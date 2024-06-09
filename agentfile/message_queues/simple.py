@@ -57,7 +57,10 @@ class SimpleMessageQueue(BaseMessageQueue):
             raise
 
     async def start(self) -> None:
-        """A loop for getting messages from queues and sending to consumer."""
+        """A loop for getting messages from queues and sending to consumer.
+
+        TODO: should log this.
+        """
         while self.running:
             for queue in self.queues.values():
                 if queue:

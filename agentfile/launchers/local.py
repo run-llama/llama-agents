@@ -35,7 +35,7 @@ class LocalLauncher:
 
     async def handle_human_message(self, **kwargs: Any) -> None:
         print("Got response:\n", str(kwargs), flush=True)
-        self.message_queue.running = False
+        # self.message_queue.running = False
 
     async def register_consumers(
         self, consumers: Optional[List[BaseMessageQueueConsumer]] = None
