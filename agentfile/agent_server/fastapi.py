@@ -183,6 +183,7 @@ class FastAPIAgentServer(BaseAgentServer):
                     # publish the completed task
                     await self.message_queue.publish(
                         QueueMessage(
+                            source_id=self.id_,
                             type="control_plane",
                             action=ActionTypes.COMPLETED_TASK,
                             data=TaskResult(

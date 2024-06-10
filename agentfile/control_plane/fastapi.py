@@ -200,6 +200,7 @@ class FastAPIControlPlane(BaseControlPlane):
             QueueMessage(
                 type=selected_agent_id,
                 data=task_def.dict(),
+                source_id=self.id_,
                 action=ActionTypes.NEW_TASK,
             )
         )
@@ -217,7 +218,10 @@ class FastAPIControlPlane(BaseControlPlane):
 
         await self.message_queue.publish(
             QueueMessage(
-                type="human", action=ActionTypes.COMPLETED_TASK, data=task_result.result
+                source_id=self.id_,
+                type="human",
+                action=ActionTypes.COMPLETED_TASK,
+                data=task_result.result,
             )
         )
 
