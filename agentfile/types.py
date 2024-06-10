@@ -20,6 +20,7 @@ class TaskDefinition(BaseModel):
     input: str
     task_id: str = Field(default_factory=generate_id)
     agent_id: Optional[str] = None
+    source_message_id: Optional[str] = None
 
 
 class TaskResult(BaseModel):

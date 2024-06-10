@@ -14,7 +14,7 @@ from agentfile.agent_server.types import (
     _ChatMessage,
 )
 from agentfile.message_consumers.base import BaseMessageQueueConsumer
-from agentfile.message_queues.base import BaseMessageQueue
+from agentfile.message_queues.base import BaseMessageQueue, PublishCallback
 from agentfile.messages.base import QueueMessage
 from agentfile.types import ActionTypes, TaskResult, AgentDefinition, TaskDefinition
 from llama_index.core.agent import AgentRunner
@@ -52,6 +52,7 @@ class FastAPIAgentServer(BaseAgentServer):
         description: str = "Agent Server",
         agent_id: str = "default_agent",
         agent_definition: Optional[AgentDefinition] = None,
+        publish_callback: Optional[PublishCallback] = None,
         step_interval: float = 0.1,
     ) -> None:
         self._agent_definition = agent_definition or AgentDefinition(
@@ -63,6 +64,7 @@ class FastAPIAgentServer(BaseAgentServer):
         self.running = running
         self.step_interval = step_interval
         self._publisher_id = f"{self.__class__.__qualname__}-{uuid.uuid4()}"
+        self._publish_callback = publish_callback
 
         self.app = FastAPI(lifespan=self.lifespan)
 
@@ -136,6 +138,10 @@ class FastAPIAgentServer(BaseAgentServer):
     def publisher_id(self) -> str:
         return self._publisher_id
 
+    @property
+    def publish_callback(self) -> Optional[PublishCallback]:
+        return self._publish_callback
+
     @asynccontextmanager
     async def lifespan(self, app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("Starting up")
@@ -193,7 +199,7 @@ class FastAPIAgentServer(BaseAgentServer):
                     # publish the completed task
                     await self.publish(
                         QueueMessage(
-                            source_id=self.publisher_id,
+                            publisher_id=self.publisher_id,
                             type="control_plane",
                             action=ActionTypes.COMPLETED_TASK,
                             data=TaskResult(
@@ -201,7 +207,8 @@ class FastAPIAgentServer(BaseAgentServer):
                                 history=history,
                                 result=response.response,
                             ).dict(),
-                        )
+                        ),
+                        callback=self.publish_callback,
                     )
 
             await asyncio.sleep(self.step_interval)
