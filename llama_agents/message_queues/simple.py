@@ -22,7 +22,11 @@ from llama_agents.message_consumers.remote import (
 )
 from llama_agents.types import PydanticValidatedUrl
 
+import logging
+
 logger = getLogger(__name__)
+logger.setLevel(logging.INFO)
+logging.basicConfig(level=logging.INFO)
 
 
 class SimpleRemoteClientMessageQueue(BaseMessageQueue):
@@ -37,7 +41,6 @@ class SimpleRemoteClientMessageQueue(BaseMessageQueue):
     ) -> Any:
         client_kwargs = self.client_kwargs or {}
         url = urljoin(self.base_url, publish_url)
-        logger.info(f"Publishing message to {url}")
         async with httpx.AsyncClient(**client_kwargs) as client:
             result = await client.post(url, json=message.model_dump())
         return result
