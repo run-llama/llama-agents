@@ -37,6 +37,7 @@ class SimpleRemoteClientMessageQueue(BaseMessageQueue):
     ) -> Any:
         client_kwargs = self.client_kwargs or {}
         url = urljoin(self.base_url, publish_url)
+        logger.info(f"Publishing message to {url}")
         async with httpx.AsyncClient(**client_kwargs) as client:
             result = await client.post(url, json=message.model_dump())
         return result
