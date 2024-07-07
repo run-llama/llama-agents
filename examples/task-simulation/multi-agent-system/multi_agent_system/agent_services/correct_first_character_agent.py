@@ -11,6 +11,9 @@ from llama_index.llms.openai import OpenAI
 from multi_agent_system.utils import load_from_env
 from multi_agent_system.agent_services.decorators import exponential_delay
 
+from logging import getLogger
+
+logger = getLogger(__name__)
 
 message_queue_host = load_from_env("RABBITMQ_HOST")
 message_queue_port = load_from_env("RABBITMQ_NODE_PORT")
@@ -31,14 +34,18 @@ STARTUP_RATE = 1
 def sync_correct_first_character(input: str) -> str:
     """Corrects the first character."""
     tokens = input.split()
-    return " ".join([t[-1] + t[0:-1] for t in tokens])
+    res = " ".join([t[-1] + t[0:-1] for t in tokens])
+    logger.info(f"Corrected first character: {res}")
+    return res
 
 
 @exponential_delay(STARTUP_RATE)
 async def async_correct_first_character(input: str) -> str:
     """Corrects the first character."""
     tokens = input.split()
-    return " ".join([t[-1] + t[0:-1] for t in tokens])
+    res = " ".join([t[-1] + t[0:-1] for t in tokens])
+    logger.info(f"Corrected first character: {res}")
+    return res
 
 
 tool = FunctionTool.from_defaults(

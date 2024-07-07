@@ -11,6 +11,10 @@ from llama_index.llms.openai import OpenAI
 from multi_agent_system.utils import load_from_env
 from multi_agent_system.agent_services.decorators import exponential_delay
 
+from logging import getLogger
+
+logger = getLogger(__name__)
+
 
 message_queue_host = load_from_env("RABBITMQ_HOST")
 message_queue_port = load_from_env("RABBITMQ_NODE_PORT")
@@ -31,14 +35,18 @@ STARTUP_RATE = 3
 def sync_remove_ay_suffix(input: str) -> str:
     """Removes 'ay' suffix"""
     tokens = input.split()
-    return " ".join([t[:-2] for t in tokens])
+    res = " ".join([t[:-2] for t in tokens])
+    logger.info(f"Removed 'ay' suffix: {res}")
+    return res
 
 
 @exponential_delay(STARTUP_RATE)
 async def async_remove_ay_suffix(input: str) -> str:
     """Removes 'ay' suffix"""
     tokens = input.split()
-    return " ".join([t[:-2] for t in tokens])
+    res = " ".join([t[:-2] for t in tokens])
+    logger.info(f"Removed 'ay' suffix: {res}")
+    return res
 
 
 tool = FunctionTool.from_defaults(

@@ -4,6 +4,10 @@ import numpy as np
 import functools
 from typing import Any, Callable
 
+from logging import getLogger
+
+logger = getLogger(__name__)
+
 
 def exponential_delay(exponential_rate: float) -> Callable:
     """Wrapper for exponential tool."""
@@ -13,7 +17,7 @@ def exponential_delay(exponential_rate: float) -> Callable:
         def wrapper(*args: Any, **kwargs: Any) -> str:
             # random delay
             delay = np.random.exponential(exponential_rate)
-            print(f"waiting for {delay} seconds", flush=True)
+            logger.info(f"waiting for {delay} seconds")
             time.sleep(delay)
             return func(*args, **kwargs)
 
@@ -21,7 +25,7 @@ def exponential_delay(exponential_rate: float) -> Callable:
         async def async_wrapper(*args: Any, **kwargs: Any) -> str:
             # random delay
             delay = np.random.exponential(exponential_rate)
-            print(f"waiting for {delay} seconds", flush=True)
+            logger.info(f"waiting for {delay} seconds")
             await asyncio.sleep(delay)
             return await func(*args, **kwargs)
 

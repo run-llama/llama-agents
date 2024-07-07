@@ -1,11 +1,17 @@
 import asyncio
 import uvicorn
 
-from llama_agents import AgentOrchestrator, ControlPlaneServer
+from llama_agents import ControlPlaneServer, PipelineOrchestrator, ServiceComponent
 from llama_agents.message_queues.rabbitmq import RabbitMQMessageQueue
-from llama_index.llms.openai import OpenAI
+from llama_index.core.query_pipeline import QueryPipeline
 
 from multi_agent_system.utils import load_from_env
+from multi_agent_system.agent_services.remove_ay_agent import (
+    agent_server as remove_ay_agent_server,
+)
+from multi_agent_system.agent_services.correct_first_character_agent import (
+    agent_server as correct_first_character_agent_server,
+)
 
 
 message_queue_host = load_from_env("RABBITMQ_HOST")
@@ -23,14 +29,28 @@ message_queue = RabbitMQMessageQueue(
 )
 
 # setup control plane
+remove_ay_agent_component = ServiceComponent.from_service_definition(
+    remove_ay_agent_server
+)
+correct_first_character_agent_component = ServiceComponent.from_service_definition(
+    correct_first_character_agent_server
+)
+
+pipeline = QueryPipeline(
+    chain=[
+        remove_ay_agent_component,
+        correct_first_character_agent_component,
+    ]
+)
+
+pipeline_orchestrator = PipelineOrchestrator(pipeline)
+
 control_plane = ControlPlaneServer(
     message_queue=message_queue,
-    orchestrator=AgentOrchestrator(llm=OpenAI()),
+    orchestrator=pipeline_orchestrator,
     host=control_plane_host,
     port=int(control_plane_port) if control_plane_port else None,
 )
-
-
 app = control_plane.app
 
 
