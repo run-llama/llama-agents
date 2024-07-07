@@ -26,7 +26,7 @@ def exponential_delay(exponential_rate: float) -> Callable:
             # random delay
             delay = np.random.exponential(exponential_rate)
             logger.info(f"waiting for {delay} seconds")
-            await asyncio.sleep(delay)
+            # await asyncio.sleep(delay)
             return await func(*args, **kwargs)
 
         return async_wrapper if asyncio.iscoroutinefunction(func) else wrapper
@@ -46,9 +46,23 @@ async def main() -> None:
         tokens = input.split()
         return " ".join([t[-1] + t[0:-1] for t in tokens])
 
-    output = await async_correct_first_character(input="eyh ouy")
+    @exponential_delay(0.5)
+    async def async_remove_ay_suffix(input: str) -> str:
+        """Removes 'ay' suffix from each token in the input_sentence.
+
+        Params:
+            input_sentence (str): The input sentence i.e., sequence of words
+        """
+        logger.info(f"received task input: {input}")
+        tokens = input.split()
+        res = " ".join([t[:-2] for t in tokens])
+        logger.info(f"Removed 'ay' suffix: {res}")
+        return res
+
+    output = await async_remove_ay_suffix(input="eyhay ouyay")
+
     print(output)
-    print(async_correct_first_character.__doc__)
+    print(async_remove_ay_suffix.__doc__)
 
 
 if __name__ == "__main__":

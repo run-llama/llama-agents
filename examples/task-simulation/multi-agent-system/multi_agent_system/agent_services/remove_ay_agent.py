@@ -28,24 +28,37 @@ localhost = load_from_env("LOCALHOST")
 
 
 STARTUP_RATE = 3
+SYSTEM_PROMPT = """Pass the entire sentence to the remove 'ay' suffix tool.
+The tool will remove 'ay' from every word in the sentence.
+Do not send tokens one at a time to the tool!
+Do not call the tool more than once!
+"""
 
 
 # create an agent
 @exponential_delay(STARTUP_RATE)
-def sync_remove_ay_suffix(input: str) -> str:
-    """Removes 'ay' suffix"""
-    logger.info(f"received task input: {input}")
-    tokens = input.split()
+def sync_remove_ay_suffix(input_sentence: str) -> str:
+    """Removes 'ay' suffix from each token in the input_sentence.
+
+    Params:
+        input_sentence (str): The input sentence i.e., sequence of words
+    """
+    logger.info(f"received task input: {input_sentence}")
+    tokens = input_sentence.split()
     res = " ".join([t[:-2] for t in tokens])
     logger.info(f"Removed 'ay' suffix: {res}")
     return res
 
 
 @exponential_delay(STARTUP_RATE)
-async def async_remove_ay_suffix(input: str) -> str:
-    """Removes 'ay' suffix"""
-    logger.info(f"received task input: {input}")
-    tokens = input.split()
+async def async_remove_ay_suffix(input_sentence: str) -> str:
+    """Removes 'ay' suffix from each token in the input_sentence.
+
+    Params:
+        input_sentence (str): The input sentence i.e., sequence of words
+    """
+    logger.info(f"received task input: {input_sentence}")
+    tokens = input_sentence.split()
     res = " ".join([t[:-2] for t in tokens])
     logger.info(f"Removed 'ay' suffix: {res}")
     return res
@@ -54,7 +67,9 @@ async def async_remove_ay_suffix(input: str) -> str:
 tool = FunctionTool.from_defaults(
     fn=sync_remove_ay_suffix, async_fn=async_remove_ay_suffix
 )
-worker = FunctionCallingAgentWorker.from_tools([tool], llm=OpenAI())
+worker = FunctionCallingAgentWorker.from_tools(
+    [tool], llm=OpenAI(), system_prompt=SYSTEM_PROMPT, max_function_calls=1
+)
 agent = worker.as_agent()
 
 # create agent server
@@ -65,7 +80,7 @@ message_queue = RabbitMQMessageQueue(
 agent_server = AgentService(
     agent=agent,
     message_queue=message_queue,
-    description="Removes the 'ay' suffix from each token.",
+    description="Removes the 'ay' suffix from each token from a provided input_sentence.",
     service_name="remove_ay_agent",
     host=remove_ay_agent_host,
     port=int(remove_ay_agent_port) if remove_ay_agent_port else None,

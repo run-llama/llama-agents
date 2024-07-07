@@ -33,6 +33,7 @@ STARTUP_RATE = 1
 @exponential_delay(STARTUP_RATE)
 def sync_correct_first_character(input: str) -> str:
     """Corrects the first character."""
+    logger.info(f"received task input: {input}")
     tokens = input.split()
     res = " ".join([t[-1] + t[0:-1] for t in tokens])
     logger.info(f"Corrected first character: {res}")
@@ -42,6 +43,7 @@ def sync_correct_first_character(input: str) -> str:
 @exponential_delay(STARTUP_RATE)
 async def async_correct_first_character(input: str) -> str:
     """Corrects the first character."""
+    logger.info(f"received task input: {input}")
     tokens = input.split()
     res = " ".join([t[-1] + t[0:-1] for t in tokens])
     logger.info(f"Corrected first character: {res}")
@@ -51,7 +53,9 @@ async def async_correct_first_character(input: str) -> str:
 tool = FunctionTool.from_defaults(
     fn=sync_correct_first_character, async_fn=async_correct_first_character
 )
-worker = FunctionCallingAgentWorker.from_tools([tool], llm=OpenAI())
+worker = FunctionCallingAgentWorker.from_tools(
+    [tool], llm=OpenAI(), max_function_calls=1
+)
 agent = worker.as_agent()
 
 # create agent server
