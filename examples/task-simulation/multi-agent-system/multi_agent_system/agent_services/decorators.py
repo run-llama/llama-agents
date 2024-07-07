@@ -8,9 +8,7 @@ from typing import Any, Callable
 def exponential_delay(exponential_rate: float) -> Callable:
     """Wrapper for exponential tool."""
 
-    def decorator(
-        func: Callable,
-    ) -> Callable:
+    def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> str:
             # random delay
