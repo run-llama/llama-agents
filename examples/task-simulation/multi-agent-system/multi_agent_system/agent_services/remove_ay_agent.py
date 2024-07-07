@@ -34,6 +34,7 @@ STARTUP_RATE = 3
 @exponential_delay(STARTUP_RATE)
 def sync_remove_ay_suffix(input: str) -> str:
     """Removes 'ay' suffix"""
+    logger.info(f"received task input: {input}")
     tokens = input.split()
     res = " ".join([t[:-2] for t in tokens])
     logger.info(f"Removed 'ay' suffix: {res}")
@@ -43,6 +44,7 @@ def sync_remove_ay_suffix(input: str) -> str:
 @exponential_delay(STARTUP_RATE)
 async def async_remove_ay_suffix(input: str) -> str:
     """Removes 'ay' suffix"""
+    logger.info(f"received task input: {input}")
     tokens = input.split()
     res = " ".join([t[:-2] for t in tokens])
     logger.info(f"Removed 'ay' suffix: {res}")
