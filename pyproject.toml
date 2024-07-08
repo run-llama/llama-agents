@@ -32,7 +32,11 @@ pytest = "^8.2.2"
 ruff = "^0.4.7"
 mypy = "^1.10.0"
 aio-pika = "^9.4.2"
+<<<<<<< HEAD
 redis = "^5.0.7"
+=======
+ipykernel = "^6.29.5"
+>>>>>>> 3c4fc50 (eavesdropper working)
 
 [tool.poetry.scripts]
 llama-agents = 'llama_agents.cli.command_line:main'

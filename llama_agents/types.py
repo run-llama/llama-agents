@@ -13,6 +13,7 @@ def generate_id() -> str:
 
 
 CONTROL_PLANE_NAME = "control_plane"
+TASK_CONSUMER_NAME = "task_eavesdropper"
 
 
 class ChatMessage(BaseModel):

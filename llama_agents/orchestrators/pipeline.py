@@ -1,8 +1,8 @@
 import json
 import pickle
-from typing import Any, Dict, List, Tuple
+from typing import Any, cast, Dict, List, Tuple
 
-from llama_index.core.query_pipeline import QueryPipeline
+from llama_index.core.query_pipeline import QueryPipeline, RouterComponent
 from llama_index.core.query_pipeline.query import RunState
 from llama_index.core.tools import BaseTool
 
@@ -179,9 +179,21 @@ class PipelineOrchestrator(BaseOrchestrator):
                 if "service_output" in output_dict:
                     service_dict = json.loads(output_dict["service_output"])
                     found_service_component = True
-                    next_service_keys.append(module_key)
-                    queue_message = get_service_component_message(
+                    next_service_keys.append(service_dict["name"])
+                    module = cast(
+                        RouterComponent,
                         module,
+                    )
+                    # find next component
+                    components: List[ServiceComponent] = module.components
+                    try:
+                        next_module = next(
+                            c for c in components if c.name == service_dict["name"]
+                        )
+                    except StopIteration:
+                        raise ValueError("Unable to find service component.")
+                    queue_message = get_service_component_message(
+                        next_module,
                         task_def.task_id,
                         input_dict=service_dict["input"],
                     )
