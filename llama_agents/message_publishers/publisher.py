@@ -17,11 +17,13 @@ class MessageQueuePublisherMixin(ABC):
 
     @property
     @abstractmethod
-    def publisher_id(self) -> str: ...
+    def publisher_id(self) -> str:
+        ...
 
     @property
     @abstractmethod
-    def message_queue(self) -> BaseMessageQueue: ...
+    def message_queue(self) -> BaseMessageQueue:
+        ...
 
     @property
     def publish_callback(self) -> Optional[PublishCallback]:

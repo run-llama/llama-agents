@@ -4,7 +4,6 @@ import random
 
 from llama_agents import LlamaAgentsClient
 from llama_index.llms.openai import OpenAI
-from llama_index.core.bridge.pydantic import BaseModel
 
 
 def pig_latin(text: str):
