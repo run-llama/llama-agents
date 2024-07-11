@@ -17,13 +17,11 @@ class MessageQueuePublisherMixin(ABC):
 
     @property
     @abstractmethod
-    def publisher_id(self) -> str:
-        ...
+    def publisher_id(self) -> str: ...
 
     @property
     @abstractmethod
-    def message_queue(self) -> BaseMessageQueue:
-        ...
+    def message_queue(self) -> BaseMessageQueue: ...
 
     @property
     def publish_callback(self) -> Optional[PublishCallback]:
@@ -46,6 +44,7 @@ class MessageQueuePublisherMixin(ABC):
             message_copy = message.model_copy(deep=True)
             message_copy.type = TASK_CONSUMER_NAME
             message_copy.data.update({"original_type": message.type})
+            message_copy.publisher_id = self.publisher_id
             _ = await self.message_queue.publish(message_copy)
 
         message.publisher_id = self.publisher_id

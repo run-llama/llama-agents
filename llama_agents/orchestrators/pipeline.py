@@ -226,7 +226,12 @@ class PipelineOrchestrator(BaseOrchestrator):
             # no service component found, return the final result
             last_modules_run = state.get(LAST_MODULES_RUN, [])
 
-            result_dict = run_state.result_outputs[module_key or last_modules_run[-1]]
+            try:
+                result_dict = run_state.result_outputs[
+                    module_key or last_modules_run[-1]
+                ]
+            except Exception:
+                return
             if len(result_dict) == 1:
                 result = str(next(iter(result_dict.values())))
             else:
