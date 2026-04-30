@@ -205,6 +205,7 @@ class DBOSRuntimeConfig(TypedDict, total=False):
     journal_table_name: str
     pool_size: int
     pool_min_size: int
+    max_recovery_attempts: int
     _experimental_executor_lease: ExecutorLeaseConfig | None
 
 
@@ -286,6 +287,10 @@ class DBOSRuntime(Runtime):
                     is unavailable.
                 pool_min_size: Minimum size of the asyncpg pool. Defaults to
                     ``pool_size``.
+                max_recovery_attempts: Forwarded to ``@DBOS.workflow``.
+                    Caps how many times a workflow is replayed after a crash
+                    before being marked ``MAX_RECOVERY_ATTEMPTS_EXCEEDED``.
+                    Defaults to DBOS's own default when unset.
                 _experimental_executor_lease: Lease-based executor identity.
                     When set, the runtime acquires a named slot from a
                     Postgres-backed pool on launch and uses it as the DBOS
@@ -377,7 +382,11 @@ class DBOSRuntime(Runtime):
         name = workflow.workflow_name
 
         # Create DBOS-wrapped control loop with stable name
-        @DBOS.workflow(name=f"{name}.control_loop")
+        wf_kwargs: dict[str, Any] = {"name": f"{name}.control_loop"}
+        if "max_recovery_attempts" in self.config:
+            wf_kwargs["max_recovery_attempts"] = self.config["max_recovery_attempts"]
+
+        @DBOS.workflow(**wf_kwargs)
         async def _dbos_control_loop(
             init_state: BrokerState,
             start_event: StartEvent | None = None,

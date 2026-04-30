@@ -447,3 +447,23 @@ def test_resolve_pool_sizes_falls_back_to_constant_when_dbos_unavailable() -> No
         min_size, max_size = runtime._resolve_pool_sizes()
     assert max_size == 10
     assert min_size == 10
+
+
+def test_register_forwards_max_recovery_attempts() -> None:
+    """When set, max_recovery_attempts is forwarded to @DBOS.workflow."""
+
+    class _W(Workflow):
+        @step
+        async def go(self, ctx: Context, ev: StartEvent) -> StopEvent:
+            return StopEvent(result="ok")
+
+    runtime = DBOSRuntime(max_recovery_attempts=3)
+    captured: dict[str, Any] = {}
+
+    def _capture(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return lambda fn: fn
+
+    with patch("llama_agents.dbos.runtime.DBOS.workflow", _capture):
+        runtime.register(_W())
+    assert captured["max_recovery_attempts"] == 3
