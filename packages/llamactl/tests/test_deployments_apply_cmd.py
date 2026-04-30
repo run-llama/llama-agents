@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import subprocess
 import textwrap
+from collections.abc import Generator
+from contextlib import contextmanager
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -103,11 +105,6 @@ MINIMAL_UPDATE_YAML = textwrap.dedent("""\
 """)
 
 
-# ---------------------------------------------------------------------------
-# apply -f: create when 404
-# ---------------------------------------------------------------------------
-
-
 def test_apply_creates_when_not_found(patched_auth: Any, tmp_path: Any) -> None:
     runner = CliRunner()
     f = tmp_path / "deploy.yaml"
@@ -121,11 +118,6 @@ def test_apply_creates_when_not_found(patched_auth: Any, tmp_path: Any) -> None:
     client.create_deployment.assert_called_once()
     assert "created" in result.output.lower()
     assert "new-app" in result.output
-
-
-# ---------------------------------------------------------------------------
-# apply -f: update when exists
-# ---------------------------------------------------------------------------
 
 
 def test_apply_updates_when_exists(patched_auth: Any, tmp_path: Any) -> None:
@@ -146,11 +138,6 @@ def test_apply_updates_when_exists(patched_auth: Any, tmp_path: Any) -> None:
     assert "my-app" in result.output
 
 
-# ---------------------------------------------------------------------------
-# apply -f -: stdin
-# ---------------------------------------------------------------------------
-
-
 def test_apply_reads_stdin(patched_auth: Any) -> None:
     runner = CliRunner()
     client = _apply_client_mock(created=make_deployment("new-app"))
@@ -164,11 +151,6 @@ def test_apply_reads_stdin(patched_auth: Any) -> None:
     assert result.exit_code == 0, result.output
     client.create_deployment.assert_called_once()
     assert "new-app" in result.output
-
-
-# ---------------------------------------------------------------------------
-# apply -f with only generateName
-# ---------------------------------------------------------------------------
 
 
 def test_apply_generate_name_only(patched_auth: Any, tmp_path: Any) -> None:
@@ -194,11 +176,6 @@ def test_apply_generate_name_only(patched_auth: Any, tmp_path: Any) -> None:
     assert "my-app-xyz" in result.output
 
 
-# ---------------------------------------------------------------------------
-# generateName and display_name interchangeable
-# ---------------------------------------------------------------------------
-
-
 def test_apply_generate_name_aliases_produce_same_create(
     patched_auth: Any, tmp_path: Any
 ) -> None:
@@ -220,11 +197,6 @@ def test_apply_generate_name_aliases_produce_same_create(
         client.create_deployment.assert_called_once()
 
 
-# ---------------------------------------------------------------------------
-# 409 on create surfaces verbatim
-# ---------------------------------------------------------------------------
-
-
 def test_apply_409_surfaces_error(patched_auth: Any, tmp_path: Any) -> None:
     runner = CliRunner()
     f = tmp_path / "deploy.yaml"
@@ -241,11 +213,6 @@ def test_apply_409_surfaces_error(patched_auth: Any, tmp_path: Any) -> None:
     assert "409" in result.output or (
         result.exception is not None and "409" in str(result.exception)
     )
-
-
-# ---------------------------------------------------------------------------
-# --dry-run
-# ---------------------------------------------------------------------------
 
 
 def test_apply_dry_run_named(patched_auth: Any, tmp_path: Any) -> None:
@@ -286,11 +253,6 @@ def test_apply_dry_run_generate_name_only(patched_auth: Any, tmp_path: Any) -> N
     assert "create" in result.output.lower()
 
 
-# ---------------------------------------------------------------------------
-# --dry-run=server not supported
-# ---------------------------------------------------------------------------
-
-
 def test_apply_dry_run_server_errors(patched_auth: Any, tmp_path: Any) -> None:
     runner = CliRunner()
     f = tmp_path / "deploy.yaml"
@@ -304,11 +266,6 @@ def test_apply_dry_run_server_errors(patched_auth: Any, tmp_path: Any) -> None:
 
     assert result.exit_code != 0
     assert "not" in result.output.lower() and "supported" in result.output.lower()
-
-
-# ---------------------------------------------------------------------------
-# Neither name nor generateName
-# ---------------------------------------------------------------------------
 
 
 def test_apply_no_name_no_generate_name_errors(
@@ -329,11 +286,6 @@ def test_apply_no_name_no_generate_name_errors(
     assert result.exit_code != 0
     output_lower = result.output.lower()
     assert "name" in output_lower or "generate_name" in output_lower
-
-
-# ---------------------------------------------------------------------------
-# name but no generateName, 404 -> create needs display_name
-# ---------------------------------------------------------------------------
 
 
 def test_apply_name_without_generate_name_404_errors(
@@ -359,11 +311,6 @@ def test_apply_name_without_generate_name_404_errors(
     )
 
 
-# ---------------------------------------------------------------------------
-# Pre-flight validate-repository blocks create
-# ---------------------------------------------------------------------------
-
-
 def test_apply_validate_repository_blocks_create(
     patched_auth: Any, tmp_path: Any
 ) -> None:
@@ -377,11 +324,6 @@ def test_apply_validate_repository_blocks_create(
 
     assert result.exit_code != 0
     client.create_deployment.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# Pre-flight skipped for push-mode (repo_url: "")
-# ---------------------------------------------------------------------------
 
 
 def test_apply_push_mode_skips_validate_repository(
@@ -402,11 +344,6 @@ def test_apply_push_mode_skips_validate_repository(
 
     assert result.exit_code == 0, result.output
     client.validate_repository.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# ${VAR} resolves from env
-# ---------------------------------------------------------------------------
 
 
 def test_apply_env_var_resolves(
@@ -437,11 +374,6 @@ def test_apply_env_var_resolves(
     assert create_payload.repo_url == "https://github.com/env-resolved/repo"
 
 
-# ---------------------------------------------------------------------------
-# Unresolved ${VAR} errors clearly
-# ---------------------------------------------------------------------------
-
-
 def test_apply_unresolved_env_var_errors(
     patched_auth: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -462,11 +394,6 @@ def test_apply_unresolved_env_var_errors(
 
     assert result.exit_code != 0
     assert "NONEXISTENT_VAR_FOR_TEST" in result.output
-
-
-# ---------------------------------------------------------------------------
-# delete -f
-# ---------------------------------------------------------------------------
 
 
 def test_delete_from_file(patched_auth: Any, tmp_path: Any) -> None:
@@ -491,11 +418,6 @@ def test_delete_from_file(patched_auth: Any, tmp_path: Any) -> None:
     assert call_args[0][0] == "doomed-app"
 
 
-# ---------------------------------------------------------------------------
-# delete -f and positional ID mutually exclusive
-# ---------------------------------------------------------------------------
-
-
 def test_delete_file_and_positional_mutually_exclusive(
     patched_auth: Any, tmp_path: Any
 ) -> None:
@@ -513,11 +435,6 @@ def test_delete_file_and_positional_mutually_exclusive(
 
     assert result.exit_code != 0
     assert "mutually exclusive" in result.output.lower()
-
-
-# ---------------------------------------------------------------------------
-# delete -f reads from stdin
-# ---------------------------------------------------------------------------
 
 
 def test_delete_reads_stdin(patched_auth: Any) -> None:
@@ -542,11 +459,6 @@ def test_delete_reads_stdin(patched_auth: Any) -> None:
     assert call_args[0][0] == "stdin-app"
 
 
-# ---------------------------------------------------------------------------
-# Push-mode sync (Phase 3)
-# ---------------------------------------------------------------------------
-
-
 def _push_mode_client(
     *,
     existing_repo_url: str = "internal://",
@@ -559,43 +471,43 @@ def _push_mode_client(
     return client
 
 
+_DEPLOY_CMD = "llama_agents.cli.commands.deployment"
+
+
+@contextmanager
+def _patched_git_push(
+    *, returncode: int = 0, stderr: bytes = b""
+) -> Generator[MagicMock, None, None]:
+    """Patch the three git-push helpers so push-mode tests don't hit real git.
+
+    Yields the ``push_to_remote`` mock for assertions.
+    """
+    with (
+        patch(f"{_DEPLOY_CMD}.configure_git_remote", return_value="llamaagents-test"),
+        patch(
+            f"{_DEPLOY_CMD}.push_to_remote",
+            return_value=subprocess.CompletedProcess([], returncode, stderr=stderr),
+        ) as mock_push,
+        patch(f"{_DEPLOY_CMD}.get_api_key", return_value="test-key"),
+    ):
+        yield mock_push
+
+
 def test_apply_push_mode_create_does_save_then_push(
     patched_auth: Any, tmp_path: Any
 ) -> None:
     """Create with repo_url="" → save first (POST), then push."""
     runner = CliRunner()
-    yaml_text = textwrap.dedent("""\
-        generate_name: My App
-        spec:
-          repo_url: ""
-          git_ref: main
-    """)
     f = tmp_path / "deploy.yaml"
-    f.write_text(yaml_text)
+    f.write_text("generate_name: My App\nspec:\n  repo_url: ''\n  git_ref: main\n")
 
     client = _apply_client_mock()
-    with (
-        patch_project_client(client),
-        patch(
-            "llama_agents.cli.commands.deployment.configure_git_remote",
-            return_value="llamaagents-new-app",
-        ) as mock_configure,
-        patch(
-            "llama_agents.cli.commands.deployment.push_to_remote",
-            return_value=subprocess.CompletedProcess([], 0),
-        ) as mock_push,
-        patch(
-            "llama_agents.cli.commands.deployment.get_api_key",
-            return_value="test-key",
-        ),
-    ):
+    with patch_project_client(client), _patched_git_push() as mock_push:
         result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
 
     assert result.exit_code == 0, result.output
     assert "created new-app" in result.output
-    # Push happened after create
     client.create_deployment.assert_called_once()
-    mock_configure.assert_called_once()
     mock_push.assert_called_once()
 
 
@@ -604,35 +516,15 @@ def test_apply_push_mode_update_does_push_then_save(
 ) -> None:
     """Existing push-mode + desired push-mode → push first, then save."""
     runner = CliRunner()
-    yaml_text = textwrap.dedent("""\
-        name: my-app
-        spec:
-          git_ref: feature-branch
-    """)
     f = tmp_path / "deploy.yaml"
-    f.write_text(yaml_text)
+    f.write_text("name: my-app\nspec:\n  git_ref: feature-branch\n")
 
     client = _push_mode_client()
-    with (
-        patch_project_client(client),
-        patch(
-            "llama_agents.cli.commands.deployment.configure_git_remote",
-            return_value="llamaagents-my-app",
-        ),
-        patch(
-            "llama_agents.cli.commands.deployment.push_to_remote",
-            return_value=subprocess.CompletedProcess([], 0),
-        ) as mock_push,
-        patch(
-            "llama_agents.cli.commands.deployment.get_api_key",
-            return_value="test-key",
-        ),
-    ):
+    with patch_project_client(client), _patched_git_push() as mock_push:
         result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
 
     assert result.exit_code == 0, result.output
     assert "updated my-app" in result.output
-    # Push happened before update
     mock_push.assert_called_once()
     client.update_deployment.assert_called_once()
 
@@ -642,35 +534,18 @@ def test_apply_push_then_save_push_failure_aborts(
 ) -> None:
     """Push-then-save: if push fails, update must NOT be called."""
     runner = CliRunner()
-    yaml_text = textwrap.dedent("""\
-        name: my-app
-        spec:
-          git_ref: main
-    """)
     f = tmp_path / "deploy.yaml"
-    f.write_text(yaml_text)
+    f.write_text("name: my-app\nspec:\n  git_ref: main\n")
 
     client = _push_mode_client()
     with (
         patch_project_client(client),
-        patch(
-            "llama_agents.cli.commands.deployment.configure_git_remote",
-            return_value="llamaagents-my-app",
-        ),
-        patch(
-            "llama_agents.cli.commands.deployment.push_to_remote",
-            return_value=subprocess.CompletedProcess([], 1, stderr=b"push rejected"),
-        ),
-        patch(
-            "llama_agents.cli.commands.deployment.get_api_key",
-            return_value="test-key",
-        ),
+        _patched_git_push(returncode=1, stderr=b"push rejected"),
     ):
         result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
 
     assert result.exit_code != 0
     assert "push failed" in result.output.lower() or "push rejected" in result.output
-    # Update must NOT have been called
     client.update_deployment.assert_not_called()
 
 
@@ -679,36 +554,18 @@ def test_apply_save_then_push_push_failure_shows_recovery(
 ) -> None:
     """Save-then-push: if push fails after save, show recovery hint."""
     runner = CliRunner()
-    yaml_text = textwrap.dedent("""\
-        generate_name: My App
-        spec:
-          repo_url: ""
-    """)
     f = tmp_path / "deploy.yaml"
-    f.write_text(yaml_text)
+    f.write_text("generate_name: My App\nspec:\n  repo_url: ''\n")
 
     client = _apply_client_mock()
     with (
         patch_project_client(client),
-        patch(
-            "llama_agents.cli.commands.deployment.configure_git_remote",
-            return_value="llamaagents-new-app",
-        ),
-        patch(
-            "llama_agents.cli.commands.deployment.push_to_remote",
-            return_value=subprocess.CompletedProcess([], 1, stderr=b"auth failed"),
-        ),
-        patch(
-            "llama_agents.cli.commands.deployment.get_api_key",
-            return_value="test-key",
-        ),
+        _patched_git_push(returncode=1, stderr=b"auth failed"),
     ):
         result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
 
     assert result.exit_code != 0
-    # Save succeeded — the create line should be in output
     assert "created new-app" in result.output
-    # Recovery hint
     assert "re-run" in result.output.lower()
 
 
@@ -717,26 +574,15 @@ def test_apply_no_push_skips_push_with_warning(
 ) -> None:
     """--no-push skips push and prints a warning."""
     runner = CliRunner()
-    yaml_text = textwrap.dedent("""\
-        name: my-app
-        spec:
-          git_ref: main
-    """)
     f = tmp_path / "deploy.yaml"
-    f.write_text(yaml_text)
+    f.write_text("name: my-app\nspec:\n  git_ref: main\n")
 
     client = _push_mode_client()
-    with (
-        patch_project_client(client),
-        patch(
-            "llama_agents.cli.commands.deployment.push_to_remote",
-        ) as mock_push,
-    ):
+    with patch_project_client(client), _patched_git_push() as mock_push:
         result = runner.invoke(app, ["deployments", "apply", "-f", str(f), "--no-push"])
 
     assert result.exit_code == 0, result.output
     assert "updated my-app" in result.output
-    # Push was NOT called
     mock_push.assert_not_called()
 
 
@@ -745,36 +591,15 @@ def test_apply_external_to_push_mode_does_save_then_push(
 ) -> None:
     """Switching from external repo to push-mode → save then push."""
     runner = CliRunner()
-    yaml_text = textwrap.dedent("""\
-        name: my-app
-        spec:
-          repo_url: ""
-    """)
     f = tmp_path / "deploy.yaml"
-    f.write_text(yaml_text)
+    f.write_text("name: my-app\nspec:\n  repo_url: ''\n")
 
-    # Existing deployment has an external repo
     client = _push_mode_client(existing_repo_url="https://github.com/org/repo")
-    with (
-        patch_project_client(client),
-        patch(
-            "llama_agents.cli.commands.deployment.configure_git_remote",
-            return_value="llamaagents-my-app",
-        ),
-        patch(
-            "llama_agents.cli.commands.deployment.push_to_remote",
-            return_value=subprocess.CompletedProcess([], 0),
-        ) as mock_push,
-        patch(
-            "llama_agents.cli.commands.deployment.get_api_key",
-            return_value="test-key",
-        ),
-    ):
+    with patch_project_client(client), _patched_git_push() as mock_push:
         result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
 
     assert result.exit_code == 0, result.output
     assert "updated my-app" in result.output
-    # Save happened first (update), then push
     client.update_deployment.assert_called_once()
     mock_push.assert_called_once()
 
@@ -784,21 +609,11 @@ def test_apply_push_to_external_does_save_only(
 ) -> None:
     """Switching from push-mode to external → save only, no push."""
     runner = CliRunner()
-    yaml_text = textwrap.dedent("""\
-        name: my-app
-        spec:
-          repo_url: https://github.com/org/new-repo
-    """)
     f = tmp_path / "deploy.yaml"
-    f.write_text(yaml_text)
+    f.write_text("name: my-app\nspec:\n  repo_url: https://github.com/org/new-repo\n")
 
     client = _push_mode_client()
-    with (
-        patch_project_client(client),
-        patch(
-            "llama_agents.cli.commands.deployment.push_to_remote",
-        ) as mock_push,
-    ):
+    with patch_project_client(client), _patched_git_push() as mock_push:
         result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
 
     assert result.exit_code == 0, result.output
