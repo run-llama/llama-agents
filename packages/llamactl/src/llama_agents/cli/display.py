@@ -39,6 +39,59 @@ from typing_extensions import Annotated
 
 SECRET_MASK = "********"
 
+# Sentinel value of ``DeploymentSpec.repo_url`` indicating push-mode (the CLI
+# pushes the local working tree on apply rather than pointing at a remote).
+PUSH_MODE_REPO_URL = ""
+
+
+def strip_masks(spec_data: dict[str, Any]) -> dict[str, Any]:
+    """Remove :data:`SECRET_MASK` sentinels from a serialized spec dict.
+
+    - ``secrets``: drop entries whose value equals the mask; drop the key
+      entirely if no entries remain.
+    - ``personal_access_token``: drop the key if its value equals the mask.
+
+    The filter runs at the emit boundary so masked values never leak back
+    into apply input via ``get | edit | apply`` round-trips.
+    """
+    out = dict(spec_data)
+    secrets = out.get("secrets")
+    if isinstance(secrets, dict):
+        filtered = {k: v for k, v in secrets.items() if v != SECRET_MASK}
+        if filtered:
+            out["secrets"] = filtered
+        else:
+            out.pop("secrets", None)
+    if out.get("personal_access_token") == SECRET_MASK:
+        out.pop("personal_access_token", None)
+    return out
+
+
+@dataclass(frozen=True)
+class Doc:
+    """Marker placed in a field's ``Annotated[]`` metadata to attach a doc comment.
+
+    Consumed by the YAML template renderer (``cli.yaml_template.render``):
+    each ``Doc(text)`` becomes one ``## <text>`` line per ``\\n``-separated
+    chunk above the field's key in the rendered output. ``Doc`` coexists with
+    :class:`Column` on the same field and is read independently via
+    ``isinstance`` filtering of ``field.metadata``.
+
+    Args:
+        text: The comment body. Rendered verbatim, prefixed with ``## ``. May
+            contain ``\\n`` for multi-line guidance — each line emits as its
+            own ``##`` comment in the output.
+    """
+
+    text: str
+
+
+@dataclass(frozen=True)
+class TrailingDoc:
+    """Marker for a short YAML note rendered after a field's scalar value."""
+
+    text: str
+
 
 @dataclass(frozen=True)
 class Column:
@@ -176,25 +229,61 @@ def render_columns(
 class DeploymentSpec(BaseModel):
     """Editable deployment fields.
 
-    These are the fields a user can set via ``apply``. ``personal_access_token``
-    is a leaky abstraction over the server-side ``GITHUB_PAT`` secret — it is
-    surfaced here as a dedicated field rather than mixed into ``secrets`` so
-    the apply input shape is explicit.
+    Every editable field is ``Optional`` (or has a default of ``None``) so the
+    same model serves three roles: (1) projection of a server-known deployment
+    (``DeploymentDisplay.from_response`` populates everything explicitly),
+    (2) input shape for ``apply`` (any subset is valid; create-time required
+    fields are enforced by the apply translator, not this model), (3) input
+    shape for partial updates (``model_dump(exclude_unset=True)`` produces a
+    clean patch payload).
+
+    ``personal_access_token`` is a leaky abstraction over the server-side
+    ``GITHUB_PAT`` secret — it is surfaced here as a dedicated field rather
+    than mixed into ``secrets`` so the apply input shape is explicit.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    display_name: str
-    repo_url: Annotated[str, Column("REPO", format=gh_short)]
-    deployment_file_path: str
-    git_ref: Annotated[str | None, Column("GIT_REF", default="-")] = None
+    repo_url: Annotated[
+        str | None,
+        Column("REPO", format=gh_short, default="-"),
+        Doc(
+            '"" = push your local working tree on apply.\n'
+            '"internal://" = reuse a previously-pushed working tree.\n'
+            "https://… = remote git URL (GitHub, GitLab, etc.)."
+        ),
+    ] = None
+    deployment_file_path: Annotated[
+        str | None,
+        TrailingDoc("pyproject.toml or llama_deploy.yaml"),
+    ] = None
+    git_ref: Annotated[
+        str | None,
+        Column("GIT_REF", default="-"),
+    ] = None
     appserver_version: Annotated[
-        str | None, Column("APPSERVER", default="-", wide=True)
+        str | None,
+        Column("APPSERVER", default="-", wide=True),
+        TrailingDoc("auto-pinned from local install"),
     ] = None
     # No Column: suspended state is already visible via status.phase.
-    suspended: bool = False
-    secrets: dict[str, str] | None = None
-    personal_access_token: str | None = None
+    suspended: Annotated[
+        bool | None,
+        TrailingDoc("scale to zero without deleting"),
+    ] = None
+    # ``str | None`` value type matches ``DeploymentUpdate.secrets`` on the wire:
+    # null values delete on apply.
+    secrets: Annotated[
+        dict[str, str | None] | None,
+        Doc(
+            "Secret env vars. ${VAR} reads from your local environment at apply time.\n"
+            "Values are masked after apply — set them, don't expect to read back."
+        ),
+    ] = None
+    personal_access_token: Annotated[
+        str | None,
+        TrailingDoc("private-repo access (GitHub PAT, GitLab access token)"),
+    ] = None
 
 
 class DeploymentStatus(BaseModel):
@@ -233,7 +322,20 @@ class DeploymentDisplay(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: Annotated[str, Column("NAME")]
+    # ``None`` is used by the ``deployments template`` command to render the
+    # top-level key as a commented-out example; ``from_response`` always
+    # populates it from the wire id.
+    name: Annotated[
+        str | None,
+        Column("NAME", default="-"),
+        Doc("Stable id for the deployment. Immutable on update."),
+    ] = None
+    # Slug seed used by the server when top-level ``name`` is unset. Surfaced
+    # at the identity tier (sibling to ``name``) since it answers a
+    # what-id-do-I-get question, not an editable-spec question. Wire-side
+    # the field is still ``display_name`` on ``DeploymentResponse``; the CLI
+    # flattens at :meth:`from_response`.
+    generate_name: str | None = None
     spec: DeploymentSpec
     status: DeploymentStatus | None = None
 
@@ -241,12 +343,11 @@ class DeploymentDisplay(BaseModel):
     def from_response(cls, r: DeploymentResponse) -> DeploymentDisplay:
         """Project a wire ``DeploymentResponse`` into the CLI display shape."""
         secret_names = r.secret_names or []
-        secrets: dict[str, str] | None = (
+        secrets: dict[str, str | None] | None = (
             {name: SECRET_MASK for name in secret_names} if secret_names else None
         )
         pat = SECRET_MASK if r.has_personal_access_token else None
         spec = DeploymentSpec(
-            display_name=r.display_name,
             repo_url=r.repo_url,
             deployment_file_path=r.deployment_file_path,
             git_ref=r.git_ref,
@@ -262,19 +363,24 @@ class DeploymentDisplay(BaseModel):
             project_id=r.project_id,
             warning=r.warning,
         )
-        return cls(name=r.id, spec=spec, status=status)
+        return cls(name=r.id, generate_name=r.display_name, spec=spec, status=status)
 
     def to_output_dict(self) -> dict[str, Any]:
         """Return the dict shape used for JSON/YAML rendering.
 
-        Omits fields inside ``spec`` whose value is None (e.g., unset
-        ``personal_access_token``, empty ``secrets``). The nested ``status``
-        block is preserved verbatim so its ``warning`` key remains explicit
-        even when ``null``.
+        Omits fields inside ``spec`` whose value is None and strips the
+        ``SECRET_MASK`` sentinel from ``secrets`` and ``personal_access_token``
+        so a ``get | edit | apply`` round-trip can't push a literal ``********``
+        back as the value. ``generate_name`` is emitted at the top level only
+        when set. The nested ``status`` block is preserved verbatim so its
+        ``warning`` key remains explicit even when ``null``.
         """
         spec_data = self.spec.model_dump(mode="json")
-        spec_data = {k: v for k, v in spec_data.items() if v is not None}
-        data: dict[str, Any] = {"name": self.name, "spec": spec_data}
+        spec_data = strip_masks({k: v for k, v in spec_data.items() if v is not None})
+        data: dict[str, Any] = {"name": self.name}
+        if self.generate_name is not None:
+            data["generate_name"] = self.generate_name
+        data["spec"] = spec_data
         if self.status is not None:
             data["status"] = self.status.model_dump(mode="json")
         return data

@@ -23,7 +23,6 @@ from llama_agents.cli.textual.deployment_form import (
     StartValidationMessage,
     ValidationScreen,
     _initialize_deployment_data,
-    _normalize_to_http,
 )
 from llama_agents.cli.textual.deployment_monitor import MonitorCloseMessage
 from llama_agents.cli.textual.git_validation import (
@@ -89,43 +88,6 @@ async def _wait_for_widget(
         return
 
     raise AssertionError(f"Timed out waiting for widget {selector}")
-
-
-def test_normalize_to_http_https_basic() -> None:
-    assert (
-        _normalize_to_http("https://github.com/user/repo.git")
-        == "https://github.com/user/repo"
-    )
-    assert (
-        _normalize_to_http("http://github.com/user/repo")
-        == "https://github.com/user/repo"
-    )
-
-
-def test_normalize_to_http_ssh_scp_style() -> None:
-    assert (
-        _normalize_to_http("git@github.com:user/repo.git")
-        == "https://github.com/user/repo"
-    )
-    assert _normalize_to_http("github.com:user/repo") == "https://github.com/user/repo"
-
-
-def test_normalize_to_http_https_with_creds_and_port() -> None:
-    assert (
-        _normalize_to_http("https://user:pass@github.com/user/repo.git")
-        == "https://github.com/user/repo"
-    )
-    assert (
-        _normalize_to_http("ssh://git@bitbucket.org:7999/team/repo.git")
-        == "https://bitbucket.org/team/repo"
-    )
-
-
-def test_normalize_to_http_plain_host_path() -> None:
-    assert (
-        _normalize_to_http("gitlab.com/group/sub/repo.git")
-        == "https://gitlab.com/group/sub/repo"
-    )
 
 
 def test_initialize_deployment_data_happy_path(

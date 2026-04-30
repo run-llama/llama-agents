@@ -2,15 +2,14 @@
 
 import dataclasses
 import logging
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from textwrap import dedent
 from typing import cast
-from urllib.parse import urlsplit
 
 from llama_agents.cli.client import get_project_client as get_client
 from llama_agents.cli.env import load_env_secrets_from_string
+from llama_agents.cli.local_context import pick_preferred_remote
 from llama_agents.cli.textual.deployment_help import (
     DeploymentHelpBackMessage,
     DeploymentHelpWidget,
@@ -1065,31 +1064,19 @@ def _initialize_deployment_data(
             "Current directory is not a git repository. If you are trying to deploy this directory, you will need to create a git repository and push it before creating a deployment."
         )
     else:
-        seen = set[str]()
-        remotes = list_remotes()
-        candidate_origins = []
-        for remote in remotes:
-            normalized_url = _normalize_to_http(remote)
-            if normalized_url not in seen:
-                candidate_origins.append(normalized_url)
-                seen.add(normalized_url)
-        preferred_origin = sorted(
-            candidate_origins, key=lambda x: "github.com" in x, reverse=True
-        )
-        if preferred_origin:
-            repo_url = preferred_origin[0]
+        repo_url = pick_preferred_remote(list_remotes())
         git_ref = get_current_branch()
         root = get_git_root()
         if root != Path.cwd():
             config_file_path = str(Path.cwd().relative_to(root))
 
-        if not preferred_origin:
+        if repo_url is None:
             warnings.append(
                 "No git remote was found. You will need to push your changes to a remote repository before creating a deployment from this repository."
             )
         else:
             # Working tree changes
-            if working_tree_has_changes() and preferred_origin:
+            if working_tree_has_changes():
                 warnings.append(
                     "Working tree has uncommitted or untracked changes. You may want to push them before creating a deployment from this branch."
                 )
@@ -1128,44 +1115,3 @@ def _initialize_deployment_data(
         server_supports_code_push=server_supports_code_push,
     )
     return form
-
-
-def _normalize_to_http(url: str) -> str:
-    """
-    normalize a git url to a best guess for a corresponding http(s) url
-    """
-    candidate = (url or "").strip()
-
-    # If no scheme, first try scp-like SSH syntax: [user@]host:path
-    has_scheme = "://" in candidate
-    if not has_scheme:
-        scp_match = re.match(
-            r"^(?:(?P<user>[^@]+)@)?(?P<host>[^:/\s]+):(?P<path>[^/].+)$",
-            candidate,
-        )
-        if scp_match:
-            host = scp_match.group("host")
-            path = scp_match.group("path").lstrip("/")
-            if path.endswith(".git"):
-                path = path[:-4]
-            return f"https://{host}/{path}"
-
-    # If no scheme (and not scp), assume host/path and prepend https
-    parsed = urlsplit(candidate if has_scheme else f"https://{candidate}")
-
-    # Drop credentials from netloc
-    netloc = parsed.netloc.split("@", 1)[-1]
-
-    # Drop explicit port (common for SSH like :7999 which is wrong for https)
-    if ":" in netloc:
-        netloc = netloc.split(":", 1)[0]
-
-    # Normalize path and strip .git
-    path = parsed.path.lstrip("/")
-    if path.endswith(".git"):
-        path = path[:-4]
-
-    if path:
-        return f"https://{netloc}/{path}"
-    else:
-        return f"https://{netloc}"

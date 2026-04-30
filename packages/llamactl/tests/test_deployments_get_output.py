@@ -160,7 +160,10 @@ def test_deployments_get_single_yaml(patched_auth: Any) -> None:
     assert obj["status"]["phase"] == "Running"
 
 
-def test_deployments_get_secrets_and_pat_masked(patched_auth: Any) -> None:
+def test_deployments_get_strips_secret_mask_sentinels(patched_auth: Any) -> None:
+    """``********`` mask sentinels never reach structured output; the keys
+    drop entirely so a ``get | edit | apply`` round-trip can't push the mask
+    back as the value."""
     runner = CliRunner()
     deployments = [
         make_deployment(
@@ -176,11 +179,9 @@ def test_deployments_get_secrets_and_pat_masked(patched_auth: Any) -> None:
         )
     assert result.exit_code == 0, result.output
     obj = json.loads(result.output)
-    assert obj["spec"]["secrets"] == {
-        "LLAMA_CLOUD_API_KEY": "********",
-        "OPENAI_API_KEY": "********",
-    }
-    assert obj["spec"]["personal_access_token"] == "********"
+    assert "secrets" not in obj["spec"]
+    assert "personal_access_token" not in obj["spec"]
+    assert "********" not in result.output
 
 
 def test_deployments_get_empty_json_is_array(patched_auth: Any) -> None:
@@ -464,3 +465,94 @@ def test_deployments_get_wide_includes_extra_columns(patched_auth: Any) -> None:
     # Wide columns slot into their natural positions, interleaved.
     # APPSERVER (spec) should appear before PHASE (status).
     assert header.index("APPSERVER") < header.index("PHASE")
+
+
+def test_deployments_get_template_single_emits_apply_shape(patched_auth: Any) -> None:
+    runner = CliRunner()
+    deployments = [
+        make_deployment(
+            "my-app",
+            secret_names=["OPENAI_API_KEY"],
+            has_personal_access_token=True,
+            appserver_version="0.5.0",
+        )
+    ]
+    client_mock = _make_client_mock(deployments)
+    with patch_project_client(client_mock):
+        result = runner.invoke(
+            app,
+            ["deployments", "get", "my-app", "--no-interactive", "-o", "template"],
+        )
+    assert result.exit_code == 0, result.output
+    out = result.output
+    parsed = yaml.safe_load(out)
+    assert parsed["name"] == "my-app"
+    assert "spec" in parsed
+    # Status is omitted from template output unconditionally.
+    assert "status" not in parsed
+    assert "phase" not in out
+    # Doc comments above fields.
+    assert "## Stable id for the deployment" in out
+    # Masked secrets / PAT are stripped at the emit boundary — they must not
+    # round-trip as literal ``********`` values into apply input.
+    assert "********" not in out
+    assert "secrets" not in (parsed["spec"] or {})
+    assert "personal_access_token" not in (parsed["spec"] or {})
+
+
+def test_deployments_get_template_does_not_scaffold_generate_name(
+    patched_auth: Any,
+) -> None:
+    """``get -o template`` is a faithful projection of an existing deployment;
+    it does not emit the ``# generate_name`` scaffolding line that the offline
+    ``deployments template`` command does."""
+    runner = CliRunner()
+    deployments = [make_deployment("my-app", display_name="My App")]
+    client_mock = _make_client_mock(deployments)
+    with patch_project_client(client_mock):
+        result = runner.invoke(
+            app,
+            ["deployments", "get", "my-app", "--no-interactive", "-o", "template"],
+        )
+    assert result.exit_code == 0, result.output
+    assert "generate_name" not in result.output
+    assert "generateName" not in result.output
+
+
+def test_deployments_get_yaml_emits_generate_name_at_top_level(
+    patched_auth: Any,
+) -> None:
+    """``-o yaml`` lifts ``display_name`` out of ``spec`` to the top level
+    as ``generate_name`` (sibling to ``name``)."""
+    runner = CliRunner()
+    deployments = [make_deployment("my-app", display_name="My App")]
+    client_mock = _make_client_mock(deployments)
+    with patch_project_client(client_mock):
+        result = runner.invoke(
+            app, ["deployments", "get", "my-app", "--no-interactive", "-o", "yaml"]
+        )
+    assert result.exit_code == 0, result.output
+    obj = yaml.safe_load(result.output)
+    assert obj["generate_name"] == "My App"
+    assert "display_name" not in obj
+    assert "display_name" not in obj["spec"]
+
+
+def test_deployments_get_template_no_name_errors(patched_auth: Any) -> None:
+    """``deployments get -o template`` without a deployment name errors clearly."""
+    runner = CliRunner()
+    # No client interaction expected — fail fast before list_deployments.
+    result = runner.invoke(
+        app, ["deployments", "get", "--no-interactive", "-o", "template"]
+    )
+    assert result.exit_code != 0
+    assert "template requires a deployment name" in result.output
+
+
+def test_other_commands_reject_template_mode(patched_auth: Any) -> None:
+    """``-o template`` is only meaningful for ``deployments get``."""
+    runner = CliRunner()
+    result = runner.invoke(app, ["auth", "list", "-o", "template"])
+    # The choice is accepted but render_output rejects it with a clear message.
+    assert result.exit_code != 0
+    assert "only supported for" in result.output or "template" in result.output

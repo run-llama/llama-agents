@@ -31,8 +31,10 @@ def test_from_response_translates_spec_fields() -> None:
 
     # ``name`` is the stable id, NOT the deprecated ``r.name`` alias.
     assert display.name == "my-app"
+    # ``display_name`` from the wire surfaces at the identity tier as
+    # ``generate_name`` — not on ``spec``.
+    assert display.generate_name == "My App"
     assert isinstance(display.spec, DeploymentSpec)
-    assert display.spec.display_name == "My App"
     assert display.spec.repo_url == "https://github.com/example/repo"
     assert display.spec.deployment_file_path == "llama_deploy.yaml"
     assert display.spec.git_ref == "main"
@@ -107,15 +109,29 @@ def test_to_output_dict_keeps_explicit_status_warning_null() -> None:
     assert data["status"]["warning"] is None
 
 
-def test_to_output_dict_includes_secrets_and_pat_when_set() -> None:
+def test_to_output_dict_strips_mask_sentinels() -> None:
+    """Mask sentinels are dropped at the emit boundary so a ``get | edit |
+    apply`` round-trip can't push the literal ``********`` back as the value."""
     response = make_deployment(
         "my-app",
         secret_names=["KEY"],
         has_personal_access_token=True,
     )
     data = DeploymentDisplay.from_response(response).to_output_dict()
-    assert data["spec"]["secrets"] == {"KEY": SECRET_MASK}
-    assert data["spec"]["personal_access_token"] == SECRET_MASK
+    # ``secrets`` had only mask values → key drops entirely.
+    assert "secrets" not in data["spec"]
+    # PAT mask drops too.
+    assert "personal_access_token" not in data["spec"]
+    # And ``SECRET_MASK`` should not appear anywhere serialized.
+    assert SECRET_MASK not in repr(data)
+
+
+def test_to_output_dict_emits_generate_name_when_set() -> None:
+    response = make_deployment("my-app", display_name="My App")
+    data = DeploymentDisplay.from_response(response).to_output_dict()
+    assert data["generate_name"] == "My App"
+    assert "display_name" not in data["spec"]
+    assert "display_name" not in data
 
 
 def test_display_model_forbids_extra_fields() -> None:
@@ -125,7 +141,6 @@ def test_display_model_forbids_extra_fields() -> None:
             {
                 "name": "x",
                 "spec": {
-                    "display_name": "x",
                     "repo_url": "https://github.com/x/y",
                     "deployment_file_path": ".",
                 },
@@ -138,12 +153,18 @@ def test_spec_model_forbids_extra_fields() -> None:
     with pytest.raises(ValidationError):
         DeploymentSpec.model_validate(
             {
-                "display_name": "x",
                 "repo_url": "https://github.com/x/y",
                 "deployment_file_path": ".",
                 "novel_field": "leak",
             }
         )
+
+
+def test_spec_model_no_longer_accepts_display_name() -> None:
+    """``display_name`` lives on ``DeploymentDisplay.generate_name`` now;
+    the spec model rejects it as an unknown field."""
+    with pytest.raises(ValidationError):
+        DeploymentSpec.model_validate({"display_name": "x"})
 
 
 def test_status_model_forbids_extra_fields() -> None:
