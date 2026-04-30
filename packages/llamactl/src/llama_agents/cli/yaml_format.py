@@ -179,9 +179,7 @@ def apply_payload_to_create(display: DeploymentDisplay) -> DeploymentCreate:
     # display_name is required on create.
     display_name = display.generate_name
     if display_name is None:
-        raise ApplyYamlError(
-            "generate_name is required on create"
-        )
+        raise ApplyYamlError("generate_name is required on create")
 
     # Build from only the fields the user actually set.
     spec_data = spec.model_dump(exclude_unset=True)
