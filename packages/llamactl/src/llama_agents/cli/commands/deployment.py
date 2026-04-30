@@ -516,16 +516,16 @@ def apply_deployment(
             verdict = f"would upsert deployment '{display.name}'"
         elif display.generate_name:
             verdict = (
-                f"would create new deployment with generateName "
+                f"would create new deployment with generate_name "
                 f"'{display.generate_name}' (server will assign id)"
             )
         else:
             raise click.ClickException(
-                "YAML must include top-level 'name' or 'generateName'"
+                "YAML must include top-level 'name' or 'generate_name'"
             )
 
         # Deferred: only needed on the dry-run path.
-        import yaml
+        import yaml  # only needed for dry-run output; avoids import on hot path
 
         click.echo(
             yaml.safe_dump(
@@ -554,14 +554,14 @@ def apply_deployment(
                 if exc.response.status_code == 404:
                     if display.generate_name is None:
                         raise click.ClickException(
-                            "deployment not found and no generateName provided "
+                            "deployment not found and no generate_name provided "
                             "for create"
                         ) from exc
                 else:
                     raise
         elif not display.generate_name:
             raise click.ClickException(
-                "YAML must include top-level 'name' or 'generateName'"
+                "YAML must include top-level 'name' or 'generate_name'"
             )
 
         # Pre-flight validate-repository (skipped for push-mode, dry-run,

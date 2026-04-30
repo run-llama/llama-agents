@@ -21,9 +21,6 @@ from pydantic import ValidationError
 
 _ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
 
-# Input aliases that all map to ``DeploymentDisplay.generate_name``.
-_GENERATE_NAME_ALIASES = ("generateName", "display_name")
-
 
 class ApplyYamlError(Exception):
     """Base error for YAML apply parsing/validation failures."""
@@ -110,30 +107,6 @@ def _strip_masks(data: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Input alias normalization
-# ---------------------------------------------------------------------------
-
-
-def _normalize_aliases(data: dict[str, Any]) -> dict[str, Any]:
-    """Accept ``generateName`` and ``display_name`` as aliases for
-    ``generate_name`` on the top-level dict.  First alias found wins;
-    subsequent duplicates are silently ignored (pydantic would reject the
-    extra key anyway since the model uses ``extra="forbid"``).
-    """
-    out = dict(data)
-    if "generate_name" not in out:
-        for alias in _GENERATE_NAME_ALIASES:
-            if alias in out:
-                out["generate_name"] = out.pop(alias)
-                break
-    else:
-        # Remove stale aliases so extra="forbid" doesn't trip.
-        for alias in _GENERATE_NAME_ALIASES:
-            out.pop(alias, None)
-    return out
-
-
-# ---------------------------------------------------------------------------
 # Main parse entry point
 # ---------------------------------------------------------------------------
 
@@ -162,9 +135,6 @@ def parse_apply_yaml(text: str, *, strict_env: bool = True) -> DeploymentDisplay
 
     # Drop read-only status block.
     raw.pop("status", None)
-
-    # Normalize top-level aliases before anything else.
-    raw = _normalize_aliases(raw)
 
     # Resolve env vars inside spec.
     spec = raw.get("spec")
@@ -210,7 +180,7 @@ def apply_payload_to_create(display: DeploymentDisplay) -> DeploymentCreate:
     display_name = display.generate_name
     if display_name is None:
         raise ApplyYamlError(
-            "generate_name (or generateName / display_name) is required on create"
+            "generate_name is required on create"
         )
 
     # Build from only the fields the user actually set.

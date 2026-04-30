@@ -219,18 +219,8 @@ def test_null_secret_value_preserved() -> None:
 
 
 # ---------------------------------------------------------------------------
-# generateName / display_name alias
+# generate_name
 # ---------------------------------------------------------------------------
-
-
-def test_generate_name_camel_case() -> None:
-    doc = textwrap.dedent("""\
-        generateName: my-slug
-        spec:
-          repo_url: https://github.com/example/repo
-    """)
-    display = parse_apply_yaml(doc)
-    assert display.generate_name == "my-slug"
 
 
 def test_generate_name_snake_case() -> None:
@@ -241,31 +231,6 @@ def test_generate_name_snake_case() -> None:
     """)
     display = parse_apply_yaml(doc)
     assert display.generate_name == "my-slug"
-
-
-def test_display_name_backward_compat() -> None:
-    doc = textwrap.dedent("""\
-        display_name: my-slug
-        spec:
-          repo_url: https://github.com/example/repo
-    """)
-    display = parse_apply_yaml(doc)
-    assert display.generate_name == "my-slug"
-
-
-def test_all_name_aliases_produce_same_payload() -> None:
-    variants = ["generateName", "generate_name", "display_name"]
-    payloads = []
-    for alias in variants:
-        doc = textwrap.dedent(f"""\
-            {alias}: my-slug
-            spec:
-              repo_url: https://github.com/example/repo
-        """)
-        display = parse_apply_yaml(doc)
-        payload = apply_payload_to_create(display)
-        payloads.append(payload.model_dump())
-    assert payloads[0] == payloads[1] == payloads[2]
 
 
 # ---------------------------------------------------------------------------

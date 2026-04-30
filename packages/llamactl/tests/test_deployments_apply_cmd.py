@@ -156,7 +156,7 @@ def test_apply_reads_stdin(patched_auth: Any) -> None:
 def test_apply_generate_name_only(patched_auth: Any, tmp_path: Any) -> None:
     runner = CliRunner()
     yaml_text = textwrap.dedent("""\
-        generateName: My App
+        generate_name: My App
         spec:
           repo_url: https://github.com/example/repo
     """)
@@ -174,27 +174,6 @@ def test_apply_generate_name_only(patched_auth: Any, tmp_path: Any) -> None:
     assert create_payload.id is None
     # The server-assigned id should appear in output.
     assert "my-app-xyz" in result.output
-
-
-def test_apply_generate_name_aliases_produce_same_create(
-    patched_auth: Any, tmp_path: Any
-) -> None:
-    runner = CliRunner()
-    variants = ["generateName", "generate_name", "display_name"]
-    for alias in variants:
-        yaml_text = textwrap.dedent(f"""\
-            {alias}: My App
-            spec:
-              repo_url: https://github.com/example/repo
-        """)
-        f = tmp_path / "deploy.yaml"
-        f.write_text(yaml_text)
-
-        client = _apply_client_mock(created=make_deployment("my-app"))
-        with patch_project_client(client):
-            result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
-        assert result.exit_code == 0, f"failed for alias {alias}: {result.output}"
-        client.create_deployment.assert_called_once()
 
 
 def test_apply_409_surfaces_error(patched_auth: Any, tmp_path: Any) -> None:
@@ -235,7 +214,7 @@ def test_apply_dry_run_named(patched_auth: Any, tmp_path: Any) -> None:
 def test_apply_dry_run_generate_name_only(patched_auth: Any, tmp_path: Any) -> None:
     runner = CliRunner()
     yaml_text = textwrap.dedent("""\
-        generateName: My App
+        generate_name: My App
         spec:
           repo_url: https://github.com/example/repo
     """)
@@ -305,10 +284,7 @@ def test_apply_name_without_generate_name_404_errors(
         result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
 
     assert result.exit_code != 0
-    assert (
-        "generate_name" in result.output.lower()
-        or "generatename" in result.output.lower()
-    )
+    assert "generate_name" in result.output.lower()
 
 
 def test_apply_validate_repository_blocks_create(
