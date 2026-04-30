@@ -360,7 +360,10 @@ def configure_git_remote_cmd(
 @project_option
 @interactive_option
 def delete_deployment(
-    deployment_id: str | None, filename: Any, interactive: bool, project: str | None
+    deployment_id: str | None,
+    filename: click.utils.LazyFile | None,
+    interactive: bool,
+    project: str | None,
 ) -> None:
     """Delete a deployment"""
     # Keep this import local: the helper imports `questionary`, which import-time
@@ -403,17 +406,21 @@ def delete_deployment(
         raise click.Abort()
 
 
+_NO_PUSH_WARNING = (
+    "push skipped (--no-push); deployment may be in a half-deployed state"
+)
+
+
 def _apply_push(
     client: Any,
     deployment_id: str,
     git_ref: str | None,
-    project_id_override: str | None,
 ) -> None:
     """Push local code to the deployment's internal bare repo.
 
     Used in the push-then-save flow (existing push-mode → push-mode update)
     and also called by ``_apply_push_after_save`` for the save-then-push flow.
-    Raises ``click.ClickException`` on failure — caller must not continue.
+    Raises ``click.ClickException`` on failure.
     """
     api_key = get_api_key()
     git_url = get_deployment_git_url(client.base_url, deployment_id)
@@ -438,22 +445,17 @@ def _apply_push_after_save(
     deployment_id: str,
     git_ref: str | None,
     no_push: bool,
-    project_id_override: str | None,
 ) -> None:
     """Push after a successful create/update (bootstrap push).
 
-    On failure, print the error and a recovery hint but do NOT exit — the
-    save already succeeded and the user needs to know. Exit non-zero by
-    raising at the end.
+    On push failure the save already succeeded, so the error message includes
+    a recovery hint. Raises ``click.ClickException`` on failure.
     """
     if no_push:
-        click.echo(
-            "push skipped (--no-push); deployment may be in a half-deployed state",
-            err=True,
-        )
+        click.echo(_NO_PUSH_WARNING, err=True)
         return
     try:
-        _apply_push(client, deployment_id, git_ref, project_id_override)
+        _apply_push(client, deployment_id, git_ref)
     except click.ClickException as exc:
         click.echo(str(exc.message), err=True)
         raise click.ClickException(
@@ -500,14 +502,12 @@ def apply_deployment(
     Reads the file (or stdin with ``-f -``), resolves ``${VAR}`` references
     from the environment, and issues the appropriate API call.
     """
-    # -- 1. Parse --------------------------------------------------------
     text = filename.read()
     try:
         display = parse_apply_yaml(text)
     except ApplyYamlError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    # -- 2. Dry-run short-circuit ----------------------------------------
     if dry_run == "server":
         raise click.ClickException("server-side dry-run not yet supported")
 
@@ -524,7 +524,7 @@ def apply_deployment(
                 "YAML must include top-level 'name' or 'generateName'"
             )
 
-        # Deferred: only needed on the dry-run path
+        # Deferred: only needed on the dry-run path.
         import yaml
 
         click.echo(
@@ -536,14 +536,10 @@ def apply_deployment(
         click.echo(verdict)
         return
 
-    # -- 3. Auth validation ----------------------------------------------
     validate_authenticated_profile(interactive=False)
-
-    # -- 4. Client setup -------------------------------------------------
     client = get_project_client(project_id_override=project)
 
-    # -- 5. Identity routing ---------------------------------------------
-    # Deferred: llamactl startup budget avoids importing httpx at module level
+    # Deferred: llamactl startup budget avoids importing httpx at module level.
     import httpx
 
     existing: DeploymentResponse | None = None
@@ -556,7 +552,6 @@ def apply_deployment(
                 is_update = True
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 404:
-                    # Will create with explicit id=display.name
                     if display.generate_name is None:
                         raise click.ClickException(
                             "deployment not found and no generateName provided "
@@ -564,23 +559,20 @@ def apply_deployment(
                         ) from exc
                 else:
                     raise
-        else:
-            if display.generate_name:
-                pass  # CREATE with id=None
-            else:
-                raise click.ClickException(
-                    "YAML must include top-level 'name' or 'generateName'"
-                )
+        elif not display.generate_name:
+            raise click.ClickException(
+                "YAML must include top-level 'name' or 'generateName'"
+            )
 
-        # -- 6. Pre-flight validate-repository ---------------------------
+        # Pre-flight validate-repository (skipped for push-mode, dry-run,
+        # and when repo_url is unset on the update path).
         repo_url = display.spec.repo_url
         skip_validation = (
-            dry_run is not None
-            or repo_url is None
+            repo_url is None
             or repo_url == ""
             or (is_update and "repo_url" not in display.spec.model_fields_set)
         )
-        if not skip_validation and repo_url is not None:
+        if not skip_validation:
             vr = asyncio.run(
                 client.validate_repository(
                     repo_url=repo_url,
@@ -591,20 +583,16 @@ def apply_deployment(
             if not vr.accessible:
                 raise click.ClickException(vr.message)
 
-        # -- 7. Determine push ordering ------------------------------------
-        # current_is_push: existing deployment uses the internal bare repo.
-        # desired_is_push: YAML says repo_url="" (push mode).
-        # Order matrix (see plan Phase 3):
+        # Push ordering matrix:
         #   (no deployment, push)    → save then push (bootstrap)
-        #   (push, push)             → push then save (PR #581: bare repo
-        #                              must hold new ref before update resolves)
+        #   (push, push)             → push then save (bare repo must hold
+        #                              new ref before update resolves git_ref)
         #   (external, push)         → save then push (switch into push mode)
         #   (*, external)            → save only
         #   (*, same-as-current)     → save only (repo_url omitted in YAML)
         current_is_push = (
             existing is not None and existing.repo_url == INTERNAL_CODE_REPO_SCHEME
         )
-
         if "repo_url" not in display.spec.model_fields_set:
             desired_is_push = current_is_push
         elif display.spec.repo_url == "":
@@ -612,11 +600,9 @@ def apply_deployment(
         else:
             desired_is_push = False
 
-        needs_push = desired_is_push
         push_before_save = current_is_push and desired_is_push
 
-        # Pre-flight: verify CWD is a git working tree when push is needed.
-        if needs_push and not no_push:
+        if desired_is_push and not no_push:
             git_check = subprocess.run(
                 ["git", "rev-parse", "--git-dir"], capture_output=True
             )
@@ -626,49 +612,38 @@ def apply_deployment(
                     "tree. Use --no-push to skip."
                 )
 
-        # -- 8. Execute: translate, push, and call -------------------------
-        deployment_name = display.name  # non-None when is_update is True
+        # Execute: translate, optionally push, and call the API.
         if push_before_save:
-            assert existing is not None and deployment_name is not None
-            # PUSH-THEN-SAVE: existing push-mode → push-mode update.
+            assert existing is not None and display.name is not None
             if no_push:
-                click.echo(
-                    "push skipped (--no-push); deployment may be in a "
-                    "half-deployed state",
-                    err=True,
-                )
+                click.echo(_NO_PUSH_WARNING, err=True)
             else:
                 _apply_push(
                     client,
                     existing.id,
                     display.spec.git_ref or existing.git_ref,
-                    project,
                 )
             payload = apply_payload_to_update(display)
-            response = asyncio.run(client.update_deployment(deployment_name, payload))
+            response = asyncio.run(client.update_deployment(display.name, payload))
             click.echo(f"updated {response.id}")
         elif is_update:
-            assert deployment_name is not None
-            # UPDATE (save-only or save-then-push).
+            assert display.name is not None
             payload = apply_payload_to_update(display)
-            response = asyncio.run(client.update_deployment(deployment_name, payload))
+            response = asyncio.run(client.update_deployment(display.name, payload))
             click.echo(f"updated {response.id}")
-            if needs_push:
+            if desired_is_push:
                 _apply_push_after_save(
-                    client, response.id, display.spec.git_ref, no_push, project
+                    client, response.id, display.spec.git_ref, no_push
                 )
         else:
-            # CREATE (save-only or save-then-push).
             payload = apply_payload_to_create(display)
             response = asyncio.run(client.create_deployment(payload))
             click.echo(f"created {response.id}")
-            if needs_push:
+            if desired_is_push:
                 _apply_push_after_save(
-                    client, response.id, display.spec.git_ref, no_push, project
+                    client, response.id, display.spec.git_ref, no_push
                 )
 
-    except ApplyYamlError as exc:
-        raise click.ClickException(str(exc)) from exc
     except click.ClickException:
         raise
     except httpx.HTTPStatusError:
