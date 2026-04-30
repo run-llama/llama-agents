@@ -9,6 +9,11 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator
 
 import uvicorn
+from llama_agents.server._diagnostics import (
+    PressureDiagnosticsConfig,
+    PressureDiagnosticsDecorator,
+    PressureDiagnosticsRecorder,
+)
 from llama_agents.server._runtime.idle_release_runtime import IdleReleaseDecorator
 from llama_agents.server._runtime.persistence_runtime import PersistenceDecorator
 from llama_agents.server._runtime.server_runtime import ServerRuntimeDecorator
@@ -67,6 +72,7 @@ class WorkflowServer:
         idle_timeout: float = 60.0,
         sse_heartbeat_interval: float | None = 25.0,
         accept_context_api: bool = False,
+        diagnostics: PressureDiagnosticsConfig | None = None,
     ):
         """Create a new workflow server.
 
@@ -100,7 +106,14 @@ class WorkflowServer:
                 bodies. Defaults to ``False``. Context deserialization can
                 instantiate arbitrary Pydantic objects via ``importlib``, so
                 only enable this on trusted networks.
+            diagnostics: Optional pressure diagnostics configuration. Diagnostics
+                are disabled by default and only start sampler tasks when this
+                is provided with ``enabled=True``.
         """
+        self.diagnostics = (
+            diagnostics if diagnostics is not None else PressureDiagnosticsConfig()
+        )
+        self.pressure_diagnostics_recorder: PressureDiagnosticsRecorder | None = None
         self._workflow_store = (
             workflow_store if workflow_store is not None else MemoryWorkflowStore()
         )
@@ -113,6 +126,13 @@ class WorkflowServer:
                 idle_timeout=idle_timeout,
             )
         )
+        if self.diagnostics.enabled:
+            self.pressure_diagnostics_recorder = PressureDiagnosticsRecorder(
+                self.diagnostics
+            )
+            inner = PressureDiagnosticsDecorator(
+                inner, self.pressure_diagnostics_recorder
+            )
         self._runtime: ServerRuntimeDecorator = ServerRuntimeDecorator(
             inner,
             store=self._workflow_store,
@@ -178,8 +198,15 @@ class WorkflowServer:
         Idle workflows are not resumed - they remain released and will be
         loaded on-demand when events arrive for them.
         """
-        await self._service.start()
-        return self
+        if self.pressure_diagnostics_recorder is not None:
+            await self.pressure_diagnostics_recorder.start()
+        try:
+            await self._service.start()
+            return self
+        except Exception:
+            if self.pressure_diagnostics_recorder is not None:
+                await self.pressure_diagnostics_recorder.stop()
+            raise
 
     @asynccontextmanager
     async def contextmanager(self) -> AsyncGenerator[WorkflowServer, None]:
@@ -192,7 +219,11 @@ class WorkflowServer:
 
     async def stop(self) -> None:
         """Gracefully shut down all running workflow handlers."""
-        await self._service.stop()
+        try:
+            await self._service.stop()
+        finally:
+            if self.pressure_diagnostics_recorder is not None:
+                await self.pressure_diagnostics_recorder.stop()
 
     # ------------------------------------------------------------------
     # Serve

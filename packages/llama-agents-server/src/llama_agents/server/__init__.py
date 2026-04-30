@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LlamaIndex Inc.
 
+from ._diagnostics import PressureDiagnosticsConfig, PressureDiagnosticsRecorder
 from ._store.abstract_workflow_store import (
     AbstractWorkflowStore,
     HandlerQuery,
@@ -16,6 +17,8 @@ __all__ = [
     "AbstractWorkflowStore",
     "HandlerQuery",
     "PersistentHandler",
+    "PressureDiagnosticsConfig",
+    "PressureDiagnosticsRecorder",
     "WorkflowServer",
     "MemoryWorkflowStore",
     "SqliteWorkflowStore",
