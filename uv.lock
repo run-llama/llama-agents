@@ -2454,7 +2454,7 @@ dev = [
 
 [[package]]
 name = "llama-agents-dbos"
-version = "0.2.3"
+version = "0.3.0"
 source = { editable = "packages/llama-agents-dbos" }
 dependencies = [
     { name = "dbos" },
@@ -2828,7 +2828,7 @@ dev = [
 
 [[package]]
 name = "llamactl"
-version = "0.9.0"
+version = "0.9.1"
 source = { editable = "packages/llamactl" }
 dependencies = [
     { name = "aiohttp" },

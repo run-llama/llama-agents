@@ -1,5 +1,11 @@
 # llamactl
 
+## 0.9.1
+
+### Patch Changes
+
+- 0b2098b: Fix `deployments update` crashing with `Event loop is closed` after a transient failure on the internal git push. The command now runs `get_deployment` and `update_deployment` in a single event loop instead of reusing the same `ProjectClient` across two `asyncio.run` calls.
+
 ## 0.9.0
 
 ### Minor Changes
