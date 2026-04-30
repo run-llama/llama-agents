@@ -1,5 +1,11 @@
 # llama-agents-dbos
 
+## 0.3.0
+
+### Minor Changes
+
+- 56701a9: Add `max_recovery_attempts` to `DBOSRuntimeConfig`. When set, it is forwarded to the `@DBOS.workflow` decorator wrapping the runtime's control loop.
+
 ## 0.2.3
 
 ### Patch Changes

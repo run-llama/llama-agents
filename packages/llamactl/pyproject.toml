@@ -16,7 +16,7 @@ dev = [
 
 [project]
 name = "llamactl"
-version = "0.9.0"
+version = "0.9.1"
 description = "A command-line interface for managing LlamaDeploy projects and deployments"
 readme = "README.md"
 license = {text = "MIT"}
