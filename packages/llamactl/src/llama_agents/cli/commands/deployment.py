@@ -573,6 +573,7 @@ def apply_deployment(
             or (is_update and "repo_url" not in display.spec.model_fields_set)
         )
         if not skip_validation:
+            assert repo_url is not None  # guarded by skip_validation
             vr = asyncio.run(
                 client.validate_repository(
                     repo_url=repo_url,
