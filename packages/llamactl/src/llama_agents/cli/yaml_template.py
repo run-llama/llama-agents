@@ -240,11 +240,8 @@ def _trailing_doc(info: FieldInfo | None) -> str | None:
 
 
 def _required_docs(docs: tuple[str, ...]) -> tuple[str, ...]:
-    """Prefix required state onto the first doc line, or emit a fallback."""
-    if not docs:
-        return ("REQUIRED.",)
-    first, *rest = docs
-    return (f"REQUIRED. {first}", *rest)
+    """Insert a REQUIRED marker above the existing doc lines."""
+    return ("REQUIRED.", *docs)
 
 
 def _one_line(value: str | None) -> str | None:

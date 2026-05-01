@@ -29,7 +29,9 @@ from typing import Any, Callable, Literal, Union, get_args, get_origin
 
 from llama_agents.cli.render import format_iso_z, gh_short, short_sha, star_marker
 from llama_agents.core.schema.deployments import (
+    DeploymentCreate,
     DeploymentResponse,
+    DeploymentUpdate,
     LlamaDeploymentPhase,
     ReleaseHistoryItem,
 )
@@ -248,9 +250,10 @@ class DeploymentSpec(BaseModel):
         str | None,
         Column("REPO", format=gh_short, default="-"),
         Doc(
-            '"" = push your local working tree on apply.\n'
-            '"internal://" = reuse a previously-pushed working tree.\n'
-            "https://… = remote git URL (GitHub, GitLab, etc.)."
+            '"" = push your local working tree (use for new deployments).\n'
+            '"internal://" = push your local working tree (use for existing deployments).\n'
+            "https://… = remote git URL (GitHub, GitLab, etc.).\n"
+            "Omit to keep the current value without pushing."
         ),
     ] = None
     deployment_file_path: Annotated[
@@ -284,6 +287,18 @@ class DeploymentSpec(BaseModel):
         str | None,
         TrailingDoc("private-repo access (GitHub PAT, GitLab access token)"),
     ] = None
+
+    def as_redacted(self) -> DeploymentSpec:
+        """Return a copy with secret values masked for display-only output."""
+        updates: dict[str, Any] = {}
+        if self.secrets is not None:
+            updates["secrets"] = {
+                name: None if value is None else SECRET_MASK
+                for name, value in self.secrets.items()
+            }
+        if self.personal_access_token is not None:
+            updates["personal_access_token"] = SECRET_MASK
+        return self.model_copy(update=updates)
 
 
 class DeploymentStatus(BaseModel):
@@ -384,6 +399,75 @@ class DeploymentDisplay(BaseModel):
         if self.status is not None:
             data["status"] = self.status.model_dump(mode="json")
         return data
+
+    def without_mask_sentinels(self) -> DeploymentDisplay:
+        """Return a copy with apply-unsafe mask sentinel values removed."""
+        spec_data = self.spec.model_dump(mode="json", exclude_unset=True)
+        stripped_spec = strip_masks(spec_data)
+        if stripped_spec == spec_data:
+            return self
+
+        data = self.model_dump(mode="json", exclude_unset=True)
+        data["spec"] = stripped_spec
+        return DeploymentDisplay.model_validate(data)
+
+    def to_create_payload(self) -> DeploymentCreate:
+        """Translate this display model into the create wire model."""
+        spec = self.spec
+
+        if spec.suspended is not None:
+            raise ValueError(
+                "cannot create a deployment as suspended; "
+                "create it first, then update with --suspended"
+            )
+
+        if spec.secrets is not None:
+            none_keys = [k for k, v in spec.secrets.items() if v is None]
+            if none_keys:
+                raise ValueError(
+                    f"cannot delete secrets on create "
+                    f"(null values for: {', '.join(sorted(none_keys))})"
+                )
+            secrets = {k: v for k, v in spec.secrets.items() if v is not None}
+        else:
+            secrets = None
+
+        if self.generate_name is None:
+            raise ValueError("generate_name is required on create")
+
+        return DeploymentCreate(
+            id=self.name,
+            display_name=self.generate_name,
+            repo_url=spec.repo_url if spec.repo_url is not None else "",
+            deployment_file_path=spec.deployment_file_path,
+            git_ref=spec.git_ref,
+            appserver_version=spec.appserver_version,
+            personal_access_token=spec.personal_access_token,
+            secrets=secrets,
+        )
+
+    def to_update_payload(self) -> DeploymentUpdate:
+        """Translate this display model into the patch-style update wire model."""
+        spec = self.spec
+
+        # PAT semantics:
+        #   explicit null in YAML  -> "" on wire (delete sentinel)
+        #   string value           -> set as given
+        #   not present            -> None (unchanged by the patch model)
+        pat = spec.personal_access_token
+        if "personal_access_token" in spec.model_fields_set and pat is None:
+            pat = ""
+
+        return DeploymentUpdate(
+            display_name=self.generate_name,
+            repo_url=spec.repo_url,
+            deployment_file_path=spec.deployment_file_path,
+            git_ref=spec.git_ref,
+            personal_access_token=pat,
+            secrets=spec.secrets,
+            appserver_version=spec.appserver_version,
+            suspended=spec.suspended,
+        )
 
 
 class ReleaseDisplay(BaseModel):

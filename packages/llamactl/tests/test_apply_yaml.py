@@ -1,0 +1,329 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 LlamaIndex Inc.
+"""Tests for ``cli.apply_yaml`` — YAML parsing for ``deployments apply -f``."""
+
+from __future__ import annotations
+
+import textwrap
+
+import pytest
+from llama_agents.cli.apply_yaml import (
+    ApplyYamlError,
+    UnresolvedEnvVarsError,
+    parse_apply_yaml,
+    parse_delete_yaml_name,
+)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+MINIMAL_YAML = textwrap.dedent("""\
+    name: my-app
+    spec:
+      repo_url: https://github.com/example/repo
+""")
+
+
+def _yaml_with_spec(**spec_fields: object) -> str:
+    """Build a minimal YAML doc with arbitrary spec fields."""
+    lines = ["name: my-app", "spec:"]
+    for k, v in spec_fields.items():
+        lines.append(f"  {k}: {v}")
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# parse_apply_yaml — basics
+# ---------------------------------------------------------------------------
+
+
+def test_parse_basic_name_and_repo() -> None:
+    display = parse_apply_yaml(MINIMAL_YAML)
+    assert display.name == "my-app"
+    assert display.spec.repo_url == "https://github.com/example/repo"
+
+
+def test_parse_drops_status_key() -> None:
+    """Round-trip from ``get -o yaml`` includes ``status``; parse strips it."""
+    doc = textwrap.dedent("""\
+        name: my-app
+        spec:
+          repo_url: https://github.com/example/repo
+        status:
+          phase: Running
+          project_id: proj_default
+    """)
+    display = parse_apply_yaml(doc)
+    assert display.name == "my-app"
+    assert display.status is None
+
+
+def test_parse_unknown_spec_field_raises() -> None:
+    doc = textwrap.dedent("""\
+        name: my-app
+        spec:
+          repo_url: https://github.com/example/repo
+          image_tag: latest
+    """)
+    with pytest.raises(ApplyYamlError, match="image_tag"):
+        parse_apply_yaml(doc)
+
+
+def test_parse_unknown_spec_field_rebuild_raises() -> None:
+    doc = textwrap.dedent("""\
+        name: my-app
+        spec:
+          repo_url: https://github.com/example/repo
+          rebuild: true
+    """)
+    with pytest.raises(ApplyYamlError, match="rebuild"):
+        parse_apply_yaml(doc)
+
+
+# ---------------------------------------------------------------------------
+# Environment variable resolution
+# ---------------------------------------------------------------------------
+
+
+def test_env_var_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MY_REPO", "https://github.com/resolved/repo")
+    doc = textwrap.dedent("""\
+        name: my-app
+        spec:
+          repo_url: ${MY_REPO}
+    """)
+    display = parse_apply_yaml(doc)
+    assert display.spec.repo_url == "https://github.com/resolved/repo"
+
+
+def test_env_var_multiple_in_one_string(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOST", "example.com")
+    monkeypatch.setenv("PORT", "8080")
+    doc = textwrap.dedent("""\
+        name: my-app
+        spec:
+          repo_url: https://${HOST}:${PORT}/repo
+    """)
+    display = parse_apply_yaml(doc)
+    assert display.spec.repo_url == "https://example.com:8080/repo"
+
+
+def test_env_var_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MISSING_VAR", raising=False)
+    doc = textwrap.dedent("""\
+        name: my-app
+        spec:
+          repo_url: ${MISSING_VAR}
+    """)
+    with pytest.raises(UnresolvedEnvVarsError) as exc_info:
+        parse_apply_yaml(doc)
+    assert "MISSING_VAR" in exc_info.value.unresolved
+
+
+def test_env_var_multiple_missing_listed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AAA", raising=False)
+    monkeypatch.delenv("BBB", raising=False)
+    doc = textwrap.dedent("""\
+        name: my-app
+        spec:
+          repo_url: ${AAA}/${BBB}
+    """)
+    with pytest.raises(UnresolvedEnvVarsError) as exc_info:
+        parse_apply_yaml(doc)
+    assert "AAA" in exc_info.value.unresolved
+    assert "BBB" in exc_info.value.unresolved
+
+
+def test_env_var_in_unknown_field_is_not_resolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MISSING_VAR", raising=False)
+    doc = textwrap.dedent("""\
+        name: my-app
+        spec:
+          repo_url: https://github.com/example/repo
+          image_tag: ${MISSING_VAR}
+    """)
+    with pytest.raises(ApplyYamlError, match="image_tag"):
+        parse_apply_yaml(doc)
+
+
+def test_env_var_in_non_string_field_is_not_resolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MISSING_VAR", raising=False)
+    doc = textwrap.dedent("""\
+        name: my-app
+        spec:
+          repo_url: https://github.com/example/repo
+          suspended: ${MISSING_VAR}
+    """)
+    with pytest.raises(ApplyYamlError, match="suspended"):
+        parse_apply_yaml(doc)
+
+
+def test_env_var_in_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SECRET_VAL", "s3cret")
+    doc = textwrap.dedent("""\
+        name: my-app
+        spec:
+          repo_url: https://github.com/example/repo
+          secrets:
+            MY_SECRET: ${SECRET_VAL}
+    """)
+    display = parse_apply_yaml(doc)
+    assert display.spec.secrets is not None
+    assert display.spec.secrets["MY_SECRET"] == "s3cret"
+
+
+# ---------------------------------------------------------------------------
+# Mask passthrough (strip SECRET_MASK values)
+# ---------------------------------------------------------------------------
+
+
+def test_mask_pat_stripped() -> None:
+    doc = textwrap.dedent("""\
+        name: my-app
+        spec:
+          repo_url: https://github.com/example/repo
+          personal_access_token: "********"
+    """)
+    display = parse_apply_yaml(doc)
+    # Masked PAT is stripped — field not set on the model.
+    assert "personal_access_token" not in display.spec.model_fields_set
+
+
+def test_mask_secret_entry_stripped() -> None:
+    doc = textwrap.dedent("""\
+        name: my-app
+        spec:
+          repo_url: https://github.com/example/repo
+          secrets:
+            FOO: "********"
+    """)
+    display = parse_apply_yaml(doc)
+    # All entries masked → secrets key itself dropped.
+    assert display.spec.secrets is None or "FOO" not in display.spec.secrets
+
+
+def test_mask_partial_secrets() -> None:
+    doc = textwrap.dedent("""\
+        name: my-app
+        spec:
+          repo_url: https://github.com/example/repo
+          secrets:
+            FOO: "********"
+            BAR: real-value
+    """)
+    display = parse_apply_yaml(doc)
+    assert display.spec.secrets is not None
+    assert "FOO" not in display.spec.secrets
+    assert display.spec.secrets["BAR"] == "real-value"
+
+
+# ---------------------------------------------------------------------------
+# Null handling
+# ---------------------------------------------------------------------------
+
+
+def test_null_pat_preserved() -> None:
+    doc = textwrap.dedent("""\
+        name: my-app
+        spec:
+          repo_url: https://github.com/example/repo
+          personal_access_token: null
+    """)
+    display = parse_apply_yaml(doc)
+    assert display.spec.personal_access_token is None
+    assert "personal_access_token" in display.spec.model_fields_set
+
+
+def test_null_secret_value_preserved() -> None:
+    doc = textwrap.dedent("""\
+        name: my-app
+        spec:
+          repo_url: https://github.com/example/repo
+          secrets:
+            FOO: null
+    """)
+    display = parse_apply_yaml(doc)
+    assert display.spec.secrets is not None
+    assert display.spec.secrets["FOO"] is None
+
+
+# ---------------------------------------------------------------------------
+# generate_name
+# ---------------------------------------------------------------------------
+
+
+def test_generate_name_snake_case() -> None:
+    doc = textwrap.dedent("""\
+        generate_name: my-slug
+        spec:
+          repo_url: https://github.com/example/repo
+    """)
+    display = parse_apply_yaml(doc)
+    assert display.generate_name == "my-slug"
+
+
+# ---------------------------------------------------------------------------
+# parse_delete_yaml_name
+# ---------------------------------------------------------------------------
+
+
+def test_delete_returns_name() -> None:
+    doc = textwrap.dedent("""\
+        name: my-app
+        spec:
+          repo_url: https://github.com/example/repo
+    """)
+    assert parse_delete_yaml_name(doc) == "my-app"
+
+
+def test_delete_missing_name_raises() -> None:
+    doc = textwrap.dedent("""\
+        spec:
+          repo_url: https://github.com/example/repo
+    """)
+    with pytest.raises(ApplyYamlError):
+        parse_delete_yaml_name(doc)
+
+
+def test_delete_non_string_name_raises() -> None:
+    doc = textwrap.dedent("""\
+        name: 42
+    """)
+    with pytest.raises(ApplyYamlError):
+        parse_delete_yaml_name(doc)
+
+
+def test_delete_ignores_other_fields_no_env_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No env resolution or model validation happens."""
+    monkeypatch.delenv("MISSING", raising=False)
+    doc = textwrap.dedent("""\
+        name: my-app
+        spec:
+          repo_url: ${MISSING}
+          bogus_field: whatever
+    """)
+    # Should succeed — only name is inspected.
+    assert parse_delete_yaml_name(doc) == "my-app"
+
+
+# ---------------------------------------------------------------------------
+# Schema validation error messages
+# ---------------------------------------------------------------------------
+
+
+def test_validation_error_includes_spec_prefix() -> None:
+    doc = textwrap.dedent("""\
+        name: my-app
+        spec:
+          repo_url: https://github.com/example/repo
+          bogus: nope
+    """)
+    with pytest.raises(ApplyYamlError, match="spec"):
+        parse_apply_yaml(doc)

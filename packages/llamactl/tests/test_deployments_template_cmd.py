@@ -153,9 +153,7 @@ def test_template_outside_git_repo_emits_compact_head_and_required_tildes(
     # ``name`` and ``generate_name`` are commented-out (server defaults the id).
     assert "  repo_url: ~" in out
     repo_idx = out.index("  repo_url: ~")
-    assert (
-        '  ## REQUIRED. "" = push your local working tree on apply.' in out[:repo_idx]
-    )
+    assert "  ## REQUIRED.\n" in out[:repo_idx]
     assert "## Required — set before `apply`." not in out
 
     # Top-level identity tier: both keys commented-out, cwd-derived defaults.

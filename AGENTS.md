@@ -148,9 +148,13 @@ We use **pytest** with idiomatic pytest patterns. Follow these guidelines:
   ```
 - Comments are useful, but avoid fluff.
 - Import etiquette
-  - **Never use inline imports**
-  - **Never use `if TYPE_CHECKING` imports**
-  - Exceptions to these rules are made only when there are A) Acceptable circular imports or B) real startup performance issues
-  - When an inline import is warranted, it **must** carry a short comment explaining the deferral reason (which cycle it breaks, or what startup cost it avoids). No naked inline imports.
-  - **Put the inline import at the chokepoint, not in the leaf.** When a cycle exists, defer the import in the high-level module that orchestrates things (e.g. `workflow.py`), not via a `TYPE_CHECKING` / late-import hack in the low-level module the cycle passes through. The low-level module stays clean; the high-level module owns the deferral with a one-line rationale. Example: `workflows/workflow.py` imports `workflows.representation.validate` inline inside `_validate_graph_structure` because the `representation` package transitively imports `Workflow`; the leaf modules under `representation/` keep their normal top-level imports.
+  - **Do not use inline imports.** This is the default rule. Do not move imports into functions just to make an edit work quickly, avoid a top-level import conflict, or silence a linter/type checker.
+  - Inline imports are allowed only for two accepted conditions: circular import chokepoints and known startup-time deferrals.
+  - Circular import deferrals must have a well-defined chokepoint that owns the inline import burden. Prefer the high-level orchestration module that closes the loop, such as `workflow.py`; keep low-level leaf modules on normal top-level imports.
+  - Startup-time deferrals are only acceptable for known, measured import costs on latency-sensitive surfaces, such as fast CLI startup. Do not invent new startup deferrals casually.
+  - If a change appears to need a new inline import, first look for a normal top-level import, a better module boundary, or an existing chokepoint. Treat adding an inline import as a design exception, not a convenience.
+  - When an inline import is truly warranted, it must carry a short comment explaining the deferral reason: which cycle it breaks, or what startup cost it avoids. No naked inline imports.
+  - Put inline imports at the very beginning of the function that uses them, before other executable logic.
+  - `if TYPE_CHECKING` imports may only be used alongside one of the accepted inline-import patterns above, so the runtime import stays deferred while annotations remain typed.
+  - Do not wrap deferred-only types in string annotations. Use `from __future__ import annotations` instead.
 - Only add `__init__.py` `__all__` exports when a file is legitimately needed for public library consumption. Module level imports should not be used internally. For the most part you should never do this unless explicitly requested to do so

@@ -4,6 +4,7 @@ import os
 from typing import Any, Callable, ParamSpec, TypeVar
 
 import click
+import yaml
 from llama_agents.cli.interactive_prompts.session_utils import is_interactive_session
 from llama_agents.cli.param_types import ProjectType
 from pydantic import BaseModel
@@ -56,7 +57,7 @@ def output_option(f: Callable[P, R]) -> Callable[P, R]:
 def output_option_with_template(f: Callable[P, R]) -> Callable[P, R]:
     """Variant of :func:`output_option` that adds the ``template`` choice.
 
-    ``template`` emits the apply-shaped YAML scaffold (annotated with ``#!``
+    ``template`` emits the apply-shaped YAML scaffold (annotated with ``##``
     docs, suitable for ``llamactl deployments apply -f``). It only makes sense
     on a single-row read (``deployments get <name>``) and is opted-in per
     command rather than advertised on every ``-o``-bearing command.
@@ -161,10 +162,6 @@ def render_output(
         click.echo(json.dumps(_to_json_safe(payload), indent=2))
         return
     if mode == "yaml":
-        # Defer pyyaml import: it's a measurable chunk of CLI startup and
-        # only paid for by the (rare) `-o yaml` path.
-        import yaml
-
         click.echo(yaml.safe_dump(_to_json_safe(payload), sort_keys=False))
         return
 
