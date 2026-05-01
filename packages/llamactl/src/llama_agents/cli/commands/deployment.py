@@ -215,9 +215,7 @@ def template_deployment() -> None:
         )
         required = ("repo_url",)
 
-    display = DeploymentDisplay(
-        name=None, generate_name=preferred_name, spec=spec
-    )
+    display = DeploymentDisplay(name=None, generate_name=preferred_name, spec=spec)
 
     head: list[str] = [f"WARNING: {warning}" for warning in ctx.warnings]
     if ctx.warnings:

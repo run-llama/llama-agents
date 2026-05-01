@@ -9,16 +9,10 @@ import logging
 import os
 import re
 import sqlite3
-import sys
 from contextlib import contextmanager
 from importlib import import_module, resources
 from pathlib import Path
-from typing import Generator
-
-if sys.version_info >= (3, 11):
-    from importlib.resources.abc import Traversable
-else:
-    from importlib.abc import Traversable
+from typing import Any, Generator
 
 logger = logging.getLogger(__name__)
 
@@ -63,11 +57,11 @@ def _file_lock(lock_path: Path) -> Generator[None, None, None]:
         lock_file.close()
 
 
-def _iter_migration_files() -> list[Traversable]:
+def _iter_migration_files() -> list[Any]:
     """Yield packaged SQL migration files in lexicographic order."""
     pkg = import_module(_MIGRATIONS_PKG)
     root = resources.files(pkg)
-    files: list[Traversable] = [p for p in root.iterdir() if p.name.endswith(".sql")]
+    files = [p for p in root.iterdir() if p.name.endswith(".sql")]
     if not files:
         raise ValueError("No migration files found")
     return sorted(files, key=lambda p: p.name)

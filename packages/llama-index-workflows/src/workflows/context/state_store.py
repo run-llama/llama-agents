@@ -342,7 +342,7 @@ class DictState(DictLikeModel):
 
 
 # Default state type is DictState for the generic type
-MODEL_T = TypeVar("MODEL_T", bound=BaseModel, default=DictState)
+MODEL_T = TypeVar("MODEL_T", bound=BaseModel, default=DictState)  # type: ignore[reportGeneralTypeIssues]
 
 
 @runtime_checkable

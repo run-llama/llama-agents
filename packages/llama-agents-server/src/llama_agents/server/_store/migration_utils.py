@@ -2,21 +2,14 @@
 # Copyright (c) 2026 LlamaIndex Inc.
 from __future__ import annotations
 
-try:
-    from importlib.resources.abc import (  # type: ignore
-        Traversable,
-    )
-except ImportError:  # pre 3.11
-    from importlib.abc import (
-        Traversable,
-    )
 import re
 from importlib import import_module, resources
+from typing import Any
 
 VERSION_PATTERN = re.compile(r"--\s*migration:\s*(\d+)")
 
 
-def iter_migration_files(source_pkg: str) -> list[Traversable]:
+def iter_migration_files(source_pkg: str) -> list[Any]:
     """Return packaged SQL migration files in lexicographic order."""
     pkg = import_module(source_pkg)
     root = resources.files(pkg)
