@@ -963,7 +963,7 @@ wheels = [
 
 [[package]]
 name = "dbos"
-version = "2.14.0"
+version = "2.19.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "psycopg", extra = ["binary"] },
@@ -973,9 +973,9 @@ dependencies = [
     { name = "typer-slim" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a5/56/d30d45ef1194c6609b746c9f57bf250c7160c6d3790068fc7554dff73110/dbos-2.14.0.tar.gz", hash = "sha256:1f79f1e5db6f57c02fdca156903bbaf0ef7c49c80ecb427565cdd2381af49fb5", size = 417752, upload-time = "2026-03-05T17:44:03.25Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/83/77/9af1f0c5ffe581c198203e0ad421489b997496a1c6c9b20ba9b637c18945/dbos-2.19.0.tar.gz", hash = "sha256:a43b7e8255f77756d0cfbdcb771f53c11908a1a37455c1c1f596c70170feb6c1", size = 443076, upload-time = "2026-04-22T15:28:18.117Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/94/11/9896eb8b41fd4b6c2fd3eb892543657b07c813b9f7c703f6ccd0dde5d94f/dbos-2.14.0-py3-none-any.whl", hash = "sha256:82622bc7a440d4c65d041c257b311dca914f854d872b9443ddda86a078a3897f", size = 167312, upload-time = "2026-03-05T17:44:01.401Z" },
+    { url = "https://files.pythonhosted.org/packages/5d/41/7cc7ce7f2cd32433e4479a5c207bc042e5b173c23c1023714d8d82df50d2/dbos-2.19.0-py3-none-any.whl", hash = "sha256:d8b8ce86785923df98c0b2dfd3400e8140c0ba6b80296ed5440d62263b8ddbed", size = 178809, upload-time = "2026-04-22T15:28:16.395Z" },
 ]
 
 [[package]]
@@ -2477,7 +2477,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "dbos", specifier = ">=2.14.0" },
+    { name = "dbos", specifier = ">=2.18.0" },
     { name = "llama-agents-server", extras = ["asyncpg"], editable = "packages/llama-agents-server" },
     { name = "llama-index-workflows", editable = "packages/llama-index-workflows" },
 ]
