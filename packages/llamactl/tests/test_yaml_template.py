@@ -64,7 +64,7 @@ def test_render_emits_name_and_spec_in_declaration_order() -> None:
 def test_render_attaches_doc_marker_text_above_each_set_field() -> None:
     out = render(_full_display())
     assert "## Stable id for the deployment" in out
-    assert '## "" = push your local working tree on apply.' in out
+    assert '## "" = push your local working tree (use for new deployments).' in out
 
 
 def test_render_omits_generate_name_when_not_scaffolded() -> None:
@@ -120,7 +120,7 @@ def test_render_partial_spec_emits_unset_fields_as_commented_examples() -> None:
     assert git_ref_line == "  # git_ref: main"
 
 
-def test_render_required_unset_prefixes_first_doc_line() -> None:
+def test_render_required_unset_puts_marker_on_own_line() -> None:
     display = DeploymentDisplay(
         name="my-app",
         spec=DeploymentSpec(),
@@ -128,10 +128,10 @@ def test_render_required_unset_prefixes_first_doc_line() -> None:
     out = render(display, required=("repo_url",))
     assert "  repo_url: ~" in out
     repo_idx = out.index("  repo_url: ~")
-    assert (
-        '  ## REQUIRED. "" = push your local working tree on apply.' in out[:repo_idx]
-    )
-    assert "## Required — set before `apply`." not in out
+    before = out[:repo_idx]
+    # REQUIRED is on its own line, not concatenated with the first doc line.
+    assert "  ## REQUIRED.\n" in before
+    assert '  ## "" = push your local working tree (use for new deployments).' in before
 
 
 def test_render_unset_top_level_name_is_commented() -> None:
@@ -214,7 +214,7 @@ def test_render_doc_and_trailing_doc_emit_separately() -> None:
     marker renders on another field's scalar line."""
     out = render(_full_display())
     head = out.split("repo_url:", 1)[0]
-    assert '  ## "" = push your local working tree on apply.' in head
+    assert '  ## "" = push your local working tree (use for new deployments).' in head
     deploy_path_line = next(
         line for line in out.splitlines() if line.startswith("  deployment_file_path:")
     )

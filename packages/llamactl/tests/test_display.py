@@ -14,7 +14,40 @@ from llama_agents.cli.display import (
     DeploymentSpec,
     DeploymentStatus,
 )
+from llama_agents.core.schema.deployments import DeploymentCreate, DeploymentUpdate
 from pydantic import ValidationError
+
+_CREATE_SPEC_FIELDS = frozenset(
+    {
+        "repo_url",
+        "deployment_file_path",
+        "git_ref",
+        "appserver_version",
+        "secrets",
+        "personal_access_token",
+    }
+)
+_UPDATE_SPEC_FIELDS = frozenset(
+    {
+        "repo_url",
+        "deployment_file_path",
+        "git_ref",
+        "appserver_version",
+        "suspended",
+        "secrets",
+        "personal_access_token",
+    }
+)
+_HANDLED_SPEC_FIELDS = _CREATE_SPEC_FIELDS | _UPDATE_SPEC_FIELDS
+_SERVICE_UPDATE_FIELDS = frozenset(
+    {
+        "git_sha",
+        "static_assets_path",
+        "image_tag",
+        "bump_to_latest_appserver",
+        "rebuild",
+    }
+)
 
 
 def test_from_response_translates_spec_fields() -> None:
@@ -89,6 +122,181 @@ def test_from_response_pat_masking() -> None:
     response = make_deployment("my-app", has_personal_access_token=False)
     display = DeploymentDisplay.from_response(response)
     assert display.spec.personal_access_token is None
+
+
+def test_spec_as_redacted_masks_secret_values() -> None:
+    spec = DeploymentSpec(
+        repo_url="https://github.com/example/repo",
+        secrets={"API_KEY": "sk-test", "DELETE_ME": None},
+        personal_access_token="ghp-test",
+    )
+
+    data = spec.as_redacted().model_dump(mode="json", exclude_unset=True)
+
+    assert data == {
+        "repo_url": "https://github.com/example/repo",
+        "secrets": {"API_KEY": SECRET_MASK, "DELETE_ME": None},
+        "personal_access_token": SECRET_MASK,
+    }
+
+
+def test_without_mask_sentinels_removes_apply_unsafe_masks() -> None:
+    display = DeploymentDisplay(
+        name="my-app",
+        spec=DeploymentSpec(
+            repo_url="https://github.com/example/repo",
+            secrets={"REAL": "value", "MASKED": SECRET_MASK},
+            personal_access_token=SECRET_MASK,
+        ),
+    )
+
+    stripped = display.without_mask_sentinels()
+
+    assert stripped.spec.secrets == {"REAL": "value"}
+    assert "personal_access_token" not in stripped.spec.model_fields_set
+
+
+def test_all_deployment_spec_fields_have_apply_semantics() -> None:
+    assert set(DeploymentSpec.model_fields) == _HANDLED_SPEC_FIELDS
+
+
+def test_create_payload_mapping_matches_wire_model_boundary() -> None:
+    assert _CREATE_SPEC_FIELDS == set(DeploymentCreate.model_fields) - {
+        "id",
+        "display_name",
+    }
+
+
+def test_update_payload_mapping_matches_wire_model_boundary() -> None:
+    assert _UPDATE_SPEC_FIELDS == (
+        set(DeploymentUpdate.model_fields) - {"display_name"} - _SERVICE_UPDATE_FIELDS
+    )
+
+
+def test_to_create_payload_with_name_sets_id() -> None:
+    display = DeploymentDisplay(
+        name="my-app",
+        generate_name="My App",
+        spec=DeploymentSpec(repo_url="https://github.com/example/repo"),
+    )
+
+    payload = display.to_create_payload()
+
+    assert payload.id == "my-app"
+    assert payload.display_name == "My App"
+
+
+def test_to_create_payload_without_name_uses_generate_name() -> None:
+    display = DeploymentDisplay(
+        generate_name="My App",
+        spec=DeploymentSpec(repo_url="https://github.com/example/repo"),
+    )
+
+    payload = display.to_create_payload()
+
+    assert payload.id is None
+    assert payload.display_name == "My App"
+
+
+def test_to_create_payload_without_generate_name_raises() -> None:
+    display = DeploymentDisplay(
+        spec=DeploymentSpec(repo_url="https://github.com/example/repo"),
+    )
+
+    with pytest.raises(ValueError, match="generate_name"):
+        display.to_create_payload()
+
+
+def test_to_create_payload_suspended_raises() -> None:
+    display = DeploymentDisplay(
+        generate_name="My App",
+        spec=DeploymentSpec(
+            repo_url="https://github.com/example/repo",
+            suspended=True,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="suspended"):
+        display.to_create_payload()
+
+
+def test_to_create_payload_secrets_with_null_value_raises() -> None:
+    display = DeploymentDisplay(
+        generate_name="My App",
+        spec=DeploymentSpec(
+            repo_url="https://github.com/example/repo",
+            secrets={"FOO": None},
+        ),
+    )
+
+    with pytest.raises(ValueError, match="null values"):
+        display.to_create_payload()
+
+
+def test_to_create_payload_unset_fields_default() -> None:
+    display = DeploymentDisplay(
+        generate_name="My App",
+        spec=DeploymentSpec(repo_url="https://github.com/example/repo"),
+    )
+
+    payload = display.to_create_payload()
+
+    assert payload.git_ref is None
+
+
+def test_to_create_payload_empty_repo_url_passthrough() -> None:
+    display = DeploymentDisplay(
+        generate_name="My App",
+        spec=DeploymentSpec(repo_url=""),
+    )
+
+    payload = display.to_create_payload()
+
+    assert payload.repo_url == ""
+
+
+def test_to_update_payload_unset_fields_remain_none() -> None:
+    display = DeploymentDisplay(name="my-app", spec=DeploymentSpec(git_ref="v2"))
+
+    payload = display.to_update_payload()
+
+    assert payload.git_ref == "v2"
+    assert payload.repo_url is None
+
+
+def test_to_update_payload_null_pat_becomes_delete_sentinel() -> None:
+    display = DeploymentDisplay(
+        name="my-app", spec=DeploymentSpec(personal_access_token=None)
+    )
+
+    payload = display.to_update_payload()
+
+    assert payload.personal_access_token == ""
+
+
+def test_to_update_payload_secrets_null_values_preserved() -> None:
+    display = DeploymentDisplay(
+        name="my-app",
+        spec=DeploymentSpec(secrets={"FOO": None, "BAR": "new-value"}),
+    )
+
+    payload = display.to_update_payload()
+
+    assert payload.secrets is not None
+    assert payload.secrets["FOO"] is None
+    assert payload.secrets["BAR"] == "new-value"
+
+
+def test_to_update_payload_generate_name_maps_to_display_name() -> None:
+    display = DeploymentDisplay(
+        name="my-app",
+        generate_name="New Name",
+        spec=DeploymentSpec(repo_url="https://github.com/example/repo"),
+    )
+
+    payload = display.to_update_payload()
+
+    assert payload.display_name == "New Name"
 
 
 def test_to_output_dict_omits_empty_spec_fields() -> None:

@@ -92,11 +92,7 @@ def test_deployments_update_internal_repo_push_failure_does_not_abort(
 
     with (
         patch_project_client(client),
-        # ``git rev-parse --git-dir`` succeeds — we're "in a repo".
-        patch(
-            "llama_agents.cli.commands.deployment.subprocess.run",
-            return_value=_completed_process(returncode=0, stdout=b".git\n"),
-        ),
+        patch("llama_agents.cli.commands.deployment.is_git_repo", return_value=True),
         patch(
             "llama_agents.cli.commands.deployment.configure_git_remote",
             return_value="llamaagents-my-app",

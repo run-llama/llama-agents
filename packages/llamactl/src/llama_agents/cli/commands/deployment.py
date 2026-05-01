@@ -6,14 +6,18 @@ A deployment points the control plane at your Git repository and deployment file
 git ref, reads the config, and runs your app.
 """
 
+from __future__ import annotations
+
 import asyncio
-import subprocess
 from pathlib import Path
+from typing import Any
 
 import click
+import yaml
 from llama_agents.cli.commands.auth import validate_authenticated_profile
 from llama_agents.cli.param_types import DeploymentType, GitShaType
 from llama_agents.cli.styles import WARNING
+from llama_agents.core.git.git_util import is_git_repo
 from llama_agents.core.schema import LogEvent
 from llama_agents.core.schema.deployments import (
     INTERNAL_CODE_REPO_SCHEME,
@@ -24,6 +28,11 @@ from llama_agents.core.schema.deployments import (
 from rich import print as rprint
 
 from ..app import app, console
+from ..apply_yaml import (
+    ApplyYamlError,
+    parse_apply_yaml,
+    parse_delete_yaml_name,
+)
 from ..client import get_project_client, project_client_context
 from ..display import (
     PUSH_MODE_REPO_URL,
@@ -304,12 +313,7 @@ def configure_git_remote_cmd(
     """
     validate_authenticated_profile(interactive)
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--git-dir"],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
+        if not is_git_repo():
             raise click.ClickException("Not a git repository")
 
         deployment_id = select_deployment(
@@ -341,16 +345,37 @@ def configure_git_remote_cmd(
 @deployments.command("delete")
 @global_options
 @click.argument("deployment_id", required=False, type=DeploymentType())
+@click.option(
+    "-f",
+    "--filename",
+    default=None,
+    type=click.File("r"),
+    help="Path to YAML file; name is read from the file. Mutually exclusive with positional ID.",
+)
 @project_option
 @interactive_option
 def delete_deployment(
-    deployment_id: str | None, interactive: bool, project: str | None
+    deployment_id: str | None,
+    filename: click.utils.LazyFile | None,
+    interactive: bool,
+    project: str | None,
 ) -> None:
     """Delete a deployment"""
     # Keep this import local: the helper imports `questionary`, which import-time
     # profiling showed is a noticeable CLI startup cost. Avoid other local
     # imports unless instrumentation shows they are slow.
     from ..interactive_prompts.utils import confirm_action
+
+    if filename is not None and deployment_id is not None:
+        raise click.ClickException(
+            "--filename and deployment ID are mutually exclusive"
+        )
+
+    if filename is not None:
+        try:
+            deployment_id = parse_delete_yaml_name(filename.read())
+        except ApplyYamlError as exc:
+            raise click.ClickException(str(exc)) from exc
 
     validate_authenticated_profile(interactive)
     try:
@@ -374,6 +399,232 @@ def delete_deployment(
     except Exception as e:
         rprint(f"[red]Error: {e}[/red]")
         raise click.Abort()
+
+
+def _apply_push(
+    client: Any,
+    deployment_id: str,
+    git_ref: str | None,
+) -> None:
+    """Push local code to the deployment's internal bare repo.
+
+    Used in the push-then-save flow (existing push-mode → push-mode update)
+    and also called by ``_apply_push_after_save`` for the save-then-push flow.
+    Raises ``click.ClickException`` on failure.
+    """
+    api_key = get_api_key()
+    git_url = get_deployment_git_url(client.base_url, deployment_id)
+    remote_name = configure_git_remote(
+        git_url, api_key, client.project_id, deployment_id
+    )
+    local_ref, target_ref = internal_push_refspec(git_ref)
+    with console.status("pushing code..."):
+        push_result = push_to_remote(
+            remote_name, local_ref=local_ref, target_ref=target_ref
+        )
+    if push_result.returncode != 0:
+        stderr = push_result.stderr.decode(errors="replace").strip()
+        raise click.ClickException(
+            f"push failed: {stderr}\n"
+            f"To debug, try: llamactl deployments configure-git-remote {deployment_id}"
+        )
+
+
+def _apply_push_after_save(
+    client: Any,
+    deployment_id: str,
+    git_ref: str | None,
+) -> None:
+    """Push after a successful create/update (bootstrap push).
+
+    On push failure the save already succeeded, so the error message includes
+    a recovery hint. Raises ``click.ClickException`` on failure.
+    """
+    try:
+        _apply_push(client, deployment_id, git_ref)
+    except click.ClickException as exc:
+        click.echo(str(exc.message), err=True)
+        raise click.ClickException(
+            "re-run `llamactl deployments apply -f <file>` to retry the push"
+        ) from exc
+
+
+async def _apply_deployment_from_yaml(
+    client: Any, display: DeploymentDisplay, *, no_push: bool = False
+) -> None:
+    # Deferred: llamactl startup budget avoids importing httpx at module level.
+    import httpx
+
+    existing: DeploymentResponse | None = None
+    is_update = False
+
+    try:
+        if display.name is not None:
+            try:
+                existing = await client.get_deployment(display.name)
+                is_update = True
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    if display.generate_name is None:
+                        raise click.ClickException(
+                            "deployment not found and no generate_name provided "
+                            "for create"
+                        ) from exc
+                else:
+                    raise
+        elif not display.generate_name:
+            raise click.ClickException(
+                "YAML must include top-level 'name' or 'generate_name'"
+            )
+
+        # Pre-flight validate-repository (skipped for push-mode, dry-run,
+        # and when repo_url is unset on the update path).
+        repo_url = display.spec.repo_url
+        skip_validation = (
+            repo_url is None
+            or repo_url == ""
+            or repo_url == INTERNAL_CODE_REPO_SCHEME
+            or (is_update and "repo_url" not in display.spec.model_fields_set)
+        )
+        if not skip_validation:
+            assert repo_url is not None  # guarded by skip_validation
+            vr = await client.validate_repository(
+                repo_url=repo_url,
+                deployment_id=existing.id if existing else None,
+                pat=display.spec.personal_access_token,
+            )
+            if not vr.accessible:
+                raise click.ClickException(vr.message)
+
+        # Push ordering matrix:
+        #   (no deployment, push)    -> save then push (bootstrap)
+        #   (push, push)             -> push then save (bare repo must hold
+        #                              new ref before update resolves git_ref)
+        #   (external, push)         -> save then push (switch into push mode)
+        #   (*, external)            -> save only
+        #   (*, same-as-current)     -> save only (repo_url omitted in YAML)
+        current_is_push = (
+            existing is not None and existing.repo_url == INTERNAL_CODE_REPO_SCHEME
+        )
+        if "repo_url" not in display.spec.model_fields_set:
+            desired_is_push = current_is_push
+        elif (
+            display.spec.repo_url == ""
+            or display.spec.repo_url == INTERNAL_CODE_REPO_SCHEME
+        ):
+            desired_is_push = True
+        else:
+            desired_is_push = False
+
+        push_before_save = current_is_push and desired_is_push
+
+        if desired_is_push and no_push:
+            desired_is_push = False
+            push_before_save = False
+
+        if desired_is_push and not is_git_repo():
+            rprint(
+                f"[{WARNING}]Not in a git repo — skipping push, "
+                "server will resolve from last pushed code[/]"
+            )
+            desired_is_push = False
+            push_before_save = False
+
+        # Execute: translate, optionally push, and call the API.
+        if push_before_save:
+            assert existing is not None and display.name is not None
+            _apply_push(
+                client,
+                existing.id,
+                display.spec.git_ref or existing.git_ref,
+            )
+            payload = display.to_update_payload()
+            response = await client.update_deployment(display.name, payload)
+            click.echo(f"updated {response.id}")
+        elif is_update:
+            assert display.name is not None
+            payload = display.to_update_payload()
+            response = await client.update_deployment(display.name, payload)
+            click.echo(f"updated {response.id}")
+            if desired_is_push:
+                _apply_push_after_save(client, response.id, display.spec.git_ref)
+        else:
+            payload = display.to_create_payload()
+            response = await client.create_deployment(payload)
+            click.echo(f"created {response.id}")
+            if desired_is_push:
+                _apply_push_after_save(client, response.id, display.spec.git_ref)
+
+    except click.ClickException:
+        raise
+    except httpx.HTTPStatusError:
+        raise
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@deployments.command("apply")
+@global_options
+@click.option(
+    "-f",
+    "--filename",
+    required=True,
+    type=click.File("r"),
+    help="Path to YAML file, or '-' for stdin.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Validate and print the resolved payload without making API calls.",
+)
+@click.option(
+    "--no-push",
+    is_flag=True,
+    default=False,
+    help="Skip pushing local code even when the deployment uses push-mode.",
+)
+@project_option
+def apply_deployment(
+    filename: click.utils.LazyFile,
+    dry_run: bool,
+    no_push: bool,
+    project: str | None,
+) -> None:
+    """Apply a deployment from a YAML file.
+
+    Creates the deployment if it doesn't exist, or updates it if it does.
+    Reads the file (or stdin with ``-f -``), resolves ``${VAR}`` references
+    from the environment, and issues the appropriate API call.
+    """
+    text = filename.read()
+    try:
+        display = parse_apply_yaml(text)
+    except ApplyYamlError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if dry_run:
+        if display.name:
+            verdict = f"would upsert deployment '{display.name}'"
+        elif display.generate_name:
+            verdict = f"would create deployment '{display.generate_name}'"
+        else:
+            raise click.ClickException(
+                "YAML must include top-level 'name' or 'generate_name'"
+            )
+
+        click.echo(
+            yaml.safe_dump(
+                display.spec.as_redacted().model_dump(mode="json", exclude_unset=True),
+                sort_keys=False,
+            )
+        )
+        click.echo(verdict)
+        return
+
+    validate_authenticated_profile(interactive=False)
+    client = get_project_client(project_id_override=project)
+    asyncio.run(_apply_deployment_from_yaml(client, display, no_push=no_push))
 
 
 @deployments.command("edit")
@@ -431,9 +682,7 @@ def _push_internal_for_update(
     This ensures the S3-stored bare repo has the latest commits so the
     server can resolve the ref to a fresh SHA.
     """
-    # Check we're in a git repo
-    result = subprocess.run(["git", "rev-parse", "--git-dir"], capture_output=True)
-    if result.returncode != 0:
+    if not is_git_repo():
         rprint(
             f"[{WARNING}]Not in a git repo — skipping push, "
             "server will resolve from last pushed code[/]"

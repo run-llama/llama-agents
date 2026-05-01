@@ -287,8 +287,7 @@ class DeploymentUpdate(Base):
     """
     Patch-style update model for deployments.
 
-    Fields not included in the request will remain unchanged.
-    Fields explicitly set to None will clear/delete the field value.
+    Fields set to None remain unchanged.
 
     For secrets: provide a dict where string values add/update secrets
     and null values remove secrets.
