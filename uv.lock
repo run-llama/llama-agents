@@ -2454,7 +2454,7 @@ dev = [
 
 [[package]]
 name = "llama-agents-dbos"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "packages/llama-agents-dbos" }
 dependencies = [
     { name = "dbos" },
