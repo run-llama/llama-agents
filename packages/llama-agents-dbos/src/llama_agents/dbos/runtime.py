@@ -1021,7 +1021,7 @@ class InternalDBOSAdapter(InternalRunAdapter):
     """
     Internal DBOS adapter for the workflow control loop.
 
-    - send_event sends ticks via DBOS.send (using run_in_executor to escape step context)
+    - send_event sends ticks via DBOS.send_async
     - wait_receive receives ticks via DBOS.recv_async
     - write_to_event_stream publishes events via DBOS streams
     - get_now returns a durable timestamp
@@ -1068,14 +1068,7 @@ class InternalDBOSAdapter(InternalRunAdapter):
         return _durable_time()
 
     async def send_event(self, tick: WorkflowTick) -> None:
-        # Use run_in_executor to escape DBOS step context.
-        # DBOS yells at you for writing to the event stream from a step (since is not idempotent)
-        # However that's the expected semantics of llama index workflow steps, so it's ok.
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None,
-            lambda: DBOS.send(self._run_id, tick, topic=_IO_STREAM_TICK_TOPIC),
-        )
+        await DBOS.send_async(self._run_id, tick, topic=_IO_STREAM_TICK_TOPIC)
 
     async def wait_receive(
         self,
