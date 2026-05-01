@@ -17,7 +17,7 @@ dev = [
 
 [project]
 name = "llama-agents-dbos"
-version = "0.3.0"
+version = "0.3.1"
 description = "DBOS durable runtime plugin for LlamaIndex Workflows"
 readme = "README.md"
 license = "MIT"

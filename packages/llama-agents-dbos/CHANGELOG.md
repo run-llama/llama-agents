@@ -1,5 +1,11 @@
 # llama-agents-dbos
 
+## 0.3.1
+
+### Patch Changes
+
+- 83d5f9f: Use DBOS async send for internal workflow ticks.
+
 ## 0.3.0
 
 ### Minor Changes
