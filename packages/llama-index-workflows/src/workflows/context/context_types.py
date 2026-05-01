@@ -8,7 +8,7 @@ from typing_extensions import TypeVar
 from workflows.context.state_store import DictState
 from workflows.events import SerializableOptionalException
 
-MODEL_T = TypeVar("MODEL_T", bound=BaseModel, default=DictState)
+MODEL_T = TypeVar("MODEL_T", bound=BaseModel, default=DictState)  # type: ignore[reportGeneralTypeIssues]
 
 
 class SerializedContextV0(BaseModel):

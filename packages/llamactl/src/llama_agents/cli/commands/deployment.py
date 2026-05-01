@@ -8,6 +8,7 @@ git ref, reads the config, and runs your app.
 
 import asyncio
 import subprocess
+from pathlib import Path
 
 import click
 from llama_agents.cli.commands.auth import validate_authenticated_profile
@@ -24,12 +25,19 @@ from rich import print as rprint
 
 from ..app import app, console
 from ..client import get_project_client, project_client_context
-from ..display import DeploymentDisplay, ReleaseDisplay
+from ..display import (
+    PUSH_MODE_REPO_URL,
+    DeploymentDisplay,
+    DeploymentSpec,
+    ReleaseDisplay,
+)
+from ..local_context import gather_local_context
 from ..log_format import parse_log_body, render_plain
 from ..options import (
     global_options,
     interactive_option,
     output_option,
+    output_option_with_template,
     project_option,
     render_output,
 )
@@ -42,6 +50,7 @@ from ..utils.git_push import (
     internal_push_refspec,
     push_to_remote,
 )
+from ..yaml_template import render as render_yaml_template
 
 
 @app.group(
@@ -94,6 +103,10 @@ def _do_get(
     a single-row table for that deployment. Never launches the TUI; for a
     live view use ``deployments logs --follow``.
     """
+    mode = output.lower()
+    if mode == "template" and not deployment_id:
+        raise click.ClickException("-o template requires a deployment name")
+
     validate_authenticated_profile(interactive)
     # Fall back to the user-supplied override if client construction itself
     # raises; `client.project_id` resolves the active project when no override.
@@ -105,7 +118,7 @@ def _do_get(
         if not deployment_id:
             deployments = asyncio.run(client.list_deployments())
 
-            if not deployments and output == "text":
+            if not deployments and mode == "text":
                 rprint(
                     f"[{WARNING}]No deployments found for project {client.project_id}[/]"
                 )
@@ -117,6 +130,9 @@ def _do_get(
 
         deployment = asyncio.run(client.get_deployment(deployment_id))
         display = DeploymentDisplay.from_response(deployment)
+        if mode == "template":
+            click.echo(render_yaml_template(display), nl=False)
+            return
         render_output(display, output)
 
     except Exception as e:
@@ -131,7 +147,7 @@ def _do_get(
 @deployments.command("get")
 @global_options
 @click.argument("deployment_id", required=False, type=DeploymentType())
-@output_option
+@output_option_with_template
 @project_option
 @interactive_option
 def get_deployment(
@@ -165,6 +181,83 @@ def list_deployments(
     _do_get(None, interactive, output, project)
 
 
+@deployments.command("template")
+@global_options
+def template_deployment() -> None:
+    """Print an apply-shaped YAML scaffold for a new deployment.
+
+    Reads the local working tree (git remote and ref, deployment config,
+    .env, required secrets) and emits a YAML scaffold with ``##`` instruction
+    comments. Edit the output, then run ``llamactl deployments apply -f
+    <file>``. Offline by design — no auth profile required.
+    """
+    ctx = gather_local_context()
+
+    cwd_name: str = Path.cwd().name
+    preferred_name: str = ctx.generate_name or cwd_name
+    secrets: dict[str, str | None] | None = None
+    if ctx.required_secret_names:
+        secrets = {name: f"${{{name}}}" for name in ctx.required_secret_names}
+
+    if ctx.is_git_repo:
+        spec = DeploymentSpec(
+            repo_url=PUSH_MODE_REPO_URL,
+            deployment_file_path=ctx.deployment_file_path,
+            git_ref=ctx.git_ref,
+            appserver_version=ctx.installed_appserver_version,
+            secrets=secrets,
+        )
+        required: tuple[str, ...] = ()
+    else:
+        spec = DeploymentSpec(
+            appserver_version=ctx.installed_appserver_version,
+            secrets=secrets,
+        )
+        required = ("repo_url",)
+
+    display = DeploymentDisplay(name=None, generate_name=preferred_name, spec=spec)
+
+    head: list[str] = [f"WARNING: {warning}" for warning in ctx.warnings]
+    if ctx.warnings:
+        head.append("")
+    head.append("Edit, then run: llamactl deployments apply -f <file>")
+    if not ctx.is_git_repo:
+        head.extend(
+            [
+                "",
+                "NOT IN A GIT REPO — set repo_url, or cd into a working tree "
+                "and re-run.",
+            ]
+        )
+
+    field_alternatives: dict[str, tuple[str, str]] = {}
+    if ctx.is_git_repo and ctx.repo_url:
+        field_alternatives["repo_url"] = (
+            ctx.repo_url,
+            "auto-detected from your git remotes",
+        )
+
+    secret_comments: dict[str, str] = {}
+    for name_ in ctx.required_secret_names:
+        if name_ in ctx.available_secrets:
+            secret_comments[name_] = "from your .env"
+        else:
+            secret_comments[name_] = "not in your .env — add it before apply"
+
+    click.echo(
+        render_yaml_template(
+            display,
+            head=head,
+            secret_comments=secret_comments,
+            field_alternatives=field_alternatives,
+            required=required,
+            name_example=preferred_name,
+            scaffold_generate_name=True,
+        ),
+        nl=False,
+    )
+
+
 @deployments.command("create")
 @global_options
 @interactive_option
@@ -189,9 +282,7 @@ def create_deployment(
         rprint(f"[{WARNING}]Cancelled[/]")
         return
 
-    rprint(
-        f"[green]Created deployment: {deployment_form.display_name} (id: {deployment_form.id})[/green]"
-    )
+    rprint(f"[green]Created deployment: {deployment_form.id}[/green]")
 
 
 @deployments.command("configure-git-remote")
@@ -321,7 +412,7 @@ def edit_deployment(
             return
 
         rprint(
-            f"[green]Successfully updated deployment: {updated_deployment.display_name}[/green]"
+            f"[green]Successfully updated deployment: {updated_deployment.id}[/green]"
         )
 
     except Exception as e:
@@ -700,12 +791,11 @@ def select_deployment(
 
     choices = []
     for deployment in deployments:
-        display_name = deployment.display_name
         deployment_id = deployment.id
         status = deployment.status
         choices.append(
             questionary.Choice(
-                title=f"{display_name} ({deployment_id}) - {status}",
+                title=f"{deployment_id} - {status}",
                 value=deployment_id,
             )
         )

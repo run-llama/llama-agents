@@ -20,6 +20,28 @@ def global_options(f: Callable[P, R]) -> Callable[P, R]:
     return native_tls_option(file_logging(f))
 
 
+_BASE_OUTPUT_CHOICES = ("text", "json", "yaml", "wide")
+_BASE_OUTPUT_HELP = (
+    "Output format. 'json'/'yaml' for machine-readable output; "
+    "'wide' for the text table with extra columns."
+)
+
+
+def _output_option(
+    *extra_choices: str, help_text: str = _BASE_OUTPUT_HELP
+) -> Callable[[Callable[P, R]], Callable[P, R]]:
+    choices = list(_BASE_OUTPUT_CHOICES) + list(extra_choices)
+    return click.option(
+        "-o",
+        "--output",
+        "output",
+        type=click.Choice(choices, case_sensitive=False),
+        default="text",
+        show_default=True,
+        help=help_text,
+    )
+
+
 def output_option(f: Callable[P, R]) -> Callable[P, R]:
     """Add a `-o/--output` option for read commands.
 
@@ -28,16 +50,23 @@ def output_option(f: Callable[P, R]) -> Callable[P, R]:
     positions (kubectl-style).
     """
 
-    return click.option(
-        "-o",
-        "--output",
-        "output",
-        type=click.Choice(["text", "json", "yaml", "wide"], case_sensitive=False),
-        default="text",
-        show_default=True,
-        help=(
-            "Output format. 'json'/'yaml' for machine-readable output; "
-            "'wide' for the text table with extra columns."
+    return _output_option()(f)
+
+
+def output_option_with_template(f: Callable[P, R]) -> Callable[P, R]:
+    """Variant of :func:`output_option` that adds the ``template`` choice.
+
+    ``template`` emits the apply-shaped YAML scaffold (annotated with ``#!``
+    docs, suitable for ``llamactl deployments apply -f``). It only makes sense
+    on a single-row read (``deployments get <name>``) and is opted-in per
+    command rather than advertised on every ``-o``-bearing command.
+    """
+
+    return _output_option(
+        "template",
+        help_text=(
+            f"{_BASE_OUTPUT_HELP[:-1]}; "
+            "'template' for an annotated YAML scaffold suitable for `apply`."
         ),
     )(f)
 
@@ -84,6 +113,14 @@ def render_output(
     from llama_agents.cli.display import render_columns, resolve_columns
 
     mode = output.lower()
+    if mode == "template":
+        # ``-o template`` is the apply-shaped scaffold output and only makes
+        # sense for ``deployments get <name>``. Each command that supports it
+        # short-circuits before calling ``render_output``; reaching here with
+        # ``template`` means the command does not.
+        raise click.ClickException(
+            "-o template is only supported for `llamactl deployments get <name>`"
+        )
     if mode in {"text", "wide"}:
         rows: list[BaseModel] | None = None
         if isinstance(payload, BaseModel):
