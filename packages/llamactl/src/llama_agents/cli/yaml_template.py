@@ -190,9 +190,7 @@ def _emit_set_field(
             )
         return
     out.append(
-        _with_trailing(
-            f"{_INDENT}{fname}: {_scalar(value)}", _trailing_doc(finfo)
-        )
+        _with_trailing(f"{_INDENT}{fname}: {_scalar(value)}", _trailing_doc(finfo))
     )
     alt = field_alternatives.get(fname)
     if alt is not None:
