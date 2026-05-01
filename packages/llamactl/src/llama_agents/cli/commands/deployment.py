@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import click
 import yaml
 from llama_agents.cli.commands.auth import validate_authenticated_profile
-from llama_agents.core.client.manage_client import ProjectClient
 from llama_agents.cli.param_types import DeploymentType, GitShaType
 from llama_agents.cli.styles import WARNING
 from llama_agents.core.git.git_util import is_git_repo
@@ -60,6 +60,7 @@ from ..utils.git_push import (
     push_to_remote,
 )
 from ..yaml_template import render as render_yaml_template
+
 
 @app.group(
     help="Deploy your app to the cloud.",
@@ -401,7 +402,7 @@ def delete_deployment(
 
 
 def _apply_push(
-    client: ProjectClient,
+    client: Any,
     deployment_id: str,
     git_ref: str | None,
 ) -> None:
@@ -430,7 +431,7 @@ def _apply_push(
 
 
 def _apply_push_after_save(
-    client: ProjectClient,
+    client: Any,
     deployment_id: str,
     git_ref: str | None,
 ) -> None:
@@ -449,7 +450,7 @@ def _apply_push_after_save(
 
 
 async def _apply_deployment_from_yaml(
-    client: ProjectClient, display: DeploymentDisplay, *, no_push: bool = False
+    client: Any, display: DeploymentDisplay, *, no_push: bool = False
 ) -> None:
     # Deferred: llamactl startup budget avoids importing httpx at module level.
     import httpx
