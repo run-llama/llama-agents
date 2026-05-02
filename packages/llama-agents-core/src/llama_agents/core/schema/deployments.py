@@ -1,9 +1,10 @@
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import Field, HttpUrl, computed_field, model_validator
+from packaging.version import InvalidVersion, Version
+from pydantic import BeforeValidator, Field, HttpUrl, computed_field, model_validator
 
 from .base import Base
 
@@ -29,6 +30,36 @@ def validate_dns_1035_label(value: str) -> str:
             "max 63 characters, and not end with a hyphen."
         )
     return value
+
+
+def validate_appserver_version(value: str) -> str:
+    """Validate the public package version used as the appserver image tag."""
+    try:
+        version = Version(value)
+    except InvalidVersion:
+        raise ValueError(
+            f"invalid appserver_version {value!r}, expected something like '0.11.3'"
+        ) from None
+
+    if version.epoch != 0:
+        raise ValueError(f"invalid appserver_version {value!r} (epoch not supported)")
+
+    if version.local is not None:
+        raise ValueError(
+            f"invalid appserver_version {value!r} (local segment not supported)"
+        )
+    return value
+
+
+def _validate_optional_appserver_version(value: str | None) -> str | None:
+    if value is None:
+        return value
+    return validate_appserver_version(value)
+
+
+AppserverVersionField = Annotated[
+    str | None, BeforeValidator(_validate_optional_appserver_version)
+]
 
 
 # Sentinel URL scheme used in the CRD's repoUrl to indicate
@@ -181,7 +212,7 @@ class DeploymentCreate(Base):
         default=None,
         description="Key-value pairs to store as deployment secrets",
     )
-    appserver_version: str | None = Field(
+    appserver_version: AppserverVersionField = Field(
         default=None,
         description="Appserver version to use (e.g. '0.4.2'). "
         "If omitted, server may set based on client version.",
@@ -318,7 +349,7 @@ class DeploymentUpdate(Base):
     static_assets_path: Path | None = Field(
         default=None, description="Path to prebuilt UI assets (set by service layer)"
     )
-    appserver_version: str | None = Field(
+    appserver_version: AppserverVersionField = Field(
         default=None, description="Updated appserver version selector"
     )
     image_tag: str | None = Field(

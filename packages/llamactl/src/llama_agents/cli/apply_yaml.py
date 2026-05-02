@@ -11,27 +11,71 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import dataclass
 from typing import Any
 
 import yaml
 from llama_agents.cli.display import DeploymentDisplay, DeploymentSpec
 from pydantic import ValidationError
+from yaml.nodes import MappingNode
 
 _ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
+_ANNOTATION_RE = re.compile(r"^\s*## ERROR:")
+
+# Spec-level field names that appear both in the apply YAML and on the wire
+# (DeploymentCreate / DeploymentUpdate).  Used by the YAML line-index and by
+# the wire-to-YAML path mapper.  Keep this in sync with DeploymentSpec.
+SPEC_FIELDS = {
+    "repo_url",
+    "deployment_file_path",
+    "git_ref",
+    "appserver_version",
+    "suspended",
+    "personal_access_token",
+}
+
+
+@dataclass(frozen=True)
+class FieldError:
+    path: tuple[str | int, ...]
+    message: str
+
+
+@dataclass(frozen=True)
+class UnresolvedEnvVar:
+    name: str
+    path: tuple[str | int, ...]
 
 
 class ApplyYamlError(Exception):
     """Base error for YAML apply parsing/validation failures."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        errors: list[FieldError] | None = None,
+        original_error: Exception | None = None,
+    ) -> None:
+        self.errors = errors or [FieldError((), message)]
+        self.original_error = original_error
+        super().__init__(message)
+
 
 class UnresolvedEnvVarsError(ApplyYamlError):
     """Raised when ``${VAR}`` references cannot be resolved."""
 
-    def __init__(self, unresolved: list[str]) -> None:
-        self.unresolved = unresolved
-        super().__init__(
-            f"unresolved environment variables: {', '.join(sorted(unresolved))}"
-        )
+    def __init__(self, unresolved: list[UnresolvedEnvVar]) -> None:
+        self.unresolved = sorted({item.name for item in unresolved})
+        message = f"unresolved environment variables: {', '.join(self.unresolved)}"
+        errors = [
+            FieldError(
+                path=path,
+                message=f"unresolved environment variables: {', '.join(names)}",
+            )
+            for path, names in _group_unresolved_by_path(unresolved).items()
+        ]
+        super().__init__(message, errors=errors)
 
 
 _ENV_STRING_SPEC_FIELDS = (
@@ -43,12 +87,25 @@ _ENV_STRING_SPEC_FIELDS = (
 )
 
 
-def _resolve_string(text: str, unresolved: list[str]) -> str:
+def _group_unresolved_by_path(
+    unresolved: list[UnresolvedEnvVar],
+) -> dict[tuple[str | int, ...], list[str]]:
+    grouped: dict[tuple[str | int, ...], set[str]] = {}
+    for item in unresolved:
+        grouped.setdefault(item.path, set()).add(item.name)
+    return {path: sorted(names) for path, names in grouped.items()}
+
+
+def _resolve_string(
+    text: str,
+    unresolved: list[UnresolvedEnvVar],
+    path: tuple[str | int, ...],
+) -> str:
     def _replacer(match: re.Match[str]) -> str:
         var = match.group(1)
         env_val = os.environ.get(var)
         if env_val is None:
-            unresolved.append(var)
+            unresolved.append(UnresolvedEnvVar(name=var, path=path))
             return match.group(0)  # leave ${VAR} as-is
         return env_val
 
@@ -56,17 +113,17 @@ def _resolve_string(text: str, unresolved: list[str]) -> str:
 
 
 def _resolve_spec_env_vars(spec: DeploymentSpec) -> DeploymentSpec:
-    unresolved: list[str] = []
+    unresolved: list[UnresolvedEnvVar] = []
     updates: dict[str, Any] = {}
 
     for field in _ENV_STRING_SPEC_FIELDS:
         value = getattr(spec, field)
         if isinstance(value, str):
-            updates[field] = _resolve_string(value, unresolved)
+            updates[field] = _resolve_string(value, unresolved, ("spec", field))
 
     if spec.secrets is not None:
         updates["secrets"] = {
-            name: _resolve_string(value, unresolved)
+            name: _resolve_string(value, unresolved, ("spec", "secrets", name))
             if isinstance(value, str)
             else value
             for name, value in spec.secrets.items()
@@ -81,13 +138,115 @@ def _load_yaml_mapping(text: str) -> dict[str, Any]:
     try:
         raw = yaml.safe_load(text)
     except yaml.YAMLError as exc:
-        raise ApplyYamlError(f"invalid YAML: {exc}") from exc
+        raise ApplyYamlError(f"invalid YAML: {exc}", original_error=exc) from exc
 
     if not isinstance(raw, dict):
         raise ApplyYamlError(
             f"expected a YAML mapping at the top level, got {type(raw).__name__}"
         )
     return raw
+
+
+def _strip_existing_annotations(text: str) -> str:
+    lines = text.splitlines(keepends=True)
+    return "".join(line for line in lines if not _ANNOTATION_RE.match(line))
+
+
+def _path_label(path: tuple[str | int, ...]) -> str:
+    return ".".join(str(part) for part in path)
+
+
+def _annotation_text(
+    error: FieldError, *, include_path: bool = False, indent: str = ""
+) -> str:
+    message = error.message
+    if include_path and error.path:
+        message = f"{_path_label(error.path)}: {message}"
+    lines = message.splitlines() or [""]
+    rendered = [f"{indent}## ERROR: {lines[0]}\n"]
+    rendered.extend(f"{indent}## ERROR: {line}\n" for line in lines[1:])
+    return "".join(rendered)
+
+
+def _key_insert_line(lines: list[str], key_line: int) -> int:
+    indent = len(lines[key_line]) - len(lines[key_line].lstrip(" "))
+    current = key_line
+    while current > 0:
+        previous = lines[current - 1]
+        previous_indent = len(previous) - len(previous.lstrip(" "))
+        if previous_indent != indent or not previous.lstrip(" ").startswith("## "):
+            break
+        current -= 1
+    return current
+
+
+def _index_mapping_node(
+    node: MappingNode,
+    *,
+    path: tuple[str | int, ...] = (),
+    index: dict[tuple[str | int, ...], int],
+) -> None:
+    for key_node, value_node in node.value:
+        if not hasattr(key_node, "value"):
+            continue
+        key = key_node.value
+        child_path = (*path, key)
+
+        if child_path in {("name",), ("generate_name",)}:
+            index[child_path] = key_node.start_mark.line
+        elif len(child_path) == 2 and child_path[0] == "spec":
+            if key in SPEC_FIELDS or key == "secrets":
+                index[child_path] = key_node.start_mark.line
+        elif len(child_path) == 3 and child_path[:2] == ("spec", "secrets"):
+            index[child_path] = key_node.start_mark.line
+
+        if isinstance(value_node, MappingNode):
+            _index_mapping_node(value_node, path=child_path, index=index)
+
+
+def _index_apply_paths(text: str) -> dict[tuple[str | int, ...], int] | None:
+    try:
+        root = yaml.compose(text)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(root, MappingNode):
+        return None
+
+    index: dict[tuple[str | int, ...], int] = {}
+    _index_mapping_node(root, index=index)
+    return index
+
+
+def annotate_yaml_with_errors(text: str, errors: list[FieldError]) -> str:
+    stripped = _strip_existing_annotations(text)
+    if not errors:
+        return stripped
+
+    lines = stripped.splitlines(keepends=True)
+    index = _index_apply_paths(stripped)
+    if index is None:
+        return (
+            "".join(_annotation_text(error, include_path=True) for error in errors)
+            + stripped
+        )
+
+    file_errors: list[FieldError] = []
+    grouped: dict[int, list[FieldError]] = {}
+    for error in errors:
+        key_line = index.get(error.path)
+        if key_line is None:
+            file_errors.append(error)
+            continue
+        grouped.setdefault(_key_insert_line(lines, key_line), []).append(error)
+
+    output: list[str] = []
+    output.extend(_annotation_text(error, include_path=True) for error in file_errors)
+    for line_no, line in enumerate(lines):
+        for error in grouped.get(line_no, []):
+            indent = len(line) - len(line.lstrip(" "))
+            output.append(_annotation_text(error, indent=" " * indent))
+        output.append(line)
+    return "".join(output)
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +274,16 @@ def parse_apply_yaml(text: str) -> DeploymentDisplay:
     try:
         display = DeploymentDisplay.model_validate(raw)
     except ValidationError as exc:
-        raise ApplyYamlError(str(exc)) from exc
+        errors = [
+            FieldError(
+                path=tuple(
+                    part for part in error["loc"] if isinstance(part, (str, int))
+                ),
+                message=str(error["msg"]),
+            )
+            for error in exc.errors()
+        ]
+        raise ApplyYamlError(str(exc), errors=errors, original_error=exc) from exc
 
     display = display.model_copy(update={"spec": _resolve_spec_env_vars(display.spec)})
     return display.without_mask_sentinels()

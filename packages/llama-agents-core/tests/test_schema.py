@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 
+import pytest
 from llama_agents.core.schema.deployments import (
     APPSERVER_TAG_PREFIX,
     DeploymentCreate,
@@ -18,7 +19,7 @@ from llama_agents.core.schema.deployments import (
     version_to_image_tag,
 )
 from llama_agents.core.schema.projects import ProjectsListResponse, ProjectSummary
-from pydantic import HttpUrl
+from pydantic import HttpUrl, ValidationError
 
 
 def test_deployment_create_valid() -> None:
@@ -123,6 +124,48 @@ def test_deployment_create_neither_version_field_set() -> None:
     assert deployment.appserver_version is None
 
 
+@pytest.mark.parametrize(
+    "version",
+    [
+        "0.11.3",
+        "1.0.0",
+        "0.12.0rc1",
+        "0.12.0.dev1",
+        "0.12.0.post1",
+    ],
+)
+def test_deployment_create_accepts_public_pep440_appserver_version(
+    version: str,
+) -> None:
+    deployment = DeploymentCreate(
+        display_name="App",
+        repo_url="https://example.com",
+        appserver_version=version,
+    )
+    assert deployment.appserver_version == version
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "latest",
+        "tilt-dev",
+        "definitely-not-a-version",
+        "0.12.0+local",
+        "1!2.0",
+    ],
+)
+def test_deployment_create_rejects_non_public_pep440_appserver_version(
+    version: str,
+) -> None:
+    with pytest.raises(ValidationError, match="appserver_version"):
+        DeploymentCreate(
+            display_name="App",
+            repo_url="https://example.com",
+            appserver_version=version,
+        )
+
+
 def test_deployment_create_serializes_llama_deploy_version_for_old_servers() -> None:
     """Serialized payload must include 'llama_deploy_version' so old servers accept it."""
     deployment = DeploymentCreate(
@@ -147,6 +190,16 @@ def test_deployment_update_canonical_wins_on_conflict() -> None:
         {"appserver_version": "0.4.2", "llama_deploy_version": "0.3.0"}
     )
     assert update.appserver_version == "0.4.2"
+
+
+def test_deployment_update_rejects_non_public_pep440_appserver_version() -> None:
+    with pytest.raises(ValidationError, match="appserver_version"):
+        DeploymentUpdate(appserver_version="tilt-dev")
+
+
+def test_deployment_update_allows_internal_image_tag_escape_hatch() -> None:
+    update = DeploymentUpdate(image_tag="tilt-dev")
+    assert update.image_tag == "tilt-dev"
 
 
 def test_deployment_update_serializes_llama_deploy_version_for_old_servers() -> None:

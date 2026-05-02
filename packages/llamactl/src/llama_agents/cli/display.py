@@ -325,6 +325,14 @@ class DeploymentStatus(BaseModel):
     warning: str | None = None
 
 
+class PayloadError(ValueError):
+    """Validation error from payload construction, with a YAML field path."""
+
+    def __init__(self, message: str, path: tuple[str | int, ...]) -> None:
+        self.path = path
+        super().__init__(message)
+
+
 class DeploymentDisplay(BaseModel):
     """CLI projection of a deployment.
 
@@ -416,24 +424,28 @@ class DeploymentDisplay(BaseModel):
         spec = self.spec
 
         if spec.suspended is not None:
-            raise ValueError(
+            raise PayloadError(
                 "cannot create a deployment as suspended; "
-                "create it first, then update with --suspended"
+                "create it first, then update with --suspended",
+                ("spec", "suspended"),
             )
 
         if spec.secrets is not None:
             none_keys = [k for k, v in spec.secrets.items() if v is None]
             if none_keys:
-                raise ValueError(
+                raise PayloadError(
                     f"cannot delete secrets on create "
-                    f"(null values for: {', '.join(sorted(none_keys))})"
+                    f"(null values for: {', '.join(sorted(none_keys))})",
+                    ("spec", "secrets", none_keys[0]),
                 )
             secrets = {k: v for k, v in spec.secrets.items() if v is not None}
         else:
             secrets = None
 
         if self.generate_name is None:
-            raise ValueError("generate_name is required on create")
+            raise PayloadError(
+                "generate_name is required on create", ("generate_name",)
+            )
 
         return DeploymentCreate(
             id=self.name,
