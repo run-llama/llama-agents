@@ -38,6 +38,12 @@ class FieldError:
     message: str
 
 
+@dataclass(frozen=True)
+class UnresolvedEnvVar:
+    name: str
+    path: tuple[str | int, ...]
+
+
 class ApplyYamlError(Exception):
     """Base error for YAML apply parsing/validation failures."""
 
@@ -56,10 +62,18 @@ class ApplyYamlError(Exception):
 class UnresolvedEnvVarsError(ApplyYamlError):
     """Raised when ``${VAR}`` references cannot be resolved."""
 
-    def __init__(self, unresolved: list[str]) -> None:
-        self.unresolved = unresolved
-        message = f"unresolved environment variables: {', '.join(sorted(unresolved))}"
-        super().__init__(message)
+    def __init__(self, unresolved: list[UnresolvedEnvVar]) -> None:
+        self.unresolved = sorted({item.name for item in unresolved})
+        message = f"unresolved environment variables: {', '.join(self.unresolved)}"
+        errors = [
+            FieldError(
+                path=path,
+                severity="error",
+                message=f"unresolved environment variables: {', '.join(names)}",
+            )
+            for path, names in _group_unresolved_by_path(unresolved).items()
+        ]
+        super().__init__(message, errors=errors)
 
 
 _ENV_STRING_SPEC_FIELDS = (
@@ -71,12 +85,25 @@ _ENV_STRING_SPEC_FIELDS = (
 )
 
 
-def _resolve_string(text: str, unresolved: list[str]) -> str:
+def _group_unresolved_by_path(
+    unresolved: list[UnresolvedEnvVar],
+) -> dict[tuple[str | int, ...], list[str]]:
+    grouped: dict[tuple[str | int, ...], set[str]] = {}
+    for item in unresolved:
+        grouped.setdefault(item.path, set()).add(item.name)
+    return {path: sorted(names) for path, names in grouped.items()}
+
+
+def _resolve_string(
+    text: str,
+    unresolved: list[UnresolvedEnvVar],
+    path: tuple[str | int, ...],
+) -> str:
     def _replacer(match: re.Match[str]) -> str:
         var = match.group(1)
         env_val = os.environ.get(var)
         if env_val is None:
-            unresolved.append(var)
+            unresolved.append(UnresolvedEnvVar(name=var, path=path))
             return match.group(0)  # leave ${VAR} as-is
         return env_val
 
@@ -84,17 +111,17 @@ def _resolve_string(text: str, unresolved: list[str]) -> str:
 
 
 def _resolve_spec_env_vars(spec: DeploymentSpec) -> DeploymentSpec:
-    unresolved: list[str] = []
+    unresolved: list[UnresolvedEnvVar] = []
     updates: dict[str, Any] = {}
 
     for field in _ENV_STRING_SPEC_FIELDS:
         value = getattr(spec, field)
         if isinstance(value, str):
-            updates[field] = _resolve_string(value, unresolved)
+            updates[field] = _resolve_string(value, unresolved, ("spec", field))
 
     if spec.secrets is not None:
         updates["secrets"] = {
-            name: _resolve_string(value, unresolved)
+            name: _resolve_string(value, unresolved, ("spec", "secrets", name))
             if isinstance(value, str)
             else value
             for name, value in spec.secrets.items()
@@ -127,12 +154,17 @@ def _path_label(path: tuple[str | int, ...]) -> str:
     return ".".join(str(part) for part in path)
 
 
-def _annotation_line(error: FieldError, *, include_path: bool = False) -> str:
+def _annotation_text(
+    error: FieldError, *, include_path: bool = False, indent: str = ""
+) -> str:
     severity = error.severity.upper()
     message = error.message
     if include_path and error.path:
         message = f"{_path_label(error.path)}: {message}"
-    return f"## {severity}: {message}\n"
+    lines = message.splitlines() or [""]
+    rendered = [f"{indent}## {severity}: {lines[0]}\n"]
+    rendered.extend(f"{indent}## {severity}: {line}\n" for line in lines[1:])
+    return "".join(rendered)
 
 
 def _key_insert_line(lines: list[str], key_line: int) -> int:
@@ -193,7 +225,7 @@ def annotate_yaml_with_errors(text: str, errors: list[FieldError]) -> str:
     index = _index_apply_paths(stripped)
     if index is None:
         return (
-            "".join(_annotation_line(error, include_path=True) for error in errors)
+            "".join(_annotation_text(error, include_path=True) for error in errors)
             + stripped
         )
 
@@ -207,11 +239,11 @@ def annotate_yaml_with_errors(text: str, errors: list[FieldError]) -> str:
         grouped.setdefault(_key_insert_line(lines, key_line), []).append(error)
 
     output: list[str] = []
-    output.extend(_annotation_line(error, include_path=True) for error in file_errors)
+    output.extend(_annotation_text(error, include_path=True) for error in file_errors)
     for line_no, line in enumerate(lines):
         for error in grouped.get(line_no, []):
             indent = len(line) - len(line.lstrip(" "))
-            output.append(" " * indent + _annotation_line(error))
+            output.append(_annotation_text(error, indent=" " * indent))
         output.append(line)
     return "".join(output)
 

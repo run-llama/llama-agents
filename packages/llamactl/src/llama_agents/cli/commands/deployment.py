@@ -142,6 +142,37 @@ def _http_error_to_field_errors(
     return [_error((), str(exc))]
 
 
+def _validation_error_to_field_errors(
+    exc: ValidationError, *, display: DeploymentDisplay
+) -> list[FieldError]:
+    return [
+        _error(
+            _wire_path_from_loc(tuple(d["loc"]), display=display),
+            str(d["msg"]),
+        )
+        for d in exc.errors()
+    ]
+
+
+def _validate_dry_run_payload(display: DeploymentDisplay) -> None:
+    try:
+        if display.name:
+            display.to_update_payload()
+        elif display.generate_name:
+            display.to_create_payload()
+        else:
+            msg = "YAML must include top-level 'name' or 'generate_name'"
+            raise ApplyYamlError(msg, errors=[_error(("generate_name",), msg)])
+    except PayloadError as exc:
+        raise ApplyYamlError(str(exc), errors=[_error(exc.path, str(exc))]) from exc
+    except ValidationError as exc:
+        raise ApplyYamlError(
+            str(exc),
+            errors=_validation_error_to_field_errors(exc, display=display),
+            original_error=exc,
+        ) from exc
+
+
 def _repository_error_path(
     message: str, display: DeploymentDisplay
 ) -> tuple[str | int, ...]:
@@ -593,6 +624,10 @@ async def _apply_deployment_from_yaml(
             msg = "YAML must include top-level 'name' or 'generate_name'"
             raise ApplyYamlError(msg, errors=[_error(("generate_name",), msg)])
 
+        payload = (
+            display.to_update_payload() if is_update else display.to_create_payload()
+        )
+
         # Pre-flight validate-repository (skipped for push-mode, dry-run,
         # and when repo_url is unset on the update path).
         repo_url = display.spec.repo_url
@@ -656,18 +691,15 @@ async def _apply_deployment_from_yaml(
                 existing.id,
                 display.spec.git_ref or existing.git_ref,
             )
-            payload = display.to_update_payload()
             response = await client.update_deployment(display.name, payload)
             click.echo(f"updated {response.id}")
         elif is_update:
             assert display.name is not None
-            payload = display.to_update_payload()
             response = await client.update_deployment(display.name, payload)
             click.echo(f"updated {response.id}")
             if desired_is_push:
                 _apply_push_after_save(client, response.id, display.spec.git_ref)
         else:
-            payload = display.to_create_payload()
             response = await client.create_deployment(payload)
             click.echo(f"created {response.id}")
             if desired_is_push:
@@ -684,14 +716,11 @@ async def _apply_deployment_from_yaml(
     except PayloadError as exc:
         raise ApplyYamlError(str(exc), errors=[_error(exc.path, str(exc))]) from exc
     except ValidationError as exc:
-        errors = [
-            _error(
-                _wire_path_from_loc(tuple(d["loc"]), display=display),
-                str(d["msg"]),
-            )
-            for d in exc.errors()
-        ]
-        raise ApplyYamlError(str(exc), errors=errors, original_error=exc) from exc
+        raise ApplyYamlError(
+            str(exc),
+            errors=_validation_error_to_field_errors(exc, display=display),
+            original_error=exc,
+        ) from exc
     except httpx.HTTPStatusError as exc:
         raise ApplyYamlError(
             str(exc),
@@ -756,13 +785,16 @@ def apply_deployment(
         raise click.ClickException(str(exc)) from exc
 
     if dry_run:
-        if display.name:
-            verdict = f"would upsert deployment '{display.name}'"
-        elif display.generate_name:
-            verdict = f"would create deployment '{display.generate_name}'"
-        else:
-            message = "YAML must include top-level 'name' or 'generate_name'"
-            raise click.ClickException(message)
+        try:
+            _validate_dry_run_payload(display)
+        except ApplyYamlError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+        verdict = (
+            f"would upsert deployment '{display.name}'"
+            if display.name
+            else f"would create deployment '{display.generate_name}'"
+        )
 
         click.echo(
             yaml.safe_dump(

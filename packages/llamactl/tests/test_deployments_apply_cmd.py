@@ -275,6 +275,30 @@ def test_apply_dry_run_generate_name_only(patched_auth: Any, tmp_path: Any) -> N
     assert "create" in result.output.lower()
 
 
+def test_apply_dry_run_validates_appserver_version(
+    patched_auth: Any, tmp_path: Any
+) -> None:
+    runner = CliRunner()
+    yaml_text = textwrap.dedent("""\
+        generate_name: My App
+        spec:
+          repo_url: https://github.com/example/repo
+          appserver_version: "1!0.11.3"
+    """)
+    f = tmp_path / "deploy.yaml"
+    f.write_text(yaml_text)
+
+    client = _apply_client_mock()
+    with patch_project_client(client):
+        result = runner.invoke(app, ["deployments", "apply", "-f", str(f), "--dry-run"])
+
+    assert result.exit_code != 0
+    assert "Invalid appserver version" in result.output
+    client.get_deployment.assert_not_called()
+    client.create_deployment.assert_not_called()
+    client.validate_repository.assert_not_called()
+
+
 def test_apply_dry_run_masks_resolved_secret_values(
     patched_auth: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -287,7 +311,6 @@ def test_apply_dry_run_masks_resolved_secret_values(
           repo_url: https://github.com/example/repo
           secrets:
             API_KEY: ${API_KEY_FOR_DRY_RUN}
-            DELETE_ME: null
           personal_access_token: ${PAT_FOR_DRY_RUN}
     """)
     f = tmp_path / "deploy.yaml"
@@ -302,7 +325,6 @@ def test_apply_dry_run_masks_resolved_secret_values(
     assert "sk-test-secret" not in result.output
     assert "ghp-test-secret" not in result.output
     assert "API_KEY: '********'" in result.output
-    assert "DELETE_ME: null" in result.output
     assert "personal_access_token: '********'" in result.output
 
 
@@ -358,6 +380,29 @@ def test_apply_validate_repository_blocks_create(
         result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
 
     assert result.exit_code != 0
+    client.create_deployment.assert_not_called()
+
+
+def test_apply_validates_payload_before_repository(
+    patched_auth: Any, tmp_path: Any
+) -> None:
+    runner = CliRunner()
+    yaml_text = textwrap.dedent("""\
+        generate_name: My App
+        spec:
+          repo_url: https://github.com/example/repo
+          appserver_version: "1!0.11.3"
+    """)
+    f = tmp_path / "deploy.yaml"
+    f.write_text(yaml_text)
+
+    client = _apply_client_mock(validate_accessible=False)
+    with patch_project_client(client):
+        result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
+
+    assert result.exit_code != 0
+    assert "Invalid appserver version" in result.output
+    client.validate_repository.assert_not_called()
     client.create_deployment.assert_not_called()
 
 
@@ -453,11 +498,19 @@ def test_apply_annotate_parse_error_rewrites_file(
 def test_apply_annotate_unresolved_env_var_rewrites_file(
     patched_auth: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("MISSING_FOR_ANNOTATION", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN_FOR_ANNOTATION", raising=False)
+    monkeypatch.delenv("OPENAI_KEY_FOR_ANNOTATION", raising=False)
     runner = CliRunner()
     f = tmp_path / "deploy.yaml"
     f.write_text(
-        "generate_name: Env App\nspec:\n  repo_url: ${MISSING_FOR_ANNOTATION}\n"
+        textwrap.dedent("""\
+            generate_name: Env App
+            spec:
+              repo_url: https://github.com/example/repo
+              personal_access_token: ${GITHUB_TOKEN_FOR_ANNOTATION}
+              secrets:
+                OPENAI_API_KEY: ${OPENAI_KEY_FOR_ANNOTATION}
+        """)
     )
 
     client = _apply_client_mock()
@@ -467,9 +520,17 @@ def test_apply_annotate_unresolved_env_var_rewrites_file(
         )
 
     assert result.exit_code == 1
-    assert "## ERROR: unresolved environment variables: MISSING_FOR_ANNOTATION" in (
-        f.read_text()
-    )
+    annotated = f.read_text()
+    assert (
+        "  ## ERROR: unresolved environment variables: "
+        "GITHUB_TOKEN_FOR_ANNOTATION\n"
+        "  personal_access_token:"
+    ) in annotated
+    assert (
+        "    ## ERROR: unresolved environment variables: "
+        "OPENAI_KEY_FOR_ANNOTATION\n"
+        "    OPENAI_API_KEY:"
+    ) in annotated
     client.create_deployment.assert_not_called()
 
 

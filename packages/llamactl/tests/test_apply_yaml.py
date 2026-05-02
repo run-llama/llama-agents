@@ -137,6 +137,28 @@ def test_env_var_multiple_missing_listed(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "BBB" in exc_info.value.unresolved
 
 
+def test_env_var_missing_reports_all_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    doc = textwrap.dedent("""\
+        generate_name: my-app
+        spec:
+          repo_url: https://github.com/example/repo
+          personal_access_token: ${GITHUB_TOKEN}
+          secrets:
+            OPENAI_API_KEY: ${OPENAI_API_KEY}
+    """)
+
+    with pytest.raises(UnresolvedEnvVarsError) as exc_info:
+        parse_apply_yaml(doc)
+
+    assert exc_info.value.unresolved == ["GITHUB_TOKEN", "OPENAI_API_KEY"]
+    assert [error.path for error in exc_info.value.errors] == [
+        ("spec", "personal_access_token"),
+        ("spec", "secrets", "OPENAI_API_KEY"),
+    ]
+
+
 def test_env_var_in_unknown_field_is_not_resolved(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -447,6 +469,32 @@ def test_annotate_syntax_error_falls_back_to_file_level() -> None:
     annotated = annotate_yaml_with_errors(doc, [_field_error(("name",), "bad name")])
 
     assert annotated == "## ERROR: name: bad name\nname: [\n"
+
+
+def test_annotate_multiline_error_comments_every_line() -> None:
+    doc = "name: [\n"
+
+    annotated = annotate_yaml_with_errors(
+        doc, [_field_error((), "invalid YAML: first line\n  second line\nthird line")]
+    )
+
+    assert annotated == (
+        "## ERROR: invalid YAML: first line\n"
+        "## ERROR:   second line\n"
+        "## ERROR: third line\n"
+        "name: [\n"
+    )
+
+
+def test_annotate_multiline_error_is_idempotent() -> None:
+    doc = "name: [\n"
+    error = _field_error((), "invalid YAML: first line\nsecond line")
+
+    once = annotate_yaml_with_errors(doc, [error])
+    twice = annotate_yaml_with_errors(once, [error])
+
+    assert once == twice
+    assert once.count("## ERROR:") == 2
 
 
 def test_annotate_non_mapping_falls_back_to_file_level() -> None:
