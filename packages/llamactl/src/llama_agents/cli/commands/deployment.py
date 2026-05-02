@@ -105,11 +105,18 @@ def _remap_wire_path(
         return ("name", *parts[1:])
     if parts[0] == "display_name":
         return ("generate_name", *parts[1:])
-    if parts[0] in _WIRE_SPEC_FIELDS:
-        return ("spec", *parts)
-    if parts[0] == "secrets":
+    if parts[0] in _WIRE_SPEC_FIELDS or parts[0] == "secrets":
         return ("spec", *parts)
     return ()
+
+
+def _wire_path_from_loc(
+    loc: tuple[str | int, ...], *, display: DeploymentDisplay | None = None
+) -> tuple[str | int, ...]:
+    return _remap_wire_path(
+        tuple(part for part in loc if isinstance(part, (str, int))),
+        display=display,
+    )
 
 
 def _parse_null_create_secret_paths(message: str) -> list[tuple[str | int, ...]]:
@@ -145,10 +152,7 @@ def _field_errors_from_validation_error(
 ) -> list[FieldError]:
     return [
         _error(
-            _remap_wire_path(
-                tuple(part for part in detail["loc"] if isinstance(part, (str, int))),
-                display=display,
-            ),
+            _wire_path_from_loc(tuple(detail["loc"]), display=display),
             str(detail["msg"]),
         )
         for detail in exc.errors()
@@ -177,10 +181,7 @@ def _field_errors_from_http_error(
             loc = item.get("loc")
             message = str(item.get("msg", item))
             if isinstance(loc, (list, tuple)):
-                path = _remap_wire_path(
-                    tuple(part for part in loc if isinstance(part, (str, int))),
-                    display=display,
-                )
+                path = _wire_path_from_loc(tuple(loc), display=display)
             else:
                 path = ()
             errors.append(_error(path, message))
