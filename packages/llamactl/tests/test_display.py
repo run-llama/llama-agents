@@ -13,6 +13,7 @@ from llama_agents.cli.display import (
     DeploymentDisplay,
     DeploymentSpec,
     DeploymentStatus,
+    PayloadError,
 )
 from llama_agents.core.schema.deployments import DeploymentCreate, DeploymentUpdate
 from pydantic import ValidationError
@@ -203,7 +204,7 @@ def test_to_create_payload_without_generate_name_raises() -> None:
         spec=DeploymentSpec(repo_url="https://github.com/example/repo"),
     )
 
-    with pytest.raises(ValueError, match="generate_name"):
+    with pytest.raises(PayloadError, match="generate_name"):
         display.to_create_payload()
 
 
@@ -216,7 +217,7 @@ def test_to_create_payload_suspended_raises() -> None:
         ),
     )
 
-    with pytest.raises(ValueError, match="suspended"):
+    with pytest.raises(PayloadError, match="suspended"):
         display.to_create_payload()
 
 
@@ -229,7 +230,7 @@ def test_to_create_payload_secrets_with_null_value_raises() -> None:
         ),
     )
 
-    with pytest.raises(ValueError, match="null values"):
+    with pytest.raises(PayloadError, match="null values"):
         display.to_create_payload()
 
 

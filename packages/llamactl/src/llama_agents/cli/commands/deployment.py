@@ -41,6 +41,7 @@ from ..display import (
     PUSH_MODE_REPO_URL,
     DeploymentDisplay,
     DeploymentSpec,
+    PayloadError,
     ReleaseDisplay,
 )
 from ..local_context import gather_local_context
@@ -113,50 +114,10 @@ def _wire_path_from_loc(
     return ()
 
 
-def _parse_null_create_secret_paths(message: str) -> list[tuple[str | int, ...]]:
-    marker = "null values for:"
-    if marker not in message:
-        return []
-    secret_text = message.split(marker, 1)[1].strip().rstrip(")")
-    return [
-        ("spec", "secrets", name.strip())
-        for name in secret_text.split(",")
-        if name.strip()
-    ]
-
-
-def _field_errors_from_value_error(exc: ValueError) -> list[FieldError]:
-    message = str(exc)
-    if "cannot create a deployment as suspended" in message:
-        return [_error(("spec", "suspended"), message)]
-    secret_paths = _parse_null_create_secret_paths(message)
-    if secret_paths:
-        return [_error(path, message) for path in secret_paths]
-    if "generate_name is required" in message:
-        return [_error(("generate_name",), message)]
-    return [_error((), message)]
-
-
-def _field_errors_from_validation_error(
-    exc: ValidationError, *, display: DeploymentDisplay | None = None
+def _http_error_to_field_errors(
+    exc: Any, *, display: DeploymentDisplay | None = None
 ) -> list[FieldError]:
-    return [
-        _error(
-            _wire_path_from_loc(tuple(detail["loc"]), display=display),
-            str(detail["msg"]),
-        )
-        for detail in exc.errors()
-    ]
-
-
-def _field_errors_from_http_error(
-    exc: Exception, *, display: DeploymentDisplay | None = None
-) -> list[FieldError]:
-    # Deferred: llamactl startup budget avoids importing httpx at module level.
-    import httpx
-
-    if not isinstance(exc, httpx.HTTPStatusError):
-        return [_error((), str(exc))]
+    """Extract structured field errors from an ``httpx.HTTPStatusError``."""
     try:
         detail = exc.response.json().get("detail")
     except ValueError:
@@ -179,26 +140,6 @@ def _field_errors_from_http_error(
     if isinstance(detail, str):
         return [_error((), detail)]
     return [_error((), str(exc))]
-
-
-def _field_errors_from_exception(
-    exc: Exception, *, display: DeploymentDisplay | None = None
-) -> list[FieldError]:
-    if isinstance(exc, ApplyYamlError):
-        return exc.errors
-    if isinstance(exc, RepositoryValidationError):
-        return [_error(exc.path, exc.message)]
-    if isinstance(exc, PushFailedError):
-        return [_error((), exc.message)]
-    if isinstance(exc, click.ClickException):
-        if "generate_name" in exc.message:
-            return [_error(("generate_name",), exc.message)]
-        return [_error((), exc.message)]
-    if isinstance(exc, ValidationError):
-        return _field_errors_from_validation_error(exc, display=display)
-    if isinstance(exc, ValueError):
-        return _field_errors_from_value_error(exc)
-    return _field_errors_from_http_error(exc, display=display)
 
 
 def _repository_error_path(
@@ -638,16 +579,19 @@ async def _apply_deployment_from_yaml(
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 404:
                     if display.generate_name is None:
-                        raise click.ClickException(
-                            "deployment not found and no generate_name provided "
-                            "for create"
+                        msg = (
+                            "deployment not found and no generate_name "
+                            "provided for create"
+                        )
+                        raise ApplyYamlError(
+                            msg,
+                            errors=[_error(("generate_name",), msg)],
                         ) from exc
                 else:
                     raise
         elif not display.generate_name:
-            raise click.ClickException(
-                "YAML must include top-level 'name' or 'generate_name'"
-            )
+            msg = "YAML must include top-level 'name' or 'generate_name'"
+            raise ApplyYamlError(msg, errors=[_error(("generate_name",), msg)])
 
         # Pre-flight validate-repository (skipped for push-mode, dry-run,
         # and when repo_url is unset on the update path).
@@ -729,12 +673,33 @@ async def _apply_deployment_from_yaml(
             if desired_is_push:
                 _apply_push_after_save(client, response.id, display.spec.git_ref)
 
-    except (click.ClickException, ValueError, ValidationError):
+    except ApplyYamlError:
         raise
-    except httpx.HTTPStatusError:
-        raise
+    except RepositoryValidationError as exc:
+        raise ApplyYamlError(
+            exc.message, errors=[_error(exc.path, exc.message)]
+        ) from exc
+    except PushFailedError as exc:
+        raise ApplyYamlError(exc.message, errors=[_error((), exc.message)]) from exc
+    except PayloadError as exc:
+        raise ApplyYamlError(str(exc), errors=[_error(exc.path, str(exc))]) from exc
+    except ValidationError as exc:
+        errors = [
+            _error(
+                _wire_path_from_loc(tuple(d["loc"]), display=display),
+                str(d["msg"]),
+            )
+            for d in exc.errors()
+        ]
+        raise ApplyYamlError(str(exc), errors=errors, original_error=exc) from exc
+    except httpx.HTTPStatusError as exc:
+        raise ApplyYamlError(
+            str(exc),
+            errors=_http_error_to_field_errors(exc, display=display),
+            original_error=exc,
+        ) from exc
     except Exception as exc:
-        raise click.ClickException(str(exc)) from exc
+        raise ApplyYamlError(str(exc)) from exc
 
 
 @deployments.command("apply")
@@ -812,14 +777,14 @@ def apply_deployment(
     client = get_project_client(project_id_override=project)
     try:
         asyncio.run(_apply_deployment_from_yaml(client, display, no_push=no_push))
-    except Exception as exc:
+    except ApplyYamlError as exc:
         if annotate_on_error:
             _handle_annotated_apply_error(
                 filename=filename,
                 text=text,
-                errors=_field_errors_from_exception(exc, display=display),
+                errors=exc.errors,
             )
-        raise
+        raise click.ClickException(str(exc)) from exc
 
 
 @deployments.command("edit")
