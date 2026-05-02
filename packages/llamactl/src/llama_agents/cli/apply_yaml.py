@@ -32,12 +32,6 @@ _APPLY_SPEC_FIELDS = {
 
 
 @dataclass(frozen=True)
-class ErrorDetail:
-    path: tuple[str | int, ...]
-    message: str
-
-
-@dataclass(frozen=True)
 class FieldError:
     path: tuple[str | int, ...]
     severity: str
@@ -51,10 +45,10 @@ class ApplyYamlError(Exception):
         self,
         message: str,
         *,
-        errors: list[ErrorDetail] | None = None,
+        errors: list[FieldError] | None = None,
         original_error: Exception | None = None,
     ) -> None:
-        self.errors = errors or [ErrorDetail((), message)]
+        self.errors = errors or [FieldError((), "error", message)]
         self.original_error = original_error
         super().__init__(message)
 
@@ -65,7 +59,7 @@ class UnresolvedEnvVarsError(ApplyYamlError):
     def __init__(self, unresolved: list[str]) -> None:
         self.unresolved = unresolved
         message = f"unresolved environment variables: {', '.join(sorted(unresolved))}"
-        super().__init__(message, errors=[ErrorDetail((), message)])
+        super().__init__(message)
 
 
 _ENV_STRING_SPEC_FIELDS = (
@@ -115,15 +109,12 @@ def _load_yaml_mapping(text: str) -> dict[str, Any]:
     try:
         raw = yaml.safe_load(text)
     except yaml.YAMLError as exc:
-        raise ApplyYamlError(
-            f"invalid YAML: {exc}",
-            errors=[ErrorDetail((), f"invalid YAML: {exc}")],
-            original_error=exc,
-        ) from exc
+        raise ApplyYamlError(f"invalid YAML: {exc}", original_error=exc) from exc
 
     if not isinstance(raw, dict):
-        message = f"expected a YAML mapping at the top level, got {type(raw).__name__}"
-        raise ApplyYamlError(message, errors=[ErrorDetail((), message)])
+        raise ApplyYamlError(
+            f"expected a YAML mapping at the top level, got {type(raw).__name__}"
+        )
     return raw
 
 
@@ -250,16 +241,17 @@ def parse_apply_yaml(text: str) -> DeploymentDisplay:
     try:
         display = DeploymentDisplay.model_validate(raw)
     except ValidationError as exc:
-        details = [
-            ErrorDetail(
+        errors = [
+            FieldError(
                 path=tuple(
                     part for part in error["loc"] if isinstance(part, (str, int))
                 ),
+                severity="error",
                 message=str(error["msg"]),
             )
             for error in exc.errors()
         ]
-        raise ApplyYamlError(str(exc), errors=details, original_error=exc) from exc
+        raise ApplyYamlError(str(exc), errors=errors, original_error=exc) from exc
 
     display = display.model_copy(update={"spec": _resolve_spec_env_vars(display.spec)})
     return display.without_mask_sentinels()

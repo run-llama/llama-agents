@@ -91,12 +91,15 @@ def _error(path: tuple[str | int, ...], message: str) -> FieldError:
     return FieldError(path=path, severity="error", message=message)
 
 
-def _remap_wire_path(
-    loc: tuple[str | int, ...],
-    *,
-    display: DeploymentDisplay | None = None,
+def _wire_path_from_loc(
+    loc: tuple[Any, ...], *, display: DeploymentDisplay | None = None
 ) -> tuple[str | int, ...]:
-    parts = tuple(part for part in loc if part not in {"body", "query"})
+    """Map an API/pydantic error ``loc`` back to the corresponding YAML path."""
+    parts = tuple(
+        part
+        for part in loc
+        if isinstance(part, (str, int)) and part not in {"body", "query"}
+    )
     if not parts:
         if display is not None and display.name is not None:
             return ("name",)
@@ -110,15 +113,6 @@ def _remap_wire_path(
     return ()
 
 
-def _wire_path_from_loc(
-    loc: tuple[str | int, ...], *, display: DeploymentDisplay | None = None
-) -> tuple[str | int, ...]:
-    return _remap_wire_path(
-        tuple(part for part in loc if isinstance(part, (str, int))),
-        display=display,
-    )
-
-
 def _parse_null_create_secret_paths(message: str) -> list[tuple[str | int, ...]]:
     marker = "null values for:"
     if marker not in message:
@@ -129,10 +123,6 @@ def _parse_null_create_secret_paths(message: str) -> list[tuple[str | int, ...]]
         for name in secret_text.split(",")
         if name.strip()
     ]
-
-
-def _field_errors_from_parse_error(exc: ApplyYamlError) -> list[FieldError]:
-    return [_error(detail.path, detail.message) for detail in exc.errors]
 
 
 def _field_errors_from_value_error(exc: ValueError) -> list[FieldError]:
@@ -195,7 +185,7 @@ def _field_errors_from_exception(
     exc: Exception, *, display: DeploymentDisplay | None = None
 ) -> list[FieldError]:
     if isinstance(exc, ApplyYamlError):
-        return _field_errors_from_parse_error(exc)
+        return exc.errors
     if isinstance(exc, RepositoryValidationError):
         return [_error(exc.path, exc.message)]
     if isinstance(exc, PushFailedError):
@@ -796,7 +786,7 @@ def apply_deployment(
             _handle_annotated_apply_error(
                 filename=filename,
                 text=text,
-                errors=_field_errors_from_parse_error(exc),
+                errors=exc.errors,
             )
         raise click.ClickException(str(exc)) from exc
 
@@ -829,8 +819,6 @@ def apply_deployment(
                 text=text,
                 errors=_field_errors_from_exception(exc, display=display),
             )
-        if isinstance(exc, click.ClickException):
-            raise
         raise
 
 
