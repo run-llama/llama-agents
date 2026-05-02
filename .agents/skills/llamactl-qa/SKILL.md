@@ -11,6 +11,14 @@ Two halves. First, a planning pass that turns "I changed X" into a small, sign-o
 
 Every row in the matrix is there because we agreed it covers a real risk or design question in the diff.
 
+## Mode flags
+
+Parse these from the user's invocation before doing anything else:
+
+- `--auto`, `auto`, `fully auto`, `non-chatty`, or `-f` means run autonomously. Pick the backend, draft the matrix internally, execute it, write the report, and return only the report pointer plus any blocking issue. Do not ask for backend selection or matrix confirmation.
+- In auto mode, prefer the least risky backend that still exercises the changed surface. Use offline/temp-project rows for parse/render/local-file behavior, local kind+tilt for new control-plane contracts, and prod-test only for read-only checks or explicitly safe writes.
+- Auto mode does not relax mutation rules. Any prod write still needs an explicitly designated test project. If that is missing, skip the mutating prod row and note the gap in the report instead of asking mid-run.
+
 ### What this is NOT
 
 - **Not an automated integration test.** No `jq has(...)` shape assertions, no `python -c "assert ..."`. If a row reads as "the command works", drop it; if it reads as "let's see the output and judge it", keep it. Real integration tests are a separate task (authoring real pytest cases against the API), not this one.
@@ -33,7 +41,7 @@ Skip when the change is fully covered by pytest, or when the failure mode is in 
 2. **Local kind + tilt.** When the change is a new API contract (new endpoint, new field, new behavior on the control plane) and you need to exercise it against a control plane that actually has the change. `uv run operator/dev.py up`. See `AGENTS.md` and `operator/AGENTS.md` for setup. Local mode runs with no auth: the `http://localhost:8011` env is preconfigured; switch to it with `llamactl auth env switch http://localhost:8011` (arg is the API URL, not a name) and a `default` profile is created automatically. No tokens, no `auth login`. Before drafting the matrix, list existing deployments with `kubectl get llamadeployments -A` — there's often something already in the cluster from prior work that you can target with `--project <id>`, saving the cost of a fresh `deployments create`.
 3. **Staging.** Rarely the right answer for this skill. Use prod-test-project or local instead.
 
-Ask the user which backend before drafting the matrix. The answer changes which rows are realistic.
+Ask the user which backend before drafting the matrix. The answer changes which rows are realistic. Skip this in auto mode and choose from the rules above.
 
 ## Test project scaffolds
 
@@ -79,12 +87,12 @@ The command surface is moving. Run `--help` on any command you're testing before
 
 ## Cooperative planning
 
-Don't run anything until the user has signed off on the matrix.
+Don't run anything until the user has signed off on the matrix. Skip confirmation in auto mode.
 
 1. Read the diff. `git diff <base>...HEAD --stat` and targeted reads on the command files. Identify the behavior surface: which subcommands, flags, output formats, endpoints changed.
 2. List design questions, not features. One line each. The right question reads as "would the user be happy seeing this output?", not "does the command run". Examples: "Does the `spec:` / `status:` split actually feel right when you eyeball `get -o yaml`?" "Does the plain-table list output stay readable for a deployment whose repo URL is 80 chars?" "Does the no-secrets case render as cleanly as the with-secrets case?"
 3. Map questions to a small matrix. One row per case. 4–8 rows is usually right; 12 means you're testing features.
-4. Present the matrix inline. Wait for the user to keep, cut, or add rows.
+4. Present the matrix inline. Wait for the user to keep, cut, or add rows. In auto mode, keep this matrix internal and run it.
 
 Matrix row format. Note "Look for" replaces a pass-fail "Expect" — the reviewer is meant to read the output and judge against these prompts, not check a list of facts.
 
