@@ -1,10 +1,10 @@
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from packaging.version import InvalidVersion, Version
-from pydantic import Field, HttpUrl, computed_field, field_validator, model_validator
+from pydantic import BeforeValidator, Field, HttpUrl, computed_field, model_validator
 
 from .base import Base
 
@@ -49,6 +49,17 @@ def validate_appserver_version(value: str) -> str:
             f"invalid appserver_version {value!r} (local segment not supported)"
         )
     return value
+
+
+def _validate_optional_appserver_version(value: str | None) -> str | None:
+    if value is None:
+        return value
+    return validate_appserver_version(value)
+
+
+AppserverVersionField = Annotated[
+    str | None, BeforeValidator(_validate_optional_appserver_version)
+]
 
 
 # Sentinel URL scheme used in the CRD's repoUrl to indicate
@@ -201,7 +212,7 @@ class DeploymentCreate(Base):
         default=None,
         description="Key-value pairs to store as deployment secrets",
     )
-    appserver_version: str | None = Field(
+    appserver_version: AppserverVersionField = Field(
         default=None,
         description="Appserver version to use (e.g. '0.4.2'). "
         "If omitted, server may set based on client version.",
@@ -233,13 +244,6 @@ class DeploymentCreate(Base):
         if self.id is not None:
             validate_dns_1035_label(self.id)
         return self
-
-    @field_validator("appserver_version")
-    @classmethod
-    def _validate_appserver_version(cls, value: str | None) -> str | None:
-        if value is None:
-            return value
-        return validate_appserver_version(value)
 
 
 class LlamaDeploymentMetadata(Base):
@@ -345,7 +349,7 @@ class DeploymentUpdate(Base):
     static_assets_path: Path | None = Field(
         default=None, description="Path to prebuilt UI assets (set by service layer)"
     )
-    appserver_version: str | None = Field(
+    appserver_version: AppserverVersionField = Field(
         default=None, description="Updated appserver version selector"
     )
     image_tag: str | None = Field(
@@ -384,13 +388,6 @@ class DeploymentUpdate(Base):
             if data.get("llama_deploy_version") and not data.get("appserver_version"):
                 data["appserver_version"] = data.pop("llama_deploy_version")
         return data
-
-    @field_validator("appserver_version")
-    @classmethod
-    def _validate_appserver_version(cls, value: str | None) -> str | None:
-        if value is None:
-            return value
-        return validate_appserver_version(value)
 
     def has_git_fields(self) -> bool:
         """Return True if any git-affecting fields are set."""

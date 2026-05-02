@@ -8,6 +8,7 @@ import textwrap
 
 import pytest
 from llama_agents.cli.apply_yaml import (
+    SPEC_FIELDS,
     ApplyYamlError,
     FieldError,
     UnresolvedEnvVarsError,
@@ -15,6 +16,7 @@ from llama_agents.cli.apply_yaml import (
     parse_apply_yaml,
     parse_delete_yaml_name,
 )
+from llama_agents.cli.display import DeploymentSpec
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -33,6 +35,21 @@ def _yaml_with_spec(**spec_fields: object) -> str:
     for k, v in spec_fields.items():
         lines.append(f"  {k}: {v}")
     return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# SPEC_FIELDS sync guard
+# ---------------------------------------------------------------------------
+
+# Fields on DeploymentSpec that are not wire-level spec fields for annotation
+# purposes (e.g. secrets is handled separately via nested key indexing).
+_SPEC_FIELDS_EXCLUDED = {"secrets"}
+
+
+def test_spec_fields_covers_deployment_spec() -> None:
+    """SPEC_FIELDS must stay in sync with DeploymentSpec's model fields."""
+    model_fields = set(DeploymentSpec.model_fields.keys()) - _SPEC_FIELDS_EXCLUDED
+    assert model_fields == SPEC_FIELDS
 
 
 # ---------------------------------------------------------------------------

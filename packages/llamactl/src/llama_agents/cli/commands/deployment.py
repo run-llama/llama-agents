@@ -737,7 +737,7 @@ async def _apply_deployment_from_yaml(
     "-f",
     "--filename",
     required=True,
-    type=click.Path(allow_dash=True, dir_okay=False, path_type=str),
+    type=click.Path(allow_dash=True, exists=True, dir_okay=False, path_type=str),
     help="Path to YAML file, or '-' for stdin.",
 )
 @click.option(
