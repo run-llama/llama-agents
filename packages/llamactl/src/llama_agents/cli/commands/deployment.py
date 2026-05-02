@@ -30,6 +30,7 @@ from rich import print as rprint
 
 from ..app import app, console
 from ..apply_yaml import (
+    SPEC_FIELDS,
     ApplyYamlError,
     FieldError,
     annotate_yaml_with_errors,
@@ -78,18 +79,8 @@ class RepositoryValidationError(click.ClickException):
         super().__init__(message)
 
 
-_WIRE_SPEC_FIELDS = {
-    "repo_url",
-    "deployment_file_path",
-    "git_ref",
-    "appserver_version",
-    "suspended",
-    "personal_access_token",
-}
-
-
 def _error(path: tuple[str | int, ...], message: str) -> FieldError:
-    return FieldError(path=path, severity="error", message=message)
+    return FieldError(path=path, message=message)
 
 
 def _wire_path_from_loc(
@@ -109,7 +100,7 @@ def _wire_path_from_loc(
         return ("name", *parts[1:])
     if parts[0] == "display_name":
         return ("generate_name", *parts[1:])
-    if parts[0] in _WIRE_SPEC_FIELDS or parts[0] == "secrets":
+    if parts[0] in SPEC_FIELDS or parts[0] == "secrets":
         return ("spec", *parts)
     return ()
 

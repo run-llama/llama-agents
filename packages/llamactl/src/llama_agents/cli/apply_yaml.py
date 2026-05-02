@@ -20,8 +20,12 @@ from pydantic import ValidationError
 from yaml.nodes import MappingNode
 
 _ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
-_ANNOTATION_RE = re.compile(r"^\s*## (ERROR|WARNING):")
-_APPLY_SPEC_FIELDS = {
+_ANNOTATION_RE = re.compile(r"^\s*## ERROR:")
+
+# Spec-level field names that appear both in the apply YAML and on the wire
+# (DeploymentCreate / DeploymentUpdate).  Used by the YAML line-index and by
+# the wire-to-YAML path mapper.  Keep this in sync with DeploymentSpec.
+SPEC_FIELDS = {
     "repo_url",
     "deployment_file_path",
     "git_ref",
@@ -34,7 +38,6 @@ _APPLY_SPEC_FIELDS = {
 @dataclass(frozen=True)
 class FieldError:
     path: tuple[str | int, ...]
-    severity: str
     message: str
 
 
@@ -54,7 +57,7 @@ class ApplyYamlError(Exception):
         errors: list[FieldError] | None = None,
         original_error: Exception | None = None,
     ) -> None:
-        self.errors = errors or [FieldError((), "error", message)]
+        self.errors = errors or [FieldError((), message)]
         self.original_error = original_error
         super().__init__(message)
 
@@ -68,7 +71,6 @@ class UnresolvedEnvVarsError(ApplyYamlError):
         errors = [
             FieldError(
                 path=path,
-                severity="error",
                 message=f"unresolved environment variables: {', '.join(names)}",
             )
             for path, names in _group_unresolved_by_path(unresolved).items()
@@ -157,13 +159,12 @@ def _path_label(path: tuple[str | int, ...]) -> str:
 def _annotation_text(
     error: FieldError, *, include_path: bool = False, indent: str = ""
 ) -> str:
-    severity = error.severity.upper()
     message = error.message
     if include_path and error.path:
         message = f"{_path_label(error.path)}: {message}"
     lines = message.splitlines() or [""]
-    rendered = [f"{indent}## {severity}: {lines[0]}\n"]
-    rendered.extend(f"{indent}## {severity}: {line}\n" for line in lines[1:])
+    rendered = [f"{indent}## ERROR: {lines[0]}\n"]
+    rendered.extend(f"{indent}## ERROR: {line}\n" for line in lines[1:])
     return "".join(rendered)
 
 
@@ -194,7 +195,7 @@ def _index_mapping_node(
         if child_path in {("name",), ("generate_name",)}:
             index[child_path] = key_node.start_mark.line
         elif len(child_path) == 2 and child_path[0] == "spec":
-            if key in _APPLY_SPEC_FIELDS or key == "secrets":
+            if key in SPEC_FIELDS or key == "secrets":
                 index[child_path] = key_node.start_mark.line
         elif len(child_path) == 3 and child_path[:2] == ("spec", "secrets"):
             index[child_path] = key_node.start_mark.line
@@ -278,7 +279,6 @@ def parse_apply_yaml(text: str) -> DeploymentDisplay:
                 path=tuple(
                     part for part in error["loc"] if isinstance(part, (str, int))
                 ),
-                severity="error",
                 message=str(error["msg"]),
             )
             for error in exc.errors()

@@ -359,7 +359,7 @@ def test_validation_error_includes_spec_prefix() -> None:
 
 
 def _field_error(path: tuple[str | int, ...], message: str) -> FieldError:
-    return FieldError(path=path, severity="error", message=message)
+    return FieldError(path=path, message=message)
 
 
 def test_annotate_top_level_field() -> None:
@@ -503,13 +503,3 @@ def test_annotate_non_mapping_falls_back_to_file_level() -> None:
     annotated = annotate_yaml_with_errors(doc, [_field_error(("name",), "bad name")])
 
     assert annotated == "## ERROR: name: bad name\n- name: my-app\n"
-
-
-def test_annotate_warning_severity() -> None:
-    doc = "name: my-app\nspec: {}\n"
-
-    annotated = annotate_yaml_with_errors(
-        doc, [FieldError(path=("name",), severity="warning", message="check this")]
-    )
-
-    assert annotated.startswith("## WARNING: check this\nname: my-app")

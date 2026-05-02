@@ -45,7 +45,9 @@ def validate_appserver_version(value: str) -> str:
         raise ValueError(f"invalid appserver_version {value!r} (epoch not supported)")
 
     if version.local is not None:
-        raise ValueError(f"invalid appserver_version {value!r} (local segment not supported)")
+        raise ValueError(
+            f"invalid appserver_version {value!r} (local segment not supported)"
+        )
     return value
 
 
