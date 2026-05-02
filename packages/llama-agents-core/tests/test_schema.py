@@ -152,6 +152,7 @@ def test_deployment_create_accepts_public_pep440_appserver_version(
         "tilt-dev",
         "definitely-not-a-version",
         "0.12.0+local",
+        "1!2.0",
     ],
 )
 def test_deployment_create_rejects_non_public_pep440_appserver_version(
