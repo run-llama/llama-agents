@@ -38,21 +38,14 @@ def validate_appserver_version(value: str) -> str:
         version = Version(value)
     except InvalidVersion:
         raise ValueError(
-            f"Invalid appserver version: {value!r}. Must be a valid public PEP 440 "
-            "version, such as '0.11.3' or '0.12.0rc1'."
+            f"invalid appserver_version {value!r}, expected something like '0.11.3'"
         ) from None
 
     if version.epoch != 0:
-        raise ValueError(
-            f"Invalid appserver version: {value!r}. Epoch version segments are not "
-            "supported because appserver_version is also used as a Docker image tag."
-        )
+        raise ValueError(f"invalid appserver_version {value!r} (epoch not supported)")
 
     if version.local is not None:
-        raise ValueError(
-            f"Invalid appserver version: {value!r}. Local version segments are not "
-            "supported because appserver_version is also used as a Docker image tag."
-        )
+        raise ValueError(f"invalid appserver_version {value!r} (local segment not supported)")
     return value
 
 

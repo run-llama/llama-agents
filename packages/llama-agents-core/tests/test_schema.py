@@ -158,7 +158,7 @@ def test_deployment_create_accepts_public_pep440_appserver_version(
 def test_deployment_create_rejects_non_public_pep440_appserver_version(
     version: str,
 ) -> None:
-    with pytest.raises(ValidationError, match="appserver version"):
+    with pytest.raises(ValidationError, match="appserver_version"):
         DeploymentCreate(
             display_name="App",
             repo_url="https://example.com",
@@ -193,7 +193,7 @@ def test_deployment_update_canonical_wins_on_conflict() -> None:
 
 
 def test_deployment_update_rejects_non_public_pep440_appserver_version() -> None:
-    with pytest.raises(ValidationError, match="appserver version"):
+    with pytest.raises(ValidationError, match="appserver_version"):
         DeploymentUpdate(appserver_version="tilt-dev")
 
 

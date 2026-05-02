@@ -738,7 +738,7 @@ def test_create_deployment_rejects_invalid_appserver_version() -> None:
     assert response.status_code == 422
     detail = response.json()["detail"]
     assert detail[0]["loc"] == ["body", "appserver_version"]
-    assert "valid public PEP 440" in detail[0]["msg"]
+    assert "invalid appserver_version" in detail[0]["msg"]
 
 
 @patch(

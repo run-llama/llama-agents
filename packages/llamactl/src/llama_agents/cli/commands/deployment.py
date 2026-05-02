@@ -142,13 +142,22 @@ def _http_error_to_field_errors(
     return [_error((), str(exc))]
 
 
+_PYDANTIC_VALUE_ERROR_PREFIX = "Value error, "
+
+
+def _strip_pydantic_prefix(msg: str) -> str:
+    if msg.startswith(_PYDANTIC_VALUE_ERROR_PREFIX):
+        return msg[len(_PYDANTIC_VALUE_ERROR_PREFIX) :]
+    return msg
+
+
 def _validation_error_to_field_errors(
     exc: ValidationError, *, display: DeploymentDisplay
 ) -> list[FieldError]:
     return [
         _error(
             _wire_path_from_loc(tuple(d["loc"]), display=display),
-            str(d["msg"]),
+            _strip_pydantic_prefix(str(d["msg"])),
         )
         for d in exc.errors()
     ]

@@ -293,7 +293,7 @@ def test_apply_dry_run_validates_appserver_version(
         result = runner.invoke(app, ["deployments", "apply", "-f", str(f), "--dry-run"])
 
     assert result.exit_code != 0
-    assert "Invalid appserver version" in result.output
+    assert "invalid appserver_version" in result.output
     client.get_deployment.assert_not_called()
     client.create_deployment.assert_not_called()
     client.validate_repository.assert_not_called()
@@ -401,7 +401,7 @@ def test_apply_validates_payload_before_repository(
         result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
 
     assert result.exit_code != 0
-    assert "Invalid appserver version" in result.output
+    assert "invalid appserver_version" in result.output
     client.validate_repository.assert_not_called()
     client.create_deployment.assert_not_called()
 
@@ -672,7 +672,7 @@ def test_apply_annotate_invalid_appserver_version_targets_field(
         )
 
     assert result.exit_code == 1
-    assert "  ## ERROR: Value error, Invalid appserver version" in f.read_text()
+    assert "  ## ERROR: invalid appserver_version" in f.read_text()
     assert "  appserver_version: tilt-dev" in f.read_text()
     client.create_deployment.assert_not_called()
 
