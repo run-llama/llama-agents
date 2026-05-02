@@ -41,6 +41,12 @@ def _http_409() -> httpx.HTTPStatusError:
     return httpx.HTTPStatusError("HTTP 409", request=request, response=response)
 
 
+def _http_422_detail(detail: list[dict[str, Any]]) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "http://test/api/v1beta1/deployments")
+    response = httpx.Response(422, request=request, json={"detail": detail})
+    return httpx.HTTPStatusError("HTTP 422", request=request, response=response)
+
+
 def _apply_client_mock(
     *,
     existing: DeploymentResponse | None = None,
@@ -423,6 +429,188 @@ def test_apply_unresolved_env_var_errors(
 
     assert result.exit_code != 0
     assert "NONEXISTENT_VAR_FOR_TEST" in result.output
+
+
+def test_apply_annotate_parse_error_rewrites_file(
+    patched_auth: Any, tmp_path: Any
+) -> None:
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text("name: my-app\nspec:\n  bogus: nope\n")
+
+    client = _apply_client_mock()
+    with patch_project_client(client):
+        result = runner.invoke(
+            app, ["deployments", "apply", "-f", str(f), "--annotate-on-error"]
+        )
+
+    assert result.exit_code == 1
+    assert "apply failed; see annotations" in result.output
+    assert "## ERROR: spec.bogus: Extra inputs are not permitted" in f.read_text()
+    client.create_deployment.assert_not_called()
+
+
+def test_apply_annotate_unresolved_env_var_rewrites_file(
+    patched_auth: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("MISSING_FOR_ANNOTATION", raising=False)
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text(
+        "generate_name: Env App\nspec:\n  repo_url: ${MISSING_FOR_ANNOTATION}\n"
+    )
+
+    client = _apply_client_mock()
+    with patch_project_client(client):
+        result = runner.invoke(
+            app, ["deployments", "apply", "-f", str(f), "--annotate-on-error"]
+        )
+
+    assert result.exit_code == 1
+    assert "## ERROR: unresolved environment variables: MISSING_FOR_ANNOTATION" in (
+        f.read_text()
+    )
+    client.create_deployment.assert_not_called()
+
+
+def test_apply_annotate_stdin_writes_yaml_to_stdout(patched_auth: Any) -> None:
+    runner = CliRunner()
+    client = _apply_client_mock()
+    with patch_project_client(client):
+        result = runner.invoke(
+            app,
+            ["deployments", "apply", "-f", "-", "--annotate-on-error"],
+            input="name: new-app\nspec:\n  repo_url: https://github.com/example/repo\n",
+        )
+
+    assert result.exit_code == 1
+    assert (
+        "## ERROR: generate_name: deployment not found and no generate_name provided "
+        "for create"
+    ) in result.output
+    assert "generate_name" in result.output
+
+
+def test_apply_annotate_dry_run_is_non_mutating(
+    patched_auth: Any, tmp_path: Any
+) -> None:
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    original = "spec:\n  repo_url: https://github.com/example/repo\n"
+    f.write_text(original)
+
+    client = _apply_client_mock()
+    with patch_project_client(client):
+        result = runner.invoke(
+            app,
+            [
+                "deployments",
+                "apply",
+                "-f",
+                str(f),
+                "--dry-run",
+                "--annotate-on-error",
+            ],
+        )
+
+    assert result.exit_code != 0
+    assert f.read_text() == original
+    assert "generate_name" in result.output
+
+
+def test_apply_annotate_repository_failure_targets_repo_url(
+    patched_auth: Any, tmp_path: Any
+) -> None:
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text(MINIMAL_CREATE_YAML)
+
+    client = _apply_client_mock(validate_accessible=False)
+    with patch_project_client(client):
+        result = runner.invoke(
+            app, ["deployments", "apply", "-f", str(f), "--annotate-on-error"]
+        )
+
+    assert result.exit_code == 1
+    assert "  ## ERROR: repo not found\n  repo_url:" in f.read_text()
+    client.create_deployment.assert_not_called()
+
+
+def test_apply_annotate_server_validation_remaps_body_loc(
+    patched_auth: Any, tmp_path: Any
+) -> None:
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text(MINIMAL_CREATE_YAML)
+
+    client = _apply_client_mock()
+    client.create_deployment = AsyncMock(
+        side_effect=_http_422_detail(
+            [
+                {
+                    "loc": ["body", "repo_url"],
+                    "msg": "invalid repository URL",
+                    "type": "value_error",
+                }
+            ]
+        )
+    )
+    with patch_project_client(client):
+        result = runner.invoke(
+            app, ["deployments", "apply", "-f", str(f), "--annotate-on-error"]
+        )
+
+    assert result.exit_code == 1
+    assert "  ## ERROR: invalid repository URL\n  repo_url:" in f.read_text()
+
+
+def test_apply_annotate_create_secret_null_targets_secret(
+    patched_auth: Any, tmp_path: Any
+) -> None:
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text(
+        textwrap.dedent("""\
+            generate_name: My App
+            spec:
+              repo_url: https://github.com/example/repo
+              secrets:
+                DELETE_ME: null
+        """)
+    )
+
+    client = _apply_client_mock()
+    with patch_project_client(client):
+        result = runner.invoke(
+            app, ["deployments", "apply", "-f", str(f), "--annotate-on-error"]
+        )
+
+    assert result.exit_code == 1
+    assert "    ## ERROR: cannot delete secrets on create" in f.read_text()
+    client.create_deployment.assert_not_called()
+
+
+def test_apply_annotate_save_then_push_failure_preserves_recovery(
+    patched_auth: Any, tmp_path: Any
+) -> None:
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text("generate_name: My App\nspec:\n  repo_url: ''\n")
+
+    client = _apply_client_mock()
+    with (
+        patch_project_client(client),
+        _patched_git_push(returncode=1, stderr=b"auth failed"),
+    ):
+        result = runner.invoke(
+            app, ["deployments", "apply", "-f", str(f), "--annotate-on-error"]
+        )
+
+    assert result.exit_code == 1
+    annotated = f.read_text()
+    assert "push failed: auth failed" in annotated
+    assert "re-run `llamactl deployments apply -f <file>`" in annotated
+    assert "created new-app" not in annotated
 
 
 def test_delete_from_file(patched_auth: Any, tmp_path: Any) -> None:

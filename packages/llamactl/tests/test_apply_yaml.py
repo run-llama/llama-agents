@@ -9,7 +9,9 @@ import textwrap
 import pytest
 from llama_agents.cli.apply_yaml import (
     ApplyYamlError,
+    FieldError,
     UnresolvedEnvVarsError,
+    annotate_yaml_with_errors,
     parse_apply_yaml,
     parse_delete_yaml_name,
 )
@@ -327,3 +329,139 @@ def test_validation_error_includes_spec_prefix() -> None:
     """)
     with pytest.raises(ApplyYamlError, match="spec"):
         parse_apply_yaml(doc)
+
+
+# ---------------------------------------------------------------------------
+# annotate_yaml_with_errors
+# ---------------------------------------------------------------------------
+
+
+def _field_error(path: tuple[str | int, ...], message: str) -> FieldError:
+    return FieldError(path=path, severity="error", message=message)
+
+
+def test_annotate_top_level_field() -> None:
+    doc = "name: my-app\nspec:\n  repo_url: https://github.com/example/repo\n"
+
+    annotated = annotate_yaml_with_errors(
+        doc, [_field_error(("name",), "must be a valid DNS label")]
+    )
+
+    assert annotated.startswith("## ERROR: must be a valid DNS label\nname: my-app")
+
+
+def test_annotate_spec_field_above_doc_block() -> None:
+    doc = textwrap.dedent("""\
+        name: my-app
+        spec:
+          ## https://... = remote git URL.
+          ## Omit to keep the current value.
+          repo_url: https://github.com/example/repo
+    """)
+
+    annotated = annotate_yaml_with_errors(
+        doc, [_field_error(("spec", "repo_url"), "repo not found")]
+    )
+
+    assert "  ## ERROR: repo not found\n  ## https://... = remote git URL." in annotated
+    assert "## Omit to keep the current value." in annotated
+
+
+def test_annotate_secret_path_preserves_indentation() -> None:
+    doc = textwrap.dedent("""\
+        name: my-app
+        spec:
+          secrets:
+            API_KEY: null
+    """)
+
+    annotated = annotate_yaml_with_errors(
+        doc, [_field_error(("spec", "secrets", "API_KEY"), "cannot delete on create")]
+    )
+
+    assert "    ## ERROR: cannot delete on create\n    API_KEY: null" in annotated
+
+
+def test_annotate_multiple_errors_same_field_preserves_order() -> None:
+    doc = "generate_name: My App\nspec: {}\n"
+
+    annotated = annotate_yaml_with_errors(
+        doc,
+        [
+            _field_error(("generate_name",), "first"),
+            _field_error(("generate_name",), "second"),
+        ],
+    )
+
+    assert annotated.startswith(
+        "## ERROR: first\n## ERROR: second\ngenerate_name: My App"
+    )
+
+
+def test_annotate_unresolved_path_prepends_with_path() -> None:
+    doc = "name: my-app\nspec: {}\n"
+
+    annotated = annotate_yaml_with_errors(
+        doc, [_field_error(("spec", "missing"), "not valid")]
+    )
+
+    assert annotated.startswith("## ERROR: spec.missing: not valid\nname: my-app")
+
+
+def test_annotate_is_idempotent_for_existing_error_lines() -> None:
+    doc = textwrap.dedent("""\
+        ## ERROR: old file error
+        name: my-app
+        spec:
+          ## ERROR: old repo error
+          repo_url: https://github.com/example/repo
+    """)
+
+    once = annotate_yaml_with_errors(
+        doc, [_field_error(("spec", "repo_url"), "new repo error")]
+    )
+    twice = annotate_yaml_with_errors(
+        once, [_field_error(("spec", "repo_url"), "new repo error")]
+    )
+
+    assert once == twice
+    assert "old file error" not in once
+    assert once.count("## ERROR: new repo error") == 1
+
+
+def test_annotate_preserves_template_docs_that_are_not_errors() -> None:
+    doc = textwrap.dedent("""\
+        ## Edit, then run: llamactl deployments apply -f <file>
+        name: my-app
+        spec: {}
+    """)
+
+    annotated = annotate_yaml_with_errors(doc, [_field_error((), "file problem")])
+
+    assert "## Edit, then run: llamactl deployments apply -f <file>" in annotated
+
+
+def test_annotate_syntax_error_falls_back_to_file_level() -> None:
+    doc = "name: [\n"
+
+    annotated = annotate_yaml_with_errors(doc, [_field_error(("name",), "bad name")])
+
+    assert annotated == "## ERROR: name: bad name\nname: [\n"
+
+
+def test_annotate_non_mapping_falls_back_to_file_level() -> None:
+    doc = "- name: my-app\n"
+
+    annotated = annotate_yaml_with_errors(doc, [_field_error(("name",), "bad name")])
+
+    assert annotated == "## ERROR: name: bad name\n- name: my-app\n"
+
+
+def test_annotate_warning_severity() -> None:
+    doc = "name: my-app\nspec: {}\n"
+
+    annotated = annotate_yaml_with_errors(
+        doc, [FieldError(path=("name",), severity="warning", message="check this")]
+    )
+
+    assert annotated.startswith("## WARNING: check this\nname: my-app")

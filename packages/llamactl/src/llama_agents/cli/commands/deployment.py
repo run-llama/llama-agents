@@ -25,11 +25,14 @@ from llama_agents.core.schema.deployments import (
     DeploymentResponse,
     DeploymentUpdate,
 )
+from pydantic import ValidationError
 from rich import print as rprint
 
 from ..app import app, console
 from ..apply_yaml import (
     ApplyYamlError,
+    FieldError,
+    annotate_yaml_with_errors,
     parse_apply_yaml,
     parse_delete_yaml_name,
 )
@@ -60,6 +63,183 @@ from ..utils.git_push import (
     push_to_remote,
 )
 from ..yaml_template import render as render_yaml_template
+
+
+class PushFailedError(click.ClickException):
+    """Raised when apply's push step fails."""
+
+
+class RepositoryValidationError(click.ClickException):
+    """Raised when validate-repository blocks apply."""
+
+    def __init__(self, message: str, path: tuple[str | int, ...]) -> None:
+        self.path = path
+        super().__init__(message)
+
+
+_WIRE_SPEC_FIELDS = {
+    "repo_url",
+    "deployment_file_path",
+    "git_ref",
+    "appserver_version",
+    "suspended",
+    "personal_access_token",
+}
+
+
+def _error(path: tuple[str | int, ...], message: str) -> FieldError:
+    return FieldError(path=path, severity="error", message=message)
+
+
+def _remap_wire_path(
+    loc: tuple[str | int, ...],
+    *,
+    display: DeploymentDisplay | None = None,
+) -> tuple[str | int, ...]:
+    parts = tuple(part for part in loc if part not in {"body", "query"})
+    if not parts:
+        if display is not None and display.name is not None:
+            return ("name",)
+        return ()
+    if parts[0] == "id":
+        return ("name", *parts[1:])
+    if parts[0] == "display_name":
+        return ("generate_name", *parts[1:])
+    if parts[0] in _WIRE_SPEC_FIELDS:
+        return ("spec", *parts)
+    if parts[0] == "secrets":
+        return ("spec", *parts)
+    return ()
+
+
+def _parse_null_create_secret_paths(message: str) -> list[tuple[str | int, ...]]:
+    marker = "null values for:"
+    if marker not in message:
+        return []
+    secret_text = message.split(marker, 1)[1].strip().rstrip(")")
+    return [
+        ("spec", "secrets", name.strip())
+        for name in secret_text.split(",")
+        if name.strip()
+    ]
+
+
+def _field_errors_from_parse_error(exc: ApplyYamlError) -> list[FieldError]:
+    return [_error(detail.path, detail.message) for detail in exc.errors]
+
+
+def _field_errors_from_value_error(exc: ValueError) -> list[FieldError]:
+    message = str(exc)
+    if "cannot create a deployment as suspended" in message:
+        return [_error(("spec", "suspended"), message)]
+    secret_paths = _parse_null_create_secret_paths(message)
+    if secret_paths:
+        return [_error(path, message) for path in secret_paths]
+    if "generate_name is required" in message:
+        return [_error(("generate_name",), message)]
+    return [_error((), message)]
+
+
+def _field_errors_from_validation_error(
+    exc: ValidationError, *, display: DeploymentDisplay | None = None
+) -> list[FieldError]:
+    return [
+        _error(
+            _remap_wire_path(
+                tuple(part for part in detail["loc"] if isinstance(part, (str, int))),
+                display=display,
+            ),
+            str(detail["msg"]),
+        )
+        for detail in exc.errors()
+    ]
+
+
+def _field_errors_from_http_error(
+    exc: Exception, *, display: DeploymentDisplay | None = None
+) -> list[FieldError]:
+    # Deferred: llamactl startup budget avoids importing httpx at module level.
+    import httpx
+
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return [_error((), str(exc))]
+    try:
+        detail = exc.response.json().get("detail")
+    except ValueError:
+        return [_error((), str(exc))]
+
+    if isinstance(detail, list):
+        errors: list[FieldError] = []
+        for item in detail:
+            if not isinstance(item, dict):
+                errors.append(_error((), str(item)))
+                continue
+            loc = item.get("loc")
+            message = str(item.get("msg", item))
+            if isinstance(loc, (list, tuple)):
+                path = _remap_wire_path(
+                    tuple(part for part in loc if isinstance(part, (str, int))),
+                    display=display,
+                )
+            else:
+                path = ()
+            errors.append(_error(path, message))
+        return errors
+    if isinstance(detail, str):
+        return [_error((), detail)]
+    return [_error((), str(exc))]
+
+
+def _field_errors_from_exception(
+    exc: Exception, *, display: DeploymentDisplay | None = None
+) -> list[FieldError]:
+    if isinstance(exc, ApplyYamlError):
+        return _field_errors_from_parse_error(exc)
+    if isinstance(exc, RepositoryValidationError):
+        return [_error(exc.path, exc.message)]
+    if isinstance(exc, PushFailedError):
+        return [_error((), exc.message)]
+    if isinstance(exc, click.ClickException):
+        if "generate_name" in exc.message:
+            return [_error(("generate_name",), exc.message)]
+        return [_error((), exc.message)]
+    if isinstance(exc, ValueError):
+        return _field_errors_from_value_error(exc)
+    if isinstance(exc, ValidationError):
+        return _field_errors_from_validation_error(exc, display=display)
+    return _field_errors_from_http_error(exc, display=display)
+
+
+def _repository_error_path(
+    message: str, display: DeploymentDisplay
+) -> tuple[str | int, ...]:
+    lowered = message.lower()
+    if any(token in lowered for token in ("auth", "pat", "token", "403")):
+        return ("spec", "personal_access_token")
+    if display.spec.repo_url:
+        return ("spec", "repo_url")
+    return ()
+
+
+def _read_apply_input(filename: str) -> str:
+    if filename == "-":
+        return click.get_text_stream("stdin").read()
+    return Path(filename).read_text()
+
+
+def _handle_annotated_apply_error(
+    *,
+    filename: str,
+    text: str,
+    errors: list[FieldError],
+) -> None:
+    annotated = annotate_yaml_with_errors(text, errors)
+    if filename == "-":
+        click.echo(annotated, nl=False)
+    else:
+        Path(filename).write_text(annotated)
+        click.echo(f"apply failed; see annotations in {filename}", err=True)
+    raise click.exceptions.Exit(1)
 
 
 @app.group(
@@ -424,7 +604,7 @@ def _apply_push(
         )
     if push_result.returncode != 0:
         stderr = push_result.stderr.decode(errors="replace").strip()
-        raise click.ClickException(
+        raise PushFailedError(
             f"push failed: {stderr}\n"
             f"To debug, try: llamactl deployments configure-git-remote {deployment_id}"
         )
@@ -442,9 +622,10 @@ def _apply_push_after_save(
     """
     try:
         _apply_push(client, deployment_id, git_ref)
-    except click.ClickException as exc:
+    except PushFailedError as exc:
         click.echo(str(exc.message), err=True)
-        raise click.ClickException(
+        raise PushFailedError(
+            f"{exc.message}\n"
             "re-run `llamactl deployments apply -f <file>` to retry the push"
         ) from exc
 
@@ -494,7 +675,9 @@ async def _apply_deployment_from_yaml(
                 pat=display.spec.personal_access_token,
             )
             if not vr.accessible:
-                raise click.ClickException(vr.message)
+                raise RepositoryValidationError(
+                    vr.message, _repository_error_path(vr.message, display)
+                )
 
         # Push ordering matrix:
         #   (no deployment, push)    -> save then push (bootstrap)
@@ -555,7 +738,7 @@ async def _apply_deployment_from_yaml(
             if desired_is_push:
                 _apply_push_after_save(client, response.id, display.spec.git_ref)
 
-    except click.ClickException:
+    except (click.ClickException, ValueError, ValidationError):
         raise
     except httpx.HTTPStatusError:
         raise
@@ -569,7 +752,7 @@ async def _apply_deployment_from_yaml(
     "-f",
     "--filename",
     required=True,
-    type=click.File("r"),
+    type=click.Path(allow_dash=True, dir_okay=False, path_type=str),
     help="Path to YAML file, or '-' for stdin.",
 )
 @click.option(
@@ -584,11 +767,18 @@ async def _apply_deployment_from_yaml(
     default=False,
     help="Skip pushing local code even when the deployment uses push-mode.",
 )
+@click.option(
+    "--annotate-on-error",
+    is_flag=True,
+    default=False,
+    help="Write apply errors back into the YAML input.",
+)
 @project_option
 def apply_deployment(
-    filename: click.utils.LazyFile,
+    filename: str,
     dry_run: bool,
     no_push: bool,
+    annotate_on_error: bool,
     project: str | None,
 ) -> None:
     """Apply a deployment from a YAML file.
@@ -597,10 +787,16 @@ def apply_deployment(
     Reads the file (or stdin with ``-f -``), resolves ``${VAR}`` references
     from the environment, and issues the appropriate API call.
     """
-    text = filename.read()
+    text = _read_apply_input(filename)
     try:
         display = parse_apply_yaml(text)
     except ApplyYamlError as exc:
+        if annotate_on_error and not dry_run:
+            _handle_annotated_apply_error(
+                filename=filename,
+                text=text,
+                errors=_field_errors_from_parse_error(exc),
+            )
         raise click.ClickException(str(exc)) from exc
 
     if dry_run:
@@ -609,9 +805,8 @@ def apply_deployment(
         elif display.generate_name:
             verdict = f"would create deployment '{display.generate_name}'"
         else:
-            raise click.ClickException(
-                "YAML must include top-level 'name' or 'generate_name'"
-            )
+            message = "YAML must include top-level 'name' or 'generate_name'"
+            raise click.ClickException(message)
 
         click.echo(
             yaml.safe_dump(
@@ -624,7 +819,18 @@ def apply_deployment(
 
     validate_authenticated_profile(interactive=False)
     client = get_project_client(project_id_override=project)
-    asyncio.run(_apply_deployment_from_yaml(client, display, no_push=no_push))
+    try:
+        asyncio.run(_apply_deployment_from_yaml(client, display, no_push=no_push))
+    except Exception as exc:
+        if annotate_on_error:
+            _handle_annotated_apply_error(
+                filename=filename,
+                text=text,
+                errors=_field_errors_from_exception(exc, display=display),
+            )
+        if isinstance(exc, click.ClickException):
+            raise
+        raise
 
 
 @deployments.command("edit")
