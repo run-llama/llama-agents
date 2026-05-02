@@ -203,10 +203,10 @@ def _field_errors_from_exception(
         if "generate_name" in exc.message:
             return [_error(("generate_name",), exc.message)]
         return [_error((), exc.message)]
-    if isinstance(exc, ValueError):
-        return _field_errors_from_value_error(exc)
     if isinstance(exc, ValidationError):
         return _field_errors_from_validation_error(exc, display=display)
+    if isinstance(exc, ValueError):
+        return _field_errors_from_value_error(exc)
     return _field_errors_from_http_error(exc, display=display)
 
 

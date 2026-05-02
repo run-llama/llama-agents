@@ -590,6 +590,32 @@ def test_apply_annotate_create_secret_null_targets_secret(
     client.create_deployment.assert_not_called()
 
 
+def test_apply_annotate_invalid_appserver_version_targets_field(
+    patched_auth: Any, tmp_path: Any
+) -> None:
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text(
+        textwrap.dedent("""\
+            generate_name: My App
+            spec:
+              repo_url: ""
+              appserver_version: tilt-dev
+        """)
+    )
+
+    client = _apply_client_mock()
+    with patch_project_client(client):
+        result = runner.invoke(
+            app, ["deployments", "apply", "-f", str(f), "--annotate-on-error"]
+        )
+
+    assert result.exit_code == 1
+    assert "  ## ERROR: Value error, Invalid appserver version" in f.read_text()
+    assert "  appserver_version: tilt-dev" in f.read_text()
+    client.create_deployment.assert_not_called()
+
+
 def test_apply_annotate_save_then_push_failure_preserves_recovery(
     patched_auth: Any, tmp_path: Any
 ) -> None:

@@ -724,6 +724,23 @@ def test_create_deployment_validation_error() -> None:
     assert response.status_code == 422  # Validation error
 
 
+def test_create_deployment_rejects_invalid_appserver_version() -> None:
+    response = client.post(
+        "/api/v1beta1/deployments",
+        params={"project_id": "test-project"},
+        json={
+            "name": "New Deploy",
+            "repo_url": "",
+            "appserver_version": "tilt-dev",
+        },
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail[0]["loc"] == ["body", "appserver_version"]
+    assert "valid public PEP 440" in detail[0]["msg"]
+
+
 @patch(
     "llama_agents.control_plane.manage_api.deployments_service.deployments_service.stream_deployment_logs"
 )

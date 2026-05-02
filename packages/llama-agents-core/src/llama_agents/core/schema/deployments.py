@@ -3,7 +3,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, HttpUrl, computed_field, model_validator
+from packaging.version import InvalidVersion, Version
+from pydantic import Field, HttpUrl, computed_field, field_validator, model_validator
 
 from .base import Base
 
@@ -27,6 +28,24 @@ def validate_dns_1035_label(value: str) -> str:
             f"Invalid DNS-1035 label: {value!r}. Must start with a lowercase letter, "
             "contain only lowercase alphanumeric characters and hyphens, "
             "max 63 characters, and not end with a hyphen."
+        )
+    return value
+
+
+def validate_appserver_version(value: str) -> str:
+    """Validate the public package version used as the appserver image tag."""
+    try:
+        version = Version(value)
+    except InvalidVersion:
+        raise ValueError(
+            f"Invalid appserver version: {value!r}. Must be a valid public PEP 440 "
+            "version, such as '0.11.3' or '0.12.0rc1'."
+        ) from None
+
+    if version.local is not None:
+        raise ValueError(
+            f"Invalid appserver version: {value!r}. Local version segments are not "
+            "supported because appserver_version is also used as a Docker image tag."
         )
     return value
 
@@ -214,6 +233,13 @@ class DeploymentCreate(Base):
             validate_dns_1035_label(self.id)
         return self
 
+    @field_validator("appserver_version")
+    @classmethod
+    def _validate_appserver_version(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return validate_appserver_version(value)
+
 
 class LlamaDeploymentMetadata(Base):
     name: str
@@ -357,6 +383,13 @@ class DeploymentUpdate(Base):
             if data.get("llama_deploy_version") and not data.get("appserver_version"):
                 data["appserver_version"] = data.pop("llama_deploy_version")
         return data
+
+    @field_validator("appserver_version")
+    @classmethod
+    def _validate_appserver_version(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return validate_appserver_version(value)
 
     def has_git_fields(self) -> bool:
         """Return True if any git-affecting fields are set."""
