@@ -35,12 +35,12 @@ def test_empty_api_key_and_project_id_are_incomplete(
 ) -> None:
     clear_llama_cloud_env(monkeypatch)
     monkeypatch.setenv("LLAMA_CLOUD_API_KEY", "")
-    monkeypatch.setenv("LLAMA_DEPLOY_PROJECT_ID", "")
+    monkeypatch.setenv("LLAMA_AGENTS_PROJECT_ID", "")
 
     settings = LlamactlEnvSettings()
 
     assert settings.llama_cloud_api_key is None
-    assert settings.llama_deploy_project_id is None
+    assert settings.llama_agents_project_id is None
     assert settings.has_complete_cloud_auth is False
 
 
@@ -70,14 +70,14 @@ def test_lowercase_env_names_populate_normal_cloud_fields(
 ) -> None:
     clear_llama_cloud_env(monkeypatch)
     monkeypatch.setenv("llama_cloud_api_key", "lower-api-key")
-    monkeypatch.setenv("llama_deploy_project_id", "lower-project")
+    monkeypatch.setenv("llama_agents_project_id", "lower-project")
     monkeypatch.setenv("llama_cloud_base_url", "https://lower.example.test")
     monkeypatch.setenv("llama_cloud_use_profile", "1")
 
     settings = LlamactlEnvSettings()
 
     assert settings.llama_cloud_api_key == "lower-api-key"
-    assert settings.llama_deploy_project_id == "lower-project"
+    assert settings.llama_agents_project_id == "lower-project"
     assert settings.llama_cloud_base_url == "https://lower.example.test"
     assert settings.llama_cloud_use_profile is True
 

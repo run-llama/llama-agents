@@ -197,14 +197,21 @@ def _set_env_vars(key: str, url: str) -> None:
 
 
 def _set_project_id_from_env(env_vars: dict[str, str]) -> None:
-    project_id = env_vars.get("LLAMA_DEPLOY_PROJECT_ID")
+    project_id = env_vars.get("LLAMA_AGENTS_PROJECT_ID") or env_vars.get(
+        "LLAMA_DEPLOY_PROJECT_ID"
+    )
     if project_id:
-        os.environ["LLAMA_DEPLOY_PROJECT_ID"] = project_id
+        _set_project_id(project_id)
 
 
 def _set_project_id_from_profile(profile: Auth) -> None:
     if profile.project_id:
-        os.environ["LLAMA_DEPLOY_PROJECT_ID"] = profile.project_id
+        _set_project_id(profile.project_id)
+
+
+def _set_project_id(project_id: str) -> None:
+    os.environ["LLAMA_AGENTS_PROJECT_ID"] = project_id
+    os.environ["LLAMA_DEPLOY_PROJECT_ID"] = project_id
 
 
 def _maybe_inject_llama_cloud_credentials(
@@ -213,7 +220,7 @@ def _maybe_inject_llama_cloud_credentials(
     """If the deployment config indicates Llama Cloud usage, ensure LLAMA_CLOUD_API_KEY is set.
 
     Behavior:
-    - If LLAMA_CLOUD_API_KEY is already set, do nothing.
+    - If LLAMA_CLOUD_API_KEY is already set, use it.
     - Else, try to read current profile's api_key and inject.
     - If no profile/api_key and session is interactive, prompt to log in and inject afterward.
     - If user declines or session is non-interactive, warn that deployment may not work.
@@ -244,35 +251,14 @@ def _maybe_inject_llama_cloud_credentials(
     _set_project_id_from_env({**os.environ, **vars})
 
     settings = read_env_settings()
-    existing = settings.llama_cloud_api_key or vars.get("LLAMA_CLOUD_API_KEY")
+    existing = None
+    if not settings.cloud_auth_disabled:
+        existing = settings.llama_cloud_api_key or vars.get("LLAMA_CLOUD_API_KEY")
     if existing:
-        # If interactive, allow choosing between env var and configured profile
-        if interactive:
-            choice = questionary.select(
-                "LLAMA_CLOUD_API_KEY detected in environment. Which credentials do you want to use?",
-                choices=[
-                    questionary.Choice(
-                        title=f"Use environment variable - {redact_api_key(existing)}",
-                        value="env",
-                    ),
-                    questionary.Choice(title="Use configured profile", value="profile"),
-                ],
-            ).ask()
-            if choice is None:
-                raise Exit(0)
-            if choice == "profile":
-                # Ensure we have an authenticated profile and inject from it
-                authed = validate_authenticated_profile(True)
-                _set_env_vars_from_profile(authed)
-                return
-            # Default to env var path when cancelled or explicitly chosen
-            _set_env_vars_from_env({**os.environ, **vars})
-            # If no project id provided, try to detect and select one using the env API key
-            if not read_env_settings().llama_deploy_project_id:
-                _maybe_select_project_for_env_key()
-            return
-        # Non-interactive: trust current environment variables
         _set_env_vars_from_env({**os.environ, **vars})
+        if interactive:
+            if not read_env_settings().llama_agents_project_id:
+                _maybe_select_project_for_env_key()
         return
 
     env = service.get_current_environment()
@@ -311,7 +297,7 @@ def _maybe_inject_llama_cloud_credentials(
 
 
 def _maybe_select_project_for_env_key() -> None:
-    """When using an env API key, ensure LLAMA_DEPLOY_PROJECT_ID is set.
+    """When using an env API key, ensure LLAMA_AGENTS_PROJECT_ID is set.
 
     If more than one project exists, prompt the user to select one.
     """
@@ -343,7 +329,7 @@ def _maybe_select_project_for_env_key() -> None:
         if not projects:
             return
         if len(projects) == 1:
-            os.environ["LLAMA_DEPLOY_PROJECT_ID"] = projects[0].project_id
+            _set_project_id(projects[0].project_id)
             return
 
         if org is not None:
@@ -361,7 +347,7 @@ def _maybe_select_project_for_env_key() -> None:
             ],
         ).ask()
         if choice:
-            os.environ["LLAMA_DEPLOY_PROJECT_ID"] = choice
+            _set_project_id(choice)
     except Exception:
         # Best-effort; if we fail to list, do nothing
         pass
@@ -373,7 +359,7 @@ def _print_connection_summary() -> None:
         return
 
     base_url = settings.llama_cloud_base_url
-    project_id = settings.llama_deploy_project_id
+    project_id = settings.llama_agents_project_id
     api_key = settings.llama_cloud_api_key
     redacted = redact_api_key(api_key)
     env_text = base_url or "-"

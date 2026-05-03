@@ -38,11 +38,13 @@ LLAMA_CLOUD_ENV_VARS = (
     "LLAMA_CLOUD_API_KEY",
     "LLAMA_CLOUD_BASE_URL",
     "LLAMA_CLOUD_USE_PROFILE",
+    "LLAMA_AGENTS_PROJECT_ID",
     "LLAMA_DEPLOY_PROJECT_ID",
     "_LLAMACTL_COMPLETE",
     "llama_cloud_api_key",
     "llama_cloud_base_url",
     "llama_cloud_use_profile",
+    "llama_agents_project_id",
     "llama_deploy_project_id",
 )
 
@@ -92,7 +94,7 @@ def set_llama_cloud_env(
     if api_key is not None:
         monkeypatch.setenv("LLAMA_CLOUD_API_KEY", api_key)
     if project_id is not None:
-        monkeypatch.setenv("LLAMA_DEPLOY_PROJECT_ID", project_id)
+        monkeypatch.setenv("LLAMA_AGENTS_PROJECT_ID", project_id)
     if base_url is not None:
         monkeypatch.setenv("LLAMA_CLOUD_BASE_URL", base_url)
     if use_profile is not None:

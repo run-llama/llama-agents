@@ -418,7 +418,7 @@ def inject_env_vars(
 ) -> None:
     """Inject auth environment variables into a .env file.
 
-    Writes LLAMA_CLOUD_API_KEY, LLAMA_CLOUD_BASE_URL, and LLAMA_DEPLOY_PROJECT_ID
+    Writes LLAMA_CLOUD_API_KEY, LLAMA_CLOUD_BASE_URL, and LLAMA_AGENTS_PROJECT_ID
     based on the current profile. Always overwrites and creates the file if missing.
     """
     try:

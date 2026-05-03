@@ -14,14 +14,14 @@ class LlamactlEnvSettings(BaseSettings):
 
     llama_cloud_api_key: str | None = None
     llama_cloud_base_url: str = DEFAULT_ENVIRONMENT.api_url
-    llama_deploy_project_id: str | None = None
+    llama_agents_project_id: str | None = None
     llama_cloud_use_profile: bool = False
     llamactl_complete: str | None = Field(
         default=None,
         validation_alias="_LLAMACTL_COMPLETE",
     )
 
-    @field_validator("llama_cloud_api_key", "llama_deploy_project_id", mode="before")
+    @field_validator("llama_cloud_api_key", "llama_agents_project_id", mode="before")
     @classmethod
     def _empty_string_is_unset(cls, value: Any) -> Any:
         if value == "":
@@ -41,13 +41,13 @@ class LlamactlEnvSettings(BaseSettings):
 
     @property
     def has_complete_cloud_auth(self) -> bool:
-        return bool(self.llama_cloud_api_key and self.llama_deploy_project_id)
+        return bool(self.llama_cloud_api_key and self.llama_agents_project_id)
 
     @property
     def has_cloud_connection_summary(self) -> bool:
         return bool(
             self.llama_cloud_api_key
-            or self.llama_deploy_project_id
+            or self.llama_agents_project_id
             or "llama_cloud_base_url" in self.model_fields_set
         )
 

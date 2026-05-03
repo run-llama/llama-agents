@@ -36,7 +36,7 @@ def _env_auth_context_or_none(
         return None
 
     api_key = settings.llama_cloud_api_key
-    project_id = settings.llama_deploy_project_id
+    project_id = settings.llama_agents_project_id
     assert api_key is not None
     assert project_id is not None
 
