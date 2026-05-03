@@ -29,3 +29,9 @@ llamactl serve [DEPLOYMENT_FILE] [options]
 - Prepares the server environment (installs dependencies unless `--no-install`)
 - In dev mode (default), proxies your UI dev server and reloads on change
 - In preview mode, builds the UI to static files and serves them without a proxy
+
+### Credential injection
+
+If your app uses LlamaCloud (e.g., for LlamaParse or cloud persistence), `llamactl serve` automatically injects credentials into the child process environment. It checks for `LLAMA_CLOUD_API_KEY` in the environment first, then falls back to the active profile's API key. Credentials are also forwarded with `PUBLIC_`, `VITE_`, and `NEXT_PUBLIC_` prefixes so frontend frameworks can access them during local development.
+
+See [`llamactl auth`](/python/llamaagents/llamactl-reference/commands-auth/) for details on environment variable and profile-based authentication.
