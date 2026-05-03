@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from llama_agents.core.client.manage_client import ControlPlaneClient, ProjectClient
 
 
-_ENV_VAR_AUTH_PROFILE_WARNING_EMITTED = False
+_ENV_AUTH_WARNING_EMITTED = False
 
 
 @dataclass(frozen=True)
@@ -74,13 +74,14 @@ def _auth_context_or_none(
     if context is not None:
         _warn_if_env_auth_overrides_profile(settings)
         return context
+    _warn_if_partial_env_auth(settings)
     return _profile_auth_context_or_none(project_id_override)
 
 
 def _warn_if_env_auth_overrides_profile(settings: LlamactlEnvSettings) -> None:
-    global _ENV_VAR_AUTH_PROFILE_WARNING_EMITTED
+    global _ENV_AUTH_WARNING_EMITTED
 
-    if _ENV_VAR_AUTH_PROFILE_WARNING_EMITTED:
+    if _ENV_AUTH_WARNING_EMITTED:
         return
     if settings.completion_active:
         return
@@ -100,7 +101,27 @@ def _warn_if_env_auth_overrides_profile(settings: LlamactlEnvSettings) -> None:
         "Set LLAMA_CLOUD_USE_PROFILE=1 to use the profile instead.",
         err=True,
     )
-    _ENV_VAR_AUTH_PROFILE_WARNING_EMITTED = True
+    _ENV_AUTH_WARNING_EMITTED = True
+
+
+def _warn_if_partial_env_auth(settings: LlamactlEnvSettings) -> None:
+    global _ENV_AUTH_WARNING_EMITTED
+
+    if _ENV_AUTH_WARNING_EMITTED:
+        return
+    if settings.completion_active:
+        return
+    if settings.cloud_auth_disabled:
+        return
+    if not settings.llama_cloud_api_key:
+        return
+
+    click.echo(
+        "LLAMA_CLOUD_API_KEY is set but LLAMA_AGENTS_PROJECT_ID is missing. "
+        "Set it or pass --project for env var auth.",
+        err=True,
+    )
+    _ENV_AUTH_WARNING_EMITTED = True
 
 
 def get_control_plane_client() -> ControlPlaneClient:

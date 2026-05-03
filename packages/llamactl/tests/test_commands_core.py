@@ -18,12 +18,16 @@ OVERRIDE_WARNING = (
     "Using LLAMA_CLOUD_API_KEY from environment (overriding profile 'prof'). "
     "Set LLAMA_CLOUD_USE_PROFILE=1 to use the profile instead."
 )
+PARTIAL_ENV_WARNING = (
+    "LLAMA_CLOUD_API_KEY is set but LLAMA_AGENTS_PROJECT_ID is missing. "
+    "Set it or pass --project for env var auth."
+)
 
 
 @pytest.fixture(autouse=True)
 def clean_env_var_auth_state(monkeypatch: pytest.MonkeyPatch) -> None:
     clear_llama_cloud_env(monkeypatch)
-    monkeypatch.setattr(client_module, "_ENV_VAR_AUTH_PROFILE_WARNING_EMITTED", False)
+    monkeypatch.setattr(client_module, "_ENV_AUTH_WARNING_EMITTED", False)
 
 
 def _profile(
@@ -138,7 +142,7 @@ def test_env_var_control_plane_client_strips_base_url_and_uses_api_key(
         _close_client(client)
 
 
-def test_incomplete_env_var_project_client_uses_active_profile_without_warning(
+def test_incomplete_env_var_project_client_falls_back_to_profile_with_warning(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     set_llama_cloud_env(monkeypatch, api_key="env-api-key")
@@ -157,13 +161,14 @@ def test_incomplete_env_var_project_client_uses_active_profile_without_warning(
         assert client.base_url == "https://profile.example.test"
         assert client.api_key == "profile-api-key"
         assert client.project_id == "profile-project"
+        assert PARTIAL_ENV_WARNING in captured.err
         assert "Using LLAMA_CLOUD_API_KEY from environment" not in captured.err
         auth_svc.auth_middleware.assert_called_once_with()
     finally:
         _close_client(client)
 
 
-def test_incomplete_env_var_control_plane_client_uses_active_profile_without_warning(
+def test_incomplete_env_var_control_plane_client_falls_back_to_profile_with_warning(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     set_llama_cloud_env(monkeypatch, api_key="env-api-key")
@@ -181,13 +186,14 @@ def test_incomplete_env_var_control_plane_client_uses_active_profile_without_war
         captured = capsys.readouterr()
         assert client.base_url == "https://profile.example.test"
         assert client.api_key == "profile-api-key"
+        assert PARTIAL_ENV_WARNING in captured.err
         assert "Using LLAMA_CLOUD_API_KEY from environment" not in captured.err
         auth_svc.auth_middleware.assert_called_once_with()
     finally:
         _close_client(client)
 
 
-def test_incomplete_env_var_project_client_without_profile_uses_generic_no_profile_error(
+def test_incomplete_env_var_project_client_without_profile_warns_and_exits(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     set_llama_cloud_env(monkeypatch, api_key="env-api-key")
@@ -198,6 +204,7 @@ def test_incomplete_env_var_project_client_without_profile_uses_generic_no_profi
 
     captured = capsys.readouterr()
     assert exc_info.value.code == 1
+    assert PARTIAL_ENV_WARNING in captured.err
     assert "No profile configured" in captured.out
 
 
@@ -270,6 +277,50 @@ def test_env_var_override_warning_does_not_fire_without_profile(
     try:
         captured = capsys.readouterr()
         assert "Using LLAMA_CLOUD_API_KEY from environment" not in captured.err
+    finally:
+        _close_client(client)
+
+
+def test_partial_env_warning_fires_once_across_calls(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    set_llama_cloud_env(monkeypatch, api_key="env-api-key")
+    _set_current_profile(
+        monkeypatch,
+        _profile(
+            api_url="https://profile.example.test",
+            project_id="profile-project",
+            api_key="profile-api-key",
+        ),
+    )
+
+    project_client = get_project_client()
+    control_plane_client = get_control_plane_client()
+    try:
+        captured = capsys.readouterr()
+        assert captured.err.count(PARTIAL_ENV_WARNING) == 1
+    finally:
+        _close_client(project_client)
+        _close_client(control_plane_client)
+
+
+def test_partial_env_warning_suppressed_under_completion(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    set_llama_cloud_env(monkeypatch, api_key="env-api-key", completion="zsh_source")
+    _set_current_profile(
+        monkeypatch,
+        _profile(
+            api_url="https://profile.example.test",
+            project_id="profile-project",
+            api_key="profile-api-key",
+        ),
+    )
+
+    client = get_project_client()
+    try:
+        captured = capsys.readouterr()
+        assert PARTIAL_ENV_WARNING not in captured.err
     finally:
         _close_client(client)
 
