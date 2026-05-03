@@ -9,6 +9,8 @@ git ref, reads the config, and runs your app.
 from __future__ import annotations
 
 import asyncio
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -56,7 +58,6 @@ from ..options import (
     render_output,
 )
 from ..render import short_sha
-from ..utils.capabilities import probe_code_push_support
 from ..utils.git_push import (
     configure_git_remote,
     get_deployment_git_url,
@@ -204,6 +205,173 @@ def _handle_annotated_apply_error(
     raise click.exceptions.Exit(1)
 
 
+def _new_deployment_template_yaml() -> str:
+    ctx = gather_local_context()
+
+    cwd_name: str = Path.cwd().name
+    preferred_name: str = ctx.generate_name or cwd_name
+    secrets: dict[str, str | None] | None = None
+    if ctx.required_secret_names:
+        secrets = {name: f"${{{name}}}" for name in ctx.required_secret_names}
+
+    if ctx.is_git_repo:
+        spec = DeploymentSpec(
+            repo_url=PUSH_MODE_REPO_URL,
+            deployment_file_path=ctx.deployment_file_path,
+            git_ref=ctx.git_ref,
+            appserver_version=ctx.installed_appserver_version,
+            secrets=secrets,
+        )
+        required: tuple[str, ...] = ()
+    else:
+        spec = DeploymentSpec(
+            appserver_version=ctx.installed_appserver_version,
+            secrets=secrets,
+        )
+        required = ("repo_url",)
+
+    display = DeploymentDisplay(name=None, generate_name=preferred_name, spec=spec)
+
+    head: list[str] = [f"WARNING: {warning}" for warning in ctx.warnings]
+    if ctx.warnings:
+        head.append("")
+    head.append("Edit, then run: llamactl deployments apply -f <file>")
+    if not ctx.is_git_repo:
+        head.extend(
+            [
+                "",
+                "NOT IN A GIT REPO — set repo_url, or cd into a working tree "
+                "and re-run.",
+            ]
+        )
+
+    field_alternatives: dict[str, tuple[str, str]] = {}
+    if ctx.is_git_repo and ctx.repo_url:
+        field_alternatives["repo_url"] = (
+            ctx.repo_url,
+            "auto-detected from your git remotes",
+        )
+
+    secret_comments: dict[str, str] = {}
+    for name_ in ctx.required_secret_names:
+        if name_ in ctx.available_secrets:
+            secret_comments[name_] = "from your .env"
+        else:
+            secret_comments[name_] = "not in your .env — add it before apply"
+
+    return render_yaml_template(
+        display,
+        head=head,
+        secret_comments=secret_comments,
+        field_alternatives=field_alternatives,
+        required=required,
+        name_example=preferred_name,
+        scaffold_generate_name=True,
+    )
+
+
+def _existing_deployment_template_yaml(deployment: DeploymentResponse) -> str:
+    return render_yaml_template(DeploymentDisplay.from_response(deployment))
+
+
+def _parse_deployment_yaml_text(text: str) -> DeploymentDisplay:
+    return parse_apply_yaml(text)
+
+
+def _apply_deployment_display(
+    client: Any, display: DeploymentDisplay, *, no_push: bool = False
+) -> None:
+    asyncio.run(_apply_deployment_from_yaml(client, display, no_push=no_push))
+
+
+def _apply_deployment_yaml_text(
+    client: Any, text: str, *, no_push: bool = False
+) -> None:
+    display = _parse_deployment_yaml_text(text)
+    _apply_deployment_display(client, display, no_push=no_push)
+
+
+def _apply_deployment_yaml_file(
+    *, filename: str, project: str | None, no_push: bool
+) -> None:
+    text = _read_apply_input(filename)
+    try:
+        display = _parse_deployment_yaml_text(text)
+    except ApplyYamlError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    client = get_project_client(project_id_override=project)
+    try:
+        _apply_deployment_display(client, display, no_push=no_push)
+    except ApplyYamlError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+def _ci_enabled() -> bool:
+    return os.environ.get("CI", "").lower() not in {"", "0", "false", "no"}
+
+
+def _requires_file_for_editor(interactive: bool) -> bool:
+    return not interactive or _ci_enabled()
+
+
+def _has_non_comment_yaml_lines(text: str) -> bool:
+    return any(
+        stripped and not stripped.startswith("#")
+        for stripped in (line.lstrip() for line in text.splitlines())
+    )
+
+
+def _editor_abort() -> None:
+    rprint(f"[{WARNING}]Cancelled[/]")
+
+
+def _edit_deployment_yaml_loop(
+    *,
+    initial_yaml: str,
+    client: Any,
+    no_push: bool,
+) -> None:
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".yaml",
+        prefix="llamactl-deployment-",
+        delete=False,
+    ) as temp:
+        temp.write(initial_yaml)
+        temp_path = Path(temp.name)
+
+    last_opened_text = initial_yaml
+    try:
+        while True:
+            click.edit(filename=str(temp_path))
+
+            if not temp_path.exists():
+                _editor_abort()
+                return
+
+            current_text = temp_path.read_text()
+            if not current_text.strip():
+                _editor_abort()
+                return
+            if current_text == last_opened_text:
+                _editor_abort()
+                return
+            if not _has_non_comment_yaml_lines(current_text):
+                _editor_abort()
+                return
+
+            try:
+                _apply_deployment_yaml_text(client, current_text, no_push=no_push)
+                return
+            except ApplyYamlError as exc:
+                annotated = annotate_yaml_with_errors(current_text, exc.errors)
+                temp_path.write_text(annotated)
+                last_opened_text = annotated
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 @app.group(
     help="Deploy your app to the cloud.",
     no_args_is_help=True,
@@ -281,7 +449,7 @@ def _do_get(
         deployment = asyncio.run(client.get_deployment(deployment_id))
         display = DeploymentDisplay.from_response(deployment)
         if mode == "template":
-            click.echo(render_yaml_template(display), nl=False)
+            click.echo(_existing_deployment_template_yaml(deployment), nl=False)
             return
         render_output(display, output)
 
@@ -341,98 +509,46 @@ def template_deployment() -> None:
     comments. Edit the output, then run ``llamactl deployments apply -f
     <file>``. Offline by design — no auth profile required.
     """
-    ctx = gather_local_context()
-
-    cwd_name: str = Path.cwd().name
-    preferred_name: str = ctx.generate_name or cwd_name
-    secrets: dict[str, str | None] | None = None
-    if ctx.required_secret_names:
-        secrets = {name: f"${{{name}}}" for name in ctx.required_secret_names}
-
-    if ctx.is_git_repo:
-        spec = DeploymentSpec(
-            repo_url=PUSH_MODE_REPO_URL,
-            deployment_file_path=ctx.deployment_file_path,
-            git_ref=ctx.git_ref,
-            appserver_version=ctx.installed_appserver_version,
-            secrets=secrets,
-        )
-        required: tuple[str, ...] = ()
-    else:
-        spec = DeploymentSpec(
-            appserver_version=ctx.installed_appserver_version,
-            secrets=secrets,
-        )
-        required = ("repo_url",)
-
-    display = DeploymentDisplay(name=None, generate_name=preferred_name, spec=spec)
-
-    head: list[str] = [f"WARNING: {warning}" for warning in ctx.warnings]
-    if ctx.warnings:
-        head.append("")
-    head.append("Edit, then run: llamactl deployments apply -f <file>")
-    if not ctx.is_git_repo:
-        head.extend(
-            [
-                "",
-                "NOT IN A GIT REPO — set repo_url, or cd into a working tree "
-                "and re-run.",
-            ]
-        )
-
-    field_alternatives: dict[str, tuple[str, str]] = {}
-    if ctx.is_git_repo and ctx.repo_url:
-        field_alternatives["repo_url"] = (
-            ctx.repo_url,
-            "auto-detected from your git remotes",
-        )
-
-    secret_comments: dict[str, str] = {}
-    for name_ in ctx.required_secret_names:
-        if name_ in ctx.available_secrets:
-            secret_comments[name_] = "from your .env"
-        else:
-            secret_comments[name_] = "not in your .env — add it before apply"
-
-    click.echo(
-        render_yaml_template(
-            display,
-            head=head,
-            secret_comments=secret_comments,
-            field_alternatives=field_alternatives,
-            required=required,
-            name_example=preferred_name,
-            scaffold_generate_name=True,
-        ),
-        nl=False,
-    )
+    click.echo(_new_deployment_template_yaml(), nl=False)
 
 
 @deployments.command("create")
 @global_options
+@click.option(
+    "-f",
+    "--filename",
+    default=None,
+    type=click.Path(allow_dash=True, exists=True, dir_okay=False, path_type=str),
+    help="Path to YAML file, or '-' for stdin.",
+)
+@click.option(
+    "--no-push",
+    is_flag=True,
+    default=False,
+    help="Skip pushing local code even when the deployment uses push-mode.",
+)
+@project_option
 @interactive_option
 def create_deployment(
+    filename: str | None,
+    no_push: bool,
+    project: str | None,
     interactive: bool,
 ) -> None:
     """Create a new deployment."""
-    validate_authenticated_profile(interactive)
-
-    if not interactive:
-        raise click.ClickException("This command requires an interactive session.")
-
-    # Keep this import local: `llamactl --help` eagerly imports command modules,
-    # and import-time profiling showed Textual adds material startup cost here.
-    # Avoid adding other local imports unless instrumentation shows they are slow.
-    from ..textual.deployment_form import create_deployment_form
-
-    deployment_form = create_deployment_form(
-        server_supports_code_push=probe_code_push_support(),
-    )
-    if deployment_form is None:
-        rprint(f"[{WARNING}]Cancelled[/]")
+    if filename is not None:
+        _apply_deployment_yaml_file(filename=filename, project=project, no_push=no_push)
         return
 
-    rprint(f"[green]Created deployment: {deployment_form.id}[/green]")
+    if _requires_file_for_editor(interactive):
+        raise click.ClickException("pass -f <file> for non-interactive create")
+
+    client = get_project_client(project_id_override=project)
+    _edit_deployment_yaml_loop(
+        initial_yaml=_new_deployment_template_yaml(),
+        client=client,
+        no_push=no_push,
+    )
 
 
 @deployments.command("configure-git-remote")
@@ -769,7 +885,7 @@ def apply_deployment(
     """
     text = _read_apply_input(filename)
     try:
-        display = parse_apply_yaml(text)
+        display = _parse_deployment_yaml_text(text)
     except ApplyYamlError as exc:
         if annotate_on_error and not dry_run:
             _handle_annotated_apply_error(
@@ -802,7 +918,7 @@ def apply_deployment(
 
     client = get_project_client(project_id_override=project)
     try:
-        asyncio.run(_apply_deployment_from_yaml(client, display, no_push=no_push))
+        _apply_deployment_display(client, display, no_push=no_push)
     except ApplyYamlError as exc:
         if annotate_on_error:
             _handle_annotated_apply_error(
@@ -816,20 +932,44 @@ def apply_deployment(
 @deployments.command("edit")
 @global_options
 @click.argument("deployment_id", required=False, type=DeploymentType())
+@click.option(
+    "-f",
+    "--filename",
+    default=None,
+    type=click.Path(allow_dash=True, exists=True, dir_okay=False, path_type=str),
+    help="Path to YAML file, or '-' for stdin.",
+)
+@click.option(
+    "--no-push",
+    is_flag=True,
+    default=False,
+    help="Skip pushing local code even when the deployment uses push-mode.",
+)
 @project_option
 @interactive_option
 def edit_deployment(
-    deployment_id: str | None, interactive: bool, project: str | None
+    deployment_id: str | None,
+    filename: str | None,
+    no_push: bool,
+    interactive: bool,
+    project: str | None,
 ) -> None:
-    """Interactively edit a deployment"""
-    # Keep this import local: `llamactl --help` eagerly imports command modules,
-    # and import-time profiling showed Textual adds material startup cost here.
-    # Avoid adding other local imports unless instrumentation shows they are slow.
-    from ..textual.deployment_form import edit_deployment_form
+    """Edit a deployment in $EDITOR."""
+    if filename is not None:
+        if deployment_id is not None:
+            raise click.ClickException(
+                "--filename and deployment ID are mutually exclusive"
+            )
+        _apply_deployment_yaml_file(filename=filename, project=project, no_push=no_push)
+        return
 
-    validate_authenticated_profile(interactive)
+    if _requires_file_for_editor(interactive):
+        raise click.ClickException("pass -f <file> for non-interactive edit")
+
+    effective_project: str | None = project
     try:
         client = get_project_client(project_id_override=project)
+        effective_project = client.project_id
 
         deployment_id = select_deployment(
             deployment_id, interactive=interactive, project_id_override=project
@@ -839,21 +979,18 @@ def edit_deployment(
             return
 
         current_deployment = asyncio.run(client.get_deployment(deployment_id))
-
-        updated_deployment = edit_deployment_form(
-            current_deployment,
-            server_supports_code_push=probe_code_push_support(),
-        )
-        if updated_deployment is None:
-            rprint(f"[{WARNING}]Cancelled[/]")
-            return
-
-        rprint(
-            f"[green]Successfully updated deployment: {updated_deployment.id}[/green]"
+        _edit_deployment_yaml_loop(
+            initial_yaml=_existing_deployment_template_yaml(current_deployment),
+            client=client,
+            no_push=no_push,
         )
 
     except Exception as e:
-        rprint(f"[red]Error: {e}[/red]")
+        friendly = friendly_http_error(
+            e, deployment_id=deployment_id, project_id=effective_project
+        )
+        message = friendly if friendly is not None else str(e)
+        rprint(f"[red]Error: {message}[/red]")
         raise click.Abort()
 
 
