@@ -13,7 +13,7 @@ import pytest
 from llama_agents.cli.client import get_control_plane_client, get_project_client
 
 DEFAULT_BASE_URL = "https://api.cloud.llamaindex.ai"
-MISSING_PROJECT_MESSAGE = (
+OLD_MISSING_PROJECT_MESSAGE = (
     "LLAMA_CLOUD_API_KEY is set but LLAMA_DEPLOY_PROJECT_ID is missing. "
     "Set it or pass --project."
 )
@@ -140,6 +140,7 @@ def test_env_var_control_plane_client_strips_base_url_and_uses_api_key(
 ) -> None:
     monkeypatch.setenv("LLAMA_CLOUD_API_KEY", "env-api-key")
     monkeypatch.setenv("LLAMA_CLOUD_BASE_URL", "https://api.example.test/")
+    monkeypatch.setenv("LLAMA_DEPLOY_PROJECT_ID", "env-project")
     _set_current_profile(monkeypatch, None)
 
     client = get_control_plane_client()
@@ -150,8 +151,57 @@ def test_env_var_control_plane_client_strips_base_url_and_uses_api_key(
         _close_client(client)
 
 
-def test_env_var_project_client_requires_project_id(
-    monkeypatch: pytest.MonkeyPatch,
+def test_incomplete_env_var_project_client_uses_active_profile_without_warning(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("LLAMA_CLOUD_API_KEY", "env-api-key")
+    auth_svc = _set_current_profile(
+        monkeypatch,
+        _profile(
+            api_url="https://profile.example.test",
+            project_id="profile-project",
+            api_key="profile-api-key",
+        ),
+    )
+
+    client = get_project_client()
+    try:
+        captured = capsys.readouterr()
+        assert client.base_url == "https://profile.example.test"
+        assert client.api_key == "profile-api-key"
+        assert client.project_id == "profile-project"
+        assert "Using LLAMA_CLOUD_API_KEY from environment" not in captured.err
+        auth_svc.auth_middleware.assert_called_once_with()
+    finally:
+        _close_client(client)
+
+
+def test_incomplete_env_var_control_plane_client_uses_active_profile_without_warning(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("LLAMA_CLOUD_API_KEY", "env-api-key")
+    auth_svc = _set_current_profile(
+        monkeypatch,
+        _profile(
+            api_url="https://profile.example.test/",
+            project_id="profile-project",
+            api_key="profile-api-key",
+        ),
+    )
+
+    client = get_control_plane_client()
+    try:
+        captured = capsys.readouterr()
+        assert client.base_url == "https://profile.example.test"
+        assert client.api_key == "profile-api-key"
+        assert "Using LLAMA_CLOUD_API_KEY from environment" not in captured.err
+        auth_svc.auth_middleware.assert_called_once_with()
+    finally:
+        _close_client(client)
+
+
+def test_incomplete_env_var_project_client_without_profile_uses_generic_no_profile_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("LLAMA_CLOUD_API_KEY", "env-api-key")
     _set_current_profile(monkeypatch, None)
@@ -159,7 +209,11 @@ def test_env_var_project_client_requires_project_id(
     with pytest.raises(SystemExit) as exc_info:
         get_project_client()
 
-    assert str(exc_info.value) == MISSING_PROJECT_MESSAGE
+    captured = capsys.readouterr()
+    assert exc_info.value.code == 1
+    assert "No profile configured" in captured.out
+    assert OLD_MISSING_PROJECT_MESSAGE not in captured.out
+    assert OLD_MISSING_PROJECT_MESSAGE not in str(exc_info.value)
 
 
 def test_env_var_project_override_wins_over_env_project_id(

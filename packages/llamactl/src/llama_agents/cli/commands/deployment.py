@@ -59,7 +59,6 @@ from ..render import short_sha
 from ..utils.capabilities import probe_code_push_support
 from ..utils.git_push import (
     configure_git_remote,
-    get_api_key,
     get_deployment_git_url,
     internal_push_refspec,
     push_to_remote,
@@ -259,7 +258,6 @@ def _do_get(
     if mode == "template" and not deployment_id:
         raise click.ClickException("-o template requires a deployment name")
 
-    validate_authenticated_profile(interactive)
     # Fall back to the user-supplied override if client construction itself
     # raises; `client.project_id` resolves the active project when no override.
     effective_project: str | None = project
@@ -454,7 +452,6 @@ def configure_git_remote_cmd(
     Tip: 'llamactl deployments update' handles pushing and redeployment in one
     step. This command is useful for troubleshooting git push issues.
     """
-    validate_authenticated_profile(interactive)
     try:
         if not is_git_repo():
             raise click.ClickException("Not a git repository")
@@ -468,9 +465,8 @@ def configure_git_remote_cmd(
 
         client = get_project_client(project_id_override=project)
         git_url = get_deployment_git_url(client.base_url, deployment_id)
-        api_key = get_api_key()
         remote_name = configure_git_remote(
-            git_url, api_key, client.project_id, deployment_id
+            git_url, client.api_key, client.project_id, deployment_id
         )
 
         rprint(
@@ -555,10 +551,9 @@ def _apply_push(
     and also called by ``_apply_push_after_save`` for the save-then-push flow.
     Raises ``click.ClickException`` on failure.
     """
-    api_key = get_api_key()
     git_url = get_deployment_git_url(client.base_url, deployment_id)
     remote_name = configure_git_remote(
-        git_url, api_key, client.project_id, deployment_id
+        git_url, client.api_key, client.project_id, deployment_id
     )
     local_ref, target_ref = internal_push_refspec(git_ref)
     with console.status("pushing code..."):
@@ -805,7 +800,6 @@ def apply_deployment(
         click.echo(verdict)
         return
 
-    validate_authenticated_profile(interactive=False)
     client = get_project_client(project_id_override=project)
     try:
         asyncio.run(_apply_deployment_from_yaml(client, display, no_push=no_push))
@@ -866,8 +860,7 @@ def edit_deployment(
 def _push_internal_for_update(
     deployment_id: str,
     git_ref: str | None,
-    base_url: str,
-    project_id: str,
+    client: Any,
 ) -> None:
     """Push local code to the internal repo before updating.
 
@@ -881,9 +874,10 @@ def _push_internal_for_update(
         )
         return
 
-    api_key = get_api_key()
-    git_url = get_deployment_git_url(base_url, deployment_id)
-    remote_name = configure_git_remote(git_url, api_key, project_id, deployment_id)
+    git_url = get_deployment_git_url(client.base_url, deployment_id)
+    remote_name = configure_git_remote(
+        git_url, client.api_key, client.project_id, deployment_id
+    )
     local_ref, target_ref = internal_push_refspec(git_ref)
     with console.status("Pushing code..."):
         push_result = push_to_remote(
@@ -915,7 +909,6 @@ def refresh_deployment(
     project: str | None,
 ) -> None:
     """Update the deployment, pulling the latest code from it's branch"""
-    validate_authenticated_profile(interactive)
     try:
         deployment_id = select_deployment(
             deployment_id, interactive=interactive, project_id_override=project
@@ -935,8 +928,7 @@ def refresh_deployment(
                     _push_internal_for_update(
                         deployment_id,
                         effective_git_ref,
-                        base_url=client.base_url,
-                        project_id=client.project_id,
+                        client=client,
                     )
                 # Re-resolves the branch to the latest commit SHA on the server.
                 with console.status(f"Refreshing {current.display_name}..."):
@@ -1149,8 +1141,6 @@ def deployment_logs(
     stream open until you Ctrl-C. Use ``--json`` to emit one JSON
     ``LogEvent`` per line for downstream tooling (jsonl).
     """
-    validate_authenticated_profile(interactive)
-
     deployment_id = select_deployment(
         deployment_id, interactive=interactive, project_id_override=project
     )

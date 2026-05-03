@@ -7,10 +7,13 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httpx
+import llama_agents.cli.config.env_service as env_service
+import pytest
 import yaml
 from click.testing import CliRunner
 from conftest import make_deployment, patch_project_client
@@ -20,6 +23,8 @@ from llama_agents.core.schema.deployments import (
     DeploymentResponse,
     ReleaseHistoryItem,
 )
+
+DEFAULT_BASE_URL = "https://api.cloud.llamaindex.ai"
 
 
 def _make_client_mock(deployments: list[DeploymentResponse]) -> MagicMock:
@@ -44,6 +49,22 @@ def _make_client_mock(deployments: list[DeploymentResponse]) -> MagicMock:
     return client
 
 
+def _patch_no_profile_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_auth_svc = MagicMock()
+    mock_auth_svc.get_current_profile.return_value = None
+    mock_auth_svc.list_profiles.return_value = []
+    mock_auth_svc.env = SimpleNamespace(requires_auth=True)
+    mock_auth_svc.auth_middleware.return_value = None
+
+    mock_service = MagicMock()
+    mock_service.current_auth_service.return_value = mock_auth_svc
+    mock_service.get_current_environment.return_value = SimpleNamespace(
+        api_url=DEFAULT_BASE_URL,
+        requires_auth=True,
+    )
+    monkeypatch.setattr(env_service, "service", mock_service)
+
+
 def test_deployments_get_text_no_args_lists(patched_auth: Any) -> None:
     runner = CliRunner()
     deployments = [make_deployment("app-a"), make_deployment("app-b")]
@@ -58,6 +79,30 @@ def test_deployments_get_text_no_args_lists(patched_auth: Any) -> None:
     assert "PHASE" in result.output
     assert "\x1b[" not in result.output  # no ANSI escapes
     assert "…" not in result.output
+
+
+def test_deployments_get_uses_complete_env_auth_without_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LLAMA_CLOUD_API_KEY", "env-api-key")
+    monkeypatch.setenv("LLAMA_DEPLOY_PROJECT_ID", "env-project")
+    _patch_no_profile_auth(monkeypatch)
+
+    runner = CliRunner()
+    deployments = [make_deployment("app-a", project_id="env-project")]
+    client_mock = _make_client_mock(deployments)
+    client_mock.project_id = "env-project"
+    client_mock.base_url = DEFAULT_BASE_URL
+    client_mock.api_key = "env-api-key"
+    with patch_project_client(client_mock) as ctor:
+        result = runner.invoke(
+            app, ["deployments", "get", "--no-interactive", "-o", "json"]
+        )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)[0]["name"] == "app-a"
+    args, _ = ctor.call_args
+    assert args == (DEFAULT_BASE_URL, "env-project", "env-api-key", None)
 
 
 def test_deployments_get_json_array(patched_auth: Any) -> None:

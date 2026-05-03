@@ -561,12 +561,18 @@ class PushingWidget(Widget):
     """
 
     def __init__(
-        self, deployment_id: str, git_url: str, project_id: str, git_ref: str = "main"
+        self,
+        deployment_id: str,
+        git_url: str,
+        project_id: str,
+        api_key: str | None,
+        git_ref: str = "main",
     ) -> None:
         super().__init__()
         self.deployment_id = deployment_id
         self.git_url = git_url
         self.project_id = project_id
+        self.api_key = api_key
         self.git_ref = git_ref
 
     def compose(self) -> ComposeResult:
@@ -581,15 +587,13 @@ class PushingWidget(Widget):
     def _push(self) -> None:
         from llama_agents.cli.utils.git_push import (
             configure_git_remote,
-            get_api_key,
             internal_push_refspec,
             push_to_remote,
         )
 
         try:
-            api_key = get_api_key()
             remote_name = configure_git_remote(
-                self.git_url, api_key, self.project_id, self.deployment_id
+                self.git_url, self.api_key, self.project_id, self.deployment_id
             )
             local_ref, target_ref = internal_push_refspec(self.git_ref)
             result = push_to_remote(
@@ -683,7 +687,11 @@ class PushScreen(Screen[DeploymentResponse | None]):
         with Container(classes="form-container"):
             git_ref = self.deployment.git_ref or "main"
             yield PushingWidget(
-                deployment_id, git_url, client.project_id, git_ref=git_ref
+                deployment_id,
+                git_url,
+                client.project_id,
+                client.api_key,
+                git_ref=git_ref,
             )
 
     def on_push_complete_message(self, message: PushCompleteMessage) -> None:
@@ -728,6 +736,7 @@ class PrePushScreen(Screen[bool]):
                 self.deployment_id,
                 git_url,
                 client.project_id,
+                client.api_key,
                 git_ref=self.git_ref,
             )
 
@@ -848,13 +857,6 @@ class FormScreen(Screen[DeploymentResponse | None]):
         self.form_data = message.form_data
         self.save_error = ""
         if self.form_data.push_mode:
-            from llama_agents.cli.utils.git_push import get_api_key
-
-            try:
-                get_api_key()
-            except RuntimeError as e:
-                self._return_to_form(save_error=str(e))
-                return
             await self._perform_save()
         else:
             self.app.push_screen(
