@@ -17,7 +17,7 @@ def _safe_fetch(fn: Any, timeout: float = 2.0) -> list[Any]:
     try:
         future = pool.submit(fn)
         return future.result(timeout=timeout)
-    except Exception:
+    except (Exception, SystemExit):
         return []
     finally:
         pool.shutdown(wait=False)
