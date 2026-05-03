@@ -55,7 +55,7 @@ _MARKER = "## "
 _TRAILING_COLUMN = 45
 _SCAFFOLD_IDENTITY_DOCS = (
     "Set 'name' for a stable id, or 'generate_name' to let the server pick a",
-    "unique id from this slug. Leave both unset → server generates from cwd.",
+    "unique id from this slug. Create needs one of these fields.",
 )
 
 # Per-field example values shown when a spec field is unset (rendered commented).

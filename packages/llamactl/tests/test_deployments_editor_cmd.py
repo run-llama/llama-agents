@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import subprocess
 import textwrap
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -13,7 +15,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from click.testing import CliRunner
-from conftest import make_deployment, patch_project_client
+from conftest import (
+    make_deployment,
+    make_loop_bound_project_client,
+    patch_project_client,
+)
 from llama_agents.cli.app import app
 from llama_agents.cli.commands import deployment as deployment_cmd
 from llama_agents.cli.local_context import LocalContext
@@ -79,26 +85,55 @@ def _patch_local_context(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@contextmanager
+def _patch_yaml_editor(*responses: str | None) -> Iterator[list[str]]:
+    opened_texts: list[str] = []
+    response_iter = iter(responses)
+
+    def _open(text: str) -> str | None:
+        opened_texts.append(text)
+        try:
+            return next(response_iter)
+        except StopIteration:
+            return text
+
+    if hasattr(deployment_cmd, "_open_deployment_yaml_editor"):
+        with patch(f"{_DEPLOY_CMD}._open_deployment_yaml_editor", side_effect=_open):
+            yield opened_texts
+        return
+
+    def _edit(*args: Any, **kwargs: Any) -> str | None:
+        if "filename" in kwargs:
+            raise AssertionError(
+                "TODO: editor commands should use "
+                "_open_deployment_yaml_editor(text: str) -> str | None or "
+                "click.edit(text=..., extension='.yaml')"
+            )
+        if len(args) > 1:
+            raise AssertionError("click.edit should receive only YAML text")
+        text = kwargs.get("text", args[0] if args else None)
+        if not isinstance(text, str):
+            raise AssertionError("click.edit should receive YAML text")
+        assert kwargs.get("extension") == ".yaml"
+        return _open(text)
+
+    with patch(f"{_DEPLOY_CMD}.click.edit", side_effect=_edit):
+        yield opened_texts
+
+
 def test_create_opens_editor_with_template_and_applies_saved_yaml(
     patched_auth: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _patch_local_context(monkeypatch)
     runner = CliRunner()
     client = _editor_client_mock(created=make_deployment("editor-app"))
-    opened_texts: list[str] = []
+    saved_text = textwrap.dedent("""\
+        generate_name: Editor App
+        spec:
+          repo_url: https://github.com/example/repo
+    """)
 
-    def _edit(filename: str) -> None:
-        path = Path(filename)
-        opened_texts.append(path.read_text())
-        path.write_text(
-            textwrap.dedent("""\
-                generate_name: Editor App
-                spec:
-                  repo_url: https://github.com/example/repo
-            """)
-        )
-
-    with patch_project_client(client), patch(f"{_DEPLOY_CMD}.click.edit", _edit):
+    with patch_project_client(client), _patch_yaml_editor(saved_text) as opened_texts:
         result = runner.invoke(app, ["deployments", "create", "--interactive"])
 
     assert result.exit_code == 0, result.output
@@ -157,7 +192,10 @@ def test_create_file_uses_create_intent_not_upsert(
               repo_url: https://github.com/example/repo
         """)
     )
-    client = _editor_client_mock(existing=make_deployment("existing-app"))
+    client = make_loop_bound_project_client(
+        existing=make_deployment("existing-app"),
+        created=make_deployment("existing-app"),
+    )
 
     with patch_project_client(client):
         result = runner.invoke(app, ["deployments", "create", "-f", str(f)])
@@ -168,24 +206,75 @@ def test_create_file_uses_create_intent_not_upsert(
     client.create_deployment.assert_called_once()
 
 
+def test_create_file_name_only_uses_name_as_display_name(
+    patched_auth: Any, tmp_path: Path
+) -> None:
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text("name: explicit-app\nspec:\n  repo_url: ''\n")
+    client = _editor_client_mock(created=make_deployment("explicit-app"))
+
+    with (
+        patch_project_client(client),
+        patch(f"{_DEPLOY_CMD}.is_git_repo", return_value=False),
+    ):
+        result = runner.invoke(app, ["deployments", "create", "-f", str(f)])
+
+    assert result.exit_code == 0, result.output
+    payload = client.create_deployment.call_args[0][0]
+    assert payload.id == "explicit-app"
+    assert payload.display_name == "explicit-app"
+
+
+def test_create_file_reports_identity_and_source_errors_together(
+    patched_auth: Any, tmp_path: Path
+) -> None:
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text("spec:\n  git_ref: main\n")
+    client = _editor_client_mock()
+
+    with patch_project_client(client):
+        result = runner.invoke(app, ["deployments", "create", "-f", str(f)])
+
+    assert result.exit_code != 0
+    assert "set top-level 'name' or 'generate_name'" in result.output
+    assert "set spec.repo_url for create" in result.output
+    client.get_deployment.assert_not_called()
+    client.create_deployment.assert_not_called()
+
+
+def test_create_file_uses_one_event_loop(patched_auth: Any, tmp_path: Path) -> None:
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text(
+        textwrap.dedent("""\
+            generate_name: File App
+            spec:
+              repo_url: https://github.com/example/repo
+        """)
+    )
+    client = make_loop_bound_project_client(created=make_deployment("file-app"))
+
+    with patch_project_client(client):
+        result = runner.invoke(app, ["deployments", "create", "-f", str(f)])
+
+    assert result.exit_code == 0, result.output
+    client.validate_repository.assert_awaited_once()
+    client.create_deployment.assert_called_once()
+
+
 def test_edit_opens_current_template_and_updates_saved_yaml(patched_auth: Any) -> None:
     runner = CliRunner()
     existing = make_deployment("my-app", git_ref="main")
     client = _editor_client_mock(existing=existing)
-    opened_texts: list[str] = []
+    saved_text = textwrap.dedent("""\
+        name: my-app
+        spec:
+          git_ref: v2
+    """)
 
-    def _edit(filename: str) -> None:
-        path = Path(filename)
-        opened_texts.append(path.read_text())
-        path.write_text(
-            textwrap.dedent("""\
-                name: my-app
-                spec:
-                  git_ref: v2
-            """)
-        )
-
-    with patch_project_client(client), patch(f"{_DEPLOY_CMD}.click.edit", _edit):
+    with patch_project_client(client), _patch_yaml_editor(saved_text) as opened_texts:
         result = runner.invoke(app, ["deployments", "edit", "my-app", "--interactive"])
 
     assert result.exit_code == 0, result.output
@@ -204,7 +293,7 @@ def test_edit_file_uses_update_intent_not_create(
     runner = CliRunner()
     f = tmp_path / "deploy.yaml"
     f.write_text("name: my-app\nspec:\n  git_ref: v2\n")
-    client = _editor_client_mock(existing=make_deployment("my-app"))
+    client = make_loop_bound_project_client(existing=make_deployment("my-app"))
 
     with patch_project_client(client):
         result = runner.invoke(app, ["deployments", "edit", "-f", str(f)])
@@ -214,6 +303,36 @@ def test_edit_file_uses_update_intent_not_create(
     client.create_deployment.assert_not_called()
     client.update_deployment.assert_called_once()
     assert client.update_deployment.call_args[0][0] == "my-app"
+
+
+def test_interactive_edit_uses_separate_clients_for_fetch_and_apply(
+    patched_auth: Any,
+) -> None:
+    runner = CliRunner()
+    existing = make_deployment("my-app", git_ref="main")
+    fetch_client = make_loop_bound_project_client(existing=existing)
+    apply_client = make_loop_bound_project_client(existing=existing)
+    saved_text = textwrap.dedent("""\
+        name: my-app
+        spec:
+          git_ref: v2
+    """)
+
+    with (
+        patch(
+            "llama_agents.core.client.manage_client.ProjectClient",
+            side_effect=[fetch_client, apply_client],
+        ) as ctor,
+        _patch_yaml_editor(saved_text),
+    ):
+        result = runner.invoke(app, ["deployments", "edit", "my-app", "--interactive"])
+
+    assert result.exit_code == 0, result.output
+    assert ctor.call_count == 2
+    fetch_client.get_deployment.assert_awaited_once_with("my-app")
+    fetch_client.update_deployment.assert_not_called()
+    apply_client.update_deployment.assert_called_once()
+    assert apply_client.update_deployment.call_args[0][0] == "my-app"
 
 
 def test_edit_file_rejects_name_that_does_not_match_argument(
@@ -234,26 +353,40 @@ def test_edit_file_rejects_name_that_does_not_match_argument(
     client.update_deployment.assert_not_called()
 
 
+def test_edit_file_requires_name_without_argument(
+    patched_auth: Any, tmp_path: Path
+) -> None:
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text("spec:\n  git_ref: v2\n")
+    client = _editor_client_mock(existing=make_deployment("my-app"))
+
+    with patch_project_client(client):
+        result = runner.invoke(app, ["deployments", "edit", "-f", str(f)])
+
+    assert result.exit_code != 0
+    assert "top-level 'name' for edit" in result.output
+    client.get_deployment.assert_not_called()
+    client.create_deployment.assert_not_called()
+    client.update_deployment.assert_not_called()
+
+
 def test_edit_editor_reopens_when_name_changes(patched_auth: Any) -> None:
     runner = CliRunner()
     existing = make_deployment("my-app", git_ref="main")
     client = _editor_client_mock(existing=existing)
-    opened_texts: list[str] = []
+    changed_name = "name: other-app\nspec:\n  git_ref: v2\n"
+    fixed_name = "name: my-app\nspec:\n  git_ref: v2\n"
 
-    def _edit(filename: str) -> None:
-        path = Path(filename)
-        opened_texts.append(path.read_text())
-        if len(opened_texts) == 1:
-            path.write_text("name: other-app\nspec:\n  git_ref: v2\n")
-        else:
-            assert "## ERROR: YAML name 'other-app'" in path.read_text()
-            path.write_text("name: my-app\nspec:\n  git_ref: v2\n")
-
-    with patch_project_client(client), patch(f"{_DEPLOY_CMD}.click.edit", _edit):
+    with (
+        patch_project_client(client),
+        _patch_yaml_editor(changed_name, fixed_name) as opened_texts,
+    ):
         result = runner.invoke(app, ["deployments", "edit", "my-app", "--interactive"])
 
     assert result.exit_code == 0, result.output
     assert len(opened_texts) == 2
+    assert "## ERROR: YAML name 'other-app'" in opened_texts[1]
     client.update_deployment.assert_called_once()
     assert client.update_deployment.call_args[0][0] == "my-app"
 
@@ -261,39 +394,46 @@ def test_edit_editor_reopens_when_name_changes(patched_auth: Any) -> None:
 def test_editor_parse_error_annotates_and_reopens(patched_auth: Any) -> None:
     runner = CliRunner()
     client = _editor_client_mock(created=make_deployment("retry-app"))
-    opened_texts: list[str] = []
+    invalid_yaml = textwrap.dedent("""\
+        generate_name: Retry App
+        spec:
+          bogus: nope
+    """)
+    valid_yaml = textwrap.dedent("""\
+        generate_name: Retry App
+        spec:
+          repo_url: https://github.com/example/repo
+    """)
 
-    def _edit(filename: str) -> None:
-        path = Path(filename)
-        opened_texts.append(path.read_text())
-        if len(opened_texts) == 1:
-            path.write_text(
-                textwrap.dedent("""\
-                    generate_name: Retry App
-                    spec:
-                      bogus: nope
-                """)
-            )
-        else:
-            assert (
-                "## ERROR: spec.bogus: Extra inputs are not permitted"
-                in path.read_text()
-            )
-            path.write_text(
-                textwrap.dedent("""\
-                    generate_name: Retry App
-                    spec:
-                      repo_url: https://github.com/example/repo
-                """)
-            )
-
-    with patch_project_client(client), patch(f"{_DEPLOY_CMD}.click.edit", _edit):
+    with (
+        patch_project_client(client),
+        _patch_yaml_editor(invalid_yaml, valid_yaml) as opened_texts,
+    ):
         result = runner.invoke(app, ["deployments", "create", "--interactive"])
 
     assert result.exit_code == 0, result.output
     assert len(opened_texts) == 2
+    assert "## ERROR: spec.bogus: Extra inputs are not permitted" in opened_texts[1]
     client.create_deployment.assert_called_once()
     assert "created retry-app" in result.output
+
+
+def test_editor_create_validation_annotates_all_errors(patched_auth: Any) -> None:
+    runner = CliRunner()
+    client = _editor_client_mock()
+
+    with (
+        patch_project_client(client),
+        _patch_yaml_editor("spec: {}\n", None) as opened_texts,
+    ):
+        result = runner.invoke(app, ["deployments", "create", "--interactive"])
+
+    assert result.exit_code == 0, result.output
+    assert len(opened_texts) == 2
+    assert "set top-level 'name' or 'generate_name'" in opened_texts[1]
+    assert "set spec.repo_url for create" in opened_texts[1]
+    client.get_deployment.assert_not_called()
+    client.create_deployment.assert_not_called()
 
 
 def test_unchanged_editor_file_aborts_without_api_calls(
@@ -303,11 +443,11 @@ def test_unchanged_editor_file_aborts_without_api_calls(
     runner = CliRunner()
     client = _editor_client_mock()
 
-    with patch_project_client(client), patch(f"{_DEPLOY_CMD}.click.edit") as edit:
+    with patch_project_client(client), _patch_yaml_editor() as opened_texts:
         result = runner.invoke(app, ["deployments", "create", "--interactive"])
 
     assert result.exit_code == 0, result.output
-    edit.assert_called_once()
+    assert len(opened_texts) == 1
     client.get_deployment.assert_not_called()
     client.create_deployment.assert_not_called()
     client.update_deployment.assert_not_called()
@@ -324,10 +464,7 @@ def test_empty_or_all_comment_editor_file_aborts_without_api_calls(
     runner = CliRunner()
     client = _editor_client_mock()
 
-    def _edit(filename: str) -> None:
-        Path(filename).write_text(saved_text)
-
-    with patch_project_client(client), patch(f"{_DEPLOY_CMD}.click.edit", _edit):
+    with patch_project_client(client), _patch_yaml_editor(saved_text):
         result = runner.invoke(app, ["deployments", "create", "--interactive"])
 
     assert result.exit_code == 0, result.output

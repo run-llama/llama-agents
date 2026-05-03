@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import os
-import tempfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 
 import click
 import yaml
@@ -23,6 +23,7 @@ from llama_agents.core.git.git_util import is_git_repo
 from llama_agents.core.schema import LogEvent
 from llama_agents.core.schema.deployments import (
     INTERNAL_CODE_REPO_SCHEME,
+    DeploymentCreate,
     DeploymentHistoryResponse,
     DeploymentResponse,
     DeploymentUpdate,
@@ -67,6 +68,22 @@ from ..utils.git_push import (
 from ..yaml_template import render as render_yaml_template
 
 DeploymentApplyMode = Literal["apply", "create", "update"]
+DeploymentOperationAction = Literal["create", "update"]
+
+
+@dataclass(frozen=True)
+class _DeploymentIntent:
+    display: DeploymentDisplay
+    mode: DeploymentApplyMode
+    update_target: str | None = None
+
+
+@dataclass(frozen=True)
+class _ResolvedDeploymentOperation:
+    action: DeploymentOperationAction
+    display: DeploymentDisplay
+    payload: DeploymentCreate | DeploymentUpdate
+    existing: DeploymentResponse | None = None
 
 
 class PushFailedError(click.ClickException):
@@ -207,6 +224,24 @@ def _handle_annotated_apply_error(
     raise click.exceptions.Exit(1)
 
 
+def _format_apply_yaml_error(exc: ApplyYamlError) -> str:
+    if len(exc.errors) <= 1:
+        return str(exc)
+
+    lines = ["deployment YAML has errors:"]
+    for error in exc.errors:
+        if error.path:
+            path = ".".join(str(part) for part in error.path)
+            lines.append(f"- {path}: {error.message}")
+        else:
+            lines.append(f"- {error.message}")
+    return "\n".join(lines)
+
+
+def _raise_apply_yaml_click_error(exc: ApplyYamlError) -> NoReturn:
+    raise click.ClickException(_format_apply_yaml_error(exc)) from exc
+
+
 def _new_deployment_template_yaml(
     *, action_hint: str = "Edit, then run: llamactl deployments apply -f <file>"
 ) -> str:
@@ -282,37 +317,55 @@ def _parse_deployment_yaml_text(text: str) -> DeploymentDisplay:
     return parse_apply_yaml(text)
 
 
+async def _apply_deployment_intent(
+    *,
+    project: str | None,
+    intent: _DeploymentIntent,
+    no_push: bool = False,
+) -> None:
+    async with project_client_context(project_id_override=project) as client:
+        await _apply_deployment_from_yaml(
+            client,
+            intent.display,
+            no_push=no_push,
+            mode=intent.mode,
+            update_target=intent.update_target,
+        )
+
+
 def _apply_deployment_display(
-    client: Any,
     display: DeploymentDisplay,
     *,
+    project: str | None,
     no_push: bool = False,
     mode: DeploymentApplyMode = "apply",
     update_target: str | None = None,
 ) -> None:
     asyncio.run(
-        _apply_deployment_from_yaml(
-            client,
-            display,
+        _apply_deployment_intent(
+            project=project,
+            intent=_DeploymentIntent(
+                display=display,
+                mode=mode,
+                update_target=update_target,
+            ),
             no_push=no_push,
-            mode=mode,
-            update_target=update_target,
         )
     )
 
 
 def _apply_deployment_yaml_text(
-    client: Any,
     text: str,
     *,
+    project: str | None,
     no_push: bool = False,
     mode: DeploymentApplyMode = "apply",
     update_target: str | None = None,
 ) -> None:
     display = _parse_deployment_yaml_text(text)
     _apply_deployment_display(
-        client,
         display,
+        project=project,
         no_push=no_push,
         mode=mode,
         update_target=update_target,
@@ -331,19 +384,25 @@ def _apply_deployment_yaml_file(
     try:
         display = _parse_deployment_yaml_text(text)
     except ApplyYamlError as exc:
-        raise click.ClickException(str(exc)) from exc
+        _raise_apply_yaml_click_error(exc)
 
-    client = get_project_client(project_id_override=project)
     try:
         _apply_deployment_display(
-            client,
             display,
+            project=project,
             no_push=no_push,
             mode=mode,
             update_target=update_target,
         )
     except ApplyYamlError as exc:
-        raise click.ClickException(str(exc)) from exc
+        _raise_apply_yaml_click_error(exc)
+
+
+async def _fetch_deployment_for_editor(
+    *, project: str | None, deployment_id: str
+) -> tuple[str, DeploymentResponse]:
+    async with project_client_context(project_id_override=project) as client:
+        return client.project_id, await client.get_deployment(deployment_id)
 
 
 def _ci_enabled() -> bool:
@@ -361,62 +420,69 @@ def _has_non_comment_yaml_lines(text: str) -> bool:
     )
 
 
-def _editor_abort() -> None:
+def _open_deployment_yaml_editor(current_text: str) -> str | None:
+    return click.edit(text=current_text, extension=".yaml")
+
+
+def _editor_cancelled() -> None:
     rprint(f"[{WARNING}]Cancelled[/]")
+
+
+def _editor_text_unchanged(current_text: str, last_opened_text: str) -> bool:
+    return current_text.rstrip("\n") == last_opened_text.rstrip("\n")
+
+
+def _editor_noop(mode: DeploymentApplyMode) -> None:
+    if mode == "create":
+        rprint(f"[{WARNING}]No changes saved; fill in the YAML before creating[/]")
+    else:
+        rprint(f"[{WARNING}]No changes saved[/]")
+
+
+def _editor_empty() -> None:
+    rprint(f"[{WARNING}]No deployment YAML saved; nothing applied[/]")
+
+
+def _editor_comments_only() -> None:
+    rprint(f"[{WARNING}]No deployment fields saved; add YAML fields and run again[/]")
 
 
 def _edit_deployment_yaml_loop(
     *,
     initial_yaml: str,
-    client: Any,
+    project: str | None,
     no_push: bool,
     mode: DeploymentApplyMode,
     update_target: str | None = None,
 ) -> None:
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        suffix=".yaml",
-        prefix="llamactl-deployment-",
-        delete=False,
-    ) as temp:
-        temp.write(initial_yaml)
-        temp_path = Path(temp.name)
-
     last_opened_text = initial_yaml
-    try:
-        while True:
-            click.edit(filename=str(temp_path))
+    while True:
+        current_text = _open_deployment_yaml_editor(last_opened_text)
 
-            if not temp_path.exists():
-                _editor_abort()
-                return
+        if current_text is None:
+            _editor_cancelled()
+            return
+        if _editor_text_unchanged(current_text, last_opened_text):
+            _editor_noop(mode)
+            return
+        if not current_text.strip():
+            _editor_empty()
+            return
+        if not _has_non_comment_yaml_lines(current_text):
+            _editor_comments_only()
+            return
 
-            current_text = temp_path.read_text()
-            if not current_text.strip():
-                _editor_abort()
-                return
-            if current_text == last_opened_text:
-                _editor_abort()
-                return
-            if not _has_non_comment_yaml_lines(current_text):
-                _editor_abort()
-                return
-
-            try:
-                _apply_deployment_yaml_text(
-                    client,
-                    current_text,
-                    no_push=no_push,
-                    mode=mode,
-                    update_target=update_target,
-                )
-                return
-            except ApplyYamlError as exc:
-                annotated = annotate_yaml_with_errors(current_text, exc.errors)
-                temp_path.write_text(annotated)
-                last_opened_text = annotated
-    finally:
-        temp_path.unlink(missing_ok=True)
+        try:
+            _apply_deployment_yaml_text(
+                current_text,
+                project=project,
+                no_push=no_push,
+                mode=mode,
+                update_target=update_target,
+            )
+            return
+        except ApplyYamlError as exc:
+            last_opened_text = annotate_yaml_with_errors(current_text, exc.errors)
 
 
 @app.group(
@@ -595,12 +661,11 @@ def create_deployment(
     if _requires_file_for_editor(interactive):
         raise click.ClickException("pass -f <file> for non-interactive create")
 
-    client = get_project_client(project_id_override=project)
     _edit_deployment_yaml_loop(
         initial_yaml=_new_deployment_template_yaml(
             action_hint="Edit, save, and close to create the deployment"
         ),
-        client=client,
+        project=project,
         no_push=no_push,
         mode="create",
     )
@@ -759,6 +824,190 @@ def _apply_push_after_save(
         ) from exc
 
 
+def _create_identity_error() -> FieldError:
+    msg = "set top-level 'name' or 'generate_name'"
+    return _error(("name",), msg)
+
+
+def _create_source_error() -> FieldError:
+    msg = 'set spec.repo_url for create (use "" for push-mode)'
+    return _error(("spec", "repo_url"), msg)
+
+
+def _normalize_create_display(display: DeploymentDisplay) -> DeploymentDisplay:
+    if display.name is not None and display.generate_name is None:
+        return display.model_copy(update={"generate_name": display.name})
+    return display
+
+
+def _validate_create_intent(display: DeploymentDisplay) -> None:
+    errors: list[FieldError] = []
+    if not display.name and not display.generate_name:
+        errors.append(_create_identity_error())
+    if "repo_url" not in display.spec.model_fields_set or display.spec.repo_url is None:
+        errors.append(_create_source_error())
+    if errors:
+        message = (
+            errors[0].message if len(errors) == 1 else "deployment YAML has errors"
+        )
+        raise ApplyYamlError(message, errors=errors)
+
+
+async def _resolve_deployment_operation(
+    client: Any,
+    intent: _DeploymentIntent,
+) -> _ResolvedDeploymentOperation:
+    # Deferred: llamactl startup budget avoids importing httpx at module level.
+    import httpx
+
+    display = intent.display
+
+    if intent.mode == "create":
+        display = _normalize_create_display(display)
+        _validate_create_intent(display)
+        return _ResolvedDeploymentOperation(
+            action="create",
+            display=display,
+            payload=display.to_create_payload(),
+        )
+
+    if intent.mode == "update":
+        update_target = intent.update_target or display.name
+        if update_target is None:
+            msg = "YAML must include top-level 'name' for edit"
+            raise ApplyYamlError(msg, errors=[_error(("name",), msg)])
+        if display.name is not None and display.name != update_target:
+            msg = (
+                f"YAML name '{display.name}' does not match deployment "
+                f"'{update_target}'"
+            )
+            raise ApplyYamlError(msg, errors=[_error(("name",), msg)])
+
+        display = display.model_copy(update={"name": update_target})
+        existing = await client.get_deployment(update_target)
+        return _ResolvedDeploymentOperation(
+            action="update",
+            display=display,
+            payload=display.to_update_payload(),
+            existing=existing,
+        )
+
+    if display.name is not None:
+        try:
+            existing = await client.get_deployment(display.name)
+            return _ResolvedDeploymentOperation(
+                action="update",
+                display=display,
+                payload=display.to_update_payload(),
+                existing=existing,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+
+    display = _normalize_create_display(display)
+    _validate_create_intent(display)
+    return _ResolvedDeploymentOperation(
+        action="create",
+        display=display,
+        payload=display.to_create_payload(),
+    )
+
+
+async def _execute_deployment_operation(
+    client: Any,
+    operation: _ResolvedDeploymentOperation,
+    *,
+    no_push: bool = False,
+) -> None:
+    display = operation.display
+    existing = operation.existing
+    is_update = operation.action == "update"
+
+    # Pre-flight validate-repository (skipped for push-mode, dry-run,
+    # and when repo_url is unset on the update path).
+    repo_url = display.spec.repo_url
+    skip_validation = (
+        repo_url is None
+        or repo_url == ""
+        or repo_url == INTERNAL_CODE_REPO_SCHEME
+        or (is_update and "repo_url" not in display.spec.model_fields_set)
+    )
+    if not skip_validation:
+        assert repo_url is not None
+        vr = await client.validate_repository(
+            repo_url=repo_url,
+            deployment_id=existing.id if existing else None,
+            pat=display.spec.personal_access_token,
+        )
+        if not vr.accessible:
+            raise RepositoryValidationError(
+                vr.message, _repository_error_path(vr.message, display)
+            )
+
+    # Push ordering matrix:
+    #   (no deployment, push)    -> save then push (bootstrap)
+    #   (push, push)             -> push then save (bare repo must hold
+    #                              new ref before update resolves git_ref)
+    #   (external, push)         -> save then push (switch into push mode)
+    #   (*, external)            -> save only
+    #   (*, same-as-current)     -> save only (repo_url omitted in YAML)
+    current_is_push = (
+        existing is not None and existing.repo_url == INTERNAL_CODE_REPO_SCHEME
+    )
+    if "repo_url" not in display.spec.model_fields_set:
+        desired_is_push = current_is_push
+    elif display.spec.repo_url in {"", INTERNAL_CODE_REPO_SCHEME}:
+        desired_is_push = True
+    else:
+        desired_is_push = False
+
+    push_before_save = current_is_push and desired_is_push
+
+    if desired_is_push and no_push:
+        desired_is_push = False
+        push_before_save = False
+
+    if desired_is_push and not is_git_repo():
+        rprint(
+            f"[{WARNING}]Not in a git repo — skipping push, "
+            "server will resolve from last pushed code[/]"
+        )
+        desired_is_push = False
+        push_before_save = False
+
+    if push_before_save:
+        assert existing is not None and display.name is not None
+        _apply_push(
+            client,
+            existing.id,
+            display.spec.git_ref or existing.git_ref,
+        )
+        response = await client.update_deployment(display.name, operation.payload)
+        click.echo(f"updated {response.id}")
+    elif operation.action == "update":
+        assert display.name is not None
+        response = await client.update_deployment(display.name, operation.payload)
+        click.echo(f"updated {response.id}")
+        if desired_is_push:
+            _apply_push_after_save(client, response.id, display.spec.git_ref)
+    else:
+        response = await client.create_deployment(operation.payload)
+        click.echo(f"created {response.id}")
+        if desired_is_push:
+            _apply_push_after_save(client, response.id, display.spec.git_ref)
+
+
+def _create_conflict_error(display: DeploymentDisplay) -> ApplyYamlError:
+    deployment_id = display.name or display.generate_name or "deployment"
+    msg = (
+        f"deployment '{deployment_id}' already exists; use "
+        "`llamactl deployments edit -f` or `llamactl deployments apply -f` "
+        "to update"
+    )
+    return ApplyYamlError(msg, errors=[_error(("name",), msg)])
+
+
 async def _apply_deployment_from_yaml(
     client: Any,
     display: DeploymentDisplay,
@@ -770,129 +1019,14 @@ async def _apply_deployment_from_yaml(
     # Deferred: llamactl startup budget avoids importing httpx at module level.
     import httpx
 
-    existing: DeploymentResponse | None = None
-    is_update = False
-
     try:
-        if mode == "create":
-            is_update = False
-        elif mode == "update":
-            if update_target is None:
-                update_target = display.name
-            if update_target is None:
-                msg = "YAML must include top-level 'name' for edit"
-                raise ApplyYamlError(msg, errors=[_error(("name",), msg)])
-            if display.name is not None and display.name != update_target:
-                msg = (
-                    f"YAML name '{display.name}' does not match deployment "
-                    f"'{update_target}'"
-                )
-                raise ApplyYamlError(msg, errors=[_error(("name",), msg)])
-            display = display.model_copy(update={"name": update_target})
-            existing = await client.get_deployment(update_target)
-            is_update = True
-        elif display.name is not None:
-            try:
-                existing = await client.get_deployment(display.name)
-                is_update = True
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 404:
-                    if display.generate_name is None:
-                        msg = (
-                            "deployment not found and no generate_name "
-                            "provided for create"
-                        )
-                        raise ApplyYamlError(
-                            msg,
-                            errors=[_error(("generate_name",), msg)],
-                        ) from exc
-                else:
-                    raise
-        elif not display.generate_name:
-            msg = "YAML must include top-level 'name' or 'generate_name'"
-            raise ApplyYamlError(msg, errors=[_error(("generate_name",), msg)])
-
-        payload = (
-            display.to_update_payload() if is_update else display.to_create_payload()
+        intent = _DeploymentIntent(
+            display=display,
+            mode=mode,
+            update_target=update_target,
         )
-
-        # Pre-flight validate-repository (skipped for push-mode, dry-run,
-        # and when repo_url is unset on the update path).
-        repo_url = display.spec.repo_url
-        skip_validation = (
-            repo_url is None
-            or repo_url == ""
-            or repo_url == INTERNAL_CODE_REPO_SCHEME
-            or (is_update and "repo_url" not in display.spec.model_fields_set)
-        )
-        if not skip_validation:
-            assert repo_url is not None  # guarded by skip_validation
-            vr = await client.validate_repository(
-                repo_url=repo_url,
-                deployment_id=existing.id if existing else None,
-                pat=display.spec.personal_access_token,
-            )
-            if not vr.accessible:
-                raise RepositoryValidationError(
-                    vr.message, _repository_error_path(vr.message, display)
-                )
-
-        # Push ordering matrix:
-        #   (no deployment, push)    -> save then push (bootstrap)
-        #   (push, push)             -> push then save (bare repo must hold
-        #                              new ref before update resolves git_ref)
-        #   (external, push)         -> save then push (switch into push mode)
-        #   (*, external)            -> save only
-        #   (*, same-as-current)     -> save only (repo_url omitted in YAML)
-        current_is_push = (
-            existing is not None and existing.repo_url == INTERNAL_CODE_REPO_SCHEME
-        )
-        if "repo_url" not in display.spec.model_fields_set:
-            desired_is_push = current_is_push
-        elif (
-            display.spec.repo_url == ""
-            or display.spec.repo_url == INTERNAL_CODE_REPO_SCHEME
-        ):
-            desired_is_push = True
-        else:
-            desired_is_push = False
-
-        push_before_save = current_is_push and desired_is_push
-
-        if desired_is_push and no_push:
-            desired_is_push = False
-            push_before_save = False
-
-        if desired_is_push and not is_git_repo():
-            rprint(
-                f"[{WARNING}]Not in a git repo — skipping push, "
-                "server will resolve from last pushed code[/]"
-            )
-            desired_is_push = False
-            push_before_save = False
-
-        # Execute: translate, optionally push, and call the API.
-        if push_before_save:
-            assert existing is not None and display.name is not None
-            _apply_push(
-                client,
-                existing.id,
-                display.spec.git_ref or existing.git_ref,
-            )
-            response = await client.update_deployment(display.name, payload)
-            click.echo(f"updated {response.id}")
-        elif is_update:
-            assert display.name is not None
-            response = await client.update_deployment(display.name, payload)
-            click.echo(f"updated {response.id}")
-            if desired_is_push:
-                _apply_push_after_save(client, response.id, display.spec.git_ref)
-        else:
-            response = await client.create_deployment(payload)
-            click.echo(f"created {response.id}")
-            if desired_is_push:
-                _apply_push_after_save(client, response.id, display.spec.git_ref)
-
+        operation = await _resolve_deployment_operation(client, intent)
+        await _execute_deployment_operation(client, operation, no_push=no_push)
     except ApplyYamlError:
         raise
     except RepositoryValidationError as exc:
@@ -910,6 +1044,12 @@ async def _apply_deployment_from_yaml(
             original_error=exc,
         ) from exc
     except httpx.HTTPStatusError as exc:
+        if (
+            mode == "create"
+            and exc.response.status_code == 409
+            and display.name is not None
+        ):
+            raise _create_conflict_error(display) from exc
         raise ApplyYamlError(
             str(exc),
             errors=_http_error_to_field_errors(exc, display=display),
@@ -970,13 +1110,13 @@ def apply_deployment(
                 text=text,
                 errors=exc.errors,
             )
-        raise click.ClickException(str(exc)) from exc
+        _raise_apply_yaml_click_error(exc)
 
     if dry_run:
         try:
             _validate_dry_run_payload(display)
         except ApplyYamlError as exc:
-            raise click.ClickException(str(exc)) from exc
+            _raise_apply_yaml_click_error(exc)
 
         verdict = (
             f"would upsert deployment '{display.name}'"
@@ -993,9 +1133,8 @@ def apply_deployment(
         click.echo(verdict)
         return
 
-    client = get_project_client(project_id_override=project)
     try:
-        _apply_deployment_display(client, display, no_push=no_push)
+        _apply_deployment_display(display, project=project, no_push=no_push)
     except ApplyYamlError as exc:
         if annotate_on_error:
             _handle_annotated_apply_error(
@@ -1003,7 +1142,7 @@ def apply_deployment(
                 text=text,
                 errors=exc.errors,
             )
-        raise click.ClickException(str(exc)) from exc
+        _raise_apply_yaml_click_error(exc)
 
 
 @deployments.command("edit")
@@ -1047,9 +1186,6 @@ def edit_deployment(
 
     effective_project: str | None = project
     try:
-        client = get_project_client(project_id_override=project)
-        effective_project = client.project_id
-
         deployment_id = select_deployment(
             deployment_id, interactive=interactive, project_id_override=project
         )
@@ -1057,10 +1193,12 @@ def edit_deployment(
             rprint(f"[{WARNING}]No deployment selected[/]")
             return
 
-        current_deployment = asyncio.run(client.get_deployment(deployment_id))
+        effective_project, current_deployment = asyncio.run(
+            _fetch_deployment_for_editor(project=project, deployment_id=deployment_id)
+        )
         _edit_deployment_yaml_loop(
             initial_yaml=_existing_deployment_template_yaml(current_deployment),
-            client=client,
+            project=project,
             no_push=no_push,
             mode="update",
             update_target=deployment_id,
