@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Literal
+from typing import TYPE_CHECKING, Any, AsyncGenerator
 
 import click
 from llama_agents.cli.env_settings import LlamactlEnvSettings, read_env_settings
@@ -23,7 +23,6 @@ class _AuthContext:
     project_id: str
     api_key: str | None
     auth_middleware: Any | None
-    source: Literal["env", "profile"]
 
 
 def _env_auth_context_or_none(
@@ -46,7 +45,6 @@ def _env_auth_context_or_none(
         project_id=project_id_override or project_id,
         api_key=api_key,
         auth_middleware=None,
-        source="env",
     )
 
 
@@ -65,7 +63,6 @@ def _profile_auth_context_or_none(
         project_id=project_id_override or profile.project_id,
         api_key=profile.api_key,
         auth_middleware=auth_svc.auth_middleware(),
-        source="profile",
     )
 
 

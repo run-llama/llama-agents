@@ -47,9 +47,7 @@ def test_empty_api_key_and_project_id_are_incomplete(
 def test_cloud_auth_is_complete_with_api_key_and_project_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    set_llama_cloud_env(
-        monkeypatch, api_key="env-api-key", project_id="env-project"
-    )
+    set_llama_cloud_env(monkeypatch, api_key="env-api-key", project_id="env-project")
 
     settings = LlamactlEnvSettings()
 

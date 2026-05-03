@@ -826,7 +826,7 @@ _DEPLOY_CMD = "llama_agents.cli.commands.deployment"
 def _patched_git_push(
     *, returncode: int = 0, stderr: bytes = b""
 ) -> Generator[MagicMock, None, None]:
-    """Patch the three git-push helpers so push-mode tests don't hit real git.
+    """Patch git-push helpers so push-mode tests don't hit real git.
 
     Yields the ``push_to_remote`` mock for assertions.
     """
@@ -836,7 +836,6 @@ def _patched_git_push(
             f"{_DEPLOY_CMD}.push_to_remote",
             return_value=subprocess.CompletedProcess([], returncode, stderr=stderr),
         ) as mock_push,
-        patch(f"{_DEPLOY_CMD}.get_api_key", return_value="test-key", create=True),
     ):
         yield mock_push
 
@@ -854,11 +853,6 @@ def test_configure_git_remote_uses_profile_project_client_api_key(
         patch(
             f"{_DEPLOY_CMD}.configure_git_remote", return_value="llamaagents-my-app"
         ) as mock_configure,
-        patch(
-            f"{_DEPLOY_CMD}.get_api_key",
-            return_value="profile-state-key",
-            create=True,
-        ) as mock_get_api_key,
     ):
         result = runner.invoke(
             app,
@@ -871,7 +865,6 @@ def test_configure_git_remote_uses_profile_project_client_api_key(
         )
 
     assert result.exit_code == 0, result.output
-    mock_get_api_key.assert_not_called()
     mock_configure.assert_called_once_with(
         "http://test:8011/api/v1beta1/deployments/my-app/git",
         "profile-client-key",
@@ -898,11 +891,6 @@ def test_configure_git_remote_uses_env_project_client_api_key(
         patch(
             f"{_DEPLOY_CMD}.configure_git_remote", return_value="llamaagents-my-app"
         ) as mock_configure,
-        patch(
-            f"{_DEPLOY_CMD}.get_api_key",
-            return_value="profile-state-key",
-            create=True,
-        ) as mock_get_api_key,
     ):
         result = runner.invoke(
             app,
@@ -915,7 +903,6 @@ def test_configure_git_remote_uses_env_project_client_api_key(
         )
 
     assert result.exit_code == 0, result.output
-    mock_get_api_key.assert_not_called()
     mock_configure.assert_called_once_with(
         f"{DEFAULT_BASE_URL}/api/v1beta1/deployments/my-app/git",
         "env-api-key",
@@ -943,16 +930,10 @@ def test_apply_push_mode_uses_selected_project_client_api_key(
             f"{_DEPLOY_CMD}.push_to_remote",
             return_value=subprocess.CompletedProcess([], 0, stderr=b""),
         ),
-        patch(
-            f"{_DEPLOY_CMD}.get_api_key",
-            return_value="profile-state-key",
-            create=True,
-        ) as mock_get_api_key,
     ):
         result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
 
     assert result.exit_code == 0, result.output
-    mock_get_api_key.assert_not_called()
     mock_configure.assert_called_once_with(
         "http://test:8011/api/v1beta1/deployments/new-app/git",
         "profile-client-key",
@@ -985,16 +966,10 @@ def test_apply_push_mode_uses_env_project_client_api_key(
             f"{_DEPLOY_CMD}.push_to_remote",
             return_value=subprocess.CompletedProcess([], 0, stderr=b""),
         ),
-        patch(
-            f"{_DEPLOY_CMD}.get_api_key",
-            return_value="profile-state-key",
-            create=True,
-        ) as mock_get_api_key,
     ):
         result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
 
     assert result.exit_code == 0, result.output
-    mock_get_api_key.assert_not_called()
     mock_configure.assert_called_once_with(
         f"{DEFAULT_BASE_URL}/api/v1beta1/deployments/new-app/git",
         "env-api-key",

@@ -14,10 +14,6 @@ from conftest import clear_llama_cloud_env, set_llama_cloud_env
 from llama_agents.cli.client import get_control_plane_client, get_project_client
 
 DEFAULT_BASE_URL = "https://api.cloud.llamaindex.ai"
-OLD_MISSING_PROJECT_MESSAGE = (
-    "LLAMA_CLOUD_API_KEY is set but LLAMA_DEPLOY_PROJECT_ID is missing. "
-    "Set it or pass --project."
-)
 OVERRIDE_WARNING = (
     "Using LLAMA_CLOUD_API_KEY from environment (overriding profile 'prof'). "
     "Set LLAMA_CLOUD_USE_PROFILE=1 to use the profile instead."
@@ -27,12 +23,7 @@ OVERRIDE_WARNING = (
 @pytest.fixture(autouse=True)
 def clean_env_var_auth_state(monkeypatch: pytest.MonkeyPatch) -> None:
     clear_llama_cloud_env(monkeypatch)
-
-    for name in dir(client_module):
-        value = getattr(client_module, name)
-        lowered = name.lower()
-        if isinstance(value, bool) and "warn" in lowered and "env" in lowered:
-            monkeypatch.setattr(client_module, name, False)
+    monkeypatch.setattr(client_module, "_ENV_VAR_AUTH_PROFILE_WARNING_EMITTED", False)
 
 
 def _profile(
@@ -208,8 +199,6 @@ def test_incomplete_env_var_project_client_without_profile_uses_generic_no_profi
     captured = capsys.readouterr()
     assert exc_info.value.code == 1
     assert "No profile configured" in captured.out
-    assert OLD_MISSING_PROJECT_MESSAGE not in captured.out
-    assert OLD_MISSING_PROJECT_MESSAGE not in str(exc_info.value)
 
 
 def test_env_var_project_override_wins_over_env_project_id(
