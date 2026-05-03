@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 import llama_agents.cli.config.env_service as env_service
 import pytest
 from click.testing import CliRunner
-from conftest import patch_project_client
+from conftest import patch_project_client, set_llama_cloud_env
 from llama_agents.cli.app import app
 from llama_agents.core.schema import LogEvent
 
@@ -96,8 +96,7 @@ def test_logs_default_prints_recent_and_exits(patched_auth: Any) -> None:
 def test_logs_uses_complete_env_auth_without_profile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("LLAMA_CLOUD_API_KEY", "env-api-key")
-    monkeypatch.setenv("LLAMA_DEPLOY_PROJECT_ID", "env-project")
+    set_llama_cloud_env(monkeypatch, api_key="env-api-key", project_id="env-project")
     _patch_no_profile_auth(monkeypatch)
 
     runner = CliRunner()

@@ -17,7 +17,7 @@ import httpx
 import llama_agents.cli.config.env_service as env_service
 import pytest
 from click.testing import CliRunner
-from conftest import make_deployment, patch_project_client
+from conftest import make_deployment, patch_project_client, set_llama_cloud_env
 from llama_agents.cli.app import app
 from llama_agents.core.schema.deployments import DeploymentResponse
 from llama_agents.core.schema.git_validation import RepositoryValidationResponse
@@ -151,8 +151,7 @@ def test_apply_creates_when_not_found(patched_auth: Any, tmp_path: Any) -> None:
 def test_apply_uses_complete_env_auth_without_profile(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
-    monkeypatch.setenv("LLAMA_CLOUD_API_KEY", "env-api-key")
-    monkeypatch.setenv("LLAMA_DEPLOY_PROJECT_ID", "env-project")
+    set_llama_cloud_env(monkeypatch, api_key="env-api-key", project_id="env-project")
     _patch_no_profile_auth(monkeypatch)
 
     runner = CliRunner()
@@ -884,8 +883,7 @@ def test_configure_git_remote_uses_profile_project_client_api_key(
 def test_configure_git_remote_uses_env_project_client_api_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("LLAMA_CLOUD_API_KEY", "env-api-key")
-    monkeypatch.setenv("LLAMA_DEPLOY_PROJECT_ID", "env-project")
+    set_llama_cloud_env(monkeypatch, api_key="env-api-key", project_id="env-project")
     _patch_no_profile_auth(monkeypatch)
 
     runner = CliRunner()
@@ -966,8 +964,7 @@ def test_apply_push_mode_uses_selected_project_client_api_key(
 def test_apply_push_mode_uses_env_project_client_api_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
-    monkeypatch.setenv("LLAMA_CLOUD_API_KEY", "env-api-key")
-    monkeypatch.setenv("LLAMA_DEPLOY_PROJECT_ID", "env-project")
+    set_llama_cloud_env(monkeypatch, api_key="env-api-key", project_id="env-project")
     _patch_no_profile_auth(monkeypatch)
 
     runner = CliRunner()

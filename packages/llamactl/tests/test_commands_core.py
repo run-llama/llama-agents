@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import llama_agents.cli.client as client_module
 import llama_agents.cli.config.env_service as env_service
 import pytest
+from conftest import clear_llama_cloud_env, set_llama_cloud_env
 from llama_agents.cli.client import get_control_plane_client, get_project_client
 
 DEFAULT_BASE_URL = "https://api.cloud.llamaindex.ai"
@@ -25,14 +26,7 @@ OVERRIDE_WARNING = (
 
 @pytest.fixture(autouse=True)
 def clean_env_var_auth_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in (
-        "LLAMA_CLOUD_API_KEY",
-        "LLAMA_CLOUD_BASE_URL",
-        "LLAMA_CLOUD_USE_PROFILE",
-        "LLAMA_DEPLOY_PROJECT_ID",
-        "_LLAMACTL_COMPLETE",
-    ):
-        monkeypatch.delenv(name, raising=False)
+    clear_llama_cloud_env(monkeypatch)
 
     for name in dir(client_module):
         value = getattr(client_module, name)
@@ -122,8 +116,7 @@ def test_client_requires_valid_profile() -> None:
 def test_env_var_project_client_uses_default_base_url_and_api_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("LLAMA_CLOUD_API_KEY", "env-api-key")
-    monkeypatch.setenv("LLAMA_DEPLOY_PROJECT_ID", "env-project")
+    set_llama_cloud_env(monkeypatch, api_key="env-api-key", project_id="env-project")
     _set_current_profile(monkeypatch, None)
 
     client = get_project_client()
@@ -138,9 +131,12 @@ def test_env_var_project_client_uses_default_base_url_and_api_key(
 def test_env_var_control_plane_client_strips_base_url_and_uses_api_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("LLAMA_CLOUD_API_KEY", "env-api-key")
-    monkeypatch.setenv("LLAMA_CLOUD_BASE_URL", "https://api.example.test/")
-    monkeypatch.setenv("LLAMA_DEPLOY_PROJECT_ID", "env-project")
+    set_llama_cloud_env(
+        monkeypatch,
+        api_key="env-api-key",
+        project_id="env-project",
+        base_url="https://api.example.test/",
+    )
     _set_current_profile(monkeypatch, None)
 
     client = get_control_plane_client()
@@ -154,7 +150,7 @@ def test_env_var_control_plane_client_strips_base_url_and_uses_api_key(
 def test_incomplete_env_var_project_client_uses_active_profile_without_warning(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setenv("LLAMA_CLOUD_API_KEY", "env-api-key")
+    set_llama_cloud_env(monkeypatch, api_key="env-api-key")
     auth_svc = _set_current_profile(
         monkeypatch,
         _profile(
@@ -179,7 +175,7 @@ def test_incomplete_env_var_project_client_uses_active_profile_without_warning(
 def test_incomplete_env_var_control_plane_client_uses_active_profile_without_warning(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setenv("LLAMA_CLOUD_API_KEY", "env-api-key")
+    set_llama_cloud_env(monkeypatch, api_key="env-api-key")
     auth_svc = _set_current_profile(
         monkeypatch,
         _profile(
@@ -203,7 +199,7 @@ def test_incomplete_env_var_control_plane_client_uses_active_profile_without_war
 def test_incomplete_env_var_project_client_without_profile_uses_generic_no_profile_error(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setenv("LLAMA_CLOUD_API_KEY", "env-api-key")
+    set_llama_cloud_env(monkeypatch, api_key="env-api-key")
     _set_current_profile(monkeypatch, None)
 
     with pytest.raises(SystemExit) as exc_info:
@@ -219,8 +215,7 @@ def test_incomplete_env_var_project_client_without_profile_uses_generic_no_profi
 def test_env_var_project_override_wins_over_env_project_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("LLAMA_CLOUD_API_KEY", "env-api-key")
-    monkeypatch.setenv("LLAMA_DEPLOY_PROJECT_ID", "env-project")
+    set_llama_cloud_env(monkeypatch, api_key="env-api-key", project_id="env-project")
     _set_current_profile(monkeypatch, None)
 
     client = get_project_client(project_id_override="flag-project")
@@ -234,10 +229,13 @@ def test_env_var_project_override_wins_over_env_project_id(
 def test_env_var_use_profile_falls_through_to_profile_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("LLAMA_CLOUD_API_KEY", "env-api-key")
-    monkeypatch.setenv("LLAMA_CLOUD_BASE_URL", "https://env.example.test")
-    monkeypatch.setenv("LLAMA_CLOUD_USE_PROFILE", "1")
-    monkeypatch.setenv("LLAMA_DEPLOY_PROJECT_ID", "env-project")
+    set_llama_cloud_env(
+        monkeypatch,
+        api_key="env-api-key",
+        project_id="env-project",
+        base_url="https://env.example.test",
+        use_profile=True,
+    )
     auth_svc = _set_current_profile(
         monkeypatch,
         _profile(
@@ -260,8 +258,7 @@ def test_env_var_use_profile_falls_through_to_profile_path(
 def test_env_var_override_warning_fires_once_with_active_profile(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setenv("LLAMA_CLOUD_API_KEY", "env-api-key")
-    monkeypatch.setenv("LLAMA_DEPLOY_PROJECT_ID", "env-project")
+    set_llama_cloud_env(monkeypatch, api_key="env-api-key", project_id="env-project")
     _set_current_profile(monkeypatch, _profile(api_key="profile-api-key"))
 
     project_client = get_project_client()
@@ -277,8 +274,7 @@ def test_env_var_override_warning_fires_once_with_active_profile(
 def test_env_var_override_warning_does_not_fire_without_profile(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setenv("LLAMA_CLOUD_API_KEY", "env-api-key")
-    monkeypatch.setenv("LLAMA_DEPLOY_PROJECT_ID", "env-project")
+    set_llama_cloud_env(monkeypatch, api_key="env-api-key", project_id="env-project")
     _set_current_profile(monkeypatch, None)
 
     client = get_project_client()
@@ -292,9 +288,12 @@ def test_env_var_override_warning_does_not_fire_without_profile(
 def test_env_var_override_warning_does_not_fire_under_completion(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setenv("LLAMA_CLOUD_API_KEY", "env-api-key")
-    monkeypatch.setenv("LLAMA_DEPLOY_PROJECT_ID", "env-project")
-    monkeypatch.setenv("_LLAMACTL_COMPLETE", "zsh_source")
+    set_llama_cloud_env(
+        monkeypatch,
+        api_key="env-api-key",
+        project_id="env-project",
+        completion="zsh_source",
+    )
     _set_current_profile(monkeypatch, _profile(api_key="profile-api-key"))
 
     client = get_project_client()

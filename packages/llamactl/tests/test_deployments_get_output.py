@@ -16,7 +16,7 @@ import llama_agents.cli.config.env_service as env_service
 import pytest
 import yaml
 from click.testing import CliRunner
-from conftest import make_deployment, patch_project_client
+from conftest import make_deployment, patch_project_client, set_llama_cloud_env
 from llama_agents.cli.app import app
 from llama_agents.core.schema.deployments import (
     DeploymentHistoryResponse,
@@ -84,8 +84,7 @@ def test_deployments_get_text_no_args_lists(patched_auth: Any) -> None:
 def test_deployments_get_uses_complete_env_auth_without_profile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("LLAMA_CLOUD_API_KEY", "env-api-key")
-    monkeypatch.setenv("LLAMA_DEPLOY_PROJECT_ID", "env-project")
+    set_llama_cloud_env(monkeypatch, api_key="env-api-key", project_id="env-project")
     _patch_no_profile_auth(monkeypatch)
 
     runner = CliRunner()

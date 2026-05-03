@@ -11,6 +11,7 @@ import llama_agents.cli.config.env_service as env_service
 import llama_agents.cli.param_types as param_types
 import pytest
 from click.testing import CliRunner
+from conftest import set_llama_cloud_env
 from llama_agents.cli.app import app
 from llama_agents.core.client.manage_client import ProjectClient
 
@@ -140,9 +141,7 @@ def test_completion_group_help() -> None:
 def test_completion_safe_fetch_handles_env_api_key_without_project_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("LLAMA_CLOUD_API_KEY", "env-api-key")
-    monkeypatch.delenv("LLAMA_DEPLOY_PROJECT_ID", raising=False)
-    monkeypatch.setenv("_LLAMACTL_COMPLETE", "zsh_source")
+    set_llama_cloud_env(monkeypatch, api_key="env-api-key", completion="zsh_source")
 
     mock_auth_svc = MagicMock()
     mock_auth_svc.get_current_profile.return_value = None
@@ -166,9 +165,7 @@ def test_completion_safe_fetch_handles_env_api_key_without_project_id(
 def test_completion_safe_fetch_incomplete_env_auth_uses_active_profile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("LLAMA_CLOUD_API_KEY", "env-api-key")
-    monkeypatch.delenv("LLAMA_DEPLOY_PROJECT_ID", raising=False)
-    monkeypatch.setenv("_LLAMACTL_COMPLETE", "zsh_source")
+    set_llama_cloud_env(monkeypatch, api_key="env-api-key", completion="zsh_source")
 
     profile = SimpleNamespace(
         api_url="https://profile.example.test",

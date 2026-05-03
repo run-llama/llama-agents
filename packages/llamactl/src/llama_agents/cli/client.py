@@ -2,13 +2,12 @@
 # Copyright (c) 2026 LlamaIndex Inc.
 from __future__ import annotations
 
-import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Literal
 
 import click
-from llama_agents.cli.config.schema import DEFAULT_ENVIRONMENT
+from llama_agents.cli.env_settings import LlamactlEnvSettings, read_env_settings
 from rich import print as rprint
 
 if TYPE_CHECKING:
@@ -27,25 +26,23 @@ class _AuthContext:
     source: Literal["env", "profile"]
 
 
-def _env_value(name: str) -> str | None:
-    value = os.environ.get(name)
-    if value == "":
-        return None
-    return value
-
-
-def _env_auth_context_or_none(project_id_override: str | None) -> _AuthContext | None:
-    if os.environ.get("LLAMA_CLOUD_USE_PROFILE") == "1":
+def _env_auth_context_or_none(
+    settings: LlamactlEnvSettings,
+    project_id_override: str | None,
+) -> _AuthContext | None:
+    if settings.cloud_auth_disabled:
         return None
 
-    api_key = _env_value("LLAMA_CLOUD_API_KEY")
-    project_id = _env_value("LLAMA_DEPLOY_PROJECT_ID")
-    if api_key is None or project_id is None:
+    if not settings.has_complete_cloud_auth:
         return None
 
-    base_url = _env_value("LLAMA_CLOUD_BASE_URL") or DEFAULT_ENVIRONMENT.api_url
+    api_key = settings.llama_cloud_api_key
+    project_id = settings.llama_deploy_project_id
+    assert api_key is not None
+    assert project_id is not None
+
     return _AuthContext(
-        base_url=base_url.rstrip("/"),
+        base_url=settings.normalized_base_url,
         project_id=project_id_override or project_id,
         api_key=api_key,
         auth_middleware=None,
@@ -75,19 +72,20 @@ def _profile_auth_context_or_none(
 def _auth_context_or_none(
     project_id_override: str | None = None,
 ) -> _AuthContext | None:
-    context = _env_auth_context_or_none(project_id_override)
+    settings = read_env_settings()
+    context = _env_auth_context_or_none(settings, project_id_override)
     if context is not None:
-        _warn_if_env_auth_overrides_profile()
+        _warn_if_env_auth_overrides_profile(settings)
         return context
     return _profile_auth_context_or_none(project_id_override)
 
 
-def _warn_if_env_auth_overrides_profile() -> None:
+def _warn_if_env_auth_overrides_profile(settings: LlamactlEnvSettings) -> None:
     global _ENV_VAR_AUTH_PROFILE_WARNING_EMITTED
 
     if _ENV_VAR_AUTH_PROFILE_WARNING_EMITTED:
         return
-    if os.environ.get("_LLAMACTL_COMPLETE"):
+    if settings.completion_active:
         return
 
     from llama_agents.cli.config.env_service import service

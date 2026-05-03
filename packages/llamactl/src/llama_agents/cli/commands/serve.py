@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal
 import click
 from click.exceptions import Abort, Exit
 from llama_agents.cli.commands.auth import validate_authenticated_profile
+from llama_agents.cli.env_settings import read_env_settings
 from llama_agents.cli.options import (
     interactive_option,
     native_tls_option,
@@ -242,7 +243,8 @@ def _maybe_inject_llama_cloud_credentials(
     # Ensure project id is available to the app and UI processes
     _set_project_id_from_env({**os.environ, **vars})
 
-    existing = os.environ.get("LLAMA_CLOUD_API_KEY") or vars.get("LLAMA_CLOUD_API_KEY")
+    settings = read_env_settings()
+    existing = settings.llama_cloud_api_key or vars.get("LLAMA_CLOUD_API_KEY")
     if existing:
         # If interactive, allow choosing between env var and configured profile
         if interactive:
@@ -266,7 +268,7 @@ def _maybe_inject_llama_cloud_credentials(
             # Default to env var path when cancelled or explicitly chosen
             _set_env_vars_from_env({**os.environ, **vars})
             # If no project id provided, try to detect and select one using the env API key
-            if not os.environ.get("LLAMA_DEPLOY_PROJECT_ID"):
+            if not read_env_settings().llama_deploy_project_id:
                 _maybe_select_project_for_env_key()
             return
         # Non-interactive: trust current environment variables
@@ -316,8 +318,9 @@ def _maybe_select_project_for_env_key() -> None:
     import questionary
     from llama_agents.core.client.manage_client import ControlPlaneClient
 
-    api_key = os.environ.get("LLAMA_CLOUD_API_KEY")
-    base_url = os.environ.get("LLAMA_CLOUD_BASE_URL", "https://api.cloud.llamaindex.ai")
+    settings = read_env_settings()
+    api_key = settings.llama_cloud_api_key
+    base_url = settings.normalized_base_url
     if not api_key:
         return
     try:
@@ -365,11 +368,13 @@ def _maybe_select_project_for_env_key() -> None:
 
 
 def _print_connection_summary() -> None:
-    base_url = os.environ.get("LLAMA_CLOUD_BASE_URL")
-    project_id = os.environ.get("LLAMA_DEPLOY_PROJECT_ID")
-    api_key = os.environ.get("LLAMA_CLOUD_API_KEY")
-    if not base_url and not project_id and not api_key:
+    settings = read_env_settings()
+    if not settings.has_cloud_connection_summary:
         return
+
+    base_url = settings.llama_cloud_base_url
+    project_id = settings.llama_deploy_project_id
+    api_key = settings.llama_cloud_api_key
     redacted = redact_api_key(api_key)
     env_text = base_url or "-"
     proj_text = project_id or "-"
