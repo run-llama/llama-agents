@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import inspect
 import subprocess
 import textwrap
 from pathlib import Path
@@ -145,6 +144,30 @@ def test_create_file_applies_without_editor_and_threads_project_no_push(
     client.create_deployment.assert_called_once()
 
 
+def test_create_file_uses_create_intent_not_upsert(
+    patched_auth: Any, tmp_path: Path
+) -> None:
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text(
+        textwrap.dedent("""\
+            name: existing-app
+            generate_name: Existing App
+            spec:
+              repo_url: https://github.com/example/repo
+        """)
+    )
+    client = _editor_client_mock(existing=make_deployment("existing-app"))
+
+    with patch_project_client(client):
+        result = runner.invoke(app, ["deployments", "create", "-f", str(f)])
+
+    assert result.exit_code == 0, result.output
+    client.get_deployment.assert_not_called()
+    client.update_deployment.assert_not_called()
+    client.create_deployment.assert_called_once()
+
+
 def test_edit_opens_current_template_and_updates_saved_yaml(patched_auth: Any) -> None:
     runner = CliRunner()
     existing = make_deployment("my-app", git_ref="main")
@@ -173,6 +196,66 @@ def test_edit_opens_current_template_and_updates_saved_yaml(patched_auth: Any) -
     client.update_deployment.assert_called_once()
     assert client.update_deployment.call_args[0][0] == "my-app"
     assert "updated my-app" in result.output
+
+
+def test_edit_file_uses_update_intent_not_create(
+    patched_auth: Any, tmp_path: Path
+) -> None:
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text("name: my-app\nspec:\n  git_ref: v2\n")
+    client = _editor_client_mock(existing=make_deployment("my-app"))
+
+    with patch_project_client(client):
+        result = runner.invoke(app, ["deployments", "edit", "-f", str(f)])
+
+    assert result.exit_code == 0, result.output
+    client.get_deployment.assert_awaited_once()
+    client.create_deployment.assert_not_called()
+    client.update_deployment.assert_called_once()
+    assert client.update_deployment.call_args[0][0] == "my-app"
+
+
+def test_edit_file_rejects_name_that_does_not_match_argument(
+    patched_auth: Any, tmp_path: Path
+) -> None:
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text("name: other-app\nspec:\n  git_ref: v2\n")
+    client = _editor_client_mock(existing=make_deployment("my-app"))
+
+    with patch_project_client(client):
+        result = runner.invoke(app, ["deployments", "edit", "my-app", "-f", str(f)])
+
+    assert result.exit_code != 0
+    assert "does not match deployment 'my-app'" in result.output
+    client.get_deployment.assert_not_called()
+    client.create_deployment.assert_not_called()
+    client.update_deployment.assert_not_called()
+
+
+def test_edit_editor_reopens_when_name_changes(patched_auth: Any) -> None:
+    runner = CliRunner()
+    existing = make_deployment("my-app", git_ref="main")
+    client = _editor_client_mock(existing=existing)
+    opened_texts: list[str] = []
+
+    def _edit(filename: str) -> None:
+        path = Path(filename)
+        opened_texts.append(path.read_text())
+        if len(opened_texts) == 1:
+            path.write_text("name: other-app\nspec:\n  git_ref: v2\n")
+        else:
+            assert "## ERROR: YAML name 'other-app'" in path.read_text()
+            path.write_text("name: my-app\nspec:\n  git_ref: v2\n")
+
+    with patch_project_client(client), patch(f"{_DEPLOY_CMD}.click.edit", _edit):
+        result = runner.invoke(app, ["deployments", "edit", "my-app", "--interactive"])
+
+    assert result.exit_code == 0, result.output
+    assert len(opened_texts) == 2
+    client.update_deployment.assert_called_once()
+    assert client.update_deployment.call_args[0][0] == "my-app"
 
 
 def test_editor_parse_error_annotates_and_reopens(patched_auth: Any) -> None:
@@ -281,18 +364,6 @@ def test_ci_forces_editor_commands_to_require_file(
 
     assert result.exit_code != 0
     assert "pass -f <file> for non-interactive edit" in result.output
-
-
-def test_create_edit_do_not_reference_textual_deployment_form() -> None:
-    assert deployment_cmd.create_deployment.callback is not None
-    assert deployment_cmd.edit_deployment.callback is not None
-    create_source = inspect.getsource(deployment_cmd.create_deployment.callback)
-    edit_source = inspect.getsource(deployment_cmd.edit_deployment.callback)
-
-    assert "textual.deployment_form" not in create_source
-    assert "textual.deployment_form" not in edit_source
-    assert "create_deployment_form" not in create_source
-    assert "edit_deployment_form" not in edit_source
 
 
 def test_editor_commands_do_not_import_textual_deployment_form_on_help() -> None:

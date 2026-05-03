@@ -12,7 +12,7 @@ import asyncio
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import click
 import yaml
@@ -65,6 +65,8 @@ from ..utils.git_push import (
     push_to_remote,
 )
 from ..yaml_template import render as render_yaml_template
+
+DeploymentApplyMode = Literal["apply", "create", "update"]
 
 
 class PushFailedError(click.ClickException):
@@ -205,7 +207,9 @@ def _handle_annotated_apply_error(
     raise click.exceptions.Exit(1)
 
 
-def _new_deployment_template_yaml() -> str:
+def _new_deployment_template_yaml(
+    *, action_hint: str = "Edit, then run: llamactl deployments apply -f <file>"
+) -> str:
     ctx = gather_local_context()
 
     cwd_name: str = Path.cwd().name
@@ -235,7 +239,7 @@ def _new_deployment_template_yaml() -> str:
     head: list[str] = [f"WARNING: {warning}" for warning in ctx.warnings]
     if ctx.warnings:
         head.append("")
-    head.append("Edit, then run: llamactl deployments apply -f <file>")
+    head.append(action_hint)
     if not ctx.is_git_repo:
         head.extend(
             [
@@ -279,20 +283,49 @@ def _parse_deployment_yaml_text(text: str) -> DeploymentDisplay:
 
 
 def _apply_deployment_display(
-    client: Any, display: DeploymentDisplay, *, no_push: bool = False
+    client: Any,
+    display: DeploymentDisplay,
+    *,
+    no_push: bool = False,
+    mode: DeploymentApplyMode = "apply",
+    update_target: str | None = None,
 ) -> None:
-    asyncio.run(_apply_deployment_from_yaml(client, display, no_push=no_push))
+    asyncio.run(
+        _apply_deployment_from_yaml(
+            client,
+            display,
+            no_push=no_push,
+            mode=mode,
+            update_target=update_target,
+        )
+    )
 
 
 def _apply_deployment_yaml_text(
-    client: Any, text: str, *, no_push: bool = False
+    client: Any,
+    text: str,
+    *,
+    no_push: bool = False,
+    mode: DeploymentApplyMode = "apply",
+    update_target: str | None = None,
 ) -> None:
     display = _parse_deployment_yaml_text(text)
-    _apply_deployment_display(client, display, no_push=no_push)
+    _apply_deployment_display(
+        client,
+        display,
+        no_push=no_push,
+        mode=mode,
+        update_target=update_target,
+    )
 
 
 def _apply_deployment_yaml_file(
-    *, filename: str, project: str | None, no_push: bool
+    *,
+    filename: str,
+    project: str | None,
+    no_push: bool,
+    mode: DeploymentApplyMode = "apply",
+    update_target: str | None = None,
 ) -> None:
     text = _read_apply_input(filename)
     try:
@@ -302,7 +335,13 @@ def _apply_deployment_yaml_file(
 
     client = get_project_client(project_id_override=project)
     try:
-        _apply_deployment_display(client, display, no_push=no_push)
+        _apply_deployment_display(
+            client,
+            display,
+            no_push=no_push,
+            mode=mode,
+            update_target=update_target,
+        )
     except ApplyYamlError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -331,6 +370,8 @@ def _edit_deployment_yaml_loop(
     initial_yaml: str,
     client: Any,
     no_push: bool,
+    mode: DeploymentApplyMode,
+    update_target: str | None = None,
 ) -> None:
     with tempfile.NamedTemporaryFile(
         mode="w",
@@ -362,7 +403,13 @@ def _edit_deployment_yaml_loop(
                 return
 
             try:
-                _apply_deployment_yaml_text(client, current_text, no_push=no_push)
+                _apply_deployment_yaml_text(
+                    client,
+                    current_text,
+                    no_push=no_push,
+                    mode=mode,
+                    update_target=update_target,
+                )
                 return
             except ApplyYamlError as exc:
                 annotated = annotate_yaml_with_errors(current_text, exc.errors)
@@ -537,7 +584,12 @@ def create_deployment(
 ) -> None:
     """Create a new deployment."""
     if filename is not None:
-        _apply_deployment_yaml_file(filename=filename, project=project, no_push=no_push)
+        _apply_deployment_yaml_file(
+            filename=filename,
+            project=project,
+            no_push=no_push,
+            mode="create",
+        )
         return
 
     if _requires_file_for_editor(interactive):
@@ -545,9 +597,12 @@ def create_deployment(
 
     client = get_project_client(project_id_override=project)
     _edit_deployment_yaml_loop(
-        initial_yaml=_new_deployment_template_yaml(),
+        initial_yaml=_new_deployment_template_yaml(
+            action_hint="Edit, save, and close to create the deployment"
+        ),
         client=client,
         no_push=no_push,
+        mode="create",
     )
 
 
@@ -705,7 +760,12 @@ def _apply_push_after_save(
 
 
 async def _apply_deployment_from_yaml(
-    client: Any, display: DeploymentDisplay, *, no_push: bool = False
+    client: Any,
+    display: DeploymentDisplay,
+    *,
+    no_push: bool = False,
+    mode: DeploymentApplyMode = "apply",
+    update_target: str | None = None,
 ) -> None:
     # Deferred: llamactl startup budget avoids importing httpx at module level.
     import httpx
@@ -714,7 +774,24 @@ async def _apply_deployment_from_yaml(
     is_update = False
 
     try:
-        if display.name is not None:
+        if mode == "create":
+            is_update = False
+        elif mode == "update":
+            if update_target is None:
+                update_target = display.name
+            if update_target is None:
+                msg = "YAML must include top-level 'name' for edit"
+                raise ApplyYamlError(msg, errors=[_error(("name",), msg)])
+            if display.name is not None and display.name != update_target:
+                msg = (
+                    f"YAML name '{display.name}' does not match deployment "
+                    f"'{update_target}'"
+                )
+                raise ApplyYamlError(msg, errors=[_error(("name",), msg)])
+            display = display.model_copy(update={"name": update_target})
+            existing = await client.get_deployment(update_target)
+            is_update = True
+        elif display.name is not None:
             try:
                 existing = await client.get_deployment(display.name)
                 is_update = True
@@ -956,11 +1033,13 @@ def edit_deployment(
 ) -> None:
     """Edit a deployment in $EDITOR."""
     if filename is not None:
-        if deployment_id is not None:
-            raise click.ClickException(
-                "--filename and deployment ID are mutually exclusive"
-            )
-        _apply_deployment_yaml_file(filename=filename, project=project, no_push=no_push)
+        _apply_deployment_yaml_file(
+            filename=filename,
+            project=project,
+            no_push=no_push,
+            mode="update",
+            update_target=deployment_id,
+        )
         return
 
     if _requires_file_for_editor(interactive):
@@ -983,6 +1062,8 @@ def edit_deployment(
             initial_yaml=_existing_deployment_template_yaml(current_deployment),
             client=client,
             no_push=no_push,
+            mode="update",
+            update_target=deployment_id,
         )
 
     except Exception as e:
