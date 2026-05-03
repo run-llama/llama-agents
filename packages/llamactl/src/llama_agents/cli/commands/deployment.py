@@ -313,6 +313,13 @@ def _existing_deployment_template_yaml(deployment: DeploymentResponse) -> str:
     return render_yaml_template(DeploymentDisplay.from_response(deployment))
 
 
+def _existing_deployment_editor_yaml(deployment: DeploymentResponse) -> str:
+    return render_yaml_template(
+        DeploymentDisplay.from_response(deployment),
+        strip_mask_sentinels=False,
+    )
+
+
 def _parse_deployment_yaml_text(text: str) -> DeploymentDisplay:
     return parse_apply_yaml(text)
 
@@ -1197,7 +1204,7 @@ def edit_deployment(
             _fetch_deployment_for_editor(project=project, deployment_id=deployment_id)
         )
         _edit_deployment_yaml_loop(
-            initial_yaml=_existing_deployment_template_yaml(current_deployment),
+            initial_yaml=_existing_deployment_editor_yaml(current_deployment),
             project=project,
             no_push=no_push,
             mode="update",

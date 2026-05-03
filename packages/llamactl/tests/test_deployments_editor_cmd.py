@@ -287,6 +287,20 @@ def test_edit_opens_current_template_and_updates_saved_yaml(patched_auth: Any) -
     assert "updated my-app" in result.output
 
 
+def test_edit_preserves_existing_secret_names_as_masks(patched_auth: Any) -> None:
+    runner = CliRunner()
+    existing = make_deployment("my-app", secret_names=["MY_SECRET"])
+    client = _editor_client_mock(existing=existing)
+
+    with patch_project_client(client), _patch_yaml_editor(None) as opened_texts:
+        result = runner.invoke(app, ["deployments", "edit", "my-app", "--interactive"])
+
+    assert result.exit_code == 0, result.output
+    assert "  secrets:\n    MY_SECRET: '********'" in opened_texts[0]
+    assert "    # MY_SECRET:" not in opened_texts[0]
+    client.update_deployment.assert_not_called()
+
+
 def test_edit_file_uses_update_intent_not_create(
     patched_auth: Any, tmp_path: Path
 ) -> None:

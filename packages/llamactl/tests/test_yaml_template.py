@@ -356,6 +356,21 @@ def test_render_drops_secrets_block_when_only_masks() -> None:
     assert "  # secrets:" in out
 
 
+def test_render_can_preserve_masked_secret_names_for_editor() -> None:
+    display = DeploymentDisplay(
+        name="my-app",
+        spec=DeploymentSpec(
+            secrets={"MY_SECRET": SECRET_MASK},
+            personal_access_token=SECRET_MASK,
+        ),
+    )
+
+    out = render(display, strip_mask_sentinels=False)
+
+    assert "  secrets:\n    MY_SECRET: '********'" in out
+    assert "  personal_access_token: '********'" in out
+
+
 def test_render_strips_personal_access_token_mask() -> None:
     display = DeploymentDisplay(
         name="my-app",
