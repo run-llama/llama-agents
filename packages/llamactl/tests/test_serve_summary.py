@@ -45,7 +45,7 @@ def test_connection_summary_uses_redaction(tmp_path: Path) -> None:
     cfg = _write_yaml(tmp_path)
     # Set env with spaces to verify cleaning and masking
     os.environ["LLAMA_CLOUD_API_KEY"] = "abc 123 456 789 000"
-    os.environ["LLAMA_DEPLOY_PROJECT_ID"] = "proj-1"
+    os.environ["LLAMA_AGENTS_PROJECT_ID"] = "proj-1"
     os.environ["LLAMA_CLOUD_BASE_URL"] = "https://api.example.local"
 
     with (

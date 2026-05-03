@@ -9,16 +9,20 @@ import subprocess
 import textwrap
 from collections.abc import Generator
 from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import llama_agents.cli.config.env_service as env_service
 import pytest
 from click.testing import CliRunner
-from conftest import make_deployment, patch_project_client
+from conftest import make_deployment, patch_project_client, set_llama_cloud_env
 from llama_agents.cli.app import app
 from llama_agents.core.schema.deployments import DeploymentResponse
 from llama_agents.core.schema.git_validation import RepositoryValidationResponse
+
+DEFAULT_BASE_URL = "https://api.cloud.llamaindex.ai"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -57,6 +61,7 @@ def _apply_client_mock(
     client = MagicMock()
     client.project_id = "proj_default"
     client.base_url = "http://test:8011"
+    client.api_key = "profile-client-key"
 
     if existing:
 
@@ -98,6 +103,22 @@ def _apply_client_mock(
     return client
 
 
+def _patch_no_profile_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_auth_svc = MagicMock()
+    mock_auth_svc.get_current_profile.return_value = None
+    mock_auth_svc.list_profiles.return_value = []
+    mock_auth_svc.env = SimpleNamespace(requires_auth=True)
+    mock_auth_svc.auth_middleware.return_value = None
+
+    mock_service = MagicMock()
+    mock_service.current_auth_service.return_value = mock_auth_svc
+    mock_service.get_current_environment.return_value = SimpleNamespace(
+        api_url=DEFAULT_BASE_URL,
+        requires_auth=True,
+    )
+    monkeypatch.setattr(env_service, "service", mock_service)
+
+
 MINIMAL_CREATE_YAML = textwrap.dedent("""\
     name: new-app
     generate_name: New App
@@ -125,6 +146,29 @@ def test_apply_creates_when_not_found(patched_auth: Any, tmp_path: Any) -> None:
     client.create_deployment.assert_called_once()
     assert "created" in result.output.lower()
     assert "new-app" in result.output
+
+
+def test_apply_uses_complete_env_auth_without_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    set_llama_cloud_env(monkeypatch, api_key="env-api-key", project_id="env-project")
+    _patch_no_profile_auth(monkeypatch)
+
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text(MINIMAL_CREATE_YAML)
+
+    client = _apply_client_mock(created=make_deployment("new-app"))
+    client.project_id = "env-project"
+    client.base_url = DEFAULT_BASE_URL
+    client.api_key = "env-api-key"
+    with patch_project_client(client) as ctor:
+        result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
+
+    assert result.exit_code == 0, result.output
+    assert "created new-app" in result.output
+    args, _ = ctor.call_args
+    assert args == (DEFAULT_BASE_URL, "env-project", "env-api-key", None)
 
 
 def test_apply_updates_when_exists(patched_auth: Any, tmp_path: Any) -> None:
@@ -782,7 +826,7 @@ _DEPLOY_CMD = "llama_agents.cli.commands.deployment"
 def _patched_git_push(
     *, returncode: int = 0, stderr: bytes = b""
 ) -> Generator[MagicMock, None, None]:
-    """Patch the three git-push helpers so push-mode tests don't hit real git.
+    """Patch git-push helpers so push-mode tests don't hit real git.
 
     Yields the ``push_to_remote`` mock for assertions.
     """
@@ -792,9 +836,146 @@ def _patched_git_push(
             f"{_DEPLOY_CMD}.push_to_remote",
             return_value=subprocess.CompletedProcess([], returncode, stderr=stderr),
         ) as mock_push,
-        patch(f"{_DEPLOY_CMD}.get_api_key", return_value="test-key"),
     ):
         yield mock_push
+
+
+def test_configure_git_remote_uses_profile_project_client_api_key(
+    patched_auth: Any,
+) -> None:
+    runner = CliRunner()
+    client = _apply_client_mock()
+    client.api_key = "profile-client-key"
+
+    with (
+        patch_project_client(client),
+        patch(f"{_DEPLOY_CMD}.is_git_repo", return_value=True),
+        patch(
+            f"{_DEPLOY_CMD}.configure_git_remote", return_value="llamaagents-my-app"
+        ) as mock_configure,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "deployments",
+                "configure-git-remote",
+                "my-app",
+                "--no-interactive",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    mock_configure.assert_called_once_with(
+        "http://test:8011/api/v1beta1/deployments/my-app/git",
+        "profile-client-key",
+        "proj_default",
+        "my-app",
+    )
+
+
+def test_configure_git_remote_uses_env_project_client_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_llama_cloud_env(monkeypatch, api_key="env-api-key", project_id="env-project")
+    _patch_no_profile_auth(monkeypatch)
+
+    runner = CliRunner()
+    client = _apply_client_mock()
+    client.project_id = "env-project"
+    client.base_url = DEFAULT_BASE_URL
+    client.api_key = "env-api-key"
+
+    with (
+        patch_project_client(client),
+        patch(f"{_DEPLOY_CMD}.is_git_repo", return_value=True),
+        patch(
+            f"{_DEPLOY_CMD}.configure_git_remote", return_value="llamaagents-my-app"
+        ) as mock_configure,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "deployments",
+                "configure-git-remote",
+                "my-app",
+                "--no-interactive",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    mock_configure.assert_called_once_with(
+        f"{DEFAULT_BASE_URL}/api/v1beta1/deployments/my-app/git",
+        "env-api-key",
+        "env-project",
+        "my-app",
+    )
+
+
+def test_apply_push_mode_uses_selected_project_client_api_key(
+    patched_auth: Any, tmp_path: Any
+) -> None:
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text("generate_name: My App\nspec:\n  repo_url: ''\n")
+
+    client = _apply_client_mock()
+    client.api_key = "profile-client-key"
+    with (
+        patch_project_client(client),
+        patch(f"{_DEPLOY_CMD}.is_git_repo", return_value=True),
+        patch(
+            f"{_DEPLOY_CMD}.configure_git_remote", return_value="llamaagents-new-app"
+        ) as mock_configure,
+        patch(
+            f"{_DEPLOY_CMD}.push_to_remote",
+            return_value=subprocess.CompletedProcess([], 0, stderr=b""),
+        ),
+    ):
+        result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
+
+    assert result.exit_code == 0, result.output
+    mock_configure.assert_called_once_with(
+        "http://test:8011/api/v1beta1/deployments/new-app/git",
+        "profile-client-key",
+        "proj_default",
+        "new-app",
+    )
+
+
+def test_apply_push_mode_uses_env_project_client_api_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    set_llama_cloud_env(monkeypatch, api_key="env-api-key", project_id="env-project")
+    _patch_no_profile_auth(monkeypatch)
+
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text("generate_name: My App\nspec:\n  repo_url: ''\n")
+
+    client = _apply_client_mock()
+    client.project_id = "env-project"
+    client.base_url = DEFAULT_BASE_URL
+    client.api_key = "env-api-key"
+    with (
+        patch_project_client(client),
+        patch(f"{_DEPLOY_CMD}.is_git_repo", return_value=True),
+        patch(
+            f"{_DEPLOY_CMD}.configure_git_remote", return_value="llamaagents-new-app"
+        ) as mock_configure,
+        patch(
+            f"{_DEPLOY_CMD}.push_to_remote",
+            return_value=subprocess.CompletedProcess([], 0, stderr=b""),
+        ),
+    ):
+        result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
+
+    assert result.exit_code == 0, result.output
+    mock_configure.assert_called_once_with(
+        f"{DEFAULT_BASE_URL}/api/v1beta1/deployments/new-app/git",
+        "env-api-key",
+        "env-project",
+        "new-app",
+    )
 
 
 def test_apply_push_mode_create_does_save_then_push(

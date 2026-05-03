@@ -35,6 +35,7 @@ def test_serve_does_not_crash_without_git(
 ) -> None:
     # Ensure no leaked env causes branching behavior
     monkeypatch.delenv("LLAMA_CLOUD_API_KEY", raising=False)
+    monkeypatch.delenv("LLAMA_AGENTS_PROJECT_ID", raising=False)
     monkeypatch.delenv("LLAMA_DEPLOY_PROJECT_ID", raising=False)
 
     cfg = _write_minimal_yaml(tmp_path)

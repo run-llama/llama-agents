@@ -42,4 +42,4 @@ def test_auth_inject_writes_env_file(tmp_path: Path, monkeypatch: MonkeyPatch) -
     contents = env_file.read_text()
     assert "LLAMA_CLOUD_API_KEY='sk-test-abc'" in contents
     assert "LLAMA_CLOUD_BASE_URL='https://api.example.com'" in contents
-    assert "LLAMA_DEPLOY_PROJECT_ID='proj-123'" in contents
+    assert "LLAMA_AGENTS_PROJECT_ID='proj-123'" in contents

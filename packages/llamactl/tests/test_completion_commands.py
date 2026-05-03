@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import MagicMock
 
+import llama_agents.cli.config.env_service as env_service
+import llama_agents.cli.param_types as param_types
 import pytest
 from click.testing import CliRunner
+from conftest import set_llama_cloud_env
 from llama_agents.cli.app import app
+from llama_agents.core.client.manage_client import ProjectClient
 
 
 def _first_matching_line_index(lines: list[str], predicate: str) -> int:
@@ -129,3 +136,61 @@ def test_completion_group_help() -> None:
     assert result.exit_code == 0
     assert "generate" in result.output
     assert "install" in result.output
+
+
+def test_completion_safe_fetch_handles_env_api_key_without_project_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_llama_cloud_env(monkeypatch, api_key="env-api-key", completion="zsh_source")
+
+    mock_auth_svc = MagicMock()
+    mock_auth_svc.get_current_profile.return_value = None
+    mock_auth_svc.env = SimpleNamespace(requires_auth=True)
+    mock_service = MagicMock()
+    mock_service.current_auth_service.return_value = mock_auth_svc
+    mock_service.get_current_environment.return_value = SimpleNamespace(
+        api_url="https://api.cloud.llamaindex.ai",
+        requires_auth=True,
+    )
+    monkeypatch.setattr(env_service, "service", mock_service)
+
+    async def _empty_deployments(self: ProjectClient) -> list[Any]:
+        return []
+
+    monkeypatch.setattr(ProjectClient, "list_deployments", _empty_deployments)
+
+    assert param_types._safe_fetch(param_types._fetch_deployments, timeout=1.0) == []
+
+
+def test_completion_safe_fetch_incomplete_env_auth_uses_active_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_llama_cloud_env(monkeypatch, api_key="env-api-key", completion="zsh_source")
+
+    profile = SimpleNamespace(
+        api_url="https://profile.example.test",
+        project_id="profile-project",
+        api_key="profile-api-key",
+        device_oidc=None,
+        name="prof",
+    )
+    mock_auth_svc = MagicMock()
+    mock_auth_svc.get_current_profile.return_value = profile
+    mock_auth_svc.list_profiles.return_value = [profile]
+    mock_auth_svc.env = SimpleNamespace(requires_auth=True)
+    mock_auth_svc.auth_middleware.return_value = None
+    mock_service = MagicMock()
+    mock_service.current_auth_service.return_value = mock_auth_svc
+    monkeypatch.setattr(env_service, "service", mock_service)
+
+    async def _profile_deployments(self: ProjectClient) -> list[Any]:
+        assert self.base_url == "https://profile.example.test"
+        assert self.project_id == "profile-project"
+        assert self.api_key == "profile-api-key"
+        return [SimpleNamespace(id="profile-app")]
+
+    monkeypatch.setattr(ProjectClient, "list_deployments", _profile_deployments)
+
+    completions = param_types._safe_fetch(param_types._fetch_deployments, timeout=1.0)
+
+    assert [item.value for item in completions] == ["profile-app"]

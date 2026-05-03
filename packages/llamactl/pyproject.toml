@@ -37,6 +37,7 @@ dependencies = [
   "aiohttp>=3.12.14",
   "copier>=9.10.2",
   "pyjwt[crypto]>=2.10.1",
+  "pydantic-settings>=2.10.1",
   "typing-extensions>=4.15.0",
   "typing-extensions>=4.15.0 ; python_full_version < '3.11'"
 ]

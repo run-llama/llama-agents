@@ -1,3 +1,13 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 LlamaIndex Inc.
+"""Test session configuration for isolating per-worker state.
+
+Each xdist worker gets a unique HOME and LLAMACTL_CONFIG_DIR so migrations and
+SQLite DBs do not clash across processes.
+"""
+
+from __future__ import annotations
+
 import os
 import shutil
 import tempfile
@@ -7,12 +17,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from llama_agents.core.schema.deployments import DeploymentResponse
-
-"""Test session configuration for isolating per-worker state.
-
-Each xdist worker gets a unique HOME and LLAMACTL_CONFIG_DIR so migrations and
-SQLite DBs do not clash across processes.
-"""
 
 # Base temp dir for the whole session
 _TEST_HOME = tempfile.mkdtemp(prefix="llamactl_test_home_")
@@ -29,6 +33,20 @@ os.makedirs(_WORKER_CONFIG, exist_ok=True)
 os.environ["HOME"] = _WORKER_HOME
 os.environ.setdefault("TERM", "xterm")
 os.environ["LLAMACTL_CONFIG_DIR"] = _WORKER_CONFIG
+
+LLAMA_CLOUD_ENV_VARS = (
+    "LLAMA_CLOUD_API_KEY",
+    "LLAMA_CLOUD_BASE_URL",
+    "LLAMA_CLOUD_USE_PROFILE",
+    "LLAMA_AGENTS_PROJECT_ID",
+    "LLAMA_DEPLOY_PROJECT_ID",
+    "_LLAMACTL_COMPLETE",
+    "llama_cloud_api_key",
+    "llama_cloud_base_url",
+    "llama_cloud_use_profile",
+    "llama_agents_project_id",
+    "llama_deploy_project_id",
+)
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: pytest.ExitCode) -> None:
@@ -56,6 +74,33 @@ def make_deployment(
     }
     base.update(overrides)
     return DeploymentResponse.model_validate(base)
+
+
+def clear_llama_cloud_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in LLAMA_CLOUD_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+
+def set_llama_cloud_env(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    api_key: str | None = None,
+    project_id: str | None = None,
+    base_url: str | None = None,
+    use_profile: bool | None = None,
+    completion: str | None = None,
+) -> None:
+    clear_llama_cloud_env(monkeypatch)
+    if api_key is not None:
+        monkeypatch.setenv("LLAMA_CLOUD_API_KEY", api_key)
+    if project_id is not None:
+        monkeypatch.setenv("LLAMA_AGENTS_PROJECT_ID", project_id)
+    if base_url is not None:
+        monkeypatch.setenv("LLAMA_CLOUD_BASE_URL", base_url)
+    if use_profile is not None:
+        monkeypatch.setenv("LLAMA_CLOUD_USE_PROFILE", "1" if use_profile else "0")
+    if completion is not None:
+        monkeypatch.setenv("_LLAMACTL_COMPLETE", completion)
 
 
 def patch_project_client(client_mock: MagicMock) -> Any:

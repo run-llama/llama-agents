@@ -19,6 +19,7 @@ Commands:
 - `switch [NAME] [--interactive/--no-interactive]`: Set currently logged in user/token
 - `logout [NAME] [--interactive/--no-interactive]`: Delete a login and its local data
 - `project [PROJECT_ID] [--interactive/--no-interactive]`: Change the active project for the current profile
+- `inject [--env-file PATH]`: Write profile credentials to a `.env` file
 
 Notes:
 
@@ -75,6 +76,41 @@ llamactl auth project [PROJECT_ID] [--interactive/--no-interactive]
 ```
 
 Change the active project for the current profile. In interactive mode, select from server projects. In environments that don't require auth, you can also enter a project ID.
+
+### Inject
+
+```bash
+llamactl auth inject [--env-file PATH] [--interactive/--no-interactive]
+```
+
+Write `LLAMA_CLOUD_API_KEY`, `LLAMA_CLOUD_BASE_URL`, and `LLAMA_AGENTS_PROJECT_ID` from the current profile into a `.env` file. Creates the file if it doesn't exist; overwrites existing values.
+
+- `--env-file PATH`: Defaults to `.env` in the current directory.
+
+## Environment Variables
+
+`llamactl` can authenticate via environment variables instead of a stored profile. This is useful for CI, automated scripts, and environments where `llamactl auth login` isn't practical.
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `LLAMA_CLOUD_API_KEY` | Yes | — | API key for authentication |
+| `LLAMA_AGENTS_PROJECT_ID` | Yes (for project-scoped commands) | — | Project to operate on |
+| `LLAMA_CLOUD_BASE_URL` | No | `https://api.cloud.llamaindex.ai` | Control plane API URL |
+| `LLAMA_CLOUD_USE_PROFILE` | No | `false` | Set to `1` to ignore env vars and use a stored profile |
+
+When `LLAMA_CLOUD_API_KEY` and `LLAMA_AGENTS_PROJECT_ID` are both set, `llamactl` uses them directly and skips profile lookup. If a stored profile also exists, a warning is printed to stderr; set `LLAMA_CLOUD_USE_PROFILE=1` to opt back into profile auth.
+
+The `--project` flag always takes precedence over `LLAMA_AGENTS_PROJECT_ID`.
+
+Example:
+
+```bash
+export LLAMA_CLOUD_API_KEY="llx-..."
+export LLAMA_AGENTS_PROJECT_ID="your-project-id"
+llamactl deployments list
+```
+
+Or generate a `.env` from your current profile with [`llamactl auth inject`](#inject).
 
 ## See also
 
