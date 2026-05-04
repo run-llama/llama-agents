@@ -16,7 +16,7 @@ dev = [
 
 [project]
 name = "llama-agents-appserver"
-version = "0.11.3"
+version = "0.11.4"
 description = "Application server components for LlamaDeploy"
 readme = "README.md"
 license = {text = "MIT"}

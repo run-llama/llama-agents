@@ -1,5 +1,22 @@
 # llamactl
 
+## 0.10.0
+
+### Minor Changes
+
+- b70ace8: Add `llamactl deployments apply -f` and `delete -f` for declarative deployment management
+- 0b9d6c2: Replace deployment create and edit forms with editor-backed YAML flows
+
+### Patch Changes
+
+- c3fac21: Validate `appserver_version` as a public PEP 440 version
+- c3fac21: Add `--annotate-on-error` to `llamactl deployments apply -f`
+- fa2136f: Add `llamactl deployments template` and `deployments get -o template` to be used as templates to support `llamactl deployments apply`
+- 87ef930: Allow llamactl to authenticate with LlamaCloud environment variables
+- Updated dependencies [c3fac21]
+  - llama-agents-core@0.10.2
+  - llama-agents-appserver@0.11.4
+
 ## 0.9.1
 
 ### Patch Changes
