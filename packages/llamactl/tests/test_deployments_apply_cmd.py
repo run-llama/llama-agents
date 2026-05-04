@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import subprocess
 import textwrap
 from collections.abc import Generator
@@ -17,7 +16,12 @@ import httpx
 import llama_agents.cli.config.env_service as env_service
 import pytest
 from click.testing import CliRunner
-from conftest import make_deployment, patch_project_client, set_llama_cloud_env
+from conftest import (
+    make_deployment,
+    make_loop_bound_project_client,
+    patch_project_client,
+    set_llama_cloud_env,
+)
 from llama_agents.cli.app import app
 from llama_agents.core.schema.deployments import DeploymentResponse
 from llama_agents.core.schema.git_validation import RepositoryValidationResponse
@@ -190,33 +194,11 @@ def test_apply_updates_when_exists(patched_auth: Any, tmp_path: Any) -> None:
 
 
 def test_apply_update_uses_one_event_loop(patched_auth: Any, tmp_path: Any) -> None:
-    loop: asyncio.AbstractEventLoop | None = None
-
-    def check_loop() -> None:
-        nonlocal loop
-        running = asyncio.get_running_loop()
-        if loop is None:
-            loop = running
-        elif running is not loop:
-            raise RuntimeError("Event loop is closed")
-
-    async def get_deployment(deployment_id: str) -> DeploymentResponse:
-        check_loop()
-        return make_deployment(deployment_id)
-
-    async def update_deployment(deployment_id: str, payload: Any) -> DeploymentResponse:
-        check_loop()
-        return make_deployment(deployment_id)
-
     runner = CliRunner()
     f = tmp_path / "deploy.yaml"
     f.write_text(MINIMAL_UPDATE_YAML)
 
-    client = MagicMock()
-    client.project_id = "proj_default"
-    client.base_url = "http://test:8011"
-    client.get_deployment = AsyncMock(side_effect=get_deployment)
-    client.update_deployment = AsyncMock(side_effect=update_deployment)
+    client = make_loop_bound_project_client(existing=make_deployment("my-app"))
     with patch_project_client(client):
         result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
 
@@ -392,7 +374,7 @@ def test_apply_no_name_no_generate_name_errors(
     assert "name" in output_lower or "generate_name" in output_lower
 
 
-def test_apply_name_without_generate_name_404_errors(
+def test_apply_name_without_generate_name_creates_when_missing(
     patched_auth: Any, tmp_path: Any
 ) -> None:
     runner = CliRunner()
@@ -408,8 +390,11 @@ def test_apply_name_without_generate_name_404_errors(
     with patch_project_client(client):
         result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
 
-    assert result.exit_code != 0
-    assert "generate_name" in result.output.lower()
+    assert result.exit_code == 0, result.output
+    payload = client.create_deployment.call_args[0][0]
+    assert payload.id == "new-app"
+    assert payload.display_name == "new-app"
+    assert "created new-app" in result.output
 
 
 def test_apply_validate_repository_blocks_create(
@@ -585,15 +570,12 @@ def test_apply_annotate_stdin_writes_yaml_to_stdout(patched_auth: Any) -> None:
         result = runner.invoke(
             app,
             ["deployments", "apply", "-f", "-", "--annotate-on-error"],
-            input="name: new-app\nspec:\n  repo_url: https://github.com/example/repo\n",
+            input="name: new-app\nspec: {}\n",
         )
 
     assert result.exit_code == 1
-    assert (
-        "## ERROR: generate_name: deployment not found and no generate_name provided "
-        "for create"
-    ) in result.output
-    assert "generate_name" in result.output
+    assert "## ERROR: spec.repo_url: set spec.repo_url for create" in result.output
+    assert "repo_url" in result.output
 
 
 def test_apply_annotate_dry_run_is_non_mutating(

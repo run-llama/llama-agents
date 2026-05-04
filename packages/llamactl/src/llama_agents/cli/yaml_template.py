@@ -55,7 +55,7 @@ _MARKER = "## "
 _TRAILING_COLUMN = 45
 _SCAFFOLD_IDENTITY_DOCS = (
     "Set 'name' for a stable id, or 'generate_name' to let the server pick a",
-    "unique id from this slug. Leave both unset → server generates from cwd.",
+    "unique id from this slug. Create needs one of these fields.",
 )
 
 # Per-field example values shown when a spec field is unset (rendered commented).
@@ -82,6 +82,7 @@ def render(
     required: Iterable[str] = (),
     name_example: str = "my-app",
     scaffold_generate_name: bool = False,
+    strip_mask_sentinels: bool = True,
 ) -> str:
     """Render ``display`` as a commented apply-shaped YAML string.
 
@@ -111,6 +112,10 @@ def render(
             ``False`` (the default), the
             field is omitted entirely. Only the offline ``deployments
             template`` flow opts in; ``get -o template`` does not.
+        strip_mask_sentinels: When ``True`` (default), omit masked secret
+            values from output so template output can be piped back into
+            apply. The editor loop sets this to ``False`` so existing secret
+            names remain visible as masked entries.
     """
     required_set = set(required)
     out: list[str] = []
@@ -137,7 +142,7 @@ def render(
     out.append("")
     out.append("spec:")
     spec_dump = display.spec.model_dump(mode="json", exclude_none=True)
-    spec_set = strip_masks(spec_dump)
+    spec_set = strip_masks(spec_dump) if strip_mask_sentinels else spec_dump
 
     for idx, (fname, finfo) in enumerate(DeploymentSpec.model_fields.items()):
         if idx > 0 and fname in {

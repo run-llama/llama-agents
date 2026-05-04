@@ -8,15 +8,18 @@ SQLite DBs do not clash across processes.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import tempfile
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from llama_agents.core.schema.deployments import DeploymentResponse
+from llama_agents.core.schema.git_validation import RepositoryValidationResponse
 
 # Base temp dir for the whole session
 _TEST_HOME = tempfile.mkdtemp(prefix="llamactl_test_home_")
@@ -74,6 +77,69 @@ def make_deployment(
     }
     base.update(overrides)
     return DeploymentResponse.model_validate(base)
+
+
+def make_loop_bound_project_client(
+    *,
+    existing: DeploymentResponse | None = None,
+    created: DeploymentResponse | None = None,
+    updated: DeploymentResponse | None = None,
+    validate_accessible: bool = True,
+) -> MagicMock:
+    loop: asyncio.AbstractEventLoop | None = None
+
+    def check_loop() -> None:
+        nonlocal loop
+        running = asyncio.get_running_loop()
+        if loop is None:
+            loop = running
+        elif running is not loop:
+            raise RuntimeError("Event loop is closed")
+
+    async def get_deployment(
+        deployment_id: str, include_events: bool = False
+    ) -> DeploymentResponse:
+        check_loop()
+        if existing is not None and deployment_id == existing.id:
+            return existing
+        request = httpx.Request(
+            "GET", f"http://test/api/v1beta1/deployments/{deployment_id}"
+        )
+        response = httpx.Response(404, request=request, text='{"detail":"not found"}')
+        raise httpx.HTTPStatusError("HTTP 404", request=request, response=response)
+
+    async def validate_repository(
+        repo_url: str,
+        deployment_id: str | None = None,
+        pat: str | None = None,
+    ) -> RepositoryValidationResponse:
+        check_loop()
+        return RepositoryValidationResponse(
+            accessible=validate_accessible,
+            message="ok" if validate_accessible else "repo not found",
+        )
+
+    async def create_deployment(payload: Any) -> DeploymentResponse:
+        check_loop()
+        return created or make_deployment("new-app")
+
+    async def update_deployment(deployment_id: str, payload: Any) -> DeploymentResponse:
+        check_loop()
+        return updated or existing or make_deployment(deployment_id)
+
+    async def aclose() -> None:
+        check_loop()
+
+    client = MagicMock()
+    client.project_id = "proj_default"
+    client.base_url = "http://test:8011"
+    client.api_key = "profile-client-key"
+    client.get_deployment = AsyncMock(side_effect=get_deployment)
+    client.validate_repository = AsyncMock(side_effect=validate_repository)
+    client.create_deployment = AsyncMock(side_effect=create_deployment)
+    client.update_deployment = AsyncMock(side_effect=update_deployment)
+    client.aclose = AsyncMock(side_effect=aclose)
+    return client
 
 
 def clear_llama_cloud_env(monkeypatch: pytest.MonkeyPatch) -> None:
