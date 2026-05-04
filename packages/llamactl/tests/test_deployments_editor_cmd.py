@@ -29,6 +29,16 @@ from llama_agents.core.schema.git_validation import RepositoryValidationResponse
 _DEPLOY_CMD = "llama_agents.cli.commands.deployment"
 
 
+@pytest.fixture(autouse=True)
+def _clear_ci_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CI=true in GitHub Actions makes editor commands require -f.
+
+    Clear it so interactive editor tests can run. The test that explicitly
+    verifies CI behavior sets CI=true via its own monkeypatch.
+    """
+    monkeypatch.delenv("CI", raising=False)
+
+
 def _http_404(deployment_id: str = "unknown") -> httpx.HTTPStatusError:
     request = httpx.Request(
         "GET", f"http://test/api/v1beta1/deployments/{deployment_id}"
