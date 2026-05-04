@@ -1,6 +1,6 @@
 ---
 name: llamactl-qa
-description: Plan and run a design-QA / "taste test" of llamactl changes against a real backend. Cooperatively builds a small matrix of cases worth eyeballing, runs them against a chosen backend (prod test project by default, local kind+tilt for new API contract changes), and writes a design-review report to `thoughts/shared/qa/`. Use this for changes to `llamactl` commands, output formats, auth, or control-plane API contracts. For UI/template smoke tests, use `llamactl_browser_test` instead.
+description: Plan and run a design-QA / "taste test" of llamactl changes against a real backend. Cooperatively builds a small matrix of cases worth eyeballing, runs them against a chosen backend (test environment by default, local kind+tilt for new API contract changes), and writes a design-review report to `thoughts/shared/qa/`. Use this for changes to `llamactl` commands, output formats, auth, or control-plane API contracts. For UI/template smoke tests, use `llamactl_browser_test` instead.
 ---
 
 # llamactl CLI QA
@@ -16,8 +16,8 @@ Every row in the matrix is there because we agreed it covers a real risk or desi
 Parse these from the user's invocation before doing anything else:
 
 - `--auto`, `auto`, `fully auto`, `non-chatty`, or `-f` means run autonomously. Pick the backend, draft the matrix internally, execute it, write the report, and return only the report pointer plus any blocking issue. Do not ask for backend selection or matrix confirmation.
-- In auto mode, prefer the least risky backend that still exercises the changed surface. Use offline/temp-project rows for parse/render/local-file behavior, local kind+tilt for new control-plane contracts, and prod-test only for read-only checks or explicitly safe writes.
-- Auto mode does not relax mutation rules. Any prod write still needs an explicitly designated test project. If that is missing, skip the mutating prod row and note the gap in the report instead of asking mid-run.
+- In auto mode, prefer the least risky backend that still exercises the changed surface. Use offline rows for parse/render/local-file behavior, local kind+tilt for new control-plane contracts, and a test environment for read-only checks or safe writes. **Never use production for mutating QA.** Switch to a test environment first.
+- Auto mode does not relax mutation rules. When creating deployments for QA (e.g., to test edit or delete flows), always create your own throwaway deployments rather than editing existing ones that might be important. Clean them up at the end of the run.
 
 ### What this is NOT
 
@@ -37,9 +37,9 @@ Skip when the change is fully covered by pytest, or when the failure mode is in 
 
 ## Pick a backend
 
-1. **Prod against a test project.** Default. Read-only commands, and write commands targeting a deployment in a project explicitly designated for testing. Confirm the project name with the user before running anything mutating. Pin every command with `--project <test-project-id>` so an active-profile slip can't write into a real project.
+1. **Test environment / test project.** Default for QA that creates or mutates deployments. Use a non-production environment or a dedicated test project so throwaway deployments don't pollute real workspaces. **Never run mutating QA commands against production.** When creating test deployments (to later edit/delete them as part of the QA), create them yourself rather than editing existing deployments that may be important. Pin every command with `--project <test-project-id>` so an active-profile slip can't write into the wrong project.
 2. **Local kind + tilt.** When the change is a new API contract (new endpoint, new field, new behavior on the control plane) and you need to exercise it against a control plane that actually has the change. `uv run operator/dev.py up`. See `AGENTS.md` and `operator/AGENTS.md` for setup. Local mode runs with no auth: the `http://localhost:8011` env is preconfigured; switch to it with `llamactl auth env switch http://localhost:8011` (arg is the API URL, not a name) and a `default` profile is created automatically. No tokens, no `auth login`. Before drafting the matrix, list existing deployments with `kubectl get llamadeployments -A` — there's often something already in the cluster from prior work that you can target with `--project <id>`, saving the cost of a fresh `deployments create`.
-3. **Staging.** Rarely the right answer for this skill. Use prod-test-project or local instead.
+3. **Offline only.** For changes that only affect local rendering (template output, help text, error formatting), no backend is needed at all. Run commands that don't hit the API (e.g., `deployments template`, `--help`, non-interactive error paths).
 
 Ask the user which backend before drafting the matrix. The answer changes which rows are realistic. Skip this in auto mode and choose from the rules above.
 
@@ -71,13 +71,15 @@ If a row needs to **commit** changes (e.g., to test git-state-dependent behavior
 git -C "$WORK/app" -c user.email=qa@example.com -c user.name=qa commit -am "<msg>"
 ```
 
-Don't try to make this temp project deployable to a real backend in the same run as offline QA. If a row genuinely needs a server-side deployment, target an existing one in the test project (see the next section); creating a new one from a throwaway repo couples two flows that fail independently.
+Don't try to make this temp project deployable to a real backend in the same run as offline QA. If a row needs a server-side deployment to edit or inspect, create a throwaway deployment yourself (e.g., `create -f` with a minimal YAML + `--no-push`) rather than editing an existing deployment that might be important. Clean it up with `deployments delete` at the end of the run.
 
 ## llamactl mental model
 
 The bits that matter when designing a matrix.
 
-A profile is `(env, oauth tokens, active org, active project)`. The env is a control-plane URL. `--project <id>` overrides the profile's active project for one call. `llamactl auth list` shows the stack. `llamactl auth env list` shows envs.
+**Scoping hierarchy**: environments → profiles → organizations → projects → deployments. An environment is a control-plane URL (e.g., `http://localhost:8011` for local). Each environment can have one or more profiles (authenticated identities). Each profile has an active organization, and each organization contains projects. Deployments live inside projects. `llamactl auth env list` shows environments. `llamactl auth list` shows profiles in the active environment. `llamactl auth env switch <url>` changes environment. `llamactl auth project [id]` changes the active project within the current profile.
+
+A profile is `(env, oauth tokens, active org, active project)`. `--project <id>` overrides the profile's active project for one call. Before running any QA, check `llamactl auth env list` and `llamactl auth list` to confirm you're in the right environment and project — don't assume from a previous session. There are multiple environments with deployments available for testing; use a non-production one for mutating operations.
 
 Read commands accept `-o text|json|yaml`. Text is human-facing; json/yaml are assertable. Prefer json for QA — exact-match assertions catch field-rename regressions text formatting hides.
 
@@ -98,9 +100,9 @@ Matrix row format. Note "Look for" replaces a pass-fail "Expect" — the reviewe
 
 | # | Command | Backend | Look for | Covers |
 |---|---|---|---|---|
-| 1 | `deployments get my-app -o yaml --project <test>` | prod-test | spec/status split reads cleanly; field ordering; null vs omitted; PAT presentation | new display model shape |
-| 2 | `deployments get --project <test>` | prod-test | column choices, alignment, behavior with long repo URLs | plain-table list mode |
-| 3 | `deployments get my-app --project <other-test>` vs default | prod-test | does the override actually retarget the project | `--project` override |
+| 1 | `deployments get my-app -o yaml --project <test>` | test-env | spec/status split reads cleanly; field ordering; null vs omitted; PAT presentation | new display model shape |
+| 2 | `deployments get --project <test>` | test-env | column choices, alignment, behavior with long repo URLs | plain-table list mode |
+| 3 | `deployments get my-app --project <other-test>` vs default | test-env | does the override actually retarget the project | `--project` override |
 
 If a row's "Look for" reads as "the command works", drop it. If it reads as "I'd want to eyeball this", keep it.
 
@@ -142,7 +144,7 @@ Template:
 ````
 # llamactl QA: <one-line scope>
 
-Backend: <prod-test-project | local kind | other>
+Backend: <test environment | local kind | offline | other>
 Profile: <name> (<env URL>)
 Project: <test project id/name>
 Branch: <branch>  Commit: <short sha>
@@ -227,8 +229,10 @@ The inline chat reply is one or two sentences pointing at the file. Don't restat
 ## Common gotchas
 
 - Stale profile. `llamactl auth list` first, every session. A profile pointing at last week's env produces 401s that look like a code bug.
-- Active project drift. A test that "works on my machine" can fail elsewhere because the active project differs. Pin every prod row with `--project`.
+- Active project drift. A test that "works on my machine" can fail elsewhere because the active project differs. Pin every row with `--project`.
 - Non-test project mutation. If you mutate without `--project`, the active profile decides where it lands. Always pin write commands.
+- Wrong environment for mutations. `llamactl auth env list` shows which environment is active. Never run create/edit/delete against production — switch to a test environment first. The active environment persists across sessions, so always verify before running mutating commands.
+- Editing existing deployments. Don't edit deployments you didn't create — they may be someone's real work. Create throwaway deployments for QA and delete them when done.
 - TUI/prompt risk on write commands. `deployments delete/edit/rollback` and `create` will prompt when interactive. For QA, supply every required arg or pass `--no-interactive`. Read commands (`get`, `logs`, `history`, `auth list`, `auth env list`) don't need the flag.
 - `tee` ate a row of a multi-line table once during a run. Use shell `>` redirect for QA captures, not `tee`, when you need every line preserved.
 - `serve` vs tilt. `llamactl serve` runs the appserver locally with no kubernetes. Tilt runs the full cloud stack in kind. Different scopes; pick one.
