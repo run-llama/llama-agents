@@ -70,7 +70,7 @@ def test_deployments_get_text_no_args_lists(patched_auth: Any) -> None:
     deployments = [make_deployment("app-a"), make_deployment("app-b")]
     client_mock = _make_client_mock(deployments)
     with patch_project_client(client_mock):
-        result = runner.invoke(app, ["deployments", "get", "--no-interactive"])
+        result = runner.invoke(app, ["deployments", "get"])
     assert result.exit_code == 0, result.output
     assert "app-a" in result.output
     assert "app-b" in result.output
@@ -94,9 +94,7 @@ def test_deployments_get_uses_complete_env_auth_without_profile(
     client_mock.base_url = DEFAULT_BASE_URL
     client_mock.api_key = "env-api-key"
     with patch_project_client(client_mock) as ctor:
-        result = runner.invoke(
-            app, ["deployments", "get", "--no-interactive", "-o", "json"]
-        )
+        result = runner.invoke(app, ["deployments", "get", "-o", "json"])
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)[0]["name"] == "app-a"
@@ -109,9 +107,7 @@ def test_deployments_get_json_array(patched_auth: Any) -> None:
     deployments = [make_deployment("app-a"), make_deployment("app-b")]
     client_mock = _make_client_mock(deployments)
     with patch_project_client(client_mock):
-        result = runner.invoke(
-            app, ["deployments", "get", "--no-interactive", "-o", "json"]
-        )
+        result = runner.invoke(app, ["deployments", "get", "-o", "json"])
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
     assert isinstance(data, list)
@@ -132,9 +128,7 @@ def test_deployments_get_yaml_list(patched_auth: Any) -> None:
     deployments = [make_deployment("only-one")]
     client_mock = _make_client_mock(deployments)
     with patch_project_client(client_mock):
-        result = runner.invoke(
-            app, ["deployments", "get", "--no-interactive", "-o", "yaml"]
-        )
+        result = runner.invoke(app, ["deployments", "get", "-o", "yaml"])
     assert result.exit_code == 0, result.output
     parsed = yaml.safe_load(result.output)
     assert isinstance(parsed, list)
@@ -153,7 +147,7 @@ def test_deployments_get_single_text_no_tui(patched_auth: Any) -> None:
         ) as mock_monitor,
     ):
         # Even if interactive=True, get must print a table — TUI is gone.
-        result = runner.invoke(app, ["deployments", "get", "my-app", "--interactive"])
+        result = runner.invoke(app, ["deployments", "get", "my-app"])
     assert result.exit_code == 0, result.output
     assert mock_monitor.call_count == 0
     assert "my-app" in result.output
@@ -167,9 +161,7 @@ def test_deployments_get_single_json(patched_auth: Any) -> None:
     deployments = [make_deployment("my-app")]
     client_mock = _make_client_mock(deployments)
     with patch_project_client(client_mock):
-        result = runner.invoke(
-            app, ["deployments", "get", "my-app", "--no-interactive", "-o", "json"]
-        )
+        result = runner.invoke(app, ["deployments", "get", "my-app", "-o", "json"])
     assert result.exit_code == 0, result.output
     obj = json.loads(result.output)
     assert isinstance(obj, dict)
@@ -194,9 +186,7 @@ def test_deployments_get_single_yaml(patched_auth: Any) -> None:
     deployments = [make_deployment("my-app")]
     client_mock = _make_client_mock(deployments)
     with patch_project_client(client_mock):
-        result = runner.invoke(
-            app, ["deployments", "get", "my-app", "--no-interactive", "-o", "yaml"]
-        )
+        result = runner.invoke(app, ["deployments", "get", "my-app", "-o", "yaml"])
     assert result.exit_code == 0, result.output
     obj = yaml.safe_load(result.output)
     assert isinstance(obj, dict)
@@ -218,9 +208,7 @@ def test_deployments_get_strips_secret_mask_sentinels(patched_auth: Any) -> None
     ]
     client_mock = _make_client_mock(deployments)
     with patch_project_client(client_mock):
-        result = runner.invoke(
-            app, ["deployments", "get", "secret-app", "--no-interactive", "-o", "json"]
-        )
+        result = runner.invoke(app, ["deployments", "get", "secret-app", "-o", "json"])
     assert result.exit_code == 0, result.output
     obj = json.loads(result.output)
     assert "secrets" not in obj["spec"]
@@ -232,9 +220,7 @@ def test_deployments_get_empty_json_is_array(patched_auth: Any) -> None:
     runner = CliRunner()
     client_mock = _make_client_mock([])
     with patch_project_client(client_mock):
-        result = runner.invoke(
-            app, ["deployments", "get", "--no-interactive", "-o", "json"]
-        )
+        result = runner.invoke(app, ["deployments", "get", "-o", "json"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.output) == []
 
@@ -245,9 +231,7 @@ def test_deployments_list_hidden_alias_works(patched_auth: Any) -> None:
     deployments = [make_deployment("app-a")]
     client_mock = _make_client_mock(deployments)
     with patch_project_client(client_mock):
-        result = runner.invoke(
-            app, ["deployments", "list", "--no-interactive", "-o", "json"]
-        )
+        result = runner.invoke(app, ["deployments", "list", "-o", "json"])
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
     assert [d["name"] for d in data] == ["app-a"]
@@ -260,6 +244,19 @@ def test_deployments_list_hidden_in_help(patched_auth: Any) -> None:
     # `list` should be hidden (not surfaced in `--help`), but `get` should be.
     assert "  list " not in result.output
     assert "  get " in result.output
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["configure-git-remote", "update", "history", "rollback", "logs"],
+)
+def test_deployment_name_required_for_single_deployment_commands(
+    command: str,
+) -> None:
+    runner = CliRunner()
+    result = runner.invoke(app, ["deployments", command])
+    assert result.exit_code != 0
+    assert "Missing argument 'DEPLOYMENT_ID'" in result.output
 
 
 def test_deployments_get_project_override_threads_to_client(
@@ -275,7 +272,6 @@ def test_deployments_get_project_override_threads_to_client(
             [
                 "deployments",
                 "get",
-                "--no-interactive",
                 "--project",
                 "proj_other",
                 "-o",
@@ -326,7 +322,6 @@ def test_deployments_history_json_output(patched_auth: Any) -> None:
                 "deployments",
                 "history",
                 "my-app",
-                "--no-interactive",
                 "-o",
                 "json",
             ],
@@ -359,7 +354,7 @@ def test_deployments_history_text_short_sha_and_z_timestamp(
     with patch_project_client(client_mock):
         result = runner.invoke(
             app,
-            ["deployments", "history", "my-app", "--no-interactive"],
+            ["deployments", "history", "my-app"],
         )
     assert result.exit_code == 0, result.output
     # Header present.
@@ -373,6 +368,51 @@ def test_deployments_history_text_short_sha_and_z_timestamp(
     assert "640f764" in result.output
     assert full_sha not in result.output
     assert "0.11.1" in result.output
+
+
+def test_rollback_without_git_sha_non_interactive_lists_history_and_hints(
+    patched_auth: Any,
+) -> None:
+    runner = CliRunner()
+    items = [
+        ReleaseHistoryItem(
+            git_sha=_full_sha("aaaaaaa1111"),
+            released_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        ),
+        ReleaseHistoryItem(
+            git_sha=_full_sha("bbbbbbb2222"),
+            released_at=datetime(2026, 2, 1, tzinfo=timezone.utc),
+        ),
+    ]
+    client_mock = _history_client_mock(items)
+    with (
+        patch_project_client(client_mock),
+        patch(
+            "llama_agents.cli.interactive.is_interactive_session", return_value=False
+        ),
+    ):
+        result = runner.invoke(app, ["deployments", "rollback", "my-app"])
+
+    assert result.exit_code != 0
+    assert "Select git sha:" in result.output
+    assert "bbbbbbb" in result.output
+    assert "--git-sha" in result.output
+    assert "llamactl deployments history my-app" in result.output
+
+
+def test_rollback_empty_history_errors(patched_auth: Any) -> None:
+    runner = CliRunner()
+    client_mock = _history_client_mock([])
+    with (
+        patch_project_client(client_mock),
+        patch(
+            "llama_agents.cli.interactive.is_interactive_session", return_value=False
+        ),
+    ):
+        result = runner.invoke(app, ["deployments", "rollback", "my-app"])
+
+    assert result.exit_code != 0
+    assert "No history available" in result.output
 
 
 def _http_status_error(
@@ -399,7 +439,7 @@ def test_deployments_get_404_renders_friendly_message(patched_auth: Any) -> None
     with patch_project_client(client_mock):
         result = runner.invoke(
             app,
-            ["deployments", "get", "nonexistent-app", "--no-interactive"],
+            ["deployments", "get", "nonexistent-app"],
         )
     assert result.exit_code != 0
     assert (
@@ -429,7 +469,6 @@ def test_deployments_get_404_with_project_includes_project(
                 "deployments",
                 "get",
                 "nonexistent-app",
-                "--no-interactive",
                 "--project",
                 "proj_other",
             ],
@@ -452,7 +491,7 @@ def test_deployments_get_500_keeps_verbose_message(patched_auth: Any) -> None:
     with patch_project_client(client_mock):
         result = runner.invoke(
             app,
-            ["deployments", "get", "boom", "--no-interactive"],
+            ["deployments", "get", "boom"],
         )
     assert result.exit_code != 0
     # Non-404 keeps the verbose default message (URL + body) for debug-visibility.
@@ -466,7 +505,7 @@ def test_deployments_get_text_column_order(patched_auth: Any) -> None:
     deployments = [make_deployment("app-a")]
     client_mock = _make_client_mock(deployments)
     with patch_project_client(client_mock):
-        result = runner.invoke(app, ["deployments", "get", "--no-interactive"])
+        result = runner.invoke(app, ["deployments", "get"])
     assert result.exit_code == 0, result.output
     header = result.output.splitlines()[0]
     name_idx = header.index("NAME")
@@ -482,7 +521,7 @@ def test_deployments_get_text_no_wide_columns(patched_auth: Any) -> None:
     deployments = [make_deployment("app-a")]
     client_mock = _make_client_mock(deployments)
     with patch_project_client(client_mock):
-        result = runner.invoke(app, ["deployments", "get", "--no-interactive"])
+        result = runner.invoke(app, ["deployments", "get"])
     assert result.exit_code == 0, result.output
     assert "GIT_SHA" not in result.output
     assert "APISERVER_URL" not in result.output
@@ -498,9 +537,7 @@ def test_deployments_get_wide_includes_extra_columns(patched_auth: Any) -> None:
     ]
     client_mock = _make_client_mock(deployments)
     with patch_project_client(client_mock):
-        result = runner.invoke(
-            app, ["deployments", "get", "--no-interactive", "-o", "wide"]
-        )
+        result = runner.invoke(app, ["deployments", "get", "-o", "wide"])
     assert result.exit_code == 0, result.output
     header = result.output.splitlines()[0]
     # Default columns still present; wide columns now appear too.
@@ -525,7 +562,7 @@ def test_deployments_get_template_single_emits_apply_shape(patched_auth: Any) ->
     with patch_project_client(client_mock):
         result = runner.invoke(
             app,
-            ["deployments", "get", "my-app", "--no-interactive", "-o", "template"],
+            ["deployments", "get", "my-app", "-o", "template"],
         )
     assert result.exit_code == 0, result.output
     out = result.output
@@ -556,7 +593,7 @@ def test_deployments_get_template_does_not_scaffold_generate_name(
     with patch_project_client(client_mock):
         result = runner.invoke(
             app,
-            ["deployments", "get", "my-app", "--no-interactive", "-o", "template"],
+            ["deployments", "get", "my-app", "-o", "template"],
         )
     assert result.exit_code == 0, result.output
     assert "generate_name" not in result.output
@@ -572,9 +609,7 @@ def test_deployments_get_yaml_emits_generate_name_at_top_level(
     deployments = [make_deployment("my-app", display_name="My App")]
     client_mock = _make_client_mock(deployments)
     with patch_project_client(client_mock):
-        result = runner.invoke(
-            app, ["deployments", "get", "my-app", "--no-interactive", "-o", "yaml"]
-        )
+        result = runner.invoke(app, ["deployments", "get", "my-app", "-o", "yaml"])
     assert result.exit_code == 0, result.output
     obj = yaml.safe_load(result.output)
     assert obj["generate_name"] == "My App"
@@ -586,9 +621,7 @@ def test_deployments_get_template_no_name_errors(patched_auth: Any) -> None:
     """``deployments get -o template`` without a deployment name errors clearly."""
     runner = CliRunner()
     # No client interaction expected — fail fast before list_deployments.
-    result = runner.invoke(
-        app, ["deployments", "get", "--no-interactive", "-o", "template"]
-    )
+    result = runner.invoke(app, ["deployments", "get", "-o", "template"])
     assert result.exit_code != 0
     assert "template requires a deployment name" in result.output
 

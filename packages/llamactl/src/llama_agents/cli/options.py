@@ -5,7 +5,7 @@ from typing import Any, Callable, ParamSpec, TypeVar
 
 import click
 import yaml
-from llama_agents.cli.interactive_prompts.session_utils import is_interactive_session
+from llama_agents.cli.interactive import is_interactive_session
 from llama_agents.cli.param_types import ProjectType
 from pydantic import BaseModel
 
@@ -177,6 +177,7 @@ def interactive_option(f: Callable[P, R]) -> Callable[P, R]:
         help="Run in interactive mode. If not provided, will default to the current session's interactive state.",
         is_flag=True,
         default=default,
+        hidden=True,
     )(f)
 
 

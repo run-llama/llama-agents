@@ -129,12 +129,12 @@ def test_auth_project_interactive_sets_selected() -> None:
                 MagicMock(project_id="proj", project_name="Proj", deployment_count=1)
             ],
         ),
-        patch("questionary.select") as mock_select,
+        patch("llama_agents.cli.commands.auth.select_or_exit") as mock_select,
         patch("llama_agents.cli.config.env_service.service") as mock_service,
     ):
         mock_auth_svc = MagicMock()
         mock_service.current_auth_service.return_value = mock_auth_svc
-        mock_select.return_value.ask.return_value = "proj"
+        mock_select.return_value = "proj"
         result = runner.invoke(app, ["auth", "project", "--interactive"])
         assert result.exit_code == 0
         mock_auth_svc.set_project.assert_called_once()

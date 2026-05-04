@@ -30,6 +30,7 @@ dependencies = [
   "llama-agents-agentcore>=0.5.0",
   "rich>=13.0.0",
   "questionary>=2.0.0",
+  "simple-term-menu>=1.6",
   "click>=8.2.1",
   "python-dotenv>=1.0.0",
   "tenacity>=9.1.2",

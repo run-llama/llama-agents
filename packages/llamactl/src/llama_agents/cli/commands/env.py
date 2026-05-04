@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 import click
 from llama_agents.cli.config.schema import Environment
+from llama_agents.cli.interactive import select_or_exit
 from llama_agents.cli.param_types import EnvironmentType
 from llama_agents.cli.styles import WARNING
 from packaging import version as packaging_version
@@ -73,11 +74,11 @@ def add_environment_cmd(api_url: str | None, interactive: bool) -> None:
             if not interactive:
                 raise click.ClickException("API URL is required when not interactive")
             current_env = service.get_current_environment()
-            from questionary import text
-
-            entered = text(
-                "Enter control plane API URL", default=current_env.api_url
-            ).ask()
+            entered = click.prompt(
+                "Enter control plane API URL",
+                default=current_env.api_url if current_env else "",
+                show_default=current_env is not None,
+            )
             if not entered:
                 rprint(f"[{WARNING}]No environment entered[/]")
                 return
@@ -207,15 +208,16 @@ def _select_environment(
         raise click.ClickException(
             "No environments found. This is a bug and shouldn't happen."
         )
-    import questionary
-
-    return questionary.select(
-        message,
-        choices=[
-            questionary.Choice(
-                title=f"{env.api_url} {'(current)' if env.api_url == current_env.api_url else ''}",
-                value=env,
+    return select_or_exit(
+        [
+            (
+                env,
+                f"{env.api_url} {'(current)' if env.api_url == current_env.api_url else ''}",
             )
             for env in envs
         ],
-    ).ask()
+        message,
+        hint_flag="<api_url>",
+        hint_command="llamactl auth env list",
+        interactive=True,
+    )

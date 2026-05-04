@@ -86,7 +86,7 @@ def test_prompts_login_when_interactive(
 
     with (
         patch("llama_agents.cli.config.env_service.service") as mock_service,
-        patch("questionary.confirm") as mock_confirm,
+        patch("llama_agents.cli.commands.serve.click.confirm") as mock_confirm,
         patch(
             "llama_agents.cli.commands.serve.validate_authenticated_profile"
         ) as mock_validate,
@@ -94,7 +94,7 @@ def test_prompts_login_when_interactive(
         patch("llama_agents.appserver.app.start_server_in_target_venv"),
     ):
         mock_service.current_auth_service().get_current_profile.return_value = None
-        mock_confirm().ask.return_value = True
+        mock_confirm.return_value = True
         mock_validate.return_value = authed
 
         runner = CliRunner()
@@ -132,7 +132,7 @@ def test_interactive_serve_uses_env_key_without_profile_choice(
 
     with (
         patch("llama_agents.cli.config.env_service.service") as mock_service,
-        patch("questionary.select") as mock_select,
+        patch("llama_agents.cli.commands.serve.select_or_exit") as mock_select,
         patch(
             "llama_agents.cli.commands.serve.validate_authenticated_profile"
         ) as mock_validate,

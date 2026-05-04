@@ -738,14 +738,19 @@ def test_delete_from_file(patched_auth: Any, tmp_path: Any) -> None:
 
     client = _apply_client_mock()
     with patch_project_client(client):
-        result = runner.invoke(
-            app, ["deployments", "delete", "-f", str(f), "--no-interactive"]
-        )
+        result = runner.invoke(app, ["deployments", "delete", "-f", str(f)])
 
     assert result.exit_code == 0, result.output
     client.delete_deployment.assert_called_once()
     call_args = client.delete_deployment.call_args
     assert call_args[0][0] == "doomed-app"
+
+
+def test_delete_requires_name_or_file() -> None:
+    runner = CliRunner()
+    result = runner.invoke(app, ["deployments", "delete"])
+    assert result.exit_code != 0
+    assert "deployment ID or --filename is required" in result.output
 
 
 def test_delete_file_and_positional_mutually_exclusive(
@@ -760,7 +765,7 @@ def test_delete_file_and_positional_mutually_exclusive(
     with patch_project_client(client):
         result = runner.invoke(
             app,
-            ["deployments", "delete", "my-app", "-f", str(f), "--no-interactive"],
+            ["deployments", "delete", "my-app", "-f", str(f)],
         )
 
     assert result.exit_code != 0
@@ -779,7 +784,7 @@ def test_delete_reads_stdin(patched_auth: Any) -> None:
     with patch_project_client(client):
         result = runner.invoke(
             app,
-            ["deployments", "delete", "-f", "-", "--no-interactive"],
+            ["deployments", "delete", "-f", "-"],
             input=yaml_text,
         )
 
@@ -842,7 +847,6 @@ def test_configure_git_remote_uses_profile_project_client_api_key(
                 "deployments",
                 "configure-git-remote",
                 "my-app",
-                "--no-interactive",
             ],
         )
 
@@ -880,7 +884,6 @@ def test_configure_git_remote_uses_env_project_client_api_key(
                 "deployments",
                 "configure-git-remote",
                 "my-app",
-                "--no-interactive",
             ],
         )
 

@@ -79,9 +79,7 @@ def test_logs_default_prints_recent_and_exits(patched_auth: Any) -> None:
     events = _make_log_events(3)
     client = _make_logs_client(events)
     with patch_project_client(client):
-        result = runner.invoke(
-            app, ["deployments", "logs", "my-app", "--no-interactive"]
-        )
+        result = runner.invoke(app, ["deployments", "logs", "my-app"])
     assert result.exit_code == 0, result.output
     # Three log lines, one per event.
     lines = [ln for ln in result.output.splitlines() if ln.strip()]
@@ -105,9 +103,7 @@ def test_logs_uses_complete_env_auth_without_profile(
     client.base_url = DEFAULT_BASE_URL
     client.api_key = "env-api-key"
     with patch_project_client(client) as ctor:
-        result = runner.invoke(
-            app, ["deployments", "logs", "my-app", "--no-interactive"]
-        )
+        result = runner.invoke(app, ["deployments", "logs", "my-app"])
 
     assert result.exit_code == 0, result.output
     assert "msg-0" in result.output
@@ -120,9 +116,7 @@ def test_logs_structured_text_uses_body_timestamp_once(patched_auth: Any) -> Non
     events = _make_log_events(1)
     client = _make_logs_client(events)
     with patch_project_client(client):
-        result = runner.invoke(
-            app, ["deployments", "logs", "my-app", "--no-interactive"]
-        )
+        result = runner.invoke(app, ["deployments", "logs", "my-app"])
 
     assert result.exit_code == 0, result.output
     line = result.output.strip()
@@ -140,9 +134,7 @@ def test_logs_unstructured_text_uses_envelope_timestamp(patched_auth: Any) -> No
     )
     client = _make_logs_client([event])
     with patch_project_client(client):
-        result = runner.invoke(
-            app, ["deployments", "logs", "my-app", "--no-interactive"]
-        )
+        result = runner.invoke(app, ["deployments", "logs", "my-app"])
 
     assert result.exit_code == 0, result.output
     assert result.output.strip() == (
@@ -157,7 +149,7 @@ def test_logs_follow_passes_follow_true(patched_auth: Any) -> None:
     with patch_project_client(client):
         result = runner.invoke(
             app,
-            ["deployments", "logs", "my-app", "--no-interactive", "--follow"],
+            ["deployments", "logs", "my-app", "--follow"],
         )
     assert result.exit_code == 0, result.output
     kwargs = client.stream_deployment_logs.call_args.kwargs
@@ -171,7 +163,7 @@ def test_logs_json_outputs_jsonl(patched_auth: Any) -> None:
     with patch_project_client(client):
         result = runner.invoke(
             app,
-            ["deployments", "logs", "my-app", "--no-interactive", "--json"],
+            ["deployments", "logs", "my-app", "--json"],
         )
     assert result.exit_code == 0, result.output
     lines = [ln for ln in result.output.splitlines() if ln.strip()]
@@ -192,7 +184,7 @@ def test_logs_no_events_emits_stderr_note(patched_auth: Any) -> None:
         # mix_stderr=False so we can inspect stderr separately.
         result = runner.invoke(
             app,
-            ["deployments", "logs", "my-app", "--no-interactive"],
+            ["deployments", "logs", "my-app"],
         )
     assert result.exit_code == 0, result.output
     # stderr message present in combined output (CliRunner default).
@@ -203,7 +195,7 @@ def test_logs_rejects_zero_tail(patched_auth: Any) -> None:
     runner = CliRunner()
     result = runner.invoke(
         app,
-        ["deployments", "logs", "my-app", "--no-interactive", "--tail", "0"],
+        ["deployments", "logs", "my-app", "--tail", "0"],
     )
 
     assert result.exit_code != 0
@@ -218,7 +210,6 @@ def test_logs_rejects_negative_since_seconds(patched_auth: Any) -> None:
             "deployments",
             "logs",
             "my-app",
-            "--no-interactive",
             "--since-seconds",
             "-1",
         ],
@@ -235,5 +226,5 @@ def test_deployments_status_command_removed() -> None:
     assert result.exit_code == 0
     assert "  status " not in result.output
 
-    result = runner.invoke(app, ["deployments", "status", "--no-interactive"])
+    result = runner.invoke(app, ["deployments", "status"])
     assert result.exit_code != 0

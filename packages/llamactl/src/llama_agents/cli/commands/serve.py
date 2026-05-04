@@ -10,6 +10,7 @@ import click
 from click.exceptions import Abort, Exit
 from llama_agents.cli.commands.auth import validate_authenticated_profile
 from llama_agents.cli.env_settings import read_env_settings
+from llama_agents.cli.interactive import select_or_exit
 from llama_agents.cli.options import (
     interactive_option,
     native_tls_option,
@@ -225,7 +226,6 @@ def _maybe_inject_llama_cloud_credentials(
     - If no profile/api_key and session is interactive, prompt to log in and inject afterward.
     - If user declines or session is non-interactive, warn that deployment may not work.
     """
-    import questionary
     from llama_agents.appserver.workflow_loader import parse_environment_variables
     from llama_agents.cli.config.env_service import service
 
@@ -276,10 +276,10 @@ def _maybe_inject_llama_cloud_credentials(
 
     # No key available; consider prompting if interactive
     if interactive:
-        should_login = questionary.confirm(
+        should_login = click.confirm(
             "This deployment requires Llama Cloud. Login now to inject credentials? Otherwise the app may not work.",
             default=True,
-        ).ask()
+        )
         if should_login:
             authed = validate_authenticated_profile(True)
             if authed.api_key:
@@ -301,7 +301,6 @@ def _maybe_select_project_for_env_key() -> None:
 
     If more than one project exists, prompt the user to select one.
     """
-    import questionary
     from llama_agents.core.client.manage_client import ControlPlaneClient
 
     settings = read_env_settings()
@@ -336,18 +335,16 @@ def _maybe_select_project_for_env_key() -> None:
             rprint(f"Projects for organization [bold]{org.org_name}[/]")
 
         # Multiple: prompt selection
-        choice = questionary.select(
-            "Select a project",
-            choices=[
-                questionary.Choice(
-                    title=f"{p.project_name} ({p.deployment_count} deployments)",
-                    value=p.project_id,
-                )
+        choice = select_or_exit(
+            [
+                (p.project_id, f"{p.project_name} ({p.deployment_count} deployments)")
                 for p in projects
             ],
-        ).ask()
-        if choice:
-            _set_project_id(choice)
+            "Select a project",
+            hint_flag="LLAMA_AGENTS_PROJECT_ID",
+            hint_command="llamactl auth project <project_id>",
+        )
+        _set_project_id(choice)
     except Exception:
         # Best-effort; if we fail to list, do nothing
         pass

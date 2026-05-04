@@ -16,7 +16,7 @@ from typing import Any, Literal, NoReturn
 
 import click
 import yaml
-from llama_agents.cli.commands.auth import validate_authenticated_profile
+from llama_agents.cli.interactive import select_or_exit
 from llama_agents.cli.param_types import DeploymentType, GitShaType
 from llama_agents.cli.styles import WARNING
 from llama_agents.core.git.git_util import is_git_repo
@@ -532,7 +532,6 @@ def friendly_http_error(
 
 def _do_get(
     deployment_id: str | None,
-    interactive: bool,
     output: str,
     project: str | None,
 ) -> None:
@@ -587,10 +586,8 @@ def _do_get(
 @click.argument("deployment_id", required=False, type=DeploymentType())
 @output_option_with_template
 @project_option
-@interactive_option
 def get_deployment(
     deployment_id: str | None,
-    interactive: bool,
     output: str,
     project: str | None,
 ) -> None:
@@ -602,21 +599,19 @@ def get_deployment(
     Use ``-o json`` or ``-o yaml`` for machine-readable output. Use
     ``llamactl deployments logs <name> --follow`` to stream logs.
     """
-    _do_get(deployment_id, interactive, output, project)
+    _do_get(deployment_id, output, project)
 
 
 @deployments.command("list", hidden=True)
 @global_options
 @output_option
 @project_option
-@interactive_option
 def list_deployments(
-    interactive: bool,
     output: str,
     project: str | None,
 ) -> None:
     """Hidden alias for ``deployments get``. Kept for backward compatibility."""
-    _do_get(None, interactive, output, project)
+    _do_get(None, output, project)
 
 
 @deployments.command("template")
@@ -680,12 +675,9 @@ def create_deployment(
 
 @deployments.command("configure-git-remote")
 @global_options
-@click.argument("deployment_id", required=False, type=DeploymentType())
+@click.argument("deployment_id", required=True, type=DeploymentType())
 @project_option
-@interactive_option
-def configure_git_remote_cmd(
-    deployment_id: str | None, interactive: bool, project: str | None
-) -> None:
+def configure_git_remote_cmd(deployment_id: str, project: str | None) -> None:
     """Configure a git remote for a deployment.
 
     Sets up authentication and a git remote named 'llamaagents-<deployment_id>'
@@ -698,13 +690,6 @@ def configure_git_remote_cmd(
     try:
         if not is_git_repo():
             raise click.ClickException("Not a git repository")
-
-        deployment_id = select_deployment(
-            deployment_id, interactive=interactive, project_id_override=project
-        )
-        if not deployment_id:
-            rprint(f"[{WARNING}]No deployment selected[/]")
-            return
 
         client = get_project_client(project_id_override=project)
         git_url = get_deployment_git_url(client.base_url, deployment_id)
@@ -735,19 +720,12 @@ def configure_git_remote_cmd(
     help="Path to YAML file; name is read from the file. Mutually exclusive with positional ID.",
 )
 @project_option
-@interactive_option
 def delete_deployment(
     deployment_id: str | None,
     filename: click.utils.LazyFile | None,
-    interactive: bool,
     project: str | None,
 ) -> None:
     """Delete a deployment"""
-    # Keep this import local: the helper imports `questionary`, which import-time
-    # profiling showed is a noticeable CLI startup cost. Avoid other local
-    # imports unless instrumentation shows they are slow.
-    from ..interactive_prompts.utils import confirm_action
-
     if filename is not None and deployment_id is not None:
         raise click.ClickException(
             "--filename and deployment ID are mutually exclusive"
@@ -759,21 +737,11 @@ def delete_deployment(
         except ApplyYamlError as exc:
             raise click.ClickException(str(exc)) from exc
 
-    validate_authenticated_profile(interactive)
+    if deployment_id is None:
+        raise click.ClickException("deployment ID or --filename is required")
+
     try:
         client = get_project_client(project_id_override=project)
-
-        deployment_id = select_deployment(
-            deployment_id, interactive=interactive, project_id_override=project
-        )
-        if not deployment_id:
-            rprint(f"[{WARNING}]No deployment selected[/]")
-            return
-
-        if interactive:
-            if not confirm_action(f"Delete deployment '{deployment_id}'?"):
-                rprint(f"[{WARNING}]Cancelled[/]")
-                return
 
         asyncio.run(client.delete_deployment(deployment_id))
         rprint(f"[green]Deleted deployment: {deployment_id}[/green]")
@@ -1257,29 +1225,20 @@ def _push_internal_for_update(
 
 @deployments.command("update")
 @global_options
-@click.argument("deployment_id", required=False, type=DeploymentType())
+@click.argument("deployment_id", required=True, type=DeploymentType())
 @click.option(
     "--git-ref",
     help="Reference branch, tag, or commit SHA for the deployment. If not provided, the current reference and latest commit on it will be used.",
     default=None,
 )
 @project_option
-@interactive_option
 def refresh_deployment(
-    deployment_id: str | None,
+    deployment_id: str,
     git_ref: str | None,
-    interactive: bool,
     project: str | None,
 ) -> None:
     """Update the deployment, pulling the latest code from it's branch"""
     try:
-        deployment_id = select_deployment(
-            deployment_id, interactive=interactive, project_id_override=project
-        )
-        if not deployment_id:
-            rprint(f"[{WARNING}]No deployment selected[/]")
-            return
-
         # Single asyncio.run with one client: reusing a ProjectClient across
         # two asyncio.run calls binds the underlying httpx pool to a closed
         # loop and the next request raises "Event loop is closed".
@@ -1320,25 +1279,16 @@ def refresh_deployment(
 
 @deployments.command("history")
 @global_options
-@click.argument("deployment_id", required=False, type=DeploymentType())
+@click.argument("deployment_id", required=True, type=DeploymentType())
 @output_option
 @project_option
-@interactive_option
 def show_history(
-    deployment_id: str | None,
-    interactive: bool,
+    deployment_id: str,
     output: str,
     project: str | None,
 ) -> None:
     """Show release history for a deployment."""
-    validate_authenticated_profile(interactive)
     try:
-        deployment_id = select_deployment(
-            deployment_id, interactive=interactive, project_id_override=project
-        )
-        if not deployment_id:
-            rprint(f"[{WARNING}]No deployment selected[/]")
-            return
 
         async def _fetch_history() -> DeploymentHistoryResponse:
             async with project_client_context(project_id_override=project) as client:
@@ -1364,35 +1314,18 @@ def show_history(
 
 @deployments.command("rollback")
 @global_options
-@click.argument("deployment_id", required=False, type=DeploymentType())
+@click.argument("deployment_id", required=True, type=DeploymentType())
 @click.option(
     "--git-sha", required=False, type=GitShaType(), help="Git SHA to roll back to"
 )
 @project_option
-@interactive_option
 def rollback(
-    deployment_id: str | None,
+    deployment_id: str,
     git_sha: str | None,
-    interactive: bool,
     project: str | None,
 ) -> None:
     """Rollback a deployment to a previous git sha."""
-    # Keep these imports local: profiling showed `questionary` is a noticeable
-    # startup cost for `llamactl --help`. Avoid other local imports unless they
-    # are measured and proven slow.
-    import questionary
-
-    from ..interactive_prompts.utils import confirm_action
-
-    validate_authenticated_profile(interactive)
     try:
-        deployment_id = select_deployment(
-            deployment_id, interactive=interactive, project_id_override=project
-        )
-        if not deployment_id:
-            rprint(f"[{WARNING}]No deployment selected[/]")
-            return
-
         if not git_sha:
             # If not provided, prompt from history
             async def _fetch_current_and_history() -> tuple[
@@ -1411,30 +1344,20 @@ def rollback(
             items_sorted = sorted(
                 history.history or [], key=lambda it: it.released_at, reverse=True
             )
-            choices = []
+            choices: list[tuple[str, str]] = []
             for it in items_sorted:
                 short = short_sha(it.git_sha)
                 suffix = (
                     " [current]" if current_sha and it.git_sha == current_sha else ""
                 )
-                choices.append(
-                    questionary.Choice(
-                        title=f"{short}{suffix} ({it.released_at})", value=it.git_sha
-                    )
-                )
-            if not choices:
-                rprint(f"[{WARNING}]No history available to rollback[/]")
-                return
-            git_sha = questionary.select("Select git sha:", choices=choices).ask()
-            if not git_sha:
-                rprint(f"[{WARNING}]Cancelled[/]")
-                return
-
-        if interactive and not confirm_action(
-            f"Rollback '{deployment_id}' to {short_sha(git_sha)}?"
-        ):
-            rprint(f"[{WARNING}]Cancelled[/]")
-            return
+                choices.append((it.git_sha, f"{short}{suffix} ({it.released_at})"))
+            git_sha = select_or_exit(
+                choices,
+                "Select git sha:",
+                hint_flag="--git-sha",
+                hint_command=f"llamactl deployments history {deployment_id}",
+                empty_message="No history available",
+            )
 
         async def _do_rollback() -> DeploymentResponse:
             async with project_client_context(project_id_override=project) as client:
@@ -1443,6 +1366,8 @@ def rollback(
         updated = asyncio.run(_do_rollback())
         new_short = short_sha(updated.git_sha) if updated.git_sha else "-"
         rprint(f"[green]Rollback initiated[/green]: {deployment_id} → {new_short}")
+    except click.ClickException:
+        raise
     except Exception as e:
         rprint(f"[red]Error: {e}[/red]")
         raise click.Abort()
@@ -1450,7 +1375,7 @@ def rollback(
 
 @deployments.command("logs")
 @global_options
-@click.argument("deployment_id", required=False, type=DeploymentType())
+@click.argument("deployment_id", required=True, type=DeploymentType())
 @click.option(
     "--follow",
     "-f",
@@ -1487,15 +1412,13 @@ def rollback(
     help="Include init container logs.",
 )
 @project_option
-@interactive_option
 def deployment_logs(
-    deployment_id: str | None,
+    deployment_id: str,
     follow: bool,
     json_lines: bool,
     tail: int,
     since_seconds: int | None,
     include_init_containers: bool,
-    interactive: bool,
     project: str | None,
 ) -> None:
     """Stream or fetch logs for a deployment.
@@ -1504,12 +1427,6 @@ def deployment_logs(
     stream open until you Ctrl-C. Use ``--json`` to emit one JSON
     ``LogEvent`` per line for downstream tooling (jsonl).
     """
-    deployment_id = select_deployment(
-        deployment_id, interactive=interactive, project_id_override=project
-    )
-    if not deployment_id:
-        rprint(f"[{WARNING}]No deployment selected[/]")
-        return
 
     async def _consume() -> int:
         events_seen = 0
@@ -1558,40 +1475,25 @@ def select_deployment(
     deployment_id: str | None,
     interactive: bool,
     project_id_override: str | None = None,
-) -> str | None:
+) -> str:
     """
     Select a deployment interactively if ID not provided.
-    Returns the selected deployment ID or None if cancelled.
-
-    In non-interactive sessions, returns None if deployment_id is not provided.
+    Returns the selected deployment ID. Raises if cancelled or non-interactive.
     """
-    # Keep this import local: profiling showed `questionary` is a noticeable
-    # startup cost for `llamactl --help`. Avoid other local imports unless they
-    # are measured and proven slow.
-    import questionary
-
     if deployment_id:
         return deployment_id
 
-    # Don't attempt interactive selection in non-interactive sessions
-    if not interactive:
-        return None
     client = get_project_client(project_id_override=project_id_override)
     deployments = asyncio.run(client.list_deployments())
 
-    if not deployments:
-        rprint(f"[{WARNING}]No deployments found for project {client.project_id}[/]")
-        return None
-
-    choices = []
-    for deployment in deployments:
-        deployment_id = deployment.id
-        status = deployment.status
-        choices.append(
-            questionary.Choice(
-                title=f"{deployment_id} - {status}",
-                value=deployment_id,
-            )
-        )
-
-    return questionary.select("Select deployment:", choices=choices).ask()
+    return select_or_exit(
+        [
+            (deployment.id, f"{deployment.id} - {deployment.status}")
+            for deployment in deployments
+        ],
+        "Select deployment:",
+        hint_flag="<deployment_id>",
+        hint_command="llamactl deployments get",
+        empty_message=f"No deployments found for project {client.project_id}",
+        interactive=interactive,
+    )

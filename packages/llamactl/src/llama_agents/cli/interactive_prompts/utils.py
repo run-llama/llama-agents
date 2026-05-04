@@ -1,9 +1,8 @@
 """Shared utilities for CLI operations"""
 
-import questionary
+import click
+from llama_agents.cli.interactive import is_interactive_session
 from rich.console import Console
-
-from .session_utils import is_interactive_session
 
 console = Console()
 
@@ -17,4 +16,4 @@ def confirm_action(message: str, default: bool = False) -> bool:
     if not is_interactive_session():
         return default
 
-    return questionary.confirm(message, default=default).ask() or False
+    return click.confirm(message, default=default)
