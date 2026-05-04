@@ -1,5 +1,13 @@
 # llama-agents-control-plane
 
+## 0.12.2
+
+### Patch Changes
+
+- c3fac21: Validate `appserver_version` as a public PEP 440 version
+- Updated dependencies [c3fac21]
+  - llama-agents-core@0.10.2
+
 ## 0.12.1
 
 ### Patch Changes
