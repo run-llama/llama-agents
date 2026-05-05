@@ -22,7 +22,7 @@ Commands:
 - `template`: Print a YAML scaffold for a new deployment
 - `delete NAME`: Delete a deployment
 - `delete -f FILE`: Delete the deployment named in a YAML file
-- `update NAME`: Redeploy at the latest commit
+- `update NAME`: Resolve a git ref again and start a new release
 - `history NAME`: Show release history
 - `rollback NAME`: Roll back to an earlier git SHA
 - `logs NAME`: Fetch or stream deployment logs
@@ -32,7 +32,7 @@ Notes:
 
 - `-o json` and `-o yaml` are for scripts. Status messages go to stderr; structured data goes to stdout.
 - `-f -` reads YAML from stdin on commands that accept `-f`.
-- `repo_url: ""` in apply YAML means push the current local working tree. Use `--no-push` when you want to save deployment config without pushing code.
+- `repo_url: ""` in apply YAML means push the current local working tree. Push-capable deployment mutations support `--no-push` when you have already pushed separately or want the server to use the revision it can already resolve.
 
 ## Commands
 
@@ -178,12 +178,14 @@ llamactl deployments delete -f deployment.yaml
 llamactl deployments update NAME [--git-ref REF] [--no-push] [--project PROJECT]
 ```
 
-Redeploys using the latest commit for the deployment's configured git ref. Use `--git-ref` to switch to a branch, tag, or commit. For push-mode deployments, local code is pushed first unless `--no-push` is set.
+Resolves the deployment's configured git ref again and starts a new release from the resulting commit. Use `--git-ref` to switch to a branch, tag, or commit before resolving.
+
+For push-mode deployments, `update` mirrors local code before resolving the ref. Use `--no-push` if you already pushed separately or want to redeploy the revision already available to the server.
 
 Flags:
 
 - `--git-ref REF`: Branch, tag, or commit SHA to deploy
-- `--no-push`: Skip pushing local code for push-mode deployments
+- `--no-push`: Skip mirroring local code for push-mode deployments
 - `--project PROJECT`: Override the active project
 
 Examples:
