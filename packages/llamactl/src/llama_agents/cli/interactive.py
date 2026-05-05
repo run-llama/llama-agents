@@ -73,6 +73,7 @@ def select_or_exit(
         menu_cursor_style=("bold",),
         menu_highlight_style=("bold",),
         search_highlight_style=("fg_yellow", "bold"),
+        search_key=None,
         skip_empty_entries=True,
     )
     selected_index = menu.show()
