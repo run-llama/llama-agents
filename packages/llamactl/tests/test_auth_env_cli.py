@@ -91,11 +91,11 @@ def test_auth_env_add_interactive_prompts_for_url() -> None:
         assert result.exit_code == 0
         mock_service.create_or_update_environment.assert_called_once_with(env)
 
-    # Non-interactive missing URL should error
+    # Non-interactive missing URL should error with hint
     with patch(_INTERACTIVE_PATCH, return_value=False):
         result = runner.invoke(app, ["auth", "env", "add"])
     assert result.exit_code != 0
-    assert "required when not interactive" in result.output
+    assert "Pass <api_url>" in result.output
 
 
 def test_auth_env_delete_argument_and_prompt() -> None:
@@ -125,8 +125,13 @@ def test_auth_env_delete_argument_and_prompt() -> None:
         assert result.exit_code == 0
         mock_service.delete_environment.assert_called_once_with("https://e2")
 
-    # Non-interactive missing URL should error
-    with patch(_INTERACTIVE_PATCH, return_value=False):
+    # Non-interactive missing URL should list envs and hint
+    with (
+        patch("llama_agents.cli.config.env_service.service") as mock_service,
+        patch(_INTERACTIVE_PATCH, return_value=False),
+    ):
+        mock_service.list_environments.return_value = envs
+        mock_service.get_current_environment.return_value = envs[0]
         result = runner.invoke(app, ["auth", "env", "delete"])
     assert result.exit_code != 0
-    assert "required when not interactive" in result.output
+    assert "Pass <api_url>" in result.output

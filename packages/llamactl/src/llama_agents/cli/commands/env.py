@@ -68,11 +68,12 @@ def list_environments_cmd(output: str) -> None:
 @global_options
 def add_environment_cmd(api_url: str | None) -> None:
     try:
-        interactive = is_interactive_session()
         service = _env_service()
         if not api_url:
-            if not interactive:
-                raise click.ClickException("API URL is required when not interactive")
+            if not is_interactive_session():
+                raise click.ClickException(
+                    "Pass <api_url> as an argument. To see existing environments, run: llamactl auth env list"
+                )
             current_env = service.get_current_environment()
             entered = click.prompt(
                 "Enter control plane API URL",
@@ -103,11 +104,8 @@ def add_environment_cmd(api_url: str | None) -> None:
 @global_options
 def delete_environment_cmd(api_url: str | None) -> None:
     try:
-        interactive = is_interactive_session()
         service = _env_service()
         if not api_url:
-            if not interactive:
-                raise click.ClickException("API URL is required when not interactive")
             result = _select_environment(
                 service.list_environments(),
                 service.get_current_environment(),
@@ -134,20 +132,16 @@ def delete_environment_cmd(api_url: str | None) -> None:
 @global_options
 def switch_environment_cmd(api_url: str | None) -> None:
     try:
-        interactive = is_interactive_session()
         service = _env_service()
         selected_url = api_url
 
-        if not selected_url and interactive:
+        if not selected_url:
             result = _select_environment(
                 service.list_environments(),
                 service.get_current_environment(),
                 "Select environment",
             )
             selected_url = result.api_url
-
-        if not selected_url:
-            raise click.ClickException("API URL is required when not interactive")
 
         selected_url = selected_url.rstrip("/")
 

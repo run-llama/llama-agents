@@ -18,7 +18,6 @@ from llama_agents.cli.templates import (
     TemplateOption,
 )
 from rich import print as rprint
-from rich.text import Text
 
 _ClickPath = getattr(click, "Path")
 
@@ -82,20 +81,18 @@ def _create(template: str | None, dir: Path | None, force: bool) -> None:
         )
         raise Exit(1)
 
-    if template is None and interactive:
-        rprint(
-            "[bold]Select a template to start from.[/bold] Either with javascript frontend UI, or just a python workflow that can be used as an API."
-        )
+    if template is None:
+        if interactive:
+            rprint(
+                "[bold]Select a template to start from.[/bold] Either with javascript frontend UI, or just a python workflow that can be used as an API."
+            )
         template = (
             select_or_exit(
                 [
                     ("", ""),
-                    *[(o.id, f"{o.name} - {o.description}") for o in UI_TEMPLATES],
+                    *[(o.id, f"{o.id} - {o.description}") for o in UI_TEMPLATES],
                     ("", ""),
-                    *[
-                        (o.id, f"{o.name} - {o.description}")
-                        for o in HEADLESS_TEMPLATES
-                    ],
+                    *[(o.id, f"{o.id} - {o.description}") for o in HEADLESS_TEMPLATES],
                 ],
                 "",
                 hint_flag="--template",
@@ -104,12 +101,6 @@ def _create(template: str | None, dir: Path | None, force: bool) -> None:
             or None
         )  # empty-string separators are not valid selections
     if template is None:
-        options = [o.id for o in ALL_TEMPLATES]
-        rprint(
-            Text(
-                f"No template selected. Select a template or pass a template name with --template <{'|'.join(options)}>"
-            )
-        )
         raise Exit(1)
     if dir is None:
         if interactive:

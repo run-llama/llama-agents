@@ -297,11 +297,10 @@ def test_init_non_interactive_requires_template(tmp_path: Path) -> None:
         ["init"],
     )
 
-    # Should exit with error
+    # Should exit with error, listing templates and hinting at --template
     assert result.exit_code == 1
-    # Should mention template is required
-    assert "No template selected" in result.output
-    assert "template" in result.output.lower()
+    assert "basic" in result.output
+    assert "Pass --template to choose one" in result.output
 
 
 def test_init_non_interactive_defaults_directory(tmp_path: Path) -> None:

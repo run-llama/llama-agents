@@ -112,7 +112,7 @@ def test_auth_logout_missing() -> None:
         assert "No profile selected" in result.output
 
 
-def test_auth_project_non_interactive_requires_arg() -> None:
+def test_auth_project_non_interactive_lists_options_and_hints() -> None:
     runner = CliRunner()
     with (
         patch(
@@ -120,12 +120,25 @@ def test_auth_project_non_interactive_requires_arg() -> None:
             return_value=MagicMock(name="p", project_id="x"),
         ),
         patch(
+            "llama_agents.cli.commands.auth._discover_organization",
+            return_value=None,
+        ),
+        patch(
+            "llama_agents.cli.commands.auth._list_projects",
+            return_value=[
+                MagicMock(
+                    project_id="abc-123", project_name="My Project", deployment_count=2
+                ),
+            ],
+        ),
+        patch(
             "llama_agents.cli.commands.auth.is_interactive_session", return_value=False
         ),
     ):
         result = runner.invoke(app, ["auth", "project"])
         assert result.exit_code != 0
-        assert "No --project-id provided" in result.output
+        assert "abc-123" in result.output
+        assert "Pass <project_id> to choose one" in result.output
 
 
 def test_auth_project_interactive_sets_selected() -> None:

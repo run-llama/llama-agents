@@ -333,7 +333,10 @@ def _maybe_select_project_for_env_key() -> None:
         # Multiple: prompt selection
         choice = select_or_exit(
             [
-                (p.project_id, f"{p.project_name} ({p.deployment_count} deployments)")
+                (
+                    p.project_id,
+                    f"{p.project_id}  {p.project_name} ({p.deployment_count} deployments)",
+                )
                 for p in projects
             ],
             "Select a project",

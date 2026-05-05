@@ -323,14 +323,8 @@ def list_organizations(output: str) -> None:
 @global_options
 def change_project(project_id: str | None, org_id: str | None) -> None:
     """Change the active project for the current profile"""
-    interactive = is_interactive_session()
     auth_svc = _get_service().current_auth_service()
     profile = validate_authenticated_profile()
-
-    if project_id is None and not interactive:
-        raise click.ClickException(
-            "No --project-id provided. Run `llamactl auth project --help` for more information."
-        )
 
     # Discover org if not explicitly provided (profile exists, credentials available)
     org = None
@@ -365,7 +359,7 @@ def change_project(project_id: str | None, org_id: str | None) -> None:
         items = [
             (
                 project.project_id,
-                f"{project.project_name} ({project.deployment_count} deployments)",
+                f"{project.project_id}  {project.project_name} ({project.deployment_count} deployments)",
             )
             for project in projects
         ]
@@ -827,7 +821,10 @@ def _select_or_enter_project(
         return projects[0].project_id
     return select_or_exit(
         [
-            (p.project_id, f"{p.project_name} ({p.deployment_count} deployments)")
+            (
+                p.project_id,
+                f"{p.project_id}  {p.project_name} ({p.deployment_count} deployments)",
+            )
             for p in projects
         ],
         "Select a project",
