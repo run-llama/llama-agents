@@ -9,76 +9,94 @@ Cloud deployments of LlamaAgents are now in beta preview and broadly available f
 
 ## Getting Started with `llamactl`
 
-LlamaAgents uses the [`llamactl` CLI for development](https://pypi.org/project/llamactl/). `llamactl` bootstraps an application server that manages running and persisting your workflows, and a control plane for managing cloud deployments of applications. It has some system pre-requisites that must be installed in order to work:
+`llamactl` is the local development and deployment CLI for LlamaAgents. It can scaffold an app, run the app server locally, and manage cloud deployments from your terminal.
 
 :::tip[Prefer a UI?]
-You can also deploy starter templates directly from the LlamaCloud dashboard—no CLI or dependencies required. See [Click-to-Deploy from LlamaCloud](/python/llamaagents/llamactl/click-to-deploy).
+You can also deploy starter templates directly from the LlamaCloud dashboard. See [Click-to-Deploy from LlamaCloud](/python/llamaagents/llamactl/click-to-deploy).
 :::
 
-- Make sure you have [`uv`](https://docs.astral.sh/uv/getting-started/installation/) installed. `uv` is a Python package manager and build tool. `llamactl` integrates with it in order to quickly manage your project's build and dependencies.
-- Windows support is experimental (as of version `0.3.14`) and requires some adjustments to run `llamactl` without issues: see [our dedicated guide](https://github.com/run-llama/llamactl-windows) on the topic. For a better user experience, it is still advisable to use WSL2 (e.g., Ubuntu) and follow the Linux instructions. See [Install WSL](https://learn.microsoft.com/windows/wsl/install).
-- Likewise, Node.js is required for UI development. For macOS and Linux, we recommend installing Node via [`nvm`](https://github.com/nvm-sh/nvm) to manage versions. You can use your node package manager of choice (`npm`, `pnpm`, or `yarn`). For Windows, we recommend using [Chocolatey](https://community.chocolatey.org/packages/nodejs) for the installation process.
-- Ensure `git` is installed:
-  - macOS: [Install via Xcode Command Line Tools](https://git-scm.com/download/mac) or Homebrew (`brew install git`)
-  - Linux: Follow your distro instructions: [git-scm.com/download/linux](https://git-scm.com/download/linux)
-  - Windows: use [Chocolatey](https://community.chocolatey.org/packages/git.install)
+Before you start:
 
+- Install [`uv`](https://docs.astral.sh/uv/getting-started/installation/). `llamactl` uses it to manage Python environments and project dependencies.
+- Install `git`. Cloud deployments are built from source repositories.
+- Install Node.js if you are using a template with a frontend. For macOS and Linux, we recommend [`nvm`](https://github.com/nvm-sh/nvm). For Windows, we recommend [Chocolatey](https://community.chocolatey.org/packages/nodejs).
+- Windows support is experimental. For the best experience, use WSL2. If you run directly on Windows, see [the Windows guide](https://github.com/run-llama/llamactl-windows).
 
 ## Install
 
-Choose one:
+Install `llamactl` with `pip`:
 
-- Try without installing:
+```bash
+pip install llamactl
+```
+
+Or run it on demand with `uvx`:
+
 ```bash
 uvx llamactl --help
 ```
 
-- Install globally (recommended):
+If you use `uvx`, replace `llamactl` with `uvx llamactl` in the commands below.
+
+## Authenticate
+
+Log in with your browser:
+
 ```bash
-uv tool install -U llamactl
-llamactl --help
+llamactl auth login
 ```
+
+If browser login is not available, use an API key and project ID:
+
+```bash
+llamactl auth token --api-key "$LLAMA_CLOUD_API_KEY" --project "$LLAMA_AGENTS_PROJECT_ID"
+```
+
+For CI or other non-interactive environments, you can skip the stored profile and set environment variables instead:
+
+```bash
+export LLAMA_CLOUD_API_KEY="llx-..."
+export LLAMA_AGENTS_PROJECT_ID="project-id"
+```
+
+See [`llamactl auth`](/python/llamaagents/llamactl-reference/commands-auth) and [`llamactl auth env`](/python/llamaagents/llamactl-reference/commands-auth-env) for profile and environment commands.
 
 ## Initialize a Project
 
-`llamactl` includes starter templates for both full‑stack UI apps, and headless (API only) workflows. Pick a template and customize it.
-
-:::warning
-Since llamactl uses symlinks when initializing, you might run into some permission issues with Windows. We advise you to activate Developer Settings using `start ms-settings:developers` before running `llamactl init`.
-:::
+Create a new LlamaAgents project:
 
 ```bash
 llamactl init
 ```
 
-This will prompt for some details, and create a Python module that contains LlamaIndex workflows, plus an optional UI you can serve as a static frontend.
+`llamactl init` opens a template picker and writes a project scaffold. Templates may include Python workflows only, or a Python app plus a frontend UI.
 
-:::info
-When you run `llamactl init`, the scaffold also includes AI assistant-facing docs: `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md`. These contain quick references and instructions for using LlamaIndex libraries to assist coding. These files are optional and safe to customize or remove — they do not affect your builds, runtime, or deployments.
+:::warning
+`llamactl init` uses symlinks. On Windows, enable Developer Mode with `start ms-settings:developers` before running the command.
 :::
 
-Application configuration is managed within your project's `pyproject.toml`, where you can define Python workflow instances that should be served, environment details, and configuration for how the UI should be built. See the [Deployment Config Reference](/python/llamaagents/llamactl/configuration-reference) for details on all configurable fields.
+:::info
+The scaffold may include assistant-facing files such as `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md`. They are optional and do not affect builds, runtime, or deployments.
+:::
 
-## Develop and Run Locally
+Application configuration lives in your project's `pyproject.toml`, or in `llama_agents.yaml` / `llama_agents.toml`. See the [Deployment Config Reference](/python/llamaagents/llamactl/configuration-reference) for the schema.
 
-Once you have a project, you can run the dev server for your application:
+## Run Locally
+
+From the project directory, start the local development server:
 
 ```bash
 llamactl serve
 ```
 
-`llamactl serve` will
+`llamactl serve` installs dependencies, reads the workflows configured for the app, serves them as an API, and proxies the frontend development server when the app has a UI.
 
-1. Install all required dependencies
-2. Read the workflows configured in your app’s `pyproject.toml` and serve them as an API
-3. Start up and proxy the frontend development server, so you can seamlessly write a full stack application.
-
-For example, with the following configuration, the app will be served at `http://localhost:4501/deployments/my-package`. Make a `POST` request to `/deployments/my-package/workflows/my-workflow/run` to trigger the workflow in `src/my_package/my_workflow.py`.
+For example, this configuration serves `my-workflow` under the local deployment named `my-package`:
 
 ```toml
 [project]
 name = "my-package"
-# ...
+
 [tool.llamaagents.workflows]
 my-workflow = "my_package.my_workflow:workflow"
 
@@ -88,61 +106,129 @@ directory = "ui"
 
 ```py
 # src/my_package/my_workflow.py
-# from workflows import ...
-# ...
 workflow = MyWorkflow()
 ```
 
-At this point, you can get to coding. The development server will detect changes as you save files. It will even resume in-progress workflows!
+The local API is available at `http://localhost:4501/deployments/my-package`. To run the workflow, make a `POST` request to `/deployments/my-package/workflows/my-workflow/run`.
 
-For more information about CLI flags available, see [`llamactl serve`](/python/llamaagents/llamactl-reference/commands-serve).
-
-For a more detailed reference on how to define and expose workflows, see [Workflows & App Server API](/python/llamaagents/llamactl/workflow-api).
+For flags, see [`llamactl serve`](/python/llamaagents/llamactl-reference/commands-serve). For workflow API details, see [Workflows & App Server API](/python/llamaagents/llamactl/workflow-api).
 
 ## Create a Cloud Deployment
 
-LlamaAgents applications can be rapidly deployed just by pointing to a source git repository. With the provided repository configuration, LlamaCloud will clone, build, and serve your app. It can even access GitHub private repositories by installing the [GitHub app](https://github.com/apps/llama-deploy).
-
-Example:
+Cloud deployments are built from a Git repository. Commit and push your project first:
 
 ```bash
 git remote add origin https://github.com/org/repo
 git add -A
-git commit -m 'Set up new app'
+git commit -m "Set up LlamaAgents app"
 git push -u origin main
 ```
 
-Then, create a deployment:
+Then create the deployment:
 
 ```bash
 llamactl deployments create
 ```
 
-:::info
-The first time you run this, you'll be prompted to log into LlamaCloud.
+`deployments create` opens a YAML deployment spec in your `$EDITOR`. Review the detected repository, deployment config path, Git ref, and secrets. Save and close the file to create the deployment.
 
-Username/password sign-in is not yet supported. If you do not have a supported social sign-in provider, you can use token-based authentication via `llamactl auth token`. See [`llamactl auth`](/python/llamaagents/llamactl-reference/commands-auth) for details.
-:::
+For non-interactive creation, pass a file:
 
-This will open an interactive Terminal UI (TUI). You can tab through fields, or even point and click with your mouse if your terminal supports it. All required fields should be automatically detected from your environment, but can be customized:
+```bash
+llamactl deployments create -f deployment.yaml
+```
 
-- Name: Human‑readable and URL‑safe; appears in your deployment URL
-- Git repository: Public HTTP or private GitHub (install the GitHub app for private repos)
-- Git branch: Branch to pull and build from (use `llamactl deployments update` to roll forward). This can also be a tag or a git commit.
-- Secrets: Pre‑filled from your local `.env`; edit as needed. These cannot be read again after creation.
+Private GitHub repositories require LlamaCloud to have repository access. If access is missing, `llamactl` will return an error with the next step.
 
-When you save, LlamaAgents will verify that it has access to your repository (and prompt you to install the GitHub app if not)
+## Declarative Deployments
 
-After creation, the TUI will show deployment status and logs.
-- You can later use `llamactl deployments get` to view again.
-- You can add secrets or change branches with `llamactl deployments edit`.
-- If you update your source repo, run `llamactl deployments update` to roll a new version. If you are interested in automating the deployment updates with GitHub Actions, you can read the [Continuous Deployment guide](/python/llamaagents/llamactl/cd-with-github-actions/)
+For repeatable deploys, generate an apply-shaped deployment spec:
 
-## Alternative Ways to Deploy
+```bash
+llamactl deployments template > deployment.yaml
+```
 
-If you prefer a self-hosted deployments, `llamactl` has utilities to export your workflows to container files, so that you can easily build images and deploy your agent workflow anywhere.
+Edit the file, then apply it:
 
-Read more about this in the [`pkg` command reference](/python/llamaagents/llamactl-reference/commands-pkg/).
+```bash
+llamactl deployments apply -f deployment.yaml
+```
+
+`apply` creates the deployment when it does not exist and updates it when it does. Secret values can reference local environment variables:
+
+```yaml
+name: my-agent
+spec:
+  repo_url: https://github.com/org/repo
+  deployment_file_path: "."
+  git_ref: main
+  secrets:
+    OPENAI_API_KEY: ${OPENAI_API_KEY}
+```
+
+Run a dry run before changing cloud state:
+
+```bash
+llamactl deployments apply -f deployment.yaml --dry-run
+```
+
+## Inspect and Stream Logs
+
+List deployments in the active project:
+
+```bash
+llamactl deployments get
+```
+
+Fetch one deployment:
+
+```bash
+llamactl deployments get NAME
+```
+
+Stream logs:
+
+```bash
+llamactl deployments logs NAME --follow
+```
+
+Use `-o json` or `-o yaml` with `deployments get` when another tool needs structured output.
+
+## Update a Deployment
+
+If the deployment tracks a branch, re-resolve that branch and start a new release from the latest commit:
+
+```bash
+llamactl deployments update NAME
+```
+
+To point at a specific branch, tag, or commit:
+
+```bash
+llamactl deployments update NAME --git-ref main
+```
+
+For push-mode deployments, `update` pushes local code before resolving the ref. If you have already pushed separately, use `--no-push`:
+
+```bash
+llamactl deployments update NAME --no-push
+```
+
+To edit the deployment spec in your editor:
+
+```bash
+llamactl deployments edit NAME
+```
+
+Or keep the spec in version control and re-apply it:
+
+```bash
+llamactl deployments apply -f deployment.yaml
+```
+
+## Package for Self-Hosted Deployments
+
+If you prefer to build and deploy containers yourself, use `llamactl pkg` to generate container files for your app. See the [`pkg` command reference](/python/llamaagents/llamactl-reference/commands-pkg/).
 
 ---
 

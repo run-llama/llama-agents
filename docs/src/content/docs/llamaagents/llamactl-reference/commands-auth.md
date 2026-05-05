@@ -13,29 +13,37 @@ llamactl auth [COMMAND] [options]
 
 Commands:
 
-- `token [--project-id ID] [--api-key KEY] [--interactive/--no-interactive]`: Create profile from API key; validates token and selects a project
+- `token [--project PROJECT] [--api-key KEY]`: Create profile from API key; validates token and selects a project
 - `login`: Login via web browser (OIDC device flow) and create a profile
 - `list`: List login profiles in the current environment
-- `switch [NAME] [--interactive/--no-interactive]`: Set currently logged in user/token
-- `logout [NAME] [--interactive/--no-interactive]`: Delete a login and its local data
-- `project [PROJECT_ID] [--interactive/--no-interactive]`: Change the active project for the current profile
+- `switch [NAME]`: Set currently logged in user/token
+- `logout [NAME]`: Delete a login and its local data
+- `organizations [-o text|json|yaml|wide]`: List organizations available to the current profile
+- `project [PROJECT_ID] [--org ORG_ID]`: Change the active project for the current profile
 - `inject [--env-file PATH]`: Write profile credentials to a `.env` file
 
 Notes:
 
 - Profiles are filtered by the current environment (`llamactl auth env switch`).
-- Non-interactive `token` requires both `--api-key` and `--project-id`.
+- `auth token` creates a profile without prompts when both `--api-key` and `--project` are supplied.
 
 ## Commands
 
 ### Token
 
 ```bash
-llamactl auth token [--project-id ID] [--api-key KEY] [--interactive/--no-interactive]
+llamactl auth token [--project PROJECT] [--api-key KEY]
 ```
 
-- Interactive: Prompts for API key (masked), validates it by listing projects, then lets you choose a project. Creates an auto‑named profile and sets it current.
-- Non‑interactive: Requires both `--api-key` and `--project-id`.
+Without flags, prompts for an API key, validates it by listing projects, then lets you choose a project. Creates an auto‑named profile and sets it current.
+
+With both `--api-key` and `--project`, creates the profile without prompts.
+
+Example:
+
+```bash
+llamactl auth token --api-key llx-... --project your-project-id
+```
 
 ### Login
 
@@ -56,31 +64,48 @@ Shows a table of profiles for the current environment with name and active proje
 ### Switch
 
 ```bash
-llamactl auth switch [NAME] [--interactive/--no-interactive]
+llamactl auth switch [NAME]
 ```
 
-Set the current profile. If `NAME` is omitted in interactive mode, you will be prompted to select one.
+Set the current profile. If `NAME` is omitted in a TTY, choose from the available profiles. Scripts should pass `NAME`.
 
 ### Logout
 
 ```bash
-llamactl auth logout [NAME] [--interactive/--no-interactive]
+llamactl auth logout [NAME]
 ```
 
 Delete a profile. If the deleted profile is current, the current selection is cleared.
 
+### Organizations
+
+```bash
+llamactl auth organizations [-o text|json|yaml|wide]
+```
+
+List organizations available to the current profile. Text output marks the default organization.
+
+Examples:
+
+```bash
+llamactl auth organizations
+llamactl auth organizations -o json
+```
+
 ### Project
 
 ```bash
-llamactl auth project [PROJECT_ID] [--interactive/--no-interactive]
+llamactl auth project [PROJECT_ID] [--org ORG_ID]
 ```
 
-Change the active project for the current profile. In interactive mode, select from server projects. In environments that don't require auth, you can also enter a project ID.
+Change the active project for the current profile. If `PROJECT_ID` is omitted in a TTY, choose from server projects. In environments that don't require auth, you can also enter a project ID.
+
+- `--org ORG_ID`: Scope project lookup to an organization.
 
 ### Inject
 
 ```bash
-llamactl auth inject [--env-file PATH] [--interactive/--no-interactive]
+llamactl auth inject [--env-file PATH]
 ```
 
 Write `LLAMA_CLOUD_API_KEY`, `LLAMA_CLOUD_BASE_URL`, and `LLAMA_AGENTS_PROJECT_ID` from the current profile into a `.env` file. Creates the file if it doesn't exist; overwrites existing values.
@@ -107,7 +132,7 @@ Example:
 ```bash
 export LLAMA_CLOUD_API_KEY="llx-..."
 export LLAMA_AGENTS_PROJECT_ID="your-project-id"
-llamactl deployments list
+llamactl deployments get
 ```
 
 Or generate a `.env` from your current profile with [`llamactl auth inject`](#inject).

@@ -75,11 +75,16 @@ directory = "./ui"
 ```bash
 llamactl auth env list              # List environments
 llamactl auth env switch <URL>      # Switch current environment
-llamactl auth token                 # Create/select profile via API key
-llamactl deployment create          # Create new deployment
-llamactl deployment list            # List deployments
-llamactl deployment get <id>        # Get deployment details
-llamactl deployment delete <id>     # Delete deployment
+llamactl auth token --project <PROJECT_ID>  # Create/select profile via API key
+llamactl deployments template > deployment.yaml  # Generate apply YAML
+llamactl deployments apply -f deployment.yaml    # Create or update from YAML
+llamactl deployments create          # Create new deployment in $EDITOR
+llamactl deployments get             # List deployments
+llamactl deployments get NAME        # Get deployment details
+llamactl deployments edit NAME       # Edit deployment in $EDITOR
+llamactl deployments update NAME     # Re-resolve current git ref and release it
+llamactl deployments logs NAME --follow  # Stream deployment logs
+llamactl deployments delete NAME     # Delete deployment
 ```
 
 ### Commands Reference
