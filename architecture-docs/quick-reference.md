@@ -82,7 +82,7 @@ llamactl deployments create          # Create new deployment in $EDITOR
 llamactl deployments get             # List deployments
 llamactl deployments get NAME        # Get deployment details
 llamactl deployments edit NAME       # Edit deployment in $EDITOR
-llamactl deployments update NAME     # Deploy latest code for current git ref
+llamactl deployments update NAME     # Re-resolve current git ref and release it
 llamactl deployments logs NAME --follow  # Stream deployment logs
 llamactl deployments delete NAME     # Delete deployment
 ```

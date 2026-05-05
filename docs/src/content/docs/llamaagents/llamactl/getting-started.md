@@ -196,7 +196,7 @@ Use `-o json` or `-o yaml` with `deployments get` when another tool needs struct
 
 ## Update a Deployment
 
-If the deployment tracks a branch, update it to the latest commit on that branch:
+If the deployment tracks a branch, re-resolve that branch and start a new release from the latest commit:
 
 ```bash
 llamactl deployments update NAME
@@ -206,6 +206,12 @@ To point at a specific branch, tag, or commit:
 
 ```bash
 llamactl deployments update NAME --git-ref main
+```
+
+For push-mode deployments, `update` pushes local code before resolving the ref. If you have already pushed separately, use `--no-push`:
+
+```bash
+llamactl deployments update NAME --no-push
 ```
 
 To edit the deployment spec in your editor:
