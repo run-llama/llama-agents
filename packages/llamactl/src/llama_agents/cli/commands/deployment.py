@@ -1164,10 +1164,6 @@ def edit_deployment(
         deployment_id = select_deployment(
             deployment_id, interactive=interactive, project_id_override=project
         )
-        if not deployment_id:
-            rprint(f"[{WARNING}]No deployment selected[/]")
-            return
-
         effective_project, current_deployment = asyncio.run(
             _fetch_deployment_for_editor(project=project, deployment_id=deployment_id)
         )

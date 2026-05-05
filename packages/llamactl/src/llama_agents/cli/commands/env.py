@@ -112,11 +112,8 @@ def delete_environment_cmd(api_url: str | None, interactive: bool) -> None:
                 service.list_environments(),
                 service.get_current_environment(),
                 "Select environment to delete",
+                interactive=interactive,
             )
-
-            if not result:
-                rprint(f"[{WARNING}]No environment selected[/]")
-                return
             api_url = result.api_url
 
         if api_url is None:
@@ -147,16 +144,11 @@ def switch_environment_cmd(api_url: str | None, interactive: bool) -> None:
                 service.list_environments(),
                 service.get_current_environment(),
                 "Select environment",
+                interactive=interactive,
             )
-            if not result:
-                rprint(f"[{WARNING}]No environment selected[/]")
-                return
             selected_url = result.api_url
 
         if not selected_url:
-            if interactive:
-                rprint(f"[{WARNING}]No environment selected[/]")
-                return
             raise click.ClickException("API URL is required when not interactive")
 
         selected_url = selected_url.rstrip("/")
@@ -203,7 +195,8 @@ def _select_environment(
     envs: list[Environment],
     current_env: Environment,
     message: str = "Select environment",
-) -> Environment | None:
+    interactive: bool = True,
+) -> Environment:
     if not envs:
         raise click.ClickException(
             "No environments found. This is a bug and shouldn't happen."
@@ -219,5 +212,5 @@ def _select_environment(
         message,
         hint_flag="<api_url>",
         hint_command="llamactl auth env list",
-        interactive=True,
+        interactive=interactive,
     )

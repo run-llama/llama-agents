@@ -12,6 +12,8 @@ import click
 
 T = TypeVar("T")
 
+_TERM_MENU_UNSUPPORTED = sys.platform == "win32"
+
 
 @functools.cache
 def is_interactive_session() -> bool:
@@ -21,6 +23,24 @@ def is_interactive_session() -> bool:
     if os.environ.get("TERM") == "dumb":
         return False
     return True
+
+
+def _raise_non_interactive(
+    entries: list[tuple[T, str]],
+    title: str,
+    hint_flag: str,
+    hint_command: str | None,
+) -> T:
+    """Print available choices to stderr and raise with a hint."""
+    if title:
+        click.echo(title, err=True)
+    for _, label in entries:
+        if label:
+            click.echo(f"- {label}", err=True)
+    hint = f"Pass {hint_flag} to choose one."
+    if hint_command is not None:
+        hint += f" To inspect choices, run: {hint_command}"
+    raise click.ClickException(hint)
 
 
 def select_or_exit(
@@ -36,18 +56,15 @@ def select_or_exit(
         raise click.ClickException(empty_message or "No items to select")
 
     should_prompt = is_interactive_session() if interactive is None else interactive
-    if not should_prompt:
-        click.echo(title, err=True)
-        for _, label in entries:
-            if label:
-                click.echo(f"- {label}", err=True)
-        hint = f"Pass {hint_flag} to choose one."
-        if hint_command is not None:
-            hint += f" To inspect choices, run: {hint_command}"
-        raise click.ClickException(hint)
 
-    # Deferred for CLI startup: only commands that actually show a menu need STM.
-    from simple_term_menu import TerminalMenu
+    if not should_prompt or _TERM_MENU_UNSUPPORTED:
+        return _raise_non_interactive(entries, title, hint_flag, hint_command)
+
+    try:
+        # Deferred for CLI startup: only commands that actually show a menu pay the cost.
+        from simple_term_menu import TerminalMenu
+    except ImportError:
+        return _raise_non_interactive(entries, title, hint_flag, hint_command)
 
     menu = TerminalMenu(
         [label for _, label in entries],

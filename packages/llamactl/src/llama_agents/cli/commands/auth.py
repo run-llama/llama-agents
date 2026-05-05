@@ -834,20 +834,17 @@ def _select_or_enter_project(
 ) -> str | None:
     if not projects:
         return None
-    # select the only authorized project if there is only one
-    elif len(projects) == 1 and requires_auth:
+    if len(projects) == 1 and requires_auth:
         return projects[0].project_id
-    else:
-        return select_or_exit(
-            [
-                (p.project_id, f"{p.project_name} ({p.deployment_count} deployments)")
-                for p in projects
-            ],
-            "Select a project",
-            hint_flag="<project_id>",
-            hint_command="llamactl auth project <project_id>",
-            interactive=True,
-        )
+    return select_or_exit(
+        [
+            (p.project_id, f"{p.project_name} ({p.deployment_count} deployments)")
+            for p in projects
+        ],
+        "Select a project",
+        hint_flag="<project_id>",
+        hint_command="llamactl auth project <project_id>",
+    )
 
 
 def _token_flow_for_env(auth_service: AuthService) -> Auth:

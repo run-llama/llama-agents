@@ -92,18 +92,24 @@ def _create(
         rprint(
             "[bold]Select a template to start from.[/bold] Either with javascript frontend UI, or just a python workflow that can be used as an API."
         )
-        template = select_or_exit(
-            [
-                ("", ""),
-                *[(o.id, f"{o.name} - {o.description}") for o in UI_TEMPLATES],
-                ("", ""),
-                *[(o.id, f"{o.name} - {o.description}") for o in HEADLESS_TEMPLATES],
-            ],
-            "",
-            hint_flag="--template",
-            hint_command="llamactl init --help",
-            interactive=interactive,
-        )
+        template = (
+            select_or_exit(
+                [
+                    ("", ""),
+                    *[(o.id, f"{o.name} - {o.description}") for o in UI_TEMPLATES],
+                    ("", ""),
+                    *[
+                        (o.id, f"{o.name} - {o.description}")
+                        for o in HEADLESS_TEMPLATES
+                    ],
+                ],
+                "",
+                hint_flag="--template",
+                hint_command="llamactl init --help",
+                interactive=interactive,
+            )
+            or None
+        )  # empty-string separators are not valid selections
     if template is None:
         options = [o.id for o in ALL_TEMPLATES]
         rprint(
