@@ -10,6 +10,7 @@ from click.exceptions import Exit
 from llama_agents.cli.app import app
 from llama_agents.cli.interactive import is_interactive_session, select_or_exit
 from llama_agents.cli.options import global_options
+from llama_agents.cli.output import echo_status as _out
 from llama_agents.cli.param_types import TemplateType
 from llama_agents.cli.templates import (
     ALL_TEMPLATES,
@@ -17,7 +18,6 @@ from llama_agents.cli.templates import (
     UI_TEMPLATES,
     TemplateOption,
 )
-from rich import print as rprint
 
 _ClickPath = getattr(click, "Path")
 
@@ -76,14 +76,14 @@ def _create(template: str | None, dir: Path | None, force: bool) -> None:
         has_git = False
 
     if not has_git:
-        rprint(
+        _out(
             "git is required to initialize a template. Make sure you have it installed and available in your PATH."
         )
         raise Exit(1)
 
     if template is None:
         if interactive:
-            rprint(
+            _out(
                 "[bold]Select a template to start from.[/bold] Either with javascript frontend UI, or just a python workflow that can be used as an API."
             )
         template = (
@@ -111,14 +111,14 @@ def _create(template: str | None, dir: Path | None, force: bool) -> None:
             else:
                 return
         else:
-            rprint(f"[yellow]No directory provided. Defaulting to {template}[/]")
+            _out(f"[yellow]No directory provided. Defaulting to {template}[/]")
             dir = Path(template)
 
     resolved_template: TemplateOption | None = next(
         (o for o in ALL_TEMPLATES if o.id == template), None
     )
     if resolved_template is None:
-        rprint(f"Template {template} not found")
+        _out(f"Template {template} not found")
         raise Exit(1)
     if dir.exists():
         is_ok = force or (
@@ -126,7 +126,7 @@ def _create(template: str | None, dir: Path | None, force: bool) -> None:
         )
 
         if not is_ok:
-            rprint(
+            _out(
                 f"[yellow]Try again with another directory or pass --force to overwrite the existing directory '{str(dir)}'[/]"
             )
             raise Exit(1)
@@ -175,7 +175,7 @@ def _create(template: str | None, dir: Path | None, force: bool) -> None:
 
             if inside_existing_repo:
                 # Do not create a nested repo; user likely wants this within the parent repo
-                rprint(
+                _out(
                     "[yellow]Detected an existing Git repository in a parent directory; skipping git initialization for this app.[/]"
                 )
                 # Treat as initialized for purposes of what instructions to show later
@@ -207,50 +207,50 @@ def _create(template: str | None, dir: Path | None, force: bool) -> None:
                     elif isinstance(e, FileNotFoundError):
                         err_msg = "git executable not found"
 
-                    rprint("")
-                    rprint("⚠️  [bold]Skipping git initialization due to an error.[/]")
+                    _out("")
+                    _out("⚠️  [bold]Skipping git initialization due to an error.[/]")
                     if err_msg:
-                        rprint(f"    {err_msg}")
-                    rprint("    You can initialize it manually:")
-                    rprint(
+                        _out(f"    {err_msg}")
+                    _out("    You can initialize it manually:")
+                    _out(
                         "      git init && git add . && git commit -m 'Initial commit'"
                     )
-                    rprint("")
+                    _out("")
     finally:
         os.chdir(original_cwd)
 
     # If git is not available at all, let the user know how to proceed
     if not has_git:
-        rprint("")
-        rprint("⚠️  [bold]Skipping git initialization due to an error.[/]")
-        rprint("    git executable not found")
-        rprint("    You can initialize it manually:")
-        rprint("      git init && git add . && git commit -m 'Initial commit'")
-        rprint("")
+        _out("")
+        _out("⚠️  [bold]Skipping git initialization due to an error.[/]")
+        _out("    git executable not found")
+        _out("    You can initialize it manually:")
+        _out("      git init && git add . && git commit -m 'Initial commit'")
+        _out("")
 
-    rprint(
+    _out(
         f"Successfully created [blue]{dir}[/] using the [blue]{resolved_template.name}[/] template! 🎉 🦙 💾"
     )
-    rprint("")
-    rprint("[bold]To run locally:[/]")
-    rprint(f"    [orange3]cd[/] {dir}")
-    rprint("    [orange3]uvx[/] llamactl serve")
-    rprint("")
-    rprint("[bold]To deploy:[/]")
+    _out("")
+    _out("[bold]To run locally:[/]")
+    _out(f"    [orange3]cd[/] {dir}")
+    _out("    [orange3]uvx[/] llamactl serve")
+    _out("")
+    _out("[bold]To deploy:[/]")
     # Only show manual git init steps if repository failed to initialize earlier
     if not git_initialized:
-        rprint("    [orange3]git[/] init")
-        rprint("    [orange3]git[/] add .")
-        rprint("    [orange3]git[/] commit -m 'Initial commit'")
-        rprint("")
-    rprint("[dim](Create a new repo and add it as a remote)[/]")
-    rprint("")
-    rprint("    [orange3]git[/] remote add origin <your-repo-url>")
-    rprint("    [orange3]git[/] push -u origin main")
-    rprint("")
-    # rprint("  [orange3]uvx[/] llamactl login")
-    rprint("    [orange3]uvx[/] llamactl deploy create")
-    rprint("")
+        _out("    [orange3]git[/] init")
+        _out("    [orange3]git[/] add .")
+        _out("    [orange3]git[/] commit -m 'Initial commit'")
+        _out("")
+    _out("[dim](Create a new repo and add it as a remote)[/]")
+    _out("")
+    _out("    [orange3]git[/] remote add origin <your-repo-url>")
+    _out("    [orange3]git[/] push -u origin main")
+    _out("")
+    # _out("  [orange3]uvx[/] llamactl login")
+    _out("    [orange3]uvx[/] llamactl deploy create")
+    _out("")
 
 
 def _update() -> None:
@@ -266,7 +266,7 @@ def _update() -> None:
             quiet=True,
         )
     except Exception as e:  # scoped to copier errors; type opaque here
-        rprint(f"{e}")
+        _out(f"{e}")
         raise Exit(1)
 
     # Check git status and warn about conflicts
@@ -292,12 +292,12 @@ def _update() -> None:
                     modified_files.append(filename)
 
             if conflicted_files:
-                rprint("")
-                rprint("⚠️  [bold]Files with conflicts detected:[/]")
+                _out("")
+                _out("⚠️  [bold]Files with conflicts detected:[/]")
                 for file in conflicted_files:
-                    rprint(f"    {file}")
-                rprint("")
-                rprint(
+                    _out(f"    {file}")
+                _out("")
+                _out(
                     "Please manually resolve conflicts with a merge editor before proceeding."
                 )
 

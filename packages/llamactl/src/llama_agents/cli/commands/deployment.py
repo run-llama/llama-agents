@@ -21,7 +21,6 @@ from llama_agents.cli.interactive import (
     select_or_exit,
 )
 from llama_agents.cli.param_types import DeploymentType, GitShaType
-from llama_agents.cli.styles import WARNING
 from llama_agents.core.git.git_util import is_git_repo
 from llama_agents.core.schema import LogEvent
 from llama_agents.core.schema.deployments import (
@@ -32,9 +31,9 @@ from llama_agents.core.schema.deployments import (
     DeploymentUpdate,
 )
 from pydantic import ValidationError
-from rich import print as rprint
+from rich.console import Console
 
-from ..app import app, console
+from ..app import app
 from ..apply_yaml import (
     SPEC_FIELDS,
     ApplyYamlError,
@@ -71,6 +70,7 @@ from ..yaml_template import render as render_yaml_template
 
 DeploymentApplyMode = Literal["apply", "create", "update"]
 DeploymentOperationAction = Literal["create", "update"]
+err_console = Console(stderr=True, highlight=False)
 
 
 @dataclass(frozen=True)
@@ -102,6 +102,18 @@ class RepositoryValidationError(click.ClickException):
 
 def _error(path: tuple[str | int, ...], message: str) -> FieldError:
     return FieldError(path=path, message=message)
+
+
+def _warn(message: str) -> None:
+    click.secho(message, fg="yellow", err=True)
+
+
+def _success(message: str) -> None:
+    click.secho(message, fg="green", err=True)
+
+
+def _status(message: str) -> None:
+    click.echo(message, err=True)
 
 
 def _wire_path_from_loc(
@@ -430,7 +442,7 @@ def _open_deployment_yaml_editor(current_text: str) -> str | None:
 
 
 def _editor_cancelled() -> None:
-    rprint(f"[{WARNING}]Cancelled[/]")
+    _warn("Cancelled")
 
 
 def _editor_text_unchanged(current_text: str, last_opened_text: str) -> bool:
@@ -439,17 +451,17 @@ def _editor_text_unchanged(current_text: str, last_opened_text: str) -> bool:
 
 def _editor_noop(mode: DeploymentApplyMode) -> None:
     if mode == "create":
-        rprint(f"[{WARNING}]No changes saved; fill in the YAML before creating[/]")
+        _warn("No changes saved; fill in the YAML before creating")
     else:
-        rprint(f"[{WARNING}]No changes saved[/]")
+        _warn("No changes saved")
 
 
 def _editor_empty() -> None:
-    rprint(f"[{WARNING}]No deployment YAML saved; nothing applied[/]")
+    _warn("No deployment YAML saved; nothing applied")
 
 
 def _editor_comments_only() -> None:
-    rprint(f"[{WARNING}]No deployment fields saved; add YAML fields and run again[/]")
+    _warn("No deployment fields saved; add YAML fields and run again")
 
 
 def _edit_deployment_yaml_loop(
@@ -554,9 +566,7 @@ def _do_get(
             deployments = asyncio.run(client.list_deployments())
 
             if not deployments and mode == "text":
-                rprint(
-                    f"[{WARNING}]No deployments found for project {client.project_id}[/]"
-                )
+                _warn(f"No deployments found for project {client.project_id}")
                 return
 
             displays = [DeploymentDisplay.from_response(d) for d in deployments]
@@ -575,8 +585,7 @@ def _do_get(
             e, deployment_id=deployment_id, project_id=effective_project
         )
         message = friendly if friendly is not None else str(e)
-        rprint(f"[red]Error: {message}[/red]")
-        raise click.Abort()
+        raise click.ClickException(message) from e
 
 
 @deployments.command("get")
@@ -696,16 +705,13 @@ def configure_git_remote_cmd(deployment_id: str | None, project: str | None) -> 
             git_url, client.api_key, client.project_id, deployment_id
         )
 
-        rprint(
-            f"[green]Configured git remote '{remote_name}' for {deployment_id}[/green]"
-        )
-        rprint(f"Push with: [cyan]git push {remote_name}[/cyan]")
+        _success(f"Configured git remote '{remote_name}' for {deployment_id}")
+        _status(f"Push with: git push {remote_name}")
 
     except click.ClickException:
         raise
     except Exception as e:
-        rprint(f"[red]Error: {e}[/red]")
-        raise click.Abort()
+        raise click.ClickException(str(e)) from e
 
 
 @deployments.command("delete")
@@ -715,13 +721,13 @@ def configure_git_remote_cmd(deployment_id: str | None, project: str | None) -> 
     "-f",
     "--filename",
     default=None,
-    type=click.File("r"),
+    type=click.Path(allow_dash=True, exists=True, dir_okay=False, path_type=str),
     help="Path to YAML file; name is read from the file. Mutually exclusive with positional ID.",
 )
 @project_option
 def delete_deployment(
     deployment_id: str | None,
-    filename: click.utils.LazyFile | None,
+    filename: str | None,
     project: str | None,
 ) -> None:
     """Delete a deployment"""
@@ -732,7 +738,7 @@ def delete_deployment(
 
     if filename is not None:
         try:
-            deployment_id = parse_delete_yaml_name(filename.read())
+            deployment_id = parse_delete_yaml_name(_read_apply_input(filename))
         except ApplyYamlError as exc:
             raise click.ClickException(str(exc)) from exc
 
@@ -742,11 +748,10 @@ def delete_deployment(
         client = get_project_client(project_id_override=project)
 
         asyncio.run(client.delete_deployment(deployment_id))
-        rprint(f"[green]Deleted deployment: {deployment_id}[/green]")
+        _success(f"Deleted deployment: {deployment_id}")
 
     except Exception as e:
-        rprint(f"[red]Error: {e}[/red]")
-        raise click.Abort()
+        raise click.ClickException(str(e)) from e
 
 
 def _apply_push(
@@ -765,7 +770,7 @@ def _apply_push(
         git_url, client.api_key, client.project_id, deployment_id
     )
     local_ref, target_ref = internal_push_refspec(git_ref)
-    with console.status("pushing code..."):
+    with err_console.status("pushing code..."):
         push_result = push_to_remote(
             remote_name, local_ref=local_ref, target_ref=target_ref
         )
@@ -790,7 +795,6 @@ def _apply_push_after_save(
     try:
         _apply_push(client, deployment_id, git_ref)
     except PushFailedError as exc:
-        click.echo(str(exc.message), err=True)
         raise PushFailedError(
             f"{exc.message}\n"
             "re-run `llamactl deployments apply -f <file>` to retry the push"
@@ -942,9 +946,9 @@ async def _execute_deployment_operation(
         push_before_save = False
 
     if desired_is_push and not is_git_repo():
-        rprint(
-            f"[{WARNING}]Not in a git repo — skipping push, "
-            "server will resolve from last pushed code[/]"
+        _warn(
+            "Not in a git repo — skipping push, "
+            "server will resolve from last pushed code"
         )
         desired_is_push = False
         push_before_save = False
@@ -957,16 +961,16 @@ async def _execute_deployment_operation(
             display.spec.git_ref or existing.git_ref,
         )
         response = await client.update_deployment(display.name, operation.payload)
-        click.echo(f"updated {response.id}")
+        _status(f"updated {response.id}")
     elif operation.action == "update":
         assert display.name is not None
         response = await client.update_deployment(display.name, operation.payload)
-        click.echo(f"updated {response.id}")
+        _status(f"updated {response.id}")
         if desired_is_push:
             _apply_push_after_save(client, response.id, display.spec.git_ref)
     else:
         response = await client.create_deployment(operation.payload)
-        click.echo(f"created {response.id}")
+        _status(f"created {response.id}")
         if desired_is_push:
             _apply_push_after_save(client, response.id, display.spec.git_ref)
 
@@ -1103,7 +1107,7 @@ def apply_deployment(
                 sort_keys=False,
             )
         )
-        click.echo(verdict)
+        _status(verdict)
         return
 
     try:
@@ -1177,8 +1181,7 @@ def edit_deployment(
             e, deployment_id=deployment_id, project_id=effective_project
         )
         message = friendly if friendly is not None else str(e)
-        rprint(f"[red]Error: {message}[/red]")
-        raise click.Abort()
+        raise click.ClickException(message) from e
 
 
 def _push_internal_for_update(
@@ -1192,9 +1195,9 @@ def _push_internal_for_update(
     server can resolve the ref to a fresh SHA.
     """
     if not is_git_repo():
-        rprint(
-            f"[{WARNING}]Not in a git repo — skipping push, "
-            "server will resolve from last pushed code[/]"
+        _warn(
+            "Not in a git repo — skipping push, "
+            "server will resolve from last pushed code"
         )
         return
 
@@ -1203,16 +1206,16 @@ def _push_internal_for_update(
         git_url, client.api_key, client.project_id, deployment_id
     )
     local_ref, target_ref = internal_push_refspec(git_ref)
-    with console.status("Pushing code..."):
+    with err_console.status("Pushing code..."):
         push_result = push_to_remote(
             remote_name, local_ref=local_ref, target_ref=target_ref
         )
     if push_result.returncode != 0:
         stderr = push_result.stderr.decode(errors="replace").strip()
-        rprint(f"[{WARNING}]Push failed: {stderr}[/]")
-        rprint(
-            f"[{WARNING}]Continuing with update using last pushed code. "
-            f"To debug, try: llamactl deployments configure-git-remote {deployment_id}[/]"
+        _warn(f"Push failed: {stderr}")
+        _warn(
+            "Continuing with update using last pushed code. "
+            f"To debug, try: llamactl deployments configure-git-remote {deployment_id}"
         )
 
 
@@ -1224,13 +1227,20 @@ def _push_internal_for_update(
     help="Reference branch, tag, or commit SHA for the deployment. If not provided, the current reference and latest commit on it will be used.",
     default=None,
 )
+@click.option(
+    "--no-push",
+    is_flag=True,
+    default=False,
+    help="Skip pushing local code for internal-repo deployments.",
+)
 @project_option
 def refresh_deployment(
     deployment_id: str | None,
     git_ref: str | None,
+    no_push: bool,
     project: str | None,
 ) -> None:
-    """Update the deployment, pulling the latest code from it's branch"""
+    """Update the deployment, pulling the latest code from its branch."""
     deployment_id = _require_deployment_id(deployment_id, "update", project)
     try:
         # Single asyncio.run with one client: reusing a ProjectClient across
@@ -1240,14 +1250,14 @@ def refresh_deployment(
             async with project_client_context(project_id_override=project) as client:
                 current = await client.get_deployment(deployment_id)
                 effective_git_ref = git_ref or current.git_ref
-                if current.repo_url == INTERNAL_CODE_REPO_SCHEME:
+                if current.repo_url == INTERNAL_CODE_REPO_SCHEME and not no_push:
                     _push_internal_for_update(
                         deployment_id,
                         effective_git_ref,
                         client=client,
                     )
                 # Re-resolves the branch to the latest commit SHA on the server.
-                with console.status(f"Refreshing {current.display_name}..."):
+                with err_console.status(f"Refreshing {current.display_name}..."):
                     updated = await client.update_deployment(
                         deployment_id,
                         DeploymentUpdate(git_ref=effective_git_ref),
@@ -1262,13 +1272,12 @@ def refresh_deployment(
         new_short = short_sha(new_git_sha) if new_git_sha else "-"
 
         if old_git_sha == new_git_sha:
-            rprint(f"No changes: already at {new_short}")
+            _status(f"No changes: already at {new_short}")
         else:
-            rprint(f"Updated: {old_short} → {new_short}")
+            _status(f"Updated: {old_short} → {new_short}")
 
     except Exception as e:
-        rprint(f"[red]Error: {e}[/red]")
-        raise click.Abort()
+        raise click.ClickException(str(e)) from e
 
 
 @deployments.command("history")
@@ -1297,14 +1306,13 @@ def show_history(
         )
 
         if not items_sorted and output == "text":
-            rprint(f"No history recorded for {deployment_id}")
+            _status(f"No history recorded for {deployment_id}")
             return
 
         displays = [ReleaseDisplay.from_response(item) for item in items_sorted]
         render_output(displays, output)
     except Exception as e:
-        rprint(f"[red]Error: {e}[/red]")
-        raise click.Abort()
+        raise click.ClickException(str(e)) from e
 
 
 @deployments.command("rollback")
@@ -1365,12 +1373,11 @@ def rollback(
 
         updated = asyncio.run(_do_rollback())
         new_short = short_sha(updated.git_sha) if updated.git_sha else "-"
-        rprint(f"[green]Rollback initiated[/green]: {deployment_id} → {new_short}")
+        _success(f"Rollback initiated: {deployment_id} → {new_short}")
     except click.ClickException:
         raise
     except Exception as e:
-        rprint(f"[red]Error: {e}[/red]")
-        raise click.Abort()
+        raise click.ClickException(str(e)) from e
 
 
 @deployments.command("logs")
@@ -1449,8 +1456,7 @@ def deployment_logs(
         # Clean exit on Ctrl-C; no traceback.
         return
     except Exception as e:
-        rprint(f"[red]Error: {e}[/red]")
-        raise click.Abort()
+        raise click.ClickException(str(e)) from e
 
     if events_seen == 0 and not follow:
         click.echo("no logs available yet", err=True)

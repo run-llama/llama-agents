@@ -10,6 +10,7 @@ import click
 from click.shell_completion import get_completion_class
 from llama_agents.cli.app import app
 from llama_agents.cli.options import global_options
+from llama_agents.cli.output import echo_status as _out
 from llama_agents.cli.paths import (
     bash_completion_dir,
     bash_rc_path,
@@ -17,7 +18,6 @@ from llama_agents.cli.paths import (
     zsh_completion_dir,
     zsh_rc_path,
 )
-from rich import print as rprint
 
 
 @app.group(help="Shell completion helpers.", no_args_is_help=True)
@@ -79,8 +79,8 @@ def install(shell: str | None, dry_run: bool) -> None:
         _install_fish(source, dry_run)
 
     if not dry_run:
-        rprint(f"\nDetected shell: [bold]{shell}[/bold]")
-        rprint("Restart your shell or source the config to activate completions.")
+        _out(f"\nDetected shell: [bold]{shell}[/bold]")
+        _out("Restart your shell or source the config to activate completions.")
 
 
 # ---------------------------------------------------------------------------
@@ -107,12 +107,12 @@ def _install_bash(source: str, dry_run: bool) -> None:
     target = comp_dir / "llamactl"
 
     if dry_run:
-        rprint(f"Would write completion script to [cyan]{target}[/cyan]")
+        _out(f"Would write completion script to [cyan]{target}[/cyan]")
         return
 
     comp_dir.mkdir(parents=True, exist_ok=True)
     target.write_text(source)
-    rprint(f"Wrote completions to [cyan]{target}[/cyan]")
+    _out(f"Wrote completions to [cyan]{target}[/cyan]")
 
     # Ensure .bashrc sources the completion dir
     bashrc = bash_rc_path()
@@ -128,15 +128,13 @@ def _install_zsh(source: str, dry_run: bool) -> None:
     target = zfunc / "_llamactl"
 
     if dry_run:
-        rprint(f"Would write completion script to [cyan]{target}[/cyan]")
-        rprint(
-            "Would ensure [cyan]~/.zfunc[/cyan] is in fpath in [cyan]~/.zshrc[/cyan]"
-        )
+        _out(f"Would write completion script to [cyan]{target}[/cyan]")
+        _out("Would ensure [cyan]~/.zfunc[/cyan] is in fpath in [cyan]~/.zshrc[/cyan]")
         return
 
     zfunc.mkdir(parents=True, exist_ok=True)
     target.write_text(source)
-    rprint(f"Wrote completions to [cyan]{target}[/cyan]")
+    _out(f"Wrote completions to [cyan]{target}[/cyan]")
 
     zshrc = zsh_rc_path()
     _ensure_zsh_fpath(zshrc, dry_run)
@@ -147,12 +145,12 @@ def _install_fish(source: str, dry_run: bool) -> None:
     target = comp_dir / "llamactl.fish"
 
     if dry_run:
-        rprint(f"Would write completion script to [cyan]{target}[/cyan]")
+        _out(f"Would write completion script to [cyan]{target}[/cyan]")
         return
 
     comp_dir.mkdir(parents=True, exist_ok=True)
     target.write_text(source)
-    rprint(f"Wrote completions to [cyan]{target}[/cyan]")
+    _out(f"Wrote completions to [cyan]{target}[/cyan]")
 
 
 def _ensure_zsh_fpath(zshrc: Path, dry_run: bool) -> None:
@@ -168,12 +166,12 @@ def _ensure_zsh_fpath(zshrc: Path, dry_run: bool) -> None:
 
     if dry_run:
         for action in actions:
-            rprint(f"Would update [cyan]{zshrc}[/cyan]: {action}")
+            _out(f"Would update [cyan]{zshrc}[/cyan]: {action}")
         return
 
     zshrc.write_text(updated_content)
     for action in actions:
-        rprint(f"Updated [cyan]{zshrc}[/cyan]: {action}")
+        _out(f"Updated [cyan]{zshrc}[/cyan]: {action}")
 
 
 def _plan_zshrc_update(content: str) -> tuple[str, list[str]]:
@@ -292,9 +290,9 @@ def _ensure_source_line(rc_file: Path, line: str, dry_run: bool) -> None:
         content = ""
 
     if dry_run:
-        rprint(f"Would add to [cyan]{rc_file}[/cyan]: {line}")
+        _out(f"Would add to [cyan]{rc_file}[/cyan]: {line}")
         return
 
     with rc_file.open("a") as f:
         f.write(f"\n{line}  {_MARKER}\n")
-    rprint(f"Added to [cyan]{rc_file}[/cyan]: {line}")
+    _out(f"Added to [cyan]{rc_file}[/cyan]: {line}")

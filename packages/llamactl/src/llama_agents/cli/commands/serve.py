@@ -12,6 +12,7 @@ from llama_agents.cli.commands.auth import validate_authenticated_profile
 from llama_agents.cli.env_settings import read_env_settings
 from llama_agents.cli.interactive import is_interactive_session, select_or_exit
 from llama_agents.cli.options import native_tls_option
+from llama_agents.cli.output import echo_status as _out
 from llama_agents.cli.styles import WARNING
 from llama_agents.cli.utils.capabilities import probe_organizations_support
 from llama_agents.cli.utils.redact import redact_api_key
@@ -20,7 +21,6 @@ from llama_agents.core.deployment_config import (
     read_deployment_config_from_git_root_or_cwd,
 )
 from llama_agents.core.schema.projects import OrgSummary, ProjectSummary
-from rich import print as rprint
 
 from ..app import app
 
@@ -99,18 +99,15 @@ def serve(
 ) -> None:
     """Run llama_deploy API Server in the foreground. Reads the deployment configuration from the current directory. Can optionally specify a deployment file path."""
     if not deployment_file.exists():
-        rprint(f"[red]Deployment file '{deployment_file}' not found[/red]")
-        raise click.Abort()
+        raise click.ClickException(f"Deployment file '{deployment_file}' not found")
 
     # Early check: appserver requires a pyproject.toml in the config directory
     config_dir = deployment_file if deployment_file.is_dir() else deployment_file.parent
     if not (config_dir / "pyproject.toml").exists():
-        rprint(
-            "[red]No pyproject.toml found at[/red] "
-            f"[bold]{config_dir}[/bold].\n"
+        raise click.ClickException(
+            f"No pyproject.toml found at {config_dir}.\n"
             "Add a pyproject.toml to your project and re-run 'llamactl serve'."
         )
-        raise click.Abort()
 
     try:
         # Pre-check: if the template requires llama cloud access, ensure credentials
@@ -161,8 +158,7 @@ def serve(
         logger.debug("Shutting down...")
 
     except Exception as e:
-        rprint(f"[red]Error: {e}[/red]")
-        raise click.Abort()
+        raise click.ClickException(str(e)) from e
 
 
 def _set_env_vars_from_profile(profile: Auth) -> None:
@@ -231,10 +227,9 @@ def _maybe_inject_llama_cloud_credentials(
             Path.cwd(), deployment_file
         )
     except Exception:
-        rprint(
-            "[red]Error: Could not read a deployment config. This doesn't appear to be a valid llama-deploy project.[/red]"
+        raise click.ClickException(
+            "Could not read a deployment config. This doesn't appear to be a valid llama-deploy project."
         )
-        raise click.Abort()
 
     if not config.llama_cloud and not require_cloud:
         return
@@ -259,7 +254,7 @@ def _maybe_inject_llama_cloud_credentials(
 
     env = service.get_current_environment()
     if not env.requires_auth:
-        rprint(
+        _out(
             f"[{WARNING}]Warning: This app requires Llama Cloud authentication, and no LLAMA_CLOUD_API_KEY is present. The app may not work.[/]"
         )
         return
@@ -281,13 +276,13 @@ def _maybe_inject_llama_cloud_credentials(
             if authed.api_key:
                 _set_env_vars_from_profile(authed)
                 return
-        rprint(
+        _out(
             f"[{WARNING}]Warning: No Llama Cloud credentials configured. The app may not work.[/]"
         )
         return
 
     # Non-interactive session
-    rprint(
+    _out(
         f"[{WARNING}]Warning: LLAMA_CLOUD_API_KEY is not set and no logged-in profile was found. The app may not work.[/]"
     )
 
@@ -328,7 +323,7 @@ def _maybe_select_project_for_env_key() -> None:
             return
 
         if org is not None:
-            rprint(f"Projects for organization [bold]{org.org_name}[/]")
+            _out(f"Projects for organization [bold]{org.org_name}[/]")
 
         # Multiple: prompt selection
         current_project_id = settings.llama_agents_project_id
@@ -366,6 +361,6 @@ def _print_connection_summary() -> None:
     redacted = redact_api_key(api_key)
     env_text = base_url or "-"
     proj_text = project_id or "-"
-    rprint(
+    _out(
         f"Connecting to environment: [bold]{env_text}[/], project: [bold]{proj_text}[/], api key: [bold]{redacted}[/]"
     )

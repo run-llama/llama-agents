@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import click
 import llama_agents.cli.client as client_module
 import llama_agents.cli.config.env_service as env_service
 import pytest
@@ -104,7 +105,7 @@ def test_client_requires_valid_profile() -> None:
         mock_auth_svc = MagicMock()
         mock_auth_svc.get_current_profile.return_value = None
         mock_service.current_auth_service.return_value = mock_auth_svc
-        with pytest.raises(SystemExit):
+        with pytest.raises(click.ClickException, match="No profile configured"):
             get_project_client()
 
 
@@ -199,13 +200,11 @@ def test_incomplete_env_var_project_client_without_profile_warns_and_exits(
     set_llama_cloud_env(monkeypatch, api_key="env-api-key")
     _set_current_profile(monkeypatch, None)
 
-    with pytest.raises(SystemExit) as exc_info:
+    with pytest.raises(click.ClickException, match="No profile configured"):
         get_project_client()
 
     captured = capsys.readouterr()
-    assert exc_info.value.code == 1
     assert PARTIAL_ENV_WARNING in captured.err
-    assert "No profile configured" in captured.out
 
 
 def test_env_var_project_override_wins_over_env_project_id(

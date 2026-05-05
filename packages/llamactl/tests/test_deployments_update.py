@@ -61,6 +61,8 @@ def test_deployments_update_external_repo(patched_auth: Any) -> None:
     with patch_project_client(client):
         result = runner.invoke(app, ["deployments", "update", "my-app"])
     assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert "Updated:" in result.stderr
     client.get_deployment.assert_called_once()
     client.update_deployment.assert_called_once()
 
@@ -110,6 +112,41 @@ def test_deployments_update_internal_repo_push_failure_does_not_abort(
         result = runner.invoke(app, ["deployments", "update", "my-app"])
 
     assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert "Push failed:" in result.stderr
+    assert "Continuing with update using last pushed code" in result.stderr
     assert "Event loop is closed" not in result.output
+    client.get_deployment.assert_called_once()
+    client.update_deployment.assert_called_once()
+
+
+def test_deployments_update_no_push_skips_internal_git_push(
+    patched_auth: Any,
+) -> None:
+    runner = CliRunner()
+    current = make_deployment(
+        "my-app", repo_url=INTERNAL_CODE_REPO_SCHEME, git_sha="a" * 40
+    )
+    updated = make_deployment(
+        "my-app", repo_url=INTERNAL_CODE_REPO_SCHEME, git_sha="b" * 40
+    )
+    client = _client_mock(current, updated)
+
+    with (
+        patch_project_client(client),
+        patch("llama_agents.cli.commands.deployment.is_git_repo") as is_git_repo,
+        patch("llama_agents.cli.commands.deployment.push_to_remote") as push_to_remote,
+        patch(
+            "llama_agents.cli.commands.deployment.configure_git_remote"
+        ) as configure_git_remote,
+    ):
+        result = runner.invoke(app, ["deployments", "update", "my-app", "--no-push"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert "Updated:" in result.stderr
+    is_git_repo.assert_not_called()
+    configure_git_remote.assert_not_called()
+    push_to_remote.assert_not_called()
     client.get_deployment.assert_called_once()
     client.update_deployment.assert_called_once()

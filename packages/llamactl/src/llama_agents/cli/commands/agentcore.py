@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 import click
+from llama_agents.cli.output import echo_status as _out
 
 from ..app import app
 from ..options import global_options
@@ -21,7 +22,7 @@ def agentcore() -> None:
 
 
 @agentcore.command("run", help="Run AgentCore server")
-def run():
+def run() -> None:
     start_app()
 
 
@@ -30,7 +31,7 @@ def run():
     help="Run AgentCore server locally with a local SQLite store (no AWS required). "
     "Send requests to POST http://localhost:8080/invocations",
 )
-def test():
+def test() -> None:
     start_app(local=True)
 
 
@@ -38,7 +39,7 @@ def test():
     "export",
     help="Export generated code to a `.agentcore` folder in the current working directory.",
 )
-def export():
+def export() -> None:
     export_generated_entrypoint_code()
 
 
@@ -92,5 +93,5 @@ def start_app(local: bool = False) -> None:
     try:
         start_app_in_target_venv(path, local=local)
     except subprocess.CalledProcessError as exc:
-        print("Failed to run agentcore, see errors above.")  # noqa
+        _out("Failed to run agentcore, see errors above.")
         raise click.exceptions.Exit(exc.returncode)

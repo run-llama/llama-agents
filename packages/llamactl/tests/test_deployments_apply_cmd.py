@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import llama_agents.cli.config.env_service as env_service
 import pytest
+import yaml
 from click.testing import CliRunner
 from conftest import (
     make_deployment,
@@ -276,6 +277,11 @@ def test_apply_dry_run_named(patched_auth: Any, tmp_path: Any) -> None:
     client.get_deployment.assert_not_called()
     client.create_deployment.assert_not_called()
     client.update_deployment.assert_not_called()
+    assert "would upsert" not in result.stdout
+    assert "would upsert deployment 'new-app'" in result.stderr
+    assert (
+        yaml.safe_load(result.stdout)["repo_url"] == "https://github.com/example/repo"
+    )
     assert "would" in result.output.lower()
     assert "upsert" in result.output.lower()
 
@@ -741,6 +747,8 @@ def test_delete_from_file(patched_auth: Any, tmp_path: Any) -> None:
         result = runner.invoke(app, ["deployments", "delete", "-f", str(f)])
 
     assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert "Deleted deployment: doomed-app" in result.stderr
     client.delete_deployment.assert_called_once()
     call_args = client.delete_deployment.call_args
     assert call_args[0][0] == "doomed-app"
@@ -795,6 +803,8 @@ def test_delete_reads_stdin(patched_auth: Any) -> None:
         )
 
     assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert "Deleted deployment: stdin-app" in result.stderr
     client.delete_deployment.assert_called_once()
     call_args = client.delete_deployment.call_args
     assert call_args[0][0] == "stdin-app"
@@ -1000,6 +1010,7 @@ def test_apply_push_mode_update_does_push_then_save(
         result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
 
     assert result.exit_code == 0, result.output
+    assert result.stdout == ""
     assert "updated my-app" in result.output
     mock_push.assert_called_once()
     client.update_deployment.assert_called_once()
@@ -1058,6 +1069,7 @@ def test_apply_external_to_push_mode_does_save_then_push(
         result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
 
     assert result.exit_code == 0, result.output
+    assert result.stdout == ""
     assert "updated my-app" in result.output
     client.update_deployment.assert_called_once()
     mock_push.assert_called_once()
@@ -1076,6 +1088,7 @@ def test_apply_push_to_external_does_save_only(
         result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
 
     assert result.exit_code == 0, result.output
+    assert result.stdout == ""
     assert "updated my-app" in result.output
     mock_push.assert_not_called()
 
@@ -1094,6 +1107,7 @@ def test_apply_internal_scheme_roundtrip_pushes(
         result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
 
     assert result.exit_code == 0, result.output
+    assert result.stdout == ""
     assert "updated my-app" in result.output
     mock_push.assert_called_once()
     client.validate_repository.assert_not_called()
@@ -1117,6 +1131,8 @@ def test_apply_internal_scheme_skips_push_when_not_in_git_repo(
         result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
 
     assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert "Not in a git repo" in result.stderr
     assert "updated my-app" in result.output
     # Push should be skipped entirely.
     mock_push.assert_not_called()
