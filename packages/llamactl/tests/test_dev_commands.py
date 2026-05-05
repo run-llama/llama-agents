@@ -155,7 +155,7 @@ def test_dev_run_sets_env_and_invokes_subprocess(
     )
     monkeypatch.setattr(
         "llama_agents.cli.commands.dev._prepare_environment",
-        lambda deployment_file, interactive, require_cloud: (
+        lambda deployment_file, require_cloud: (
             SimpleNamespace(),
             Path("."),
         ),
@@ -188,7 +188,7 @@ def test_dev_run_enables_auth_by_default(
     captured = SimpleNamespace(require_cloud=None)
 
     def _capture_prepare(
-        deployment_file: Path, interactive: bool, require_cloud: bool
+        deployment_file: Path, require_cloud: bool
     ) -> tuple[SimpleNamespace, Path]:
         captured.require_cloud = require_cloud
         return (SimpleNamespace(), Path("."))
@@ -221,7 +221,7 @@ def test_dev_run_disable_auth_flag(
     captured = SimpleNamespace(require_cloud=None)
 
     def _capture_prepare(
-        deployment_file: Path, interactive: bool, require_cloud: bool
+        deployment_file: Path, require_cloud: bool
     ) -> tuple[SimpleNamespace, Path]:
         captured.require_cloud = require_cloud
         return (SimpleNamespace(), Path("."))
@@ -263,7 +263,7 @@ def test_dev_run_does_not_require_pyproject(
     # No pyproject written to tmp_path on purpose
     monkeypatch.setattr(
         "llama_agents.cli.commands.dev._prepare_environment",
-        lambda deployment_file, interactive, require_cloud: (
+        lambda deployment_file, require_cloud: (
             SimpleNamespace(),
             Path("."),
         ),

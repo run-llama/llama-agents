@@ -10,10 +10,8 @@ import click
 from click.exceptions import Abort, Exit
 from llama_agents.cli.commands.auth import validate_authenticated_profile
 from llama_agents.cli.env_settings import read_env_settings
-from llama_agents.cli.options import (
-    interactive_option,
-    native_tls_option,
-)
+from llama_agents.cli.interactive import is_interactive_session, select_or_exit
+from llama_agents.cli.options import native_tls_option
 from llama_agents.cli.styles import WARNING
 from llama_agents.cli.utils.capabilities import probe_organizations_support
 from llama_agents.cli.utils.redact import redact_api_key
@@ -84,7 +82,6 @@ _ClickPath = getattr(click, "Path")
     type=str,
     help="The host to run the API server on. Default is 127.0.0.1. Use 0.0.0.0 to allow remote access.",
 )
-@interactive_option
 @native_tls_option
 def serve(
     deployment_file: Path,
@@ -99,7 +96,6 @@ def serve(
     persistence: Literal["memory", "local", "cloud"] | None = None,
     local_persistence_path: Path | None = None,
     host: str | None = None,
-    interactive: bool = False,
 ) -> None:
     """Run llama_deploy API Server in the foreground. Reads the deployment configuration from the current directory. Can optionally specify a deployment file path."""
     if not deployment_file.exists():
@@ -119,7 +115,7 @@ def serve(
     try:
         # Pre-check: if the template requires llama cloud access, ensure credentials
         _maybe_inject_llama_cloud_credentials(
-            deployment_file, interactive, require_cloud=persistence == "cloud"
+            deployment_file, require_cloud=persistence == "cloud"
         )
 
         # Defer heavy appserver imports until the `serve` command is actually invoked
@@ -215,7 +211,7 @@ def _set_project_id(project_id: str) -> None:
 
 
 def _maybe_inject_llama_cloud_credentials(
-    deployment_file: Path, interactive: bool, require_cloud: bool
+    deployment_file: Path, require_cloud: bool
 ) -> None:
     """If the deployment config indicates Llama Cloud usage, ensure LLAMA_CLOUD_API_KEY is set.
 
@@ -225,7 +221,7 @@ def _maybe_inject_llama_cloud_credentials(
     - If no profile/api_key and session is interactive, prompt to log in and inject afterward.
     - If user declines or session is non-interactive, warn that deployment may not work.
     """
-    import questionary
+    interactive = is_interactive_session()
     from llama_agents.appserver.workflow_loader import parse_environment_variables
     from llama_agents.cli.config.env_service import service
 
@@ -276,12 +272,12 @@ def _maybe_inject_llama_cloud_credentials(
 
     # No key available; consider prompting if interactive
     if interactive:
-        should_login = questionary.confirm(
+        should_login = click.confirm(
             "This deployment requires Llama Cloud. Login now to inject credentials? Otherwise the app may not work.",
             default=True,
-        ).ask()
+        )
         if should_login:
-            authed = validate_authenticated_profile(True)
+            authed = validate_authenticated_profile()
             if authed.api_key:
                 _set_env_vars_from_profile(authed)
                 return
@@ -301,7 +297,6 @@ def _maybe_select_project_for_env_key() -> None:
 
     If more than one project exists, prompt the user to select one.
     """
-    import questionary
     from llama_agents.core.client.manage_client import ControlPlaneClient
 
     settings = read_env_settings()
@@ -336,18 +331,25 @@ def _maybe_select_project_for_env_key() -> None:
             rprint(f"Projects for organization [bold]{org.org_name}[/]")
 
         # Multiple: prompt selection
-        choice = questionary.select(
+        current_project_id = settings.llama_agents_project_id
+        project_items = []
+        current_idx = 0
+        for i, p in enumerate(projects):
+            label = (
+                f"{p.project_id}  {p.project_name} ({p.deployment_count} deployments)"
+            )
+            if p.project_id == current_project_id:
+                label += " [current]"
+                current_idx = i
+            project_items.append((p.project_id, label))
+        choice = select_or_exit(
+            project_items,
             "Select a project",
-            choices=[
-                questionary.Choice(
-                    title=f"{p.project_name} ({p.deployment_count} deployments)",
-                    value=p.project_id,
-                )
-                for p in projects
-            ],
-        ).ask()
-        if choice:
-            _set_project_id(choice)
+            hint_flag="LLAMA_AGENTS_PROJECT_ID",
+            hint_command="llamactl auth project <project_id>",
+            selected=current_idx,
+        )
+        _set_project_id(choice)
     except Exception:
         # Best-effort; if we fail to list, do nothing
         pass

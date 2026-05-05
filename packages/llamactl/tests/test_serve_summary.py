@@ -51,6 +51,9 @@ def test_connection_summary_uses_redaction(tmp_path: Path) -> None:
     with (
         patch("llama_agents.appserver.app.prepare_server"),
         patch("llama_agents.appserver.app.start_server_in_target_venv"),
+        patch(
+            "llama_agents.cli.commands.serve.is_interactive_session", return_value=False
+        ),
     ):
         runner = CliRunner()
         res = runner.invoke(
@@ -61,7 +64,6 @@ def test_connection_summary_uses_redaction(tmp_path: Path) -> None:
                 "--no-install",
                 "--no-reload",
                 "--no-open-browser",
-                "--no-interactive",
             ],
         )
         assert res.exit_code == 0, res.output

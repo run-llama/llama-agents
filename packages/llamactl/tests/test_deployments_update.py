@@ -59,9 +59,7 @@ def test_deployments_update_external_repo(patched_auth: Any) -> None:
     updated = make_deployment("my-app", git_sha="b" * 40)
     client = _client_mock(current, updated)
     with patch_project_client(client):
-        result = runner.invoke(
-            app, ["deployments", "update", "my-app", "--no-interactive"]
-        )
+        result = runner.invoke(app, ["deployments", "update", "my-app"])
     assert result.exit_code == 0, result.output
     client.get_deployment.assert_called_once()
     client.update_deployment.assert_called_once()
@@ -109,9 +107,7 @@ def test_deployments_update_internal_repo_push_failure_does_not_abort(
             ),
         ),
     ):
-        result = runner.invoke(
-            app, ["deployments", "update", "my-app", "--no-interactive"]
-        )
+        result = runner.invoke(app, ["deployments", "update", "my-app"])
 
     assert result.exit_code == 0, result.output
     assert "Event loop is closed" not in result.output

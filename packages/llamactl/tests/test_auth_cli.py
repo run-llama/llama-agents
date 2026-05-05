@@ -11,7 +11,10 @@ from llama_agents.cli.config.schema import Auth
 
 def test_auth_create_api_key_profile_non_interactive_validation() -> None:
     runner = CliRunner()
-    result = runner.invoke(app, ["auth", "token", "--no-interactive"])
+    with patch(
+        "llama_agents.cli.commands.auth.is_interactive_session", return_value=False
+    ):
+        result = runner.invoke(app, ["auth", "token"])
     assert result.exit_code != 0
     assert (
         "--api-key and --project-id are required in non-interactive mode"
@@ -21,7 +24,12 @@ def test_auth_create_api_key_profile_non_interactive_validation() -> None:
 
 def test_auth_create_api_key_profile_non_interactive_success() -> None:
     runner = CliRunner()
-    with patch("llama_agents.cli.config.env_service.service") as mock_service:
+    with (
+        patch("llama_agents.cli.config.env_service.service") as mock_service,
+        patch(
+            "llama_agents.cli.commands.auth.is_interactive_session", return_value=False
+        ),
+    ):
         mock_auth_svc = MagicMock()
         mock_auth_svc.create_profile_from_token.return_value = SimpleNamespace(
             name="prof"
@@ -33,7 +41,6 @@ def test_auth_create_api_key_profile_non_interactive_success() -> None:
             [
                 "auth",
                 "token",
-                "--no-interactive",
                 "--project-id",
                 "p",
                 "--api-key",
@@ -105,15 +112,33 @@ def test_auth_logout_missing() -> None:
         assert "No profile selected" in result.output
 
 
-def test_auth_project_non_interactive_requires_arg() -> None:
+def test_auth_project_non_interactive_lists_options_and_hints() -> None:
     runner = CliRunner()
-    with patch(
-        "llama_agents.cli.commands.auth.validate_authenticated_profile",
-        return_value=MagicMock(name="p", project_id="x"),
+    with (
+        patch(
+            "llama_agents.cli.commands.auth.validate_authenticated_profile",
+            return_value=MagicMock(name="p", project_id="x"),
+        ),
+        patch(
+            "llama_agents.cli.commands.auth._discover_organization",
+            return_value=None,
+        ),
+        patch(
+            "llama_agents.cli.commands.auth._list_projects",
+            return_value=[
+                MagicMock(
+                    project_id="abc-123", project_name="My Project", deployment_count=2
+                ),
+            ],
+        ),
+        patch(
+            "llama_agents.cli.commands.auth.is_interactive_session", return_value=False
+        ),
     ):
-        result = runner.invoke(app, ["auth", "project", "--no-interactive"])
+        result = runner.invoke(app, ["auth", "project"])
         assert result.exit_code != 0
-        assert "No --project-id provided" in result.output
+        assert "abc-123" in result.output
+        assert "Pass <project_id> to choose one" in result.output
 
 
 def test_auth_project_interactive_sets_selected() -> None:
@@ -129,13 +154,16 @@ def test_auth_project_interactive_sets_selected() -> None:
                 MagicMock(project_id="proj", project_name="Proj", deployment_count=1)
             ],
         ),
-        patch("questionary.select") as mock_select,
+        patch("llama_agents.cli.commands.auth.select_or_exit") as mock_select,
         patch("llama_agents.cli.config.env_service.service") as mock_service,
+        patch(
+            "llama_agents.cli.commands.auth.is_interactive_session", return_value=True
+        ),
     ):
         mock_auth_svc = MagicMock()
         mock_service.current_auth_service.return_value = mock_auth_svc
-        mock_select.return_value.ask.return_value = "proj"
-        result = runner.invoke(app, ["auth", "project", "--interactive"])
+        mock_select.return_value = "proj"
+        result = runner.invoke(app, ["auth", "project"])
         assert result.exit_code == 0
         mock_auth_svc.set_project.assert_called_once()
 

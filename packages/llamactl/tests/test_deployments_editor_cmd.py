@@ -27,16 +27,18 @@ from llama_agents.core.schema.deployments import DeploymentResponse
 from llama_agents.core.schema.git_validation import RepositoryValidationResponse
 
 _DEPLOY_CMD = "llama_agents.cli.commands.deployment"
+_INTERACTIVE_PATCH = "llama_agents.cli.commands.deployment.is_interactive_session"
 
 
 @pytest.fixture(autouse=True)
-def _clear_ci_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CI=true in GitHub Actions makes editor commands require -f.
+def _interactive_session(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Default editor tests to interactive mode (most tests need the editor).
 
-    Clear it so interactive editor tests can run. The test that explicitly
-    verifies CI behavior sets CI=true via its own monkeypatch.
+    Individual tests that verify non-interactive behavior override this.
     """
     monkeypatch.delenv("CI", raising=False)
+    with patch(_INTERACTIVE_PATCH, return_value=True):
+        yield
 
 
 def _http_404(deployment_id: str = "unknown") -> httpx.HTTPStatusError:
@@ -144,7 +146,7 @@ def test_create_opens_editor_with_template_and_applies_saved_yaml(
     """)
 
     with patch_project_client(client), _patch_yaml_editor(saved_text) as opened_texts:
-        result = runner.invoke(app, ["deployments", "create", "--interactive"])
+        result = runner.invoke(app, ["deployments", "create"])
 
     assert result.exit_code == 0, result.output
     assert len(opened_texts) == 1
@@ -285,7 +287,7 @@ def test_edit_opens_current_template_and_updates_saved_yaml(patched_auth: Any) -
     """)
 
     with patch_project_client(client), _patch_yaml_editor(saved_text) as opened_texts:
-        result = runner.invoke(app, ["deployments", "edit", "my-app", "--interactive"])
+        result = runner.invoke(app, ["deployments", "edit", "my-app"])
 
     assert result.exit_code == 0, result.output
     assert len(opened_texts) == 1
@@ -303,7 +305,7 @@ def test_edit_preserves_existing_secret_names_as_masks(patched_auth: Any) -> Non
     client = _editor_client_mock(existing=existing)
 
     with patch_project_client(client), _patch_yaml_editor(None) as opened_texts:
-        result = runner.invoke(app, ["deployments", "edit", "my-app", "--interactive"])
+        result = runner.invoke(app, ["deployments", "edit", "my-app"])
 
     assert result.exit_code == 0, result.output
     assert "  secrets:\n    MY_SECRET: '********'" in opened_texts[0]
@@ -349,7 +351,7 @@ def test_interactive_edit_uses_separate_clients_for_fetch_and_apply(
         ) as ctor,
         _patch_yaml_editor(saved_text),
     ):
-        result = runner.invoke(app, ["deployments", "edit", "my-app", "--interactive"])
+        result = runner.invoke(app, ["deployments", "edit", "my-app"])
 
     assert result.exit_code == 0, result.output
     assert ctor.call_count == 2
@@ -406,7 +408,7 @@ def test_edit_editor_reopens_when_name_changes(patched_auth: Any) -> None:
         patch_project_client(client),
         _patch_yaml_editor(changed_name, fixed_name) as opened_texts,
     ):
-        result = runner.invoke(app, ["deployments", "edit", "my-app", "--interactive"])
+        result = runner.invoke(app, ["deployments", "edit", "my-app"])
 
     assert result.exit_code == 0, result.output
     assert len(opened_texts) == 2
@@ -433,7 +435,7 @@ def test_editor_parse_error_annotates_and_reopens(patched_auth: Any) -> None:
         patch_project_client(client),
         _patch_yaml_editor(invalid_yaml, valid_yaml) as opened_texts,
     ):
-        result = runner.invoke(app, ["deployments", "create", "--interactive"])
+        result = runner.invoke(app, ["deployments", "create"])
 
     assert result.exit_code == 0, result.output
     assert len(opened_texts) == 2
@@ -450,7 +452,7 @@ def test_editor_create_validation_annotates_all_errors(patched_auth: Any) -> Non
         patch_project_client(client),
         _patch_yaml_editor("spec: {}\n", None) as opened_texts,
     ):
-        result = runner.invoke(app, ["deployments", "create", "--interactive"])
+        result = runner.invoke(app, ["deployments", "create"])
 
     assert result.exit_code == 0, result.output
     assert len(opened_texts) == 2
@@ -468,7 +470,7 @@ def test_unchanged_editor_file_aborts_without_api_calls(
     client = _editor_client_mock()
 
     with patch_project_client(client), _patch_yaml_editor() as opened_texts:
-        result = runner.invoke(app, ["deployments", "create", "--interactive"])
+        result = runner.invoke(app, ["deployments", "create"])
 
     assert result.exit_code == 0, result.output
     assert len(opened_texts) == 1
@@ -489,7 +491,7 @@ def test_empty_or_all_comment_editor_file_aborts_without_api_calls(
     client = _editor_client_mock()
 
     with patch_project_client(client), _patch_yaml_editor(saved_text):
-        result = runner.invoke(app, ["deployments", "create", "--interactive"])
+        result = runner.invoke(app, ["deployments", "create"])
 
     assert result.exit_code == 0, result.output
     client.get_deployment.assert_not_called()
@@ -501,15 +503,16 @@ def test_empty_or_all_comment_editor_file_aborts_without_api_calls(
 @pytest.mark.parametrize(
     ("argv", "message"),
     [
-        (["deployments", "create", "--no-interactive"], "create"),
-        (["deployments", "edit", "my-app", "--no-interactive"], "edit"),
+        (["deployments", "create"], "create"),
+        (["deployments", "edit", "my-app"], "edit"),
     ],
 )
 def test_non_interactive_editor_commands_require_file(
     argv: list[str], message: str
 ) -> None:
     runner = CliRunner()
-    result = runner.invoke(app, argv)
+    with patch(_INTERACTIVE_PATCH, return_value=False):
+        result = runner.invoke(app, argv)
 
     assert result.exit_code != 0
     assert f"pass -f <file> for non-interactive {message}" in result.output
@@ -521,7 +524,8 @@ def test_ci_forces_editor_commands_to_require_file(
     monkeypatch.setenv("CI", "true")
     runner = CliRunner()
 
-    result = runner.invoke(app, ["deployments", "edit", "my-app", "--interactive"])
+    with patch(_INTERACTIVE_PATCH, return_value=False):
+        result = runner.invoke(app, ["deployments", "edit", "my-app"])
 
     assert result.exit_code != 0
     assert "pass -f <file> for non-interactive edit" in result.output
