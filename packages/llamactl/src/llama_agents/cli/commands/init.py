@@ -8,12 +8,9 @@ from pathlib import Path
 import click
 from click.exceptions import Exit
 from llama_agents.cli.app import app
-from llama_agents.cli.options import (
-    global_options,
-    interactive_option,
-)
+from llama_agents.cli.interactive import is_interactive_session, select_or_exit
+from llama_agents.cli.options import global_options
 from llama_agents.cli.param_types import TemplateType
-from llama_agents.cli.styles import HEADER_COLOR_HEX
 from llama_agents.cli.templates import (
     ALL_TEMPLATES,
     HEADLESS_TEMPLATES,
@@ -21,7 +18,6 @@ from llama_agents.cli.templates import (
     TemplateOption,
 )
 from rich import print as rprint
-from rich.text import Text
 
 _ClickPath = getattr(click, "Path")
 
@@ -54,26 +50,21 @@ _ClickPath = getattr(click, "Path")
     help="Force overwrite the directory if it exists",
 )
 @global_options
-@interactive_option
 def init(
     update: bool,
     template: str | None,
     dir: Path | None,
     force: bool,
-    interactive: bool,
 ) -> None:
     """Create a new app repository from a template"""
     if update:
         _update()
     else:
-        _create(template, dir, force, interactive)
+        _create(template, dir, force)
 
 
-def _create(
-    template: str | None, dir: Path | None, force: bool, interactive: bool
-) -> None:
-    import questionary
-
+def _create(template: str | None, dir: Path | None, force: bool) -> None:
+    interactive = is_interactive_session()
     # Initialize git repository if git is available
     has_git = False
     git_initialized = False
@@ -90,44 +81,33 @@ def _create(
         )
         raise Exit(1)
 
-    if template is None and interactive:
-        rprint(
-            "[bold]Select a template to start from.[/bold] Either with javascript frontend UI, or just a python workflow that can be used as an API."
-        )
-        template = questionary.select(
-            "",
-            choices=[questionary.Separator("------------ With UI -------------")]
-            + [
-                questionary.Choice(title=o.name, value=o.id, description=o.description)
-                for o in UI_TEMPLATES
-            ]
-            + [
-                questionary.Separator(" "),
-                questionary.Separator("--- Headless Workflows (No UI) ---"),
-            ]
-            + [
-                questionary.Choice(title=o.name, value=o.id, description=o.description)
-                for o in HEADLESS_TEMPLATES
-            ],
-            style=questionary.Style(
-                [
-                    ("separator", f"fg:{HEADER_COLOR_HEX}"),
-                ]
-            ),
-        ).ask()
     if template is None:
-        options = [o.id for o in ALL_TEMPLATES]
-        rprint(
-            Text(
-                f"No template selected. Select a template or pass a template name with --template <{'|'.join(options)}>"
+        if interactive:
+            rprint(
+                "[bold]Select a template to start from.[/bold] Either with javascript frontend UI, or just a python workflow that can be used as an API."
             )
-        )
+        template = (
+            select_or_exit(
+                [
+                    ("", ""),
+                    *[(o.id, f"{o.id} - {o.description}") for o in UI_TEMPLATES],
+                    ("", ""),
+                    *[(o.id, f"{o.id} - {o.description}") for o in HEADLESS_TEMPLATES],
+                ],
+                "",
+                hint_flag="--template",
+                hint_command="llamactl init --help",
+            )
+            or None
+        )  # empty-string separators are not valid selections
+    if template is None:
         raise Exit(1)
     if dir is None:
         if interactive:
-            dir_str = questionary.text(
-                "Enter the directory to create the new app in", default=template
-            ).ask()
+            dir_str = click.prompt(
+                "Enter the directory to create the new app in",
+                default=template,
+            )
             if dir_str:
                 dir = Path(dir_str)
             else:
@@ -144,8 +124,7 @@ def _create(
         raise Exit(1)
     if dir.exists():
         is_ok = force or (
-            interactive
-            and questionary.confirm("Directory exists. Overwrite?", default=False).ask()
+            interactive and click.confirm("Directory exists. Overwrite?", default=False)
         )
 
         if not is_ok:

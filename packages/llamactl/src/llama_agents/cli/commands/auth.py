@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import click
+from llama_agents.cli.interactive import is_interactive_session, select_or_exit
 from llama_agents.cli.param_types import OrgType, ProfileType, ProjectType
 from llama_agents.cli.styles import MUTED_COL, PRIMARY_COL, WARNING
 from llama_agents.cli.utils.capabilities import probe_organizations_support
@@ -17,7 +18,7 @@ from rich import print as rprint
 
 from ..app import app
 from ..display import AuthProfileDisplay, OrgDisplay
-from ..options import global_options, interactive_option, output_option, render_output
+from ..options import global_options, output_option, render_output
 
 if TYPE_CHECKING:
     from llama_agents.cli.config.auth_service import AuthService
@@ -66,18 +67,16 @@ def auth() -> None:
     "--api-key",
     help="API key to use for the login when creating non-interactively",
 )
-@interactive_option
 def create_api_key_profile(
     project_id: str | None,
     api_key: str | None,
-    interactive: bool,
 ) -> None:
     """Authenticate with an API key and create a profile in the current environment."""
     try:
         auth_svc = _get_service().current_auth_service()
 
         # Non-interactive mode: require both api-key and project-id
-        if not interactive:
+        if not is_interactive_session():
             if not api_key or not project_id:
                 raise click.ClickException(
                     "--api-key and --project-id are required in non-interactive mode"
@@ -186,12 +185,11 @@ def list_profiles(output: str) -> None:
 @global_options
 def destroy_database() -> None:
     """Destroy the database"""
-    import questionary
     from llama_agents.cli.config._config import ConfigManager
 
-    if not questionary.confirm(
+    if is_interactive_session() and not click.confirm(
         "Are you sure you want to destroy all of your local logins? This action cannot be undone."
-    ).ask():
+    ):
         return
     ConfigManager(init_database=False).destroy_database()
     rprint("[green]Database destroyed[/green]")
@@ -208,12 +206,11 @@ def config_database() -> None:
 @auth.command("switch")
 @global_options
 @click.argument("name", required=False, type=ProfileType())
-@interactive_option
-def switch_profile(name: str | None, interactive: bool) -> None:
+def switch_profile(name: str | None) -> None:
     """Switch to a different profile"""
     auth_svc = _get_service().current_auth_service()
     try:
-        selected_auth = _select_profile(auth_svc, name, interactive)
+        selected_auth = _select_profile(auth_svc, name)
         if not selected_auth:
             rprint(f"[{WARNING}]No profile selected[/]")
             return
@@ -229,12 +226,11 @@ def switch_profile(name: str | None, interactive: bool) -> None:
 @auth.command("logout")
 @global_options
 @click.argument("name", required=False, type=ProfileType())
-@interactive_option
-def delete_profile(name: str | None, interactive: bool) -> None:
+def delete_profile(name: str | None) -> None:
     """Logout from a profile and wipe all associated data"""
     try:
         auth_svc = _get_service().current_auth_service()
-        auth = _select_profile(auth_svc, name, interactive)
+        auth = _select_profile(auth_svc, name)
         if not auth:
             rprint(f"[{WARNING}]No profile selected[/]")
             return
@@ -324,21 +320,11 @@ def list_organizations(output: str) -> None:
     type=OrgType(),
     help="Organization ID to scope projects to",
 )
-@interactive_option
 @global_options
-def change_project(
-    project_id: str | None, org_id: str | None, interactive: bool
-) -> None:
+def change_project(project_id: str | None, org_id: str | None) -> None:
     """Change the active project for the current profile"""
-    import questionary
-
     auth_svc = _get_service().current_auth_service()
-    profile = validate_authenticated_profile(interactive)
-
-    if project_id is None and not interactive:
-        raise click.ClickException(
-            "No --project-id provided. Run `llamactl auth project --help` for more information."
-        )
+    profile = validate_authenticated_profile()
 
     # Discover org if not explicitly provided (profile exists, credentials available)
     org = None
@@ -361,32 +347,35 @@ def change_project(
         rprint(f"Set active project to [bold green]{project_id}[/]")
         return
     try:
-        projects = _list_projects(auth_svc, org_id=org_id)
+        projects = _list_projects(auth_svc)
 
         if not projects:
             rprint(f"[{WARNING}]No projects found[/]")
             return
 
-        if org is not None:
-            rprint(f"Projects for organization [bold]{org.org_name}[/]")
+        current_project_id = profile.project_id
+        items = []
+        current_idx = 0
+        for i, project in enumerate(projects):
+            label = f"{project.project_id}  {project.project_name} ({project.deployment_count} deployments)"
+            if project.project_id == current_project_id:
+                label += " [current]"
+                current_idx = i
+            items.append((project.project_id, label))
+        if not auth_svc.env.requires_auth:
+            items.append(("__CREATE__", "Create new project"))
 
-        result = questionary.select(
+        result = select_or_exit(
+            items,
             "Select a project",
-            choices=[
-                questionary.Choice(
-                    title=f"{project.project_name} ({project.deployment_count} deployments)",
-                    value=project.project_id,
-                )
-                for project in projects
-            ]
-            + (
-                [questionary.Choice(title="Create new project", value="__CREATE__")]
-                if not auth_svc.env.requires_auth
-                else []
-            ),
-        ).ask()
+            hint_flag="<project_id>",
+            hint_command="llamactl auth project <project_id>",
+            selected=current_idx,
+        )
         if result == "__CREATE__":
-            project_id = questionary.text("Enter project ID").ask()
+            project_id = click.prompt(
+                "Enter project ID", default="", show_default=False
+            ).strip()
             result = project_id
         if result:
             selected_project = next(
@@ -397,6 +386,8 @@ def change_project(
             rprint(f"Set active project to [bold {PRIMARY_COL}]{name}[/]")
         else:
             rprint(f"[{WARNING}]No project selected[/]")
+    except click.ClickException:
+        raise
     except Exception as e:
         rprint(f"[red]Error: {e}[/red]")
         raise click.Abort()
@@ -411,10 +402,8 @@ def change_project(
     type=_ClickPath(dir_okay=False, resolve_path=True, path_type=Path),
     help="Path to the .env file to write",
 )
-@interactive_option
 def inject_env_vars(
     env_file: Path,
-    interactive: bool,
 ) -> None:
     """Inject auth environment variables into a .env file.
 
@@ -428,8 +417,8 @@ def inject_env_vars(
         auth_svc = _get_service().current_auth_service()
         profile = auth_svc.get_current_profile()
         if not profile:
-            if interactive:
-                profile = validate_authenticated_profile(True)
+            if is_interactive_session():
+                profile = validate_authenticated_profile()
             else:
                 raise click.ClickException(
                     "No profile configured. Run `llamactl auth token` to create a profile."
@@ -677,7 +666,7 @@ async def _run_device_authentication(base_url: str) -> DeviceOIDC:
             raise click.ClickException("Device flow failed: unexpected token response")
 
 
-def validate_authenticated_profile(interactive: bool) -> Auth:
+def validate_authenticated_profile() -> Auth:
     """Validate that the user is authenticated within the current environment.
 
     - If there is a current profile, return it.
@@ -686,12 +675,12 @@ def validate_authenticated_profile(interactive: bool) -> Auth:
       - If environment requires_auth: run token flow inline.
       - Else: create profile without token after selecting a project.
     """
-    import questionary
-
     auth_svc = _get_service().current_auth_service()
     existing = auth_svc.get_current_profile()
     if existing:
         return existing
+
+    interactive = is_interactive_session()
 
     if not interactive:
         raise click.ClickException(
@@ -703,13 +692,12 @@ def validate_authenticated_profile(interactive: bool) -> Auth:
     current_env = auth_svc.env
 
     if len(env_profiles) > 1:
-        # Prompt to select
-        choice: Auth | None = questionary.select(
+        choice = select_or_exit(
+            [(profile, profile.name) for profile in env_profiles],
             "Select profile",
-            choices=[questionary.Choice(title=p.name, value=p) for p in env_profiles],
-        ).ask()
-        if not choice:
-            raise click.ClickException("No profile selected")
+            hint_flag="<profile>",
+            hint_command="llamactl auth list",
+        )
         auth_svc.set_current_profile(choice.name)
         return choice
     if len(env_profiles) == 1:
@@ -724,7 +712,9 @@ def validate_authenticated_profile(interactive: bool) -> Auth:
         return created
     else:
         # No auth required: select project and create a default profile without token
-        project_id: str | None = questionary.text("Enter project ID").ask()
+        project_id = click.prompt(
+            "Enter project ID", default="", show_default=False
+        ).strip()
         if not project_id:
             raise click.ClickException("No project ID provided")
         created = auth_svc.create_profile_from_token(project_id, None)
@@ -737,9 +727,12 @@ def validate_authenticated_profile(interactive: bool) -> Auth:
 
 
 def _prompt_for_api_key() -> str:
-    import questionary
-
-    entered = questionary.password("Enter API key token to login").ask()
+    entered = click.prompt(
+        "Enter API key token to login",
+        hide_input=True,
+        default="",
+        show_default=False,
+    )
     if entered:
         return entered.strip()
     raise click.ClickException("No API key entered")
@@ -824,25 +817,22 @@ def _prompt_validate_api_key_and_list_projects(
 def _select_or_enter_project(
     projects: list[ProjectSummary], requires_auth: bool
 ) -> str | None:
-    import questionary
-
     if not projects:
         return None
-    # select the only authorized project if there is only one
-    elif len(projects) == 1 and requires_auth:
+    if len(projects) == 1 and requires_auth:
         return projects[0].project_id
-    else:
-        choice = questionary.select(
-            "Select a project",
-            choices=[
-                questionary.Choice(
-                    title=f"{p.project_name} ({p.deployment_count} deployments)",
-                    value=p.project_id,
-                )
-                for p in projects
-            ],
-        ).ask()
-        return choice
+    return select_or_exit(
+        [
+            (
+                p.project_id,
+                f"{p.project_id}  {p.project_name} ({p.deployment_count} deployments)",
+            )
+            for p in projects
+        ],
+        "Select a project",
+        hint_flag="<project_id>",
+        hint_command="llamactl auth project <project_id>",
+    )
 
 
 def _token_flow_for_env(auth_service: AuthService) -> Auth:
@@ -855,9 +845,7 @@ def _token_flow_for_env(auth_service: AuthService) -> Auth:
     return created
 
 
-def _select_profile(
-    auth_svc: AuthService, profile_name: str | None, is_interactive: bool
-) -> Auth | None:
+def _select_profile(auth_svc: AuthService, profile_name: str | None) -> Auth | None:
     """
     Select a profile interactively if name not provided.
     Returns the selected profile name or None if cancelled.
@@ -869,30 +857,36 @@ def _select_profile(
         if profile:
             return profile
 
-    # Don't attempt interactive selection in non-interactive sessions
-    if not is_interactive:
+    if not is_interactive_session():
         return None
 
     try:
-        import questionary
-
         profiles = auth_svc.list_profiles()
 
         if not profiles:
             rprint(f"[{WARNING}]No profiles found[/]")
             return None
 
-        choices: list[questionary.Choice] = []
         current = auth_svc.get_current_profile()
-
-        for profile in profiles:
+        choices = []
+        current_idx = 0
+        for i, profile in enumerate(profiles):
             title = f"{profile.name} ({profile.api_url})"
             if profile == current:
                 title += " [current]"
-            choices.append(questionary.Choice(title=title, value=profile))
+                current_idx = i
+            choices.append((profile, title))
 
-        return questionary.select("Select profile:", choices=choices).ask()
+        return select_or_exit(
+            choices,
+            "Select profile:",
+            hint_flag="<name>",
+            hint_command="llamactl auth list",
+            selected=current_idx,
+        )
 
+    except click.ClickException:
+        raise
     except Exception as e:
         rprint(f"[red]Error loading profiles: {e}[/red]")
         return None

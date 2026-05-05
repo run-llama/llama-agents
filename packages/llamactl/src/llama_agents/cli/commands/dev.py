@@ -14,7 +14,7 @@ from llama_agents.cli.commands.serve import (
 from llama_agents.cli.commands.serve import (
     serve as serve_command,
 )
-from llama_agents.cli.options import global_options, interactive_option
+from llama_agents.cli.options import global_options
 from llama_agents.core.config import DEFAULT_DEPLOYMENT_FILE_PATH
 from llama_agents.core.deployment_config import DeploymentConfig
 from rich import print as rprint
@@ -57,19 +57,14 @@ dev.add_command(serve_command, name="serve")
         "without actual environment variable values."
     ),
 )
-@interactive_option
 @global_options
-def validate_command(
-    deployment_file: Path, validate_env: bool, interactive: bool
-) -> None:
+def validate_command(deployment_file: Path, validate_env: bool) -> None:
     """Validate workflows defined in the deployment configuration."""
     config_dir = _ensure_project_layout(
         deployment_file, command_name="llamactl dev validate"
     )
     # Ensure cloud credentials/env are available to the subprocess (if required)
-    _maybe_inject_llama_cloud_credentials(
-        deployment_file, interactive, require_cloud=False
-    )
+    _maybe_inject_llama_cloud_credentials(deployment_file, require_cloud=False)
 
     # By default, skip env validation (fill missing with placeholders)
     skip_env_validation = not validate_env
@@ -119,12 +114,10 @@ def validate_command(
     default=None,
     type=_ClickPath(dir_okay=True, resolve_path=True, path_type=Path),
 )
-@interactive_option
 @global_options
 def export_json_graph_command(
     deployment_file: Path,
     output: Path | None,
-    interactive: bool,
 ) -> None:
     """Export the configured workflows to a JSON document that may be used for graph visualization."""
     if not deployment_file.exists():
@@ -134,9 +127,7 @@ def export_json_graph_command(
     _ensure_project_layout(
         deployment_file, command_name="llamactl dev export-json-graph"
     )
-    _maybe_inject_llama_cloud_credentials(
-        deployment_file, interactive, require_cloud=False
-    )
+    _maybe_inject_llama_cloud_credentials(deployment_file, require_cloud=False)
 
     prepare_server(
         deployment_file=deployment_file,
@@ -183,11 +174,8 @@ def export_json_graph_command(
     is_flag=True,
     help="Do not inject/authenticate with Llama Cloud credentials",
 )
-@interactive_option
 @click.argument("cmd", nargs=-1, type=click.UNPROCESSED)
-def run_command(
-    deployment_file: Path, no_auth: bool, interactive: bool, cmd: tuple[str, ...]
-) -> None:
+def run_command(deployment_file: Path, no_auth: bool, cmd: tuple[str, ...]) -> None:
     """Execute COMMAND with deployment environment variables applied."""
     if not cmd:
         raise click.ClickException(
@@ -196,7 +184,7 @@ def run_command(
 
     try:
         config, config_parent = _prepare_environment(
-            deployment_file, interactive, require_cloud=not no_auth
+            deployment_file, require_cloud=not no_auth
         )
         env_overrides = parse_environment_variables(config, config_parent)
         env = os.environ.copy()
@@ -233,7 +221,7 @@ def _ensure_project_layout(deployment_file: Path, *, command_name: str) -> Path:
 
 
 def _prepare_environment(
-    deployment_file: Path, interactive: bool, *, require_cloud: bool
+    deployment_file: Path, *, require_cloud: bool
 ) -> tuple[DeploymentConfig, Path]:
     from llama_agents.appserver.deployment_config_parser import (
         get_deployment_config,
@@ -244,9 +232,7 @@ def _prepare_environment(
         validate_required_env_vars,
     )
 
-    _maybe_inject_llama_cloud_credentials(
-        deployment_file, interactive, require_cloud=require_cloud
-    )
+    _maybe_inject_llama_cloud_credentials(deployment_file, require_cloud=require_cloud)
     configure_settings(
         deployment_file_path=deployment_file,
         app_root=Path.cwd(),

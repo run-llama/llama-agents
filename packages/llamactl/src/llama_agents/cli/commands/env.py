@@ -5,13 +5,14 @@ from typing import TYPE_CHECKING
 
 import click
 from llama_agents.cli.config.schema import Environment
+from llama_agents.cli.interactive import is_interactive_session, select_or_exit
 from llama_agents.cli.param_types import EnvironmentType
 from llama_agents.cli.styles import WARNING
 from packaging import version as packaging_version
 from rich import print as rprint
 
 from ..display import EnvDisplay
-from ..options import global_options, interactive_option, output_option, render_output
+from ..options import global_options, output_option, render_output
 from .auth import auth
 
 if TYPE_CHECKING:
@@ -64,20 +65,21 @@ def list_environments_cmd(output: str) -> None:
 
 @env_group.command("add")
 @click.argument("api_url", required=False)
-@interactive_option
 @global_options
-def add_environment_cmd(api_url: str | None, interactive: bool) -> None:
+def add_environment_cmd(api_url: str | None) -> None:
     try:
         service = _env_service()
         if not api_url:
-            if not interactive:
-                raise click.ClickException("API URL is required when not interactive")
+            if not is_interactive_session():
+                raise click.ClickException(
+                    "Pass <api_url> as an argument. To see existing environments, run: llamactl auth env list"
+                )
             current_env = service.get_current_environment()
-            from questionary import text
-
-            entered = text(
-                "Enter control plane API URL", default=current_env.api_url
-            ).ask()
+            entered = click.prompt(
+                "Enter control plane API URL",
+                default=current_env.api_url if current_env else "",
+                show_default=current_env is not None,
+            )
             if not entered:
                 rprint(f"[{WARNING}]No environment entered[/]")
                 return
@@ -92,6 +94,8 @@ def add_environment_cmd(api_url: str | None, interactive: bool) -> None:
             f"[green]Added environment[/green] {env.api_url} (requires_auth={env.requires_auth}, min_llamactl_version={env.min_llamactl_version or '-'})."
         )
         _maybe_warn_min_version(env.min_llamactl_version)
+    except click.ClickException:
+        raise
     except Exception as e:
         rprint(f"[red]Failed to add environment: {e}[/red]")
         raise click.Abort()
@@ -99,23 +103,16 @@ def add_environment_cmd(api_url: str | None, interactive: bool) -> None:
 
 @env_group.command("delete")
 @click.argument("api_url", required=False, type=EnvironmentType())
-@interactive_option
 @global_options
-def delete_environment_cmd(api_url: str | None, interactive: bool) -> None:
+def delete_environment_cmd(api_url: str | None) -> None:
     try:
         service = _env_service()
         if not api_url:
-            if not interactive:
-                raise click.ClickException("API URL is required when not interactive")
             result = _select_environment(
                 service.list_environments(),
                 service.get_current_environment(),
                 "Select environment to delete",
             )
-
-            if not result:
-                rprint(f"[{WARNING}]No environment selected[/]")
-                return
             api_url = result.api_url
 
         if api_url is None:
@@ -127,6 +124,8 @@ def delete_environment_cmd(api_url: str | None, interactive: bool) -> None:
         rprint(
             f"[green]Deleted environment[/green] {api_url} and all associated profiles"
         )
+    except click.ClickException:
+        raise
     except Exception as e:
         rprint(f"[red]Failed to delete environment: {e}[/red]")
         raise click.Abort()
@@ -134,29 +133,19 @@ def delete_environment_cmd(api_url: str | None, interactive: bool) -> None:
 
 @env_group.command("switch")
 @click.argument("api_url", required=False, type=EnvironmentType())
-@interactive_option
 @global_options
-def switch_environment_cmd(api_url: str | None, interactive: bool) -> None:
+def switch_environment_cmd(api_url: str | None) -> None:
     try:
         service = _env_service()
         selected_url = api_url
 
-        if not selected_url and interactive:
+        if not selected_url:
             result = _select_environment(
                 service.list_environments(),
                 service.get_current_environment(),
                 "Select environment",
             )
-            if not result:
-                rprint(f"[{WARNING}]No environment selected[/]")
-                return
             selected_url = result.api_url
-
-        if not selected_url:
-            if interactive:
-                rprint(f"[{WARNING}]No environment selected[/]")
-                return
-            raise click.ClickException("API URL is required when not interactive")
 
         selected_url = selected_url.rstrip("/")
 
@@ -170,6 +159,8 @@ def switch_environment_cmd(api_url: str | None, interactive: bool) -> None:
         service.current_auth_service().select_any_profile()
         rprint(f"[green]Switched to environment[/green] {env.api_url}")
         _maybe_warn_min_version(env.min_llamactl_version)
+    except click.ClickException:
+        raise
     except Exception as e:
         rprint(f"[red]Failed to switch environment: {e}[/red]")
         raise click.Abort()
@@ -202,20 +193,23 @@ def _select_environment(
     envs: list[Environment],
     current_env: Environment,
     message: str = "Select environment",
-) -> Environment | None:
+) -> Environment:
     if not envs:
         raise click.ClickException(
             "No environments found. This is a bug and shouldn't happen."
         )
-    import questionary
-
-    return questionary.select(
+    items = []
+    current_idx = 0
+    for i, env in enumerate(envs):
+        label = env.api_url
+        if env.api_url == current_env.api_url:
+            label += " [current]"
+            current_idx = i
+        items.append((env, label))
+    return select_or_exit(
+        items,
         message,
-        choices=[
-            questionary.Choice(
-                title=f"{env.api_url} {'(current)' if env.api_url == current_env.api_url else ''}",
-                value=env,
-            )
-            for env in envs
-        ],
-    ).ask()
+        hint_flag="<api_url>",
+        hint_command="llamactl auth env list",
+        selected=current_idx,
+    )

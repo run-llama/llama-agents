@@ -5,6 +5,8 @@ import click
 import pytest
 from llama_agents.cli.commands.auth import validate_authenticated_profile
 
+_INTERACTIVE_PATCH = "llama_agents.cli.commands.auth.is_interactive_session"
+
 
 class DummyProfile:
     def __init__(self, name: str):
@@ -16,7 +18,7 @@ def test_validate_authenticated_profile_returns_current_when_present() -> None:
         mock_auth_svc = MagicMock()
         mock_auth_svc.get_current_profile.return_value = DummyProfile("cur")
         mock_service.current_auth_service.return_value = mock_auth_svc
-        prof = validate_authenticated_profile(interactive=False)
+        prof = validate_authenticated_profile()
         assert isinstance(prof, DummyProfile)
         assert prof.name == "cur"
 
@@ -24,26 +26,30 @@ def test_validate_authenticated_profile_returns_current_when_present() -> None:
 def test_validate_authenticated_profile_raises_when_non_interactive_and_missing() -> (
     None
 ):
-    with patch("llama_agents.cli.config.env_service.service") as mock_service:
+    with (
+        patch("llama_agents.cli.config.env_service.service") as mock_service,
+        patch(_INTERACTIVE_PATCH, return_value=False),
+    ):
         mock_auth_svc = MagicMock()
         mock_auth_svc.get_current_profile.return_value = None
         mock_service.current_auth_service.return_value = mock_auth_svc
         with pytest.raises(click.ClickException):
-            validate_authenticated_profile(interactive=False)
+            validate_authenticated_profile()
 
 
 def test_validate_authenticated_profile_interactive_multiple_profiles_selects() -> None:
     with (
         patch("llama_agents.cli.config.env_service.service") as mock_service,
-        patch("questionary.select") as mock_select,
+        patch("llama_agents.cli.commands.auth.select_or_exit") as mock_select,
+        patch(_INTERACTIVE_PATCH, return_value=True),
     ):
         mock_auth_svc = MagicMock()
         profiles = [DummyProfile("a"), DummyProfile("b")]
         mock_auth_svc.get_current_profile.return_value = None
         mock_auth_svc.list_profiles.return_value = profiles
         mock_service.current_auth_service.return_value = mock_auth_svc
-        mock_select.return_value.ask.return_value = profiles[1]
-        prof = validate_authenticated_profile(interactive=True)
+        mock_select.return_value = profiles[1]
+        prof = validate_authenticated_profile()
         mock_auth_svc.set_current_profile.assert_called_once_with("b")
         assert prof.name == "b"
 
@@ -53,7 +59,8 @@ def test_validate_authenticated_profile_interactive_multiple_profiles_none_selec
 ):
     with (
         patch("llama_agents.cli.config.env_service.service") as mock_service,
-        patch("questionary.select") as mock_select,
+        patch("llama_agents.cli.commands.auth.select_or_exit") as mock_select,
+        patch(_INTERACTIVE_PATCH, return_value=True),
     ):
         mock_auth_svc = MagicMock()
         mock_auth_svc.get_current_profile.return_value = None
@@ -62,21 +69,24 @@ def test_validate_authenticated_profile_interactive_multiple_profiles_none_selec
             DummyProfile("b"),
         ]
         mock_service.current_auth_service.return_value = mock_auth_svc
-        mock_select.return_value.ask.return_value = None
+        mock_select.side_effect = click.ClickException("Cancelled")
         with pytest.raises(click.ClickException):
-            validate_authenticated_profile(interactive=True)
+            validate_authenticated_profile()
 
 
 def test_validate_authenticated_profile_interactive_single_profile_sets_current() -> (
     None
 ):
-    with patch("llama_agents.cli.config.env_service.service") as mock_service:
+    with (
+        patch("llama_agents.cli.config.env_service.service") as mock_service,
+        patch(_INTERACTIVE_PATCH, return_value=True),
+    ):
         mock_auth_svc = MagicMock()
         only = DummyProfile("only-one")
         mock_auth_svc.get_current_profile.return_value = None
         mock_auth_svc.list_profiles.return_value = [only]
         mock_service.current_auth_service.return_value = mock_auth_svc
-        prof = validate_authenticated_profile(interactive=True)
+        prof = validate_authenticated_profile()
         mock_auth_svc.set_current_profile.assert_called_once_with("only-one")
         assert prof.name == "only-one"
 
@@ -86,13 +96,14 @@ def test_validate_authenticated_profile_interactive_no_profiles_and_no_auth_canc
 ):
     with (
         patch("llama_agents.cli.config.env_service.service") as mock_service,
-        patch("questionary.text") as mock_text,
+        patch("llama_agents.cli.commands.auth.click.prompt") as mock_prompt,
+        patch(_INTERACTIVE_PATCH, return_value=True),
     ):
         mock_auth_svc = MagicMock()
         mock_auth_svc.get_current_profile.return_value = None
         mock_auth_svc.list_profiles.return_value = []
         mock_auth_svc.env = SimpleNamespace(requires_auth=False)
         mock_service.current_auth_service.return_value = mock_auth_svc
-        mock_text.return_value.ask.return_value = None
+        mock_prompt.return_value = ""
         with pytest.raises(click.ClickException):
-            validate_authenticated_profile(interactive=True)
+            validate_authenticated_profile()

@@ -5,8 +5,18 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 from llama_agents.cli.app import app
+
+_INTERACTIVE_PATCH = "llama_agents.cli.commands.init.is_interactive_session"
+
+
+@pytest.fixture(autouse=True)
+def _non_interactive() -> Any:
+    """Default all init tests to non-interactive mode."""
+    with patch(_INTERACTIVE_PATCH, return_value=False):
+        yield
 
 
 def test_init_help_shows_options() -> None:
@@ -242,7 +252,6 @@ def test_init_skips_git_init_when_inside_parent_repo(tmp_path: Path) -> None:
                 "basic-ui",
                 "--dir",
                 str(target_dir),
-                "--no-interactive",
             ],
         )
 
@@ -285,14 +294,13 @@ def test_init_non_interactive_requires_template(tmp_path: Path) -> None:
 
     result = runner.invoke(
         app,
-        ["init", "--no-interactive"],
+        ["init"],
     )
 
-    # Should exit with error
+    # Should exit with error, listing templates and hinting at --template
     assert result.exit_code == 1
-    # Should mention template is required
-    assert "No template selected" in result.output
-    assert "template" in result.output.lower()
+    assert "basic" in result.output
+    assert "Pass --template to choose one" in result.output
 
 
 def test_init_non_interactive_defaults_directory(tmp_path: Path) -> None:
@@ -328,7 +336,7 @@ def test_init_non_interactive_defaults_directory(tmp_path: Path) -> None:
 
             result = runner.invoke(
                 app,
-                ["init", "--template", "basic-ui", "--no-interactive"],
+                ["init", "--template", "basic-ui"],
             )
 
             assert result.exit_code == 0, result.output
@@ -378,7 +386,6 @@ def test_init_force_flag_skips_confirmation(tmp_path: Path) -> None:
                 "--dir",
                 str(target_dir),
                 "--force",
-                "--no-interactive",
             ],
         )
 
@@ -403,7 +410,6 @@ def test_init_existing_directory_no_force_exits(tmp_path: Path) -> None:
             "basic-ui",
             "--dir",
             str(target_dir),
-            "--no-interactive",
         ],
     )
 
