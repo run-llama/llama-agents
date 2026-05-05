@@ -10,9 +10,7 @@ from llama_agents.cli.interactive import require_or_list_choices, select_or_exit
 
 
 def test_select_or_exit_interactive_returns_selected_item() -> None:
-    with patch(
-        "llama_agents.cli.interactive._blessed_select", return_value=1
-    ):
+    with patch("llama_agents.cli.interactive._blessed_select", return_value=1):
         selected = select_or_exit(
             [(1, "one"), (2, "two")],
             "Pick one",
@@ -24,9 +22,7 @@ def test_select_or_exit_interactive_returns_selected_item() -> None:
 
 
 def test_select_or_exit_interactive_cancel_raises() -> None:
-    with patch(
-        "llama_agents.cli.interactive._blessed_select", return_value=None
-    ):
+    with patch("llama_agents.cli.interactive._blessed_select", return_value=None):
         with pytest.raises(click.ClickException, match="Cancelled"):
             select_or_exit([(1, "one")], "Pick one", "--item", interactive=True)
 

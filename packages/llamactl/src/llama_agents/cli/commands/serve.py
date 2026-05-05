@@ -335,7 +335,9 @@ def _maybe_select_project_for_env_key() -> None:
         project_items = []
         current_idx = 0
         for i, p in enumerate(projects):
-            label = f"{p.project_id}  {p.project_name} ({p.deployment_count} deployments)"
+            label = (
+                f"{p.project_id}  {p.project_name} ({p.deployment_count} deployments)"
+            )
             if p.project_id == current_project_id:
                 label += " [current]"
                 current_idx = i
