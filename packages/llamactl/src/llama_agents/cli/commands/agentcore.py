@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 import click
-from llama_agents.cli.output import echo_status as _out
+from llama_agents.cli.output import status
 
 from ..app import app
 from ..options import global_options
@@ -93,5 +93,5 @@ def start_app(local: bool = False) -> None:
     try:
         start_app_in_target_venv(path, local=local)
     except subprocess.CalledProcessError as exc:
-        _out("Failed to run agentcore, see errors above.")
+        status("failed to run agentcore; see errors above")
         raise click.exceptions.Exit(exc.returncode)

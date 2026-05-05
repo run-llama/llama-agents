@@ -125,7 +125,7 @@ def test_dev_validate_reports_failures(
 
     result = runner.invoke(app, ["dev", "validate", str(tmp_path)])
     assert result.exit_code != 0
-    assert "Workflow validation failed" in result.output
+    assert "workflow validation failed; see errors above" in result.output
 
 
 @dataclass
@@ -427,7 +427,7 @@ def test_export_json_graph_reports_failures(
 
     result = runner.invoke(app, ["dev", "export-json-graph"])
     assert result.exit_code != 0, result.output
-    assert "Workflow JSON graph export failed" in result.output
+    assert "workflow JSON graph export failed; see errors above" in result.output
 
 
 def test_export_json_graph_deployment_file_not_exist(

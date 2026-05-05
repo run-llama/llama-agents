@@ -89,7 +89,7 @@ def test_auth_list_profiles_no_profiles() -> None:
         mock_service.current_auth_service.return_value = mock_auth_svc
         result = runner.invoke(app, ["auth", "list"])
         assert result.exit_code == 0
-        assert "No profiles found" in result.output
+        assert "no profiles found" in result.output
 
 
 def test_auth_switch_profile_success_and_missing() -> None:
@@ -112,7 +112,7 @@ def test_auth_switch_profile_success_and_missing() -> None:
         mock_service2.current_auth_service.return_value = MagicMock()
         result = runner.invoke(app, ["auth", "switch", "doesnt-exist"])
         assert result.exit_code == 0
-        assert "No profile selected" in result.output
+        assert "no profile selected" in result.output
 
 
 def test_auth_logout_existing() -> None:

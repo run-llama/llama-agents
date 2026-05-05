@@ -6,9 +6,8 @@ from typing import TYPE_CHECKING
 import click
 from llama_agents.cli.config.schema import Environment
 from llama_agents.cli.interactive import is_interactive_session, select_or_exit
-from llama_agents.cli.output import echo_status as _out
+from llama_agents.cli.output import status, warning
 from llama_agents.cli.param_types import EnvironmentType
-from llama_agents.cli.styles import WARNING
 from packaging import version as packaging_version
 
 from ..display import EnvDisplay
@@ -50,7 +49,7 @@ def list_environments_cmd(output: str) -> None:
         current_env = service.get_current_environment()
 
         if not envs and output == "text":
-            _out(f"[{WARNING}]No environments found[/]")
+            status("no environments found")
             return
 
         current_url = current_env.api_url if current_env else None
@@ -80,7 +79,7 @@ def add_environment_cmd(api_url: str | None) -> None:
                 show_default=current_env is not None,
             )
             if not entered:
-                _out(f"[{WARNING}]No environment entered[/]")
+                status("no environment entered")
                 return
             api_url = entered.strip()
 
@@ -89,8 +88,9 @@ def add_environment_cmd(api_url: str | None) -> None:
         api_url = api_url.rstrip("/")
         env = service.probe_environment(api_url)
         service.create_or_update_environment(env)
-        _out(
-            f"[green]Added environment[/green] {env.api_url} (requires_auth={env.requires_auth}, min_llamactl_version={env.min_llamactl_version or '-'})."
+        requires_auth = str(env.requires_auth).lower()
+        status(
+            f"added environment {env.api_url} requires_auth={requires_auth} min_llamactl_version={env.min_llamactl_version or '-'}"
         )
         _maybe_warn_min_version(env.min_llamactl_version)
     except click.ClickException:
@@ -119,9 +119,7 @@ def delete_environment_cmd(api_url: str | None) -> None:
         deleted = service.delete_environment(api_url)
         if not deleted:
             raise click.ClickException(f"Environment '{api_url}' not found")
-        _out(
-            f"[green]Deleted environment[/green] {api_url} and all associated profiles"
-        )
+        status(f"deleted environment {api_url} and associated profiles")
     except click.ClickException:
         raise
     except Exception as e:
@@ -151,10 +149,10 @@ def switch_environment_cmd(api_url: str | None) -> None:
         try:
             env = service.auto_update_env(env)
         except Exception as e:
-            _out(f"[{WARNING}]Failed to resolve environment: {e}[/]")
+            warning(f"failed to resolve environment: {e}")
             return
         service.current_auth_service().select_any_profile()
-        _out(f"[green]Switched to environment[/green] {env.api_url}")
+        status(f"switched environment {env.api_url}")
         _maybe_warn_min_version(env.min_llamactl_version)
     except click.ClickException:
         raise
@@ -177,8 +175,8 @@ def _maybe_warn_min_version(min_required: str | None) -> None:
         return
     try:
         if packaging_version.parse(current) < packaging_version.parse(min_required):
-            _out(
-                f"[{WARNING}]Warning:[/] This environment requires llamactl >= [bold]{min_required}[/bold], you have [bold]{current}[/bold]."
+            warning(
+                f"this environment requires llamactl >= {min_required}; you have {current}"
             )
     except Exception:
         # If packaging is not available or parsing fails, skip strict comparison

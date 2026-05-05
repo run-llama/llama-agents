@@ -12,8 +12,7 @@ from llama_agents.cli.commands.auth import validate_authenticated_profile
 from llama_agents.cli.env_settings import read_env_settings
 from llama_agents.cli.interactive import is_interactive_session, select_or_exit
 from llama_agents.cli.options import native_tls_option
-from llama_agents.cli.output import echo_status as _out
-from llama_agents.cli.styles import WARNING
+from llama_agents.cli.output import status, warning
 from llama_agents.cli.utils.capabilities import probe_organizations_support
 from llama_agents.cli.utils.redact import redact_api_key
 from llama_agents.core.config import DEFAULT_DEPLOYMENT_FILE_PATH
@@ -254,8 +253,8 @@ def _maybe_inject_llama_cloud_credentials(
 
     env = service.get_current_environment()
     if not env.requires_auth:
-        _out(
-            f"[{WARNING}]Warning: This app requires Llama Cloud authentication, and no LLAMA_CLOUD_API_KEY is present. The app may not work.[/]"
+        warning(
+            "LLAMA_CLOUD_API_KEY is not set and no logged-in profile was found; the app may not work"
         )
         return
 
@@ -276,14 +275,14 @@ def _maybe_inject_llama_cloud_credentials(
             if authed.api_key:
                 _set_env_vars_from_profile(authed)
                 return
-        _out(
-            f"[{WARNING}]Warning: No Llama Cloud credentials configured. The app may not work.[/]"
+        warning(
+            "LLAMA_CLOUD_API_KEY is not set and no logged-in profile was found; the app may not work"
         )
         return
 
     # Non-interactive session
-    _out(
-        f"[{WARNING}]Warning: LLAMA_CLOUD_API_KEY is not set and no logged-in profile was found. The app may not work.[/]"
+    warning(
+        "LLAMA_CLOUD_API_KEY is not set and no logged-in profile was found; the app may not work"
     )
 
 
@@ -323,7 +322,7 @@ def _maybe_select_project_for_env_key() -> None:
             return
 
         if org is not None:
-            _out(f"Projects for organization [bold]{org.org_name}[/]")
+            status(f"projects for organization {org.org_name}")
 
         # Multiple: prompt selection
         current_project_id = settings.llama_agents_project_id
@@ -361,6 +360,6 @@ def _print_connection_summary() -> None:
     redacted = redact_api_key(api_key)
     env_text = base_url or "-"
     proj_text = project_id or "-"
-    _out(
-        f"Connecting to environment: [bold]{env_text}[/], project: [bold]{proj_text}[/], api key: [bold]{redacted}[/]"
+    status(
+        f"connecting to environment {env_text}, project {proj_text}, api key {redacted}"
     )

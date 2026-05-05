@@ -6,7 +6,7 @@ The headline regression here: ``deployments update <id>`` for an internal-code
 deployment used to call ``asyncio.run`` twice with the same ``ProjectClient``.
 The shared httpx pool was bound to the first (closed) event loop, and the
 second run raised ``RuntimeError: Event loop is closed`` — surfacing in CI as
-``Error: Event loop is closed`` after the "Continuing with update using last
+``Error: Event loop is closed`` after the "continuing with update using last
 pushed code" fallback when the internal git mirror returned a transient 500.
 """
 
@@ -62,7 +62,8 @@ def test_deployments_update_external_repo(patched_auth: Any) -> None:
         result = runner.invoke(app, ["deployments", "update", "my-app"])
     assert result.exit_code == 0, result.output
     assert result.stdout == ""
-    assert "Updated:" in result.stderr
+    assert "refreshing my-app" in result.stderr
+    assert "updated my-app aaaaaaa -> bbbbbbb" in result.stderr
     client.get_deployment.assert_called_once()
     client.update_deployment.assert_called_once()
 
@@ -113,8 +114,8 @@ def test_deployments_update_internal_repo_push_failure_does_not_abort(
 
     assert result.exit_code == 0, result.output
     assert result.stdout == ""
-    assert "Push failed:" in result.stderr
-    assert "Continuing with update using last pushed code" in result.stderr
+    assert "warning: push failed:" in result.stderr
+    assert "warning: continuing with update using last pushed code" in result.stderr
     assert "Event loop is closed" not in result.output
     client.get_deployment.assert_called_once()
     client.update_deployment.assert_called_once()
@@ -144,7 +145,8 @@ def test_deployments_update_no_push_skips_internal_git_push(
 
     assert result.exit_code == 0, result.output
     assert result.stdout == ""
-    assert "Updated:" in result.stderr
+    assert "refreshing my-app" in result.stderr
+    assert "updated my-app aaaaaaa -> bbbbbbb" in result.stderr
     is_git_repo.assert_not_called()
     configure_git_remote.assert_not_called()
     push_to_remote.assert_not_called()

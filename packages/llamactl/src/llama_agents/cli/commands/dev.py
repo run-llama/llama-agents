@@ -15,7 +15,7 @@ from llama_agents.cli.commands.serve import (
     serve as serve_command,
 )
 from llama_agents.cli.options import global_options
-from llama_agents.cli.output import echo_status as _out
+from llama_agents.cli.output import status
 from llama_agents.core.config import DEFAULT_DEPLOYMENT_FILE_PATH
 from llama_agents.core.deployment_config import DeploymentConfig
 
@@ -86,11 +86,11 @@ def validate_command(deployment_file: Path, validate_env: bool) -> None:
             skip_env_validation=skip_env_validation,
         )
     except subprocess.CalledProcessError as exc:
-        _out("[red]Workflow validation failed. See errors above.[/red]")
+        status("workflow validation failed; see errors above")
         raise Exit(exc.returncode)
 
     _print_connection_summary()
-    _out(f"[green]Validated workflows in {config_dir} successfully.[/green]")
+    status(f"validated workflows in {config_dir}")
 
 
 @dev.command(
@@ -148,9 +148,9 @@ def export_json_graph_command(
             output=output,
         )
     except subprocess.CalledProcessError as exc:
-        _out("[red]Workflow JSON graph export failed. See errors above.[/red]")
+        status("workflow JSON graph export failed; see errors above")
         raise Exit(exc.returncode)
-    _out(f"[green]Exported workflow JSON graph to {output}[/green]")
+    status(f"exported workflow JSON graph to {output}")
 
 
 @dev.command(

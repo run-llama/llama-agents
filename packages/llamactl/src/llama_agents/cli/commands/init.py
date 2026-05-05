@@ -10,7 +10,7 @@ from click.exceptions import Exit
 from llama_agents.cli.app import app
 from llama_agents.cli.interactive import is_interactive_session, select_or_exit
 from llama_agents.cli.options import global_options
-from llama_agents.cli.output import echo_status as _out
+from llama_agents.cli.output import status, warning
 from llama_agents.cli.param_types import TemplateType
 from llama_agents.cli.templates import (
     ALL_TEMPLATES,
@@ -76,15 +76,15 @@ def _create(template: str | None, dir: Path | None, force: bool) -> None:
         has_git = False
 
     if not has_git:
-        _out(
+        status(
             "git is required to initialize a template. Make sure you have it installed and available in your PATH."
         )
         raise Exit(1)
 
     if template is None:
         if interactive:
-            _out(
-                "[bold]Select a template to start from.[/bold] Either with javascript frontend UI, or just a python workflow that can be used as an API."
+            status(
+                "select a template to start from. either with javascript frontend UI, or just a python workflow that can be used as an API."
             )
         template = (
             select_or_exit(
@@ -111,14 +111,14 @@ def _create(template: str | None, dir: Path | None, force: bool) -> None:
             else:
                 return
         else:
-            _out(f"[yellow]No directory provided. Defaulting to {template}[/]")
+            status(f"no directory provided; defaulting to {template}")
             dir = Path(template)
 
     resolved_template: TemplateOption | None = next(
         (o for o in ALL_TEMPLATES if o.id == template), None
     )
     if resolved_template is None:
-        _out(f"Template {template} not found")
+        status(f"template {template} not found")
         raise Exit(1)
     if dir.exists():
         is_ok = force or (
@@ -126,8 +126,8 @@ def _create(template: str | None, dir: Path | None, force: bool) -> None:
         )
 
         if not is_ok:
-            _out(
-                f"[yellow]Try again with another directory or pass --force to overwrite the existing directory '{str(dir)}'[/]"
+            status(
+                f"try again with another directory or pass --force to overwrite the existing directory {str(dir)}"
             )
             raise Exit(1)
         else:
@@ -175,8 +175,8 @@ def _create(template: str | None, dir: Path | None, force: bool) -> None:
 
             if inside_existing_repo:
                 # Do not create a nested repo; user likely wants this within the parent repo
-                _out(
-                    "[yellow]Detected an existing Git repository in a parent directory; skipping git initialization for this app.[/]"
+                warning(
+                    "skipping git initialization: existing Git repository in a parent directory"
                 )
                 # Treat as initialized for purposes of what instructions to show later
                 git_initialized = True
@@ -207,50 +207,46 @@ def _create(template: str | None, dir: Path | None, force: bool) -> None:
                     elif isinstance(e, FileNotFoundError):
                         err_msg = "git executable not found"
 
-                    _out("")
-                    _out("⚠️  [bold]Skipping git initialization due to an error.[/]")
+                    status("")
+                    warning(f"skipping git initialization: {err_msg or 'git error'}")
                     if err_msg:
-                        _out(f"    {err_msg}")
-                    _out("    You can initialize it manually:")
-                    _out(
+                        status(f"    {err_msg}")
+                    status("    You can initialize it manually:")
+                    status(
                         "      git init && git add . && git commit -m 'Initial commit'"
                     )
-                    _out("")
+                    status("")
     finally:
         os.chdir(original_cwd)
 
     # If git is not available at all, let the user know how to proceed
     if not has_git:
-        _out("")
-        _out("⚠️  [bold]Skipping git initialization due to an error.[/]")
-        _out("    git executable not found")
-        _out("    You can initialize it manually:")
-        _out("      git init && git add . && git commit -m 'Initial commit'")
-        _out("")
+        status("")
+        warning("skipping git initialization: git executable not found")
+        status("    You can initialize it manually:")
+        status("      git init && git add . && git commit -m 'Initial commit'")
+        status("")
 
-    _out(
-        f"Successfully created [blue]{dir}[/] using the [blue]{resolved_template.name}[/] template! 🎉 🦙 💾"
-    )
-    _out("")
-    _out("[bold]To run locally:[/]")
-    _out(f"    [orange3]cd[/] {dir}")
-    _out("    [orange3]uvx[/] llamactl serve")
-    _out("")
-    _out("[bold]To deploy:[/]")
+    status(f"created {dir} using the {resolved_template.name} template")
+    status("")
+    status("to run locally:")
+    status(f"    cd {dir}")
+    status("    uvx llamactl serve")
+    status("")
+    status("to deploy:")
     # Only show manual git init steps if repository failed to initialize earlier
     if not git_initialized:
-        _out("    [orange3]git[/] init")
-        _out("    [orange3]git[/] add .")
-        _out("    [orange3]git[/] commit -m 'Initial commit'")
-        _out("")
-    _out("[dim](Create a new repo and add it as a remote)[/]")
-    _out("")
-    _out("    [orange3]git[/] remote add origin <your-repo-url>")
-    _out("    [orange3]git[/] push -u origin main")
-    _out("")
-    # _out("  [orange3]uvx[/] llamactl login")
-    _out("    [orange3]uvx[/] llamactl deploy create")
-    _out("")
+        status("    git init")
+        status("    git add .")
+        status("    git commit -m 'Initial commit'")
+        status("")
+    status("(Create a new repo and add it as a remote)")
+    status("")
+    status("    git remote add origin <your-repo-url>")
+    status("    git push -u origin main")
+    status("")
+    status("    uvx llamactl deploy create")
+    status("")
 
 
 def _update() -> None:
@@ -266,7 +262,7 @@ def _update() -> None:
             quiet=True,
         )
     except Exception as e:  # scoped to copier errors; type opaque here
-        _out(f"{e}")
+        status(f"{e}")
         raise Exit(1)
 
     # Check git status and warn about conflicts
@@ -283,21 +279,21 @@ def _update() -> None:
             modified_files = []
 
             for line in result.stdout.strip().split("\n"):
-                status = line[:2]
+                git_status = line[:2]
                 filename = line[3:]
 
-                if "UU" in status or "AA" in status or "DD" in status:
+                if "UU" in git_status or "AA" in git_status or "DD" in git_status:
                     conflicted_files.append(filename)
-                elif status.strip():
+                elif git_status.strip():
                     modified_files.append(filename)
 
             if conflicted_files:
-                _out("")
-                _out("⚠️  [bold]Files with conflicts detected:[/]")
+                status("")
+                warning("files with conflicts detected:")
                 for file in conflicted_files:
-                    _out(f"    {file}")
-                _out("")
-                _out(
+                    status(f"    {file}")
+                status("")
+                status(
                     "Please manually resolve conflicts with a merge editor before proceeding."
                 )
 

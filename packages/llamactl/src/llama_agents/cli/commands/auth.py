@@ -11,9 +11,8 @@ from typing import TYPE_CHECKING
 
 import click
 from llama_agents.cli.interactive import is_interactive_session, select_or_exit
-from llama_agents.cli.output import echo_status as _out
+from llama_agents.cli.output import status, warning
 from llama_agents.cli.param_types import OrgType, ProfileType, ProjectType
-from llama_agents.cli.styles import MUTED_COL, PRIMARY_COL, WARNING
 from llama_agents.cli.utils.capabilities import probe_organizations_support
 
 from ..app import app
@@ -88,9 +87,7 @@ def create_api_key_profile(
                     "--api-key and --project are required in non-interactive mode"
                 )
             created = auth_svc.create_profile_from_token(project_id, api_key)
-            _out(
-                f"[green]Created API key profile '{created.name}' and set as current[/green]"
-            )
+            status(f"created API key profile {created.name} and set as current")
             return
 
         # Interactive mode: prompt for token (masked) and validate
@@ -98,7 +95,7 @@ def create_api_key_profile(
         org = _discover_organization(auth_svc, api_key=token_value)
         org_id_for_projects = org.org_id if org is not None else None
         if org is not None:
-            _out(f"Projects for organization [bold]{org.org_name}[/]")
+            status(f"projects for organization {org.org_name}")
         projects = _prompt_validate_api_key_and_list_projects(
             auth_svc, token_value, org_id=org_id_for_projects
         )
@@ -108,14 +105,12 @@ def create_api_key_profile(
             projects, auth_svc.env.requires_auth
         )
         if not selected_project_id:
-            _out(f"[{WARNING}]No project selected[/]")
+            status("no project selected")
             return
 
         # Create and set profile
         created = auth_svc.create_profile_from_token(selected_project_id, token_value)
-        _out(
-            f"[green]Created API key profile '{created.name}' and set as current[/green]"
-        )
+        status(f"created API key profile {created.name} and set as current")
     except click.ClickException:
         raise
     except Exception as e:
@@ -130,25 +125,19 @@ def device_login() -> None:
 
     try:
         created = _create_device_profile()
-        _out(
-            f"[green]Created login profile '{created.name}' and set as current[/green]"
-        )
+        status(f"created login profile {created.name} and set as current")
 
     except NoProjectsFoundError:
-        _out(f"[{WARNING}]⚠️ No Existing Projects - Welcome to LlamaCloud![/]")
-        _out(f"[{WARNING}]Looks like this may be your first time logging in.[/]")
-        _out(
-            f"[{WARNING}]Before you can get started, log in to https://cloud.llamaindex.ai to complete your account setup.[/]"
-        )
+        warning("no existing projects")
+        status("looks like this may be your first time logging in")
+        status("log in to https://cloud.llamaindex.ai to complete account setup")
         return
 
     except OIDCNotEnabledError as e:
-        _out(
-            f"[{WARNING}]This server does not have browser-based login (OIDC) configured.[/]"
-        )
+        warning("this server does not have browser-based login (OIDC) configured")
         if str(e):
-            _out(f"[{MUTED_COL}]Server response: {e}[/]")
-        _out("Use [cyan]llamactl auth token[/cyan] to log in with an API key instead.")
+            status(f"server response: {e}")
+        status("use llamactl auth token to log in with an API key instead")
         return
 
     except Exception as e:
@@ -166,11 +155,11 @@ def list_profiles(output: str) -> None:
         current = auth_svc.get_current_profile()
 
         if not profiles and output == "text":
-            _out(f"[{WARNING}]No profiles found[/]")
+            status("no profiles found")
             if auth_svc.env.requires_auth:
-                _out("Create one with: [cyan]llamactl auth login[/cyan]")
+                status("create one with: llamactl auth login")
             else:
-                _out("Create one with: [cyan]llamactl auth token[/cyan]")
+                status("create one with: llamactl auth token")
             return
 
         current_name = current.name if current else None
@@ -195,7 +184,7 @@ def destroy_database() -> None:
     ):
         return
     ConfigManager(init_database=False).destroy_database()
-    _out("[green]Database destroyed[/green]")
+    status("database destroyed")
 
 
 @auth.command("show-db", hidden=True)
@@ -203,7 +192,7 @@ def destroy_database() -> None:
 def config_database() -> None:
     """Config the database"""
     path = _get_service().config_manager().db_path
-    _out(f"[bold]{path}[/bold]")
+    status(path)
 
 
 @auth.command("switch")
@@ -215,11 +204,11 @@ def switch_profile(name: str | None) -> None:
     try:
         selected_auth = _select_profile(auth_svc, name)
         if not selected_auth:
-            _out(f"[{WARNING}]No profile selected[/]")
+            status("no profile selected")
             return
 
         auth_svc.set_current_profile(selected_auth.name)
-        _out(f"[green]Switched to profile '{selected_auth.name}'[/green]")
+        status(f"switched profile {selected_auth.name}")
 
     except Exception as e:
         raise click.ClickException(str(e)) from e
@@ -239,7 +228,7 @@ def delete_profile(name: str | None) -> None:
             raise click.ClickException("No profile selected")
 
         if asyncio.run(auth_svc.delete_profile(auth.name)):
-            _out(f"[green]Logged out from '{auth.name}'[/green]")
+            status(f"logged out {auth.name}")
         else:
             raise click.ClickException(f"Profile '{auth.name}' not found")
 
@@ -287,7 +276,7 @@ def list_organizations(output: str) -> None:
         auth_svc = _get_service().current_auth_service()
         if not probe_organizations_support():
             if output == "text":
-                _out(f"[{WARNING}]This server does not support organizations[/]")
+                warning("this server does not support organizations")
                 return
             # Structured outputs: emit an empty list so scripts get a
             # well-typed answer instead of an unparsable warning.
@@ -296,7 +285,7 @@ def list_organizations(output: str) -> None:
 
         organizations = _list_organizations(auth_svc)
         if not organizations and output == "text":
-            _out(f"[{WARNING}]No organizations found[/]")
+            status("no organizations found")
             return
 
         default_org = next((o.org_id for o in organizations if o.is_default), None)
@@ -344,13 +333,13 @@ def change_project(project_id: str | None, org_id: str | None) -> None:
             ):
                 raise click.ClickException(f"Project {project_id} not found")
         auth_svc.set_project(profile.name, project_id)
-        _out(f"Set active project to [bold green]{project_id}[/]")
+        status(f"switched project {project_id}")
         return
     try:
         projects = _list_projects(auth_svc)
 
         if not projects:
-            _out(f"[{WARNING}]No projects found[/]")
+            status("no projects found")
             return
 
         current_project_id = profile.project_id
@@ -383,9 +372,9 @@ def change_project(project_id: str | None, org_id: str | None) -> None:
             )
             name = selected_project.project_name if selected_project else result
             auth_svc.set_project(profile.name, result)
-            _out(f"Set active project to [bold {PRIMARY_COL}]{name}[/]")
+            status(f"switched project {name}")
         else:
-            _out(f"[{WARNING}]No project selected[/]")
+            status("no project selected")
     except click.ClickException:
         raise
     except Exception as e:
@@ -429,15 +418,13 @@ def inject_env_vars(
 
         vars = env_vars_from_profile(profile)
         if not vars:
-            _out(f"[{WARNING}]No variables to inject[/]")
+            status("no variables to inject")
             return
         env_file.parent.mkdir(parents=True, exist_ok=True)
         for key, value in vars.items():
             set_key(str(env_file), key, value)
         rel = os.path.relpath(env_file, Path.cwd())
-        _out(
-            f"[green]Wrote environment variables: {', '.join(vars.keys())} to {rel}[/green]"
-        )
+        status(f"wrote environment variables to {rel}")
     except Exception as e:
         raise click.ClickException(str(e)) from e
 
@@ -529,7 +516,7 @@ def _create_device_profile() -> Auth:
         raise click.ClickException("No projects found for this account")
 
     if org is not None:
-        _out(f"Projects for organization [bold]{org.org_name}[/]")
+        status(f"projects for organization {org.org_name}")
 
     selected_project_id = _select_or_enter_project(projects, True)
     if not selected_project_id:
@@ -599,15 +586,15 @@ async def _run_device_authentication(base_url: str) -> DeviceOIDC:
             DeviceAuthorizationRequest(client_id=client_id, scope=scope_value),
         )
 
-        _out(
-            "[bold]complete authentication by visiting the verification URI and confirming the device:[/bold]"
+        status(
+            "complete authentication by visiting the verification URI and confirming the device:"
         )
         if da.verification_uri:
-            _out(
-                f"Verification URI: {da.verification_uri} (will open in your browser if supported)"
+            status(
+                f"verification URI: {da.verification_uri} (will open in your browser if supported)"
             )
         if da.user_code:
-            _out(f"User Code: {da.user_code} to confirm the device")
+            status(f"user code: {da.user_code} to confirm the device")
         if da.verification_uri_complete:
             try:
                 webbrowser.open(da.verification_uri_complete)
@@ -798,12 +785,12 @@ def _prompt_validate_api_key_and_list_projects(
         return _list_projects(auth_svc, api_key, org_id=org_id)
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 401:
-            _out("[red]Invalid API key. Please try again.[/red]")
+            status("invalid API key; please try again")
             return _prompt_validate_api_key_and_list_projects(
                 auth_svc, _prompt_for_api_key(), org_id=org_id
             )
         if e.response.status_code == 403:
-            _out("[red]This environment requires a valid API key.[/red]")
+            status("this environment requires a valid API key")
             return _prompt_validate_api_key_and_list_projects(
                 auth_svc, _prompt_for_api_key(), org_id=org_id
             )
@@ -862,7 +849,7 @@ def _select_profile(auth_svc: AuthService, profile_name: str | None) -> Auth | N
         profiles = auth_svc.list_profiles()
 
         if not profiles:
-            _out(f"[{WARNING}]No profiles found[/]")
+            status("no profiles found")
             return None
 
         current = auth_svc.get_current_profile()
@@ -886,5 +873,5 @@ def _select_profile(auth_svc: AuthService, profile_name: str | None) -> Auth | N
     except click.ClickException:
         raise
     except Exception as e:
-        _out(f"[red]Error loading profiles: {e}[/red]")
+        warning(f"error loading profiles: {e}")
         return None

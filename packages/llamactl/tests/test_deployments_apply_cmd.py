@@ -748,7 +748,7 @@ def test_delete_from_file(patched_auth: Any, tmp_path: Any) -> None:
 
     assert result.exit_code == 0, result.output
     assert result.stdout == ""
-    assert "Deleted deployment: doomed-app" in result.stderr
+    assert "deleted doomed-app" in result.stderr
     client.delete_deployment.assert_called_once()
     call_args = client.delete_deployment.call_args
     assert call_args[0][0] == "doomed-app"
@@ -804,7 +804,7 @@ def test_delete_reads_stdin(patched_auth: Any) -> None:
 
     assert result.exit_code == 0, result.output
     assert result.stdout == ""
-    assert "Deleted deployment: stdin-app" in result.stderr
+    assert "deleted stdin-app" in result.stderr
     client.delete_deployment.assert_called_once()
     call_args = client.delete_deployment.call_args
     assert call_args[0][0] == "stdin-app"
@@ -1132,7 +1132,10 @@ def test_apply_internal_scheme_skips_push_when_not_in_git_repo(
 
     assert result.exit_code == 0, result.output
     assert result.stdout == ""
-    assert "Not in a git repo" in result.stderr
+    assert (
+        "warning: not in a git repo; skipping push, server will use last pushed code"
+        in result.stderr
+    )
     assert "updated my-app" in result.output
     # Push should be skipped entirely.
     mock_push.assert_not_called()

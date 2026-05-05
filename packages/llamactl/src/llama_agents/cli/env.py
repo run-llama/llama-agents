@@ -4,7 +4,7 @@ from io import StringIO
 from typing import Dict
 
 from dotenv import dotenv_values
-from llama_agents.cli.output import echo_status as _out
+from llama_agents.cli.output import warning
 
 
 def load_env_secrets_from_string(env_content: str) -> Dict[str, str]:
@@ -25,5 +25,5 @@ def load_env_secrets_from_string(env_content: str) -> Dict[str, str]:
         # Filter out None values and convert to strings
         return {k: str(v) for k, v in secrets.items() if v is not None}
     except Exception as e:
-        _out(f"Warning: Could not parse environment variables from string: {e}")
+        warning(f"could not parse environment variables from string: {e}")
         return {}
