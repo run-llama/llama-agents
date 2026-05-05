@@ -74,7 +74,7 @@ def test_auth_env_switch_argument_and_interactive() -> None:
         assert "not found" in result.output
 
 
-def test_auth_env_add_interactive_prompts_for_url() -> None:
+def test_auth_env_add_interactive_selection_for_url() -> None:
     runner = CliRunner()
     env = Environment(api_url="https://x", requires_auth=False)
     with (

@@ -4,8 +4,8 @@
 
 Reads the current working directory: git remote / branch, deployment config,
 ``.env`` secrets, and the installed appserver version. Produces a
-:class:`LocalContext` consumable by ``deployments template`` and the Textual
-deployment form.
+:class:`LocalContext` consumable by ``deployments template`` and the editor
+workflow.
 """
 
 from __future__ import annotations
