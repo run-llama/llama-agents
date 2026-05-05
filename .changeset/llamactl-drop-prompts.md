@@ -1,5 +1,5 @@
 ---
-"llamactl": patch
+"llamactl": minor
 ---
 
-Make llamactl prompts safe for non-interactive sessions
+Replace simple-term-menu with blessed, add type-to-filter picker, handle non-interactive sessions gracefully

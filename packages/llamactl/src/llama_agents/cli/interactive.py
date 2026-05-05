@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Sequence
-from typing import TypeVar
+from typing import NoReturn, TypeVar
 
 import click
 
@@ -47,7 +47,7 @@ def require_or_list_choices(
     items: Sequence[tuple[str, str]],
     hint_command: str,
     empty_message: str | None = None,
-) -> None:
+) -> NoReturn:
     """Print available choices to stderr and raise with an actionable hint.
 
     Unlike ``select_or_exit`` this never shows a picker — it always lists
@@ -95,7 +95,11 @@ def _blessed_select(labels: list[str], title: str, selected: int = 0) -> int | N
         return before + term.yellow + term.bold + match + term.normal + after
 
     def writeln(text: str) -> None:
-        out.write(term.move_x(0) + term.clear_eol + text + "\r\n")
+        # Truncate to terminal width so wrapped lines don't break cursor-up math.
+        col0 = term.move_x(0)  # type: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type]
+        if term.length(text) > term.width:
+            text = term.truncate(text, term.width - 1) + "…"
+        out.write(col0 + term.clear_eol + text + "\r\n")
 
     def render() -> int:
         matches = filtered()
@@ -169,7 +173,7 @@ def _blessed_select(labels: list[str], title: str, selected: int = 0) -> int | N
 
             if lines_drawn > 0:
                 out.write(f"\x1b[{lines_drawn}A")
-            out.write(term.move_x(0))
+            out.write(term.move_x(0))  # type: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type]
             lines_drawn = render()
 
 

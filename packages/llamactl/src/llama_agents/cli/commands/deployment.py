@@ -736,8 +736,7 @@ def delete_deployment(
         except ApplyYamlError as exc:
             raise click.ClickException(str(exc)) from exc
 
-    if deployment_id is None:
-        _require_deployment_id(None, "delete", project)
+    deployment_id = _require_deployment_id(deployment_id, "delete", project)
 
     try:
         client = get_project_client(project_id_override=project)

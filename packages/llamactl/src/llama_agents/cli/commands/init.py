@@ -89,9 +89,7 @@ def _create(template: str | None, dir: Path | None, force: bool) -> None:
         template = (
             select_or_exit(
                 [
-                    ("", ""),
                     *[(o.id, f"{o.id} - {o.description}") for o in UI_TEMPLATES],
-                    ("", ""),
                     *[(o.id, f"{o.id} - {o.description}") for o in HEADLESS_TEMPLATES],
                 ],
                 "",
@@ -99,7 +97,7 @@ def _create(template: str | None, dir: Path | None, force: bool) -> None:
                 hint_command="llamactl init --help",
             )
             or None
-        )  # empty-string separators are not valid selections
+        )
     if template is None:
         raise Exit(1)
     if dir is None:
