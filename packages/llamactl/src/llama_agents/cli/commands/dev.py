@@ -14,7 +14,6 @@ from llama_agents.cli.commands.serve import (
 from llama_agents.cli.commands.serve import (
     serve as serve_command,
 )
-from llama_agents.cli.interactive import is_interactive_session
 from llama_agents.cli.options import global_options
 from llama_agents.core.config import DEFAULT_DEPLOYMENT_FILE_PATH
 from llama_agents.core.deployment_config import DeploymentConfig
@@ -65,9 +64,7 @@ def validate_command(deployment_file: Path, validate_env: bool) -> None:
         deployment_file, command_name="llamactl dev validate"
     )
     # Ensure cloud credentials/env are available to the subprocess (if required)
-    _maybe_inject_llama_cloud_credentials(
-        deployment_file, is_interactive_session(), require_cloud=False
-    )
+    _maybe_inject_llama_cloud_credentials(deployment_file, require_cloud=False)
 
     # By default, skip env validation (fill missing with placeholders)
     skip_env_validation = not validate_env
@@ -130,9 +127,7 @@ def export_json_graph_command(
     _ensure_project_layout(
         deployment_file, command_name="llamactl dev export-json-graph"
     )
-    _maybe_inject_llama_cloud_credentials(
-        deployment_file, is_interactive_session(), require_cloud=False
-    )
+    _maybe_inject_llama_cloud_credentials(deployment_file, require_cloud=False)
 
     prepare_server(
         deployment_file=deployment_file,
@@ -189,7 +184,7 @@ def run_command(deployment_file: Path, no_auth: bool, cmd: tuple[str, ...]) -> N
 
     try:
         config, config_parent = _prepare_environment(
-            deployment_file, is_interactive_session(), require_cloud=not no_auth
+            deployment_file, require_cloud=not no_auth
         )
         env_overrides = parse_environment_variables(config, config_parent)
         env = os.environ.copy()
@@ -226,7 +221,7 @@ def _ensure_project_layout(deployment_file: Path, *, command_name: str) -> Path:
 
 
 def _prepare_environment(
-    deployment_file: Path, interactive: bool, *, require_cloud: bool
+    deployment_file: Path, *, require_cloud: bool
 ) -> tuple[DeploymentConfig, Path]:
     from llama_agents.appserver.deployment_config_parser import (
         get_deployment_config,
@@ -237,9 +232,7 @@ def _prepare_environment(
         validate_required_env_vars,
     )
 
-    _maybe_inject_llama_cloud_credentials(
-        deployment_file, interactive, require_cloud=require_cloud
-    )
+    _maybe_inject_llama_cloud_credentials(deployment_file, require_cloud=require_cloud)
     configure_settings(
         deployment_file_path=deployment_file,
         app_root=Path.cwd(),

@@ -5,14 +5,14 @@ from typing import TYPE_CHECKING
 
 import click
 from llama_agents.cli.config.schema import Environment
-from llama_agents.cli.interactive import select_or_exit
+from llama_agents.cli.interactive import is_interactive_session, select_or_exit
 from llama_agents.cli.param_types import EnvironmentType
 from llama_agents.cli.styles import WARNING
 from packaging import version as packaging_version
 from rich import print as rprint
 
 from ..display import EnvDisplay
-from ..options import global_options, interactive_option, output_option, render_output
+from ..options import global_options, output_option, render_output
 from .auth import auth
 
 if TYPE_CHECKING:
@@ -65,10 +65,10 @@ def list_environments_cmd(output: str) -> None:
 
 @env_group.command("add")
 @click.argument("api_url", required=False)
-@interactive_option
 @global_options
-def add_environment_cmd(api_url: str | None, interactive: bool) -> None:
+def add_environment_cmd(api_url: str | None) -> None:
     try:
+        interactive = is_interactive_session()
         service = _env_service()
         if not api_url:
             if not interactive:
@@ -100,10 +100,10 @@ def add_environment_cmd(api_url: str | None, interactive: bool) -> None:
 
 @env_group.command("delete")
 @click.argument("api_url", required=False, type=EnvironmentType())
-@interactive_option
 @global_options
-def delete_environment_cmd(api_url: str | None, interactive: bool) -> None:
+def delete_environment_cmd(api_url: str | None) -> None:
     try:
+        interactive = is_interactive_session()
         service = _env_service()
         if not api_url:
             if not interactive:
@@ -112,7 +112,6 @@ def delete_environment_cmd(api_url: str | None, interactive: bool) -> None:
                 service.list_environments(),
                 service.get_current_environment(),
                 "Select environment to delete",
-                interactive=interactive,
             )
             api_url = result.api_url
 
@@ -132,10 +131,10 @@ def delete_environment_cmd(api_url: str | None, interactive: bool) -> None:
 
 @env_group.command("switch")
 @click.argument("api_url", required=False, type=EnvironmentType())
-@interactive_option
 @global_options
-def switch_environment_cmd(api_url: str | None, interactive: bool) -> None:
+def switch_environment_cmd(api_url: str | None) -> None:
     try:
+        interactive = is_interactive_session()
         service = _env_service()
         selected_url = api_url
 
@@ -144,7 +143,6 @@ def switch_environment_cmd(api_url: str | None, interactive: bool) -> None:
                 service.list_environments(),
                 service.get_current_environment(),
                 "Select environment",
-                interactive=interactive,
             )
             selected_url = result.api_url
 
@@ -195,7 +193,6 @@ def _select_environment(
     envs: list[Environment],
     current_env: Environment,
     message: str = "Select environment",
-    interactive: bool = True,
 ) -> Environment:
     if not envs:
         raise click.ClickException(
@@ -212,5 +209,4 @@ def _select_environment(
         message,
         hint_flag="<api_url>",
         hint_command="llamactl auth env list",
-        interactive=interactive,
     )

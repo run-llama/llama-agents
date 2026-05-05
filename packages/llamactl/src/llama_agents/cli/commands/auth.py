@@ -18,7 +18,7 @@ from rich import print as rprint
 
 from ..app import app
 from ..display import AuthProfileDisplay, OrgDisplay
-from ..options import global_options, interactive_option, output_option, render_output
+from ..options import global_options, output_option, render_output
 
 if TYPE_CHECKING:
     from llama_agents.cli.config.auth_service import AuthService
@@ -67,18 +67,16 @@ def auth() -> None:
     "--api-key",
     help="API key to use for the login when creating non-interactively",
 )
-@interactive_option
 def create_api_key_profile(
     project_id: str | None,
     api_key: str | None,
-    interactive: bool,
 ) -> None:
     """Authenticate with an API key and create a profile in the current environment."""
     try:
         auth_svc = _get_service().current_auth_service()
 
         # Non-interactive mode: require both api-key and project-id
-        if not interactive:
+        if not is_interactive_session():
             if not api_key or not project_id:
                 raise click.ClickException(
                     "--api-key and --project-id are required in non-interactive mode"
@@ -189,7 +187,7 @@ def destroy_database() -> None:
     """Destroy the database"""
     from llama_agents.cli.config._config import ConfigManager
 
-    if not click.confirm(
+    if is_interactive_session() and not click.confirm(
         "Are you sure you want to destroy all of your local logins? This action cannot be undone."
     ):
         return
@@ -208,12 +206,11 @@ def config_database() -> None:
 @auth.command("switch")
 @global_options
 @click.argument("name", required=False, type=ProfileType())
-@interactive_option
-def switch_profile(name: str | None, interactive: bool) -> None:
+def switch_profile(name: str | None) -> None:
     """Switch to a different profile"""
     auth_svc = _get_service().current_auth_service()
     try:
-        selected_auth = _select_profile(auth_svc, name, interactive)
+        selected_auth = _select_profile(auth_svc, name)
         if not selected_auth:
             rprint(f"[{WARNING}]No profile selected[/]")
             return
@@ -229,12 +226,11 @@ def switch_profile(name: str | None, interactive: bool) -> None:
 @auth.command("logout")
 @global_options
 @click.argument("name", required=False, type=ProfileType())
-@interactive_option
-def delete_profile(name: str | None, interactive: bool) -> None:
+def delete_profile(name: str | None) -> None:
     """Logout from a profile and wipe all associated data"""
     try:
         auth_svc = _get_service().current_auth_service()
-        auth = _select_profile(auth_svc, name, interactive)
+        auth = _select_profile(auth_svc, name)
         if not auth:
             rprint(f"[{WARNING}]No profile selected[/]")
             return
@@ -324,14 +320,12 @@ def list_organizations(output: str) -> None:
     type=OrgType(),
     help="Organization ID to scope projects to",
 )
-@interactive_option
 @global_options
-def change_project(
-    project_id: str | None, org_id: str | None, interactive: bool
-) -> None:
+def change_project(project_id: str | None, org_id: str | None) -> None:
     """Change the active project for the current profile"""
+    interactive = is_interactive_session()
     auth_svc = _get_service().current_auth_service()
-    profile = validate_authenticated_profile(interactive)
+    profile = validate_authenticated_profile()
 
     if project_id is None and not interactive:
         raise click.ClickException(
@@ -383,7 +377,6 @@ def change_project(
             "Select a project",
             hint_flag="<project_id>",
             hint_command="llamactl auth project <project_id>",
-            interactive=interactive,
         )
         if result == "__CREATE__":
             project_id = click.prompt(
@@ -413,10 +406,8 @@ def change_project(
     type=_ClickPath(dir_okay=False, resolve_path=True, path_type=Path),
     help="Path to the .env file to write",
 )
-@interactive_option
 def inject_env_vars(
     env_file: Path,
-    interactive: bool,
 ) -> None:
     """Inject auth environment variables into a .env file.
 
@@ -430,8 +421,8 @@ def inject_env_vars(
         auth_svc = _get_service().current_auth_service()
         profile = auth_svc.get_current_profile()
         if not profile:
-            if interactive:
-                profile = validate_authenticated_profile(True)
+            if is_interactive_session():
+                profile = validate_authenticated_profile()
             else:
                 raise click.ClickException(
                     "No profile configured. Run `llamactl auth token` to create a profile."
@@ -679,7 +670,7 @@ async def _run_device_authentication(base_url: str) -> DeviceOIDC:
             raise click.ClickException("Device flow failed: unexpected token response")
 
 
-def validate_authenticated_profile(interactive: bool | None = None) -> Auth:
+def validate_authenticated_profile() -> Auth:
     """Validate that the user is authenticated within the current environment.
 
     - If there is a current profile, return it.
@@ -693,8 +684,7 @@ def validate_authenticated_profile(interactive: bool | None = None) -> Auth:
     if existing:
         return existing
 
-    if interactive is None:
-        interactive = is_interactive_session()
+    interactive = is_interactive_session()
 
     if not interactive:
         raise click.ClickException(
@@ -711,7 +701,6 @@ def validate_authenticated_profile(interactive: bool | None = None) -> Auth:
             "Select profile",
             hint_flag="<profile>",
             hint_command="llamactl auth list",
-            interactive=interactive,
         )
         auth_svc.set_current_profile(choice.name)
         return choice
@@ -857,9 +846,7 @@ def _token_flow_for_env(auth_service: AuthService) -> Auth:
     return created
 
 
-def _select_profile(
-    auth_svc: AuthService, profile_name: str | None, is_interactive: bool
-) -> Auth | None:
+def _select_profile(auth_svc: AuthService, profile_name: str | None) -> Auth | None:
     """
     Select a profile interactively if name not provided.
     Returns the selected profile name or None if cancelled.
@@ -871,7 +858,7 @@ def _select_profile(
         if profile:
             return profile
 
-    if not is_interactive:
+    if not is_interactive_session():
         return None
 
     try:
@@ -894,7 +881,6 @@ def _select_profile(
             "Select profile:",
             hint_flag="<name>",
             hint_command="llamactl auth list",
-            interactive=is_interactive,
         )
 
     except click.ClickException:

@@ -8,11 +8,8 @@ from pathlib import Path
 import click
 from click.exceptions import Exit
 from llama_agents.cli.app import app
-from llama_agents.cli.interactive import select_or_exit
-from llama_agents.cli.options import (
-    global_options,
-    interactive_option,
-)
+from llama_agents.cli.interactive import is_interactive_session, select_or_exit
+from llama_agents.cli.options import global_options
 from llama_agents.cli.param_types import TemplateType
 from llama_agents.cli.templates import (
     ALL_TEMPLATES,
@@ -54,24 +51,21 @@ _ClickPath = getattr(click, "Path")
     help="Force overwrite the directory if it exists",
 )
 @global_options
-@interactive_option
 def init(
     update: bool,
     template: str | None,
     dir: Path | None,
     force: bool,
-    interactive: bool,
 ) -> None:
     """Create a new app repository from a template"""
     if update:
         _update()
     else:
-        _create(template, dir, force, interactive)
+        _create(template, dir, force)
 
 
-def _create(
-    template: str | None, dir: Path | None, force: bool, interactive: bool
-) -> None:
+def _create(template: str | None, dir: Path | None, force: bool) -> None:
+    interactive = is_interactive_session()
     # Initialize git repository if git is available
     has_git = False
     git_initialized = False
@@ -106,7 +100,6 @@ def _create(
                 "",
                 hint_flag="--template",
                 hint_command="llamactl init --help",
-                interactive=interactive,
             )
             or None
         )  # empty-string separators are not valid selections

@@ -2,7 +2,6 @@
 # Copyright (c) 2026 LlamaIndex Inc.
 from __future__ import annotations
 
-import functools
 import os
 import sys
 from collections.abc import Sequence
@@ -15,9 +14,10 @@ T = TypeVar("T")
 _TERM_MENU_UNSUPPORTED = sys.platform == "win32"
 
 
-@functools.cache
 def is_interactive_session() -> bool:
     """Return whether the current CLI session can prompt the user."""
+    if os.environ.get("CI"):
+        return False
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return False
     if os.environ.get("TERM") == "dumb":

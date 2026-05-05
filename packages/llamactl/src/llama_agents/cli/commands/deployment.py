@@ -9,14 +9,13 @@ git ref, reads the config, and runs your app.
 from __future__ import annotations
 
 import asyncio
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, NoReturn
 
 import click
 import yaml
-from llama_agents.cli.interactive import select_or_exit
+from llama_agents.cli.interactive import is_interactive_session, select_or_exit
 from llama_agents.cli.param_types import DeploymentType, GitShaType
 from llama_agents.cli.styles import WARNING
 from llama_agents.core.git.git_util import is_git_repo
@@ -52,7 +51,6 @@ from ..local_context import gather_local_context
 from ..log_format import parse_log_body, render_plain
 from ..options import (
     global_options,
-    interactive_option,
     output_option,
     output_option_with_template,
     project_option,
@@ -412,12 +410,8 @@ async def _fetch_deployment_for_editor(
         return client.project_id, await client.get_deployment(deployment_id)
 
 
-def _ci_enabled() -> bool:
-    return os.environ.get("CI", "").lower() not in {"", "0", "false", "no"}
-
-
-def _requires_file_for_editor(interactive: bool) -> bool:
-    return not interactive or _ci_enabled()
+def _requires_file_for_editor() -> bool:
+    return not is_interactive_session()
 
 
 def _has_non_comment_yaml_lines(text: str) -> bool:
@@ -643,12 +637,10 @@ def template_deployment() -> None:
     help="Skip pushing local code even when the deployment uses push-mode.",
 )
 @project_option
-@interactive_option
 def create_deployment(
     filename: str | None,
     no_push: bool,
     project: str | None,
-    interactive: bool,
 ) -> None:
     """Create a new deployment."""
     if filename is not None:
@@ -660,7 +652,7 @@ def create_deployment(
         )
         return
 
-    if _requires_file_for_editor(interactive):
+    if _requires_file_for_editor():
         raise click.ClickException("pass -f <file> for non-interactive create")
 
     _edit_deployment_yaml_loop(
@@ -1137,12 +1129,10 @@ def apply_deployment(
     help="Skip pushing local code even when the deployment uses push-mode.",
 )
 @project_option
-@interactive_option
 def edit_deployment(
     deployment_id: str | None,
     filename: str | None,
     no_push: bool,
-    interactive: bool,
     project: str | None,
 ) -> None:
     """Edit a deployment in $EDITOR."""
@@ -1156,14 +1146,12 @@ def edit_deployment(
         )
         return
 
-    if _requires_file_for_editor(interactive):
+    if _requires_file_for_editor():
         raise click.ClickException("pass -f <file> for non-interactive edit")
 
     effective_project: str | None = project
     try:
-        deployment_id = select_deployment(
-            deployment_id, interactive=interactive, project_id_override=project
-        )
+        deployment_id = select_deployment(deployment_id, project_id_override=project)
         effective_project, current_deployment = asyncio.run(
             _fetch_deployment_for_editor(project=project, deployment_id=deployment_id)
         )
@@ -1469,7 +1457,6 @@ def _emit_log_event(ev: LogEvent, *, json_lines: bool) -> None:
 
 def select_deployment(
     deployment_id: str | None,
-    interactive: bool,
     project_id_override: str | None = None,
 ) -> str:
     """
@@ -1491,5 +1478,4 @@ def select_deployment(
         hint_flag="<deployment_id>",
         hint_command="llamactl deployments get",
         empty_message=f"No deployments found for project {client.project_id}",
-        interactive=interactive,
     )

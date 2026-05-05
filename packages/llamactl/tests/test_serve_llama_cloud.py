@@ -92,6 +92,9 @@ def test_prompts_login_when_interactive(
         ) as mock_validate,
         patch("llama_agents.appserver.app.prepare_server"),
         patch("llama_agents.appserver.app.start_server_in_target_venv"),
+        patch(
+            "llama_agents.cli.commands.serve.is_interactive_session", return_value=True
+        ),
     ):
         mock_service.current_auth_service().get_current_profile.return_value = None
         mock_confirm.return_value = True
@@ -106,7 +109,6 @@ def test_prompts_login_when_interactive(
                 "--no-install",
                 "--no-reload",
                 "--no-open-browser",
-                "--interactive",
             ],
         )
         assert res.exit_code == 0, res.output
@@ -138,6 +140,9 @@ def test_interactive_serve_uses_env_key_without_profile_choice(
         ) as mock_validate,
         patch("llama_agents.appserver.app.prepare_server"),
         patch("llama_agents.appserver.app.start_server_in_target_venv"),
+        patch(
+            "llama_agents.cli.commands.serve.is_interactive_session", return_value=True
+        ),
     ):
         mock_service.current_auth_service().get_current_profile.return_value = profile
 
@@ -150,7 +155,6 @@ def test_interactive_serve_uses_env_key_without_profile_choice(
                 "--no-install",
                 "--no-reload",
                 "--no-open-browser",
-                "--interactive",
             ],
         )
 
@@ -224,6 +228,9 @@ def test_injects_project_id_from_env_config(
         patch("llama_agents.cli.config.env_service.service") as mock_service,
         patch("llama_agents.appserver.app.prepare_server"),
         patch("llama_agents.appserver.app.start_server_in_target_venv"),
+        patch(
+            "llama_agents.cli.commands.serve.is_interactive_session", return_value=False
+        ),
     ):
         # No profile necessary for this path; simulate no logged-in profile
         mock_service.current_auth_service().get_current_profile.return_value = None
@@ -237,7 +244,6 @@ def test_injects_project_id_from_env_config(
                 "--no-install",
                 "--no-reload",
                 "--no-open-browser",
-                "--no-interactive",
             ],
         )
         assert res.exit_code == 0, res.output
@@ -253,6 +259,9 @@ def test_warns_non_interactive_without_key(
         patch("llama_agents.cli.config.env_service.service") as mock_service,
         patch("llama_agents.appserver.app.prepare_server"),
         patch("llama_agents.appserver.app.start_server_in_target_venv"),
+        patch(
+            "llama_agents.cli.commands.serve.is_interactive_session", return_value=False
+        ),
     ):
         mock_service.current_auth_service().get_current_profile.return_value = None
 
@@ -265,7 +274,6 @@ def test_warns_non_interactive_without_key(
                 "--no-install",
                 "--no-reload",
                 "--no-open-browser",
-                "--no-interactive",
             ],
         )
         assert res.exit_code == 0, res.output

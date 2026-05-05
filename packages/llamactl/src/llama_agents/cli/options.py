@@ -5,7 +5,6 @@ from typing import Any, Callable, ParamSpec, TypeVar
 
 import click
 import yaml
-from llama_agents.cli.interactive import is_interactive_session
 from llama_agents.cli.param_types import ProjectType
 from pydantic import BaseModel
 
@@ -166,19 +165,6 @@ def render_output(
         return
 
     raise click.ClickException(f"Unknown output mode: {output}")
-
-
-def interactive_option(f: Callable[P, R]) -> Callable[P, R]:
-    """Add an interactive option to the command"""
-
-    default = is_interactive_session()
-    return click.option(
-        "--interactive/--no-interactive",
-        help="Run in interactive mode. If not provided, will default to the current session's interactive state.",
-        is_flag=True,
-        default=default,
-        hidden=True,
-    )(f)
 
 
 def native_tls_option(f: Callable[P, R]) -> Callable[P, R]:
