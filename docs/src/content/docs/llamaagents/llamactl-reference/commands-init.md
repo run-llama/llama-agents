@@ -14,15 +14,14 @@ llamactl init --update
 
 ## Templates
 
-- basic-ui: A basic starter workflow with a React Vite UI
-- extraction-review: Extraction Agent with Review UI (Llama Cloud integration; review/correct extracted results)
+Run `llamactl init` without `--template` to open the template picker. The picker shows both UI templates and headless workflow templates.
 
-If omitted, you will be prompted to choose interactively.
+Use `--template <id>` when you already know which template you want. Template IDs can change as templates are added or renamed, so use the picker or the [Agent Templates](/python/llamaagents/llamactl/agent-templates/) page for the current list.
 
 ## Options
 
 - `--update`: Update the current app to the latest template version. Ignores other options.
-- `--template <id>`: Template to use (`basic-ui`, `extraction-review`).
+- `--template <id>`: Template to use.
 - `--dir <path>`: Directory to create the new app in. Defaults to the template name.
 - `--force`: Overwrite the directory if it already exists.
 
@@ -30,27 +29,31 @@ If omitted, you will be prompted to choose interactively.
 
 - Copies the selected template into the target directory using [`copier`](https://copier.readthedocs.io/en/stable/)
 - Adds assistant docs: `AGENTS.md` and symlinks `CLAUDE.md`/`GEMINI.md`
-- initializes a Git repository if `git` is available
+- Initializes a Git repository if `git` is available
 - Prints next steps to run locally and deploy
 
 ## Examples
 
-- Interactive flow:
+Open the template picker:
+
 ```bash
 llamactl init
 ```
 
-- Non‑interactive creation:
+Create from a known template:
+
 ```bash
-llamactl init --template basic-ui --dir my-app
+llamactl init --template <template-id> --dir my-app
 ```
 
-- Overwrite an existing directory:
+Overwrite an existing directory:
+
 ```bash
-llamactl init --template basic-ui --dir ./basic-ui --force
+llamactl init --template <template-id> --dir ./my-app --force
 ```
 
-- Update an existing app to the latest template:
+Update an existing app to the latest template:
+
 ```bash
 llamactl init --update
 ```

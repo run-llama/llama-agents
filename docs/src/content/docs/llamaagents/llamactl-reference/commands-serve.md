@@ -23,12 +23,18 @@ llamactl serve [DEPLOYMENT_FILE] [options]
 - `--preview`: Build the UI to static files and serve them (production‑like)
 - `--port <int>`: Port for the API server
 - `--ui-port <int>`: Port for the UI proxy in dev
+- `--log-level <DEBUG|INFO|WARNING|ERROR|CRITICAL>`: Log level for the API server
+- `--log-format <console|json>`: Log format for the API server
+- `--persistence <memory|local|cloud>`: Persistence mode for the workflow server. Defaults to local persistence.
+- `--local-persistence-path <path>`: SQLite database path for local persistence
+- `--host <host>`: Host for the API server. Defaults to `127.0.0.1`; use `0.0.0.0` to accept remote connections.
 
 ## Behavior
 
 - Prepares the server environment (installs dependencies unless `--no-install`)
 - In dev mode (default), proxies your UI dev server and reloads on change
 - In preview mode, builds the UI to static files and serves them without a proxy
+- Uses local workflow persistence by default; `--persistence cloud` stores workflow state in LlamaCloud
 
 ### Credential injection
 

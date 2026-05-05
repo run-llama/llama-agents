@@ -1,9 +1,8 @@
 # llamactl
 
+`llamactl` is the CLI for developing LlamaAgents apps locally and managing their LlamaCloud deployments.
 
-A command-line interface for managing LlamaDeploy projects and deployments.
-
-For an end-to-end introduction, see [Getting started with LlamaAgents](https://developers.llamaindex.ai/python/cloud/llamaagents/getting-started).
+For the full guide, see the [LlamaAgents `llamactl` docs](https://developers.llamaindex.ai/python/llamaagents/llamactl/getting-started/).
 
 ## Installation
 
@@ -13,89 +12,99 @@ Install from PyPI:
 pip install llamactl
 ```
 
-Or using uv:
+Or run without installing:
 
 ```bash
-uv add llamactl
+uvx llamactl --help
 ```
 
 ## Quick Start
 
-1. **Configure your profile**: Set up connection to your LlamaDeploy control plane
-   ```bash
-   llamactl profile configure
-   ```
+Create or select an auth profile:
 
-2. **Check health**: Verify connection to the control plane
-   ```bash
-   llamactl health
-   ```
+```bash
+llamactl auth login
+```
 
-3. **Create a project**: Initialize a new deployment project
-   ```bash
-   llamactl project create my-project
-   ```
+If browser login is not available, use an API key:
 
-4. **Deploy**: Deploy your project to the control plane
-   ```bash
-   llamactl deployment create my-deployment --project-name my-project
-   ```
+```bash
+llamactl auth token --api-key "$LLAMA_CLOUD_API_KEY" --project "$LLAMA_AGENTS_PROJECT_ID"
+```
 
-## Commands
+Scaffold and run an app:
 
-### Profile Management
-- `llamactl profile configure` - Configure connection to control plane
-- `llamactl profile show` - Show current profile configuration
-- `llamactl profile list` - List all configured profiles
+```bash
+llamactl init
+cd my-app
+llamactl serve
+```
 
-### Project Management
-- `llamactl project create <name>` - Create a new project
-- `llamactl project list` - List all projects
-- `llamactl project show <name>` - Show project details
-- `llamactl project delete <name>` - Delete a project
+Create a cloud deployment:
 
-### Deployment Management
-- `llamactl deployment create <name>` - Create a new deployment
-- `llamactl deployment list` - List all deployments
-- `llamactl deployment show <name>` - Show deployment details
-- `llamactl deployment delete <name>` - Delete a deployment
-- `llamactl deployment logs <name>` - View deployment logs
+```bash
+llamactl deployments create
+```
 
-### Health & Status
-- `llamactl health` - Check control plane health
-- `llamactl serve` - Start local development server
+Inspect it and stream logs:
+
+```bash
+llamactl deployments get
+llamactl deployments get NAME
+llamactl deployments logs NAME --follow
+```
+
+For declarative deployments:
+
+```bash
+llamactl deployments template > deployment.yaml
+llamactl deployments apply -f deployment.yaml
+```
+
+## Command Groups
+
+- `llamactl auth`: log in, create API-key profiles, switch profiles, select projects, and list organizations.
+- `llamactl auth env`: list, add, inspect, and switch LlamaCloud API environments.
+- `llamactl deployments`: create, apply, edit, update, inspect, delete, roll back, and stream deployment logs.
+- `llamactl init`: create a new LlamaAgents project from a starter template.
+- `llamactl serve`: run the local app server and optional frontend dev server.
+- `llamactl pkg`: generate container build files for self-hosted deployments.
+- `llamactl completion`: generate or install shell completions.
+- `llamactl agentcore`: run or export AgentCore apps.
 
 ## Configuration
 
-llamactl stores configuration in your home directory at `~/.llamactl/`.
+`llamactl auth login` and `llamactl auth token` create local auth profiles. A profile stores the active API environment, project, and credential used by deployment commands.
 
-### Profile Configuration
-Profiles allow you to manage multiple control plane connections:
+For CI and other non-interactive environments, set env vars instead of using a profile:
 
 ```bash
-# Configure default profile
-llamactl profile configure
-
-# Configure named profile
-llamactl profile configure --profile production
-
-# Use specific profile for commands
-llamactl --profile production deployment list
+export LLAMA_CLOUD_API_KEY="llx-..."
+export LLAMA_AGENTS_PROJECT_ID="project-id"
 ```
 
-## Development
+`LLAMA_CLOUD_BASE_URL` can point the CLI at a non-default environment. When both `LLAMA_CLOUD_API_KEY` and `LLAMA_AGENTS_PROJECT_ID` are set, env var auth takes precedence over the stored profile for cloud commands. Many commands also accept `--project` to override the active project for that invocation.
 
-This CLI is part of the LlamaDeploy ecosystem. For development setup:
+## Shell Completion
 
-1. Clone the repository
-2. Install dependencies: `uv sync`
-3. Run tests: `uv run pytest`
+Install completions for your current shell:
+
+```bash
+llamactl completion install
+```
+
+Or print a completion script:
+
+```bash
+llamactl completion generate zsh
+```
 
 ## Requirements
 
 - Python 3.12+
-- Access to a LlamaDeploy control plane
+- `uv` for project dependency management
+- `git` for cloud deployments
 
 ## License
 
-This project is licensed under the MIT License.
+MIT

@@ -88,11 +88,16 @@ directory = "./ui"
 ```bash
 llamactl auth env switch https://api.cloud.llamaindex.ai
 llamactl auth login
-llamactl auth token
+llamactl auth token --project <PROJECT_ID>
 llamactl auth logout
-llamactl deployment create
-llamactl deployment list
-llamactl deployment get <id>
+llamactl deployments template > deployment.yaml
+llamactl deployments apply -f deployment.yaml
+llamactl deployments create
+llamactl deployments get
+llamactl deployments get NAME
+llamactl deployments edit NAME
+llamactl deployments update NAME
+llamactl deployments logs NAME --follow
 ```
 
 ## Component Interaction Flow

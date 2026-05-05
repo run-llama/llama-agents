@@ -35,7 +35,7 @@ llama_cloud = true
 ```
 
 When this is set:
-- During development, `llamactl` prompts you to log in to LlamaCloud if you're not already. After that, it injects `LLAMA_CLOUD_API_KEY`, `LLAMA_CLOUD_PROJECT_ID`, and `LLAMA_CLOUD_BASE_URL` into your Python server process and JavaScript build.
+- During development, `llamactl` uses environment variable auth or the active profile, then injects `LLAMA_CLOUD_API_KEY`, `LLAMA_AGENTS_PROJECT_ID`, and `LLAMA_CLOUD_BASE_URL` into your Python server process and JavaScript build.
 - When deployed, LlamaCloud automatically injects a dedicated API key into the Python process. The frontend process receives a short-lived session cookie specific to each user visiting the application. Therefore, configure the project ID on the frontend API client so that LlamaCloud API requests from the frontend and backend are scoped to the same project ID.
 
 ### `.env` files
