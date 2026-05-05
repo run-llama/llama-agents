@@ -101,7 +101,7 @@ def test__check_deployment_config(
         assert str(conf_dir) == str(tmp_path)
         with open(tmp_path / "pyproject.toml", "w") as f:
             f.write(pyproject_toml_with_ui)
-        with pytest.raises(click.Abort):
+        with pytest.raises(click.ClickException):
             _check_deployment_config(tmp_path)
     except Exception as e:
         raise e
@@ -129,9 +129,7 @@ def test__create_file_for_container(
         assert (tmp_path / "Dockerfile").read_text(encoding="utf-8") == dockerfile
         content = (tmp_path / ".dockerignore").read_text()
         assert DEFAULT_DOCKER_IGNORE in content
-        with pytest.raises(
-            click.Abort
-        ):  # without --overwrite, this raises an exception
+        with pytest.raises(click.ClickException):
             _create_file_for_container(
                 output_file="Dockerfile",
                 deployment_file=tmp_path,

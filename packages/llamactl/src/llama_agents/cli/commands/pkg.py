@@ -10,7 +10,6 @@ from llama_agents.cli.pkg import (
 from llama_agents.core.deployment_config import (
     read_deployment_config_from_git_root_or_cwd,
 )
-from rich import print as rprint
 
 from ..app import app
 
@@ -55,33 +54,28 @@ def create_container_file(
 
 def _check_deployment_config(deployment_file: Path) -> Path:
     if not deployment_file.exists():
-        rprint(f"[red]Deployment file '{deployment_file}' not found[/red]")
-        raise click.Abort()
+        raise click.ClickException(f"Deployment file '{deployment_file}' not found")
 
     # Early check: appserver requires a pyproject.toml in the config directory
     config_dir = deployment_file if deployment_file.is_dir() else deployment_file.parent
     if not (config_dir / "pyproject.toml").exists():
-        rprint(
-            "[red]No pyproject.toml found at[/red] "
-            f"[bold]{config_dir}[/bold].\n"
+        raise click.ClickException(
+            f"No pyproject.toml found at {config_dir}.\n"
             "Add a pyproject.toml to your project and re-run 'llamactl serve'."
         )
-        raise click.Abort()
 
     try:
         config = read_deployment_config_from_git_root_or_cwd(
             Path.cwd(), deployment_file
         )
     except Exception:
-        rprint(
-            "[red]Error: Could not read a deployment config. This doesn't appear to be a valid llama-deploy project.[/red]"
+        raise click.ClickException(
+            "Could not read a deployment config. This doesn't appear to be a valid llama-deploy project."
         )
-        raise click.Abort()
     if config.ui:
-        rprint(
-            "[bold red]Containerized UI builds are currently not supported. Please remove the UI configuration from your deployment file if you wish to proceed.[/]"
+        raise click.ClickException(
+            "Containerized UI builds are currently not supported. Please remove the UI configuration from your deployment file if you wish to proceed."
         )
-        raise click.Abort()
     return config_dir
 
 
@@ -107,16 +101,14 @@ def _create_file_for_container(
     dockerfile_content = build_dockerfile_content(python_version, port)
 
     if Path(output_file).exists() and not overwrite:
-        rprint(
-            f"[red bold]Error: {output_file} already exists. If you wish to overwrite the file, pass `--overwrite` as a flag to the command.[/]"
+        raise click.ClickException(
+            f"{output_file} already exists. If you wish to overwrite the file, pass `--overwrite` as a flag to the command."
         )
-        raise click.Abort()
     with open(output_file, "w") as f:
         f.write(dockerfile_content)
     if Path(dockerignore_path).exists() and not overwrite:
-        rprint(
-            f"[red bold]Error: {dockerignore_path} already exists. If you wish to overwrite the file, pass `--overwrite` as a flag to the command.[/]"
+        raise click.ClickException(
+            f"{dockerignore_path} already exists. If you wish to overwrite the file, pass `--overwrite` as a flag to the command."
         )
-        raise click.Abort()
     with open(dockerignore_path, "w") as f:
         f.write(dockerignore_content)

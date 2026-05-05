@@ -17,12 +17,40 @@ def test_auth_create_api_key_profile_non_interactive_validation() -> None:
         result = runner.invoke(app, ["auth", "token"])
     assert result.exit_code != 0
     assert (
-        "--api-key and --project-id are required in non-interactive mode"
-        in result.output
+        "--api-key and --project are required in non-interactive mode" in result.output
     )
 
 
 def test_auth_create_api_key_profile_non_interactive_success() -> None:
+    runner = CliRunner()
+    with (
+        patch("llama_agents.cli.config.env_service.service") as mock_service,
+        patch(
+            "llama_agents.cli.commands.auth.is_interactive_session", return_value=False
+        ),
+    ):
+        mock_auth_svc = MagicMock()
+        mock_auth_svc.create_profile_from_token.return_value = SimpleNamespace(
+            name="prof"
+        )
+        mock_service.current_auth_service.return_value = mock_auth_svc
+
+        result = runner.invoke(
+            app,
+            [
+                "auth",
+                "token",
+                "--project",
+                "p",
+                "--api-key",
+                "key",
+            ],
+        )
+        assert result.exit_code == 0
+        mock_auth_svc.create_profile_from_token.assert_called_once_with("p", "key")
+
+
+def test_auth_create_api_key_profile_project_id_alias() -> None:
     runner = CliRunner()
     with (
         patch("llama_agents.cli.config.env_service.service") as mock_service,
@@ -47,8 +75,9 @@ def test_auth_create_api_key_profile_non_interactive_success() -> None:
                 "key",
             ],
         )
-        assert result.exit_code == 0
-        mock_auth_svc.create_profile_from_token.assert_called_once_with("p", "key")
+
+    assert result.exit_code == 0
+    mock_auth_svc.create_profile_from_token.assert_called_once_with("p", "key")
 
 
 def test_auth_list_profiles_no_profiles() -> None:
@@ -60,7 +89,7 @@ def test_auth_list_profiles_no_profiles() -> None:
         mock_service.current_auth_service.return_value = mock_auth_svc
         result = runner.invoke(app, ["auth", "list"])
         assert result.exit_code == 0
-        assert "No profiles found" in result.output
+        assert "no profiles found" in result.output
 
 
 def test_auth_switch_profile_success_and_missing() -> None:
@@ -83,7 +112,7 @@ def test_auth_switch_profile_success_and_missing() -> None:
         mock_service2.current_auth_service.return_value = MagicMock()
         result = runner.invoke(app, ["auth", "switch", "doesnt-exist"])
         assert result.exit_code == 0
-        assert "No profile selected" in result.output
+        assert "no profile selected" in result.output
 
 
 def test_auth_logout_existing() -> None:
@@ -108,8 +137,8 @@ def test_auth_logout_missing() -> None:
     ):
         mock_service2.current_auth_service.return_value = MagicMock()
         result = runner.invoke(app, ["auth", "logout", "missing"])
-        assert result.exit_code == 0
-        assert "No profile selected" in result.output
+        assert result.exit_code != 0
+        assert "Profile 'missing' not found" in result.output
 
 
 def test_auth_project_non_interactive_lists_options_and_hints() -> None:

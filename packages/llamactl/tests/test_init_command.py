@@ -203,7 +203,7 @@ def test_init_handles_git_init_failure_gracefully(tmp_path: Path) -> None:
 
         assert result.exit_code == 0, result.output
         assert target_dir.exists()
-        assert "Skipping git initialization" in result.output
+        assert "warning: skipping git initialization" in result.output
         mock_scaffold.assert_called_once()
 
 
@@ -257,7 +257,10 @@ def test_init_skips_git_init_when_inside_parent_repo(tmp_path: Path) -> None:
 
         assert result.exit_code == 0, result.output
         assert target_dir.exists()
-        assert "Detected an existing Git repository" in result.output
+        assert (
+            "warning: skipping git initialization: existing Git repository"
+            in result.output
+        )
 
 
 def test_copy_scaffold(tmp_path: Path) -> None:
@@ -342,7 +345,7 @@ def test_init_non_interactive_defaults_directory(tmp_path: Path) -> None:
             assert result.exit_code == 0, result.output
             # Should default to template name
             assert (tmp_path / "basic-ui").exists()
-            assert "Defaulting to basic-ui" in result.output
+            assert "no directory provided; defaulting to basic-ui" in result.output
         finally:
             os.chdir(original_cwd)
 

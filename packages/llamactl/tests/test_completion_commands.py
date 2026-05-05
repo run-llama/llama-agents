@@ -63,7 +63,7 @@ def test_completion_install_dry_run() -> None:
         app, ["completion", "install", "--shell", "zsh", "--dry-run"]
     )
     assert result.exit_code == 0
-    assert "Would write" in result.output
+    assert "would write completion script" in result.output
 
 
 def test_completion_install_dry_run_bash() -> None:
@@ -72,7 +72,7 @@ def test_completion_install_dry_run_bash() -> None:
         app, ["completion", "install", "--shell", "bash", "--dry-run"]
     )
     assert result.exit_code == 0
-    assert "Would write" in result.output
+    assert "would write completion script" in result.output
 
 
 def test_completion_install_dry_run_fish() -> None:
@@ -81,7 +81,7 @@ def test_completion_install_dry_run_fish() -> None:
         app, ["completion", "install", "--shell", "fish", "--dry-run"]
     )
     assert result.exit_code == 0
-    assert "Would write" in result.output
+    assert "would write completion script" in result.output
 
 
 def test_completion_install_zsh_repairs_ordered_completion_block(

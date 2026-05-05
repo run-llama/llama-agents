@@ -15,9 +15,9 @@ from llama_agents.cli.commands.serve import (
     serve as serve_command,
 )
 from llama_agents.cli.options import global_options
+from llama_agents.cli.output import status
 from llama_agents.core.config import DEFAULT_DEPLOYMENT_FILE_PATH
 from llama_agents.core.deployment_config import DeploymentConfig
-from rich import print as rprint
 
 from ..app import app
 
@@ -86,11 +86,11 @@ def validate_command(deployment_file: Path, validate_env: bool) -> None:
             skip_env_validation=skip_env_validation,
         )
     except subprocess.CalledProcessError as exc:
-        rprint("[red]Workflow validation failed. See errors above.[/red]")
+        status("workflow validation failed; see errors above")
         raise Exit(exc.returncode)
 
     _print_connection_summary()
-    rprint(f"[green]Validated workflows in {config_dir} successfully.[/green]")
+    status(f"validated workflows in {config_dir}")
 
 
 @dev.command(
@@ -121,8 +121,9 @@ def export_json_graph_command(
 ) -> None:
     """Export the configured workflows to a JSON document that may be used for graph visualization."""
     if not deployment_file.exists():
-        rprint(f"[red]Deployment file '{deployment_file}' does not exist[/red]")
-        raise click.Abort()
+        raise click.ClickException(
+            f"Deployment file '{deployment_file}' does not exist"
+        )
 
     _ensure_project_layout(
         deployment_file, command_name="llamactl dev export-json-graph"
@@ -147,9 +148,9 @@ def export_json_graph_command(
             output=output,
         )
     except subprocess.CalledProcessError as exc:
-        rprint("[red]Workflow JSON graph export failed. See errors above.[/red]")
+        status("workflow JSON graph export failed; see errors above")
         raise Exit(exc.returncode)
-    rprint(f"[green]Exported workflow JSON graph to {output}[/green]")
+    status(f"exported workflow JSON graph to {output}")
 
 
 @dev.command(
@@ -197,26 +198,21 @@ def run_command(deployment_file: Path, no_auth: bool, cmd: tuple[str, ...]) -> N
     except (Exit, Abort, SystemExit, click.ClickException):
         raise
     except FileNotFoundError as exc:
-        rprint(f"[red]Command not found: {exc.filename}[/red]")
-        raise click.Abort()
+        raise click.ClickException(f"Command not found: {exc.filename}") from exc
     except Exception as exc:  # pragma: no cover - unexpected errors reported to user
-        rprint(f"[red]Failed to run command: {exc}[/red]")
-        raise click.Abort()
+        raise click.ClickException(str(exc)) from exc
 
 
 def _ensure_project_layout(deployment_file: Path, *, command_name: str) -> Path:
     if not deployment_file.exists():
-        rprint(f"[red]Deployment file '{deployment_file}' not found[/red]")
-        raise click.Abort()
+        raise click.ClickException(f"Deployment file '{deployment_file}' not found")
 
     config_dir = deployment_file if deployment_file.is_dir() else deployment_file.parent
     if not (config_dir / "pyproject.toml").exists():
-        rprint(
-            "[red]No pyproject.toml found at[/red] "
-            f"[bold]{config_dir}[/bold].\n"
+        raise click.ClickException(
+            f"No pyproject.toml found at {config_dir}.\n"
             f"Add a pyproject.toml to your project and re-run '{command_name}'."
         )
-        raise click.Abort()
     return config_dir
 
 

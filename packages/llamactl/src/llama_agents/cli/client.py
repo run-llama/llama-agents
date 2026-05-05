@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, AsyncGenerator
 
 import click
 from llama_agents.cli.env_settings import LlamactlEnvSettings, read_env_settings
-from rich import print as rprint
 
 if TYPE_CHECKING:
     from llama_agents.core.client.manage_client import ControlPlaneClient, ProjectClient
@@ -161,13 +160,10 @@ def get_project_client(project_id_override: str | None = None) -> ProjectClient:
     from llama_agents.cli.config.env_service import service
 
     auth_svc = service.current_auth_service()
-    rprint("\n[bold red]No profile configured![/bold red]")
-    rprint("\nTo get started, create a profile with:")
-    if auth_svc.env.requires_auth:
-        rprint("[cyan]llamactl auth login[/cyan]")
-    else:
-        rprint("[cyan]llamactl auth token[/cyan]")
-    raise SystemExit(1)
+    command = (
+        "llamactl auth login" if auth_svc.env.requires_auth else "llamactl auth token"
+    )
+    raise click.ClickException(f"No profile configured. To get started, run: {command}")
 
 
 @asynccontextmanager

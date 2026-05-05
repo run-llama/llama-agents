@@ -281,6 +281,6 @@ def test_warns_non_interactive_without_key(
         assert os.environ.get("LLAMA_CLOUD_API_KEY") is None
         # Warning present
         assert (
-            "Warning: LLAMA_CLOUD_API_KEY is not set" in res.output
-            or "Warning: No Llama Cloud credentials" in res.output
+            "warning: LLAMA_CLOUD_API_KEY is not set and no logged-in profile was found; the app may not work"
+            in res.output
         )
