@@ -94,6 +94,8 @@ def add_environment_cmd(api_url: str | None) -> None:
             f"[green]Added environment[/green] {env.api_url} (requires_auth={env.requires_auth}, min_llamactl_version={env.min_llamactl_version or '-'})."
         )
         _maybe_warn_min_version(env.min_llamactl_version)
+    except click.ClickException:
+        raise
     except Exception as e:
         rprint(f"[red]Failed to add environment: {e}[/red]")
         raise click.Abort()
@@ -122,6 +124,8 @@ def delete_environment_cmd(api_url: str | None) -> None:
         rprint(
             f"[green]Deleted environment[/green] {api_url} and all associated profiles"
         )
+    except click.ClickException:
+        raise
     except Exception as e:
         rprint(f"[red]Failed to delete environment: {e}[/red]")
         raise click.Abort()
@@ -155,6 +159,8 @@ def switch_environment_cmd(api_url: str | None) -> None:
         service.current_auth_service().select_any_profile()
         rprint(f"[green]Switched to environment[/green] {env.api_url}")
         _maybe_warn_min_version(env.min_llamactl_version)
+    except click.ClickException:
+        raise
     except Exception as e:
         rprint(f"[red]Failed to switch environment: {e}[/red]")
         raise click.Abort()

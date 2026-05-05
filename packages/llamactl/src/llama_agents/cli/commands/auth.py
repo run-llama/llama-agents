@@ -386,6 +386,8 @@ def change_project(project_id: str | None, org_id: str | None) -> None:
             rprint(f"Set active project to [bold {PRIMARY_COL}]{name}[/]")
         else:
             rprint(f"[{WARNING}]No project selected[/]")
+    except click.ClickException:
+        raise
     except Exception as e:
         rprint(f"[red]Error: {e}[/red]")
         raise click.Abort()

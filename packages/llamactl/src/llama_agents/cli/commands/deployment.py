@@ -1163,6 +1163,8 @@ def edit_deployment(
             update_target=deployment_id,
         )
 
+    except click.ClickException:
+        raise
     except Exception as e:
         friendly = friendly_http_error(
             e, deployment_id=deployment_id, project_id=effective_project
