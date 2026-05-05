@@ -31,12 +31,11 @@ def test_select_or_exit_interactive_returns_selected_item() -> None:
     terminal_menu_cls.assert_called_once_with(
         ["one", "two"],
         title="Pick one",
-        menu_cursor="→ ",
-        menu_cursor_style=(),
-        menu_highlight_style=(),
-        search_highlight_style=(),
+        menu_cursor="> ",
+        menu_cursor_style=("fg_cyan", "bold"),
+        menu_highlight_style=("fg_cyan",),
+        search_highlight_style=("fg_yellow", "bold"),
         search_key=None,
-        show_search_hint=True,
         skip_empty_entries=True,
     )
 

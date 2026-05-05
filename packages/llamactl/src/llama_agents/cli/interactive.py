@@ -69,12 +69,11 @@ def select_or_exit(
     menu = TerminalMenu(
         [label for _, label in entries],
         title=title,
-        menu_cursor="→ ",
-        menu_cursor_style=(),
-        menu_highlight_style=(),
-        search_highlight_style=(),
+        menu_cursor="> ",
+        menu_cursor_style=("fg_cyan", "bold"),
+        menu_highlight_style=("fg_cyan",),
+        search_highlight_style=("fg_yellow", "bold"),
         search_key=None,
-        show_search_hint=True,
         skip_empty_entries=True,
     )
     selected_index = menu.show()
