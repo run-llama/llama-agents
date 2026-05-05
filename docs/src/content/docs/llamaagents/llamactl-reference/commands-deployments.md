@@ -91,7 +91,7 @@ llamactl deployments create --no-push
 llamactl deployments edit [NAME] [-f FILE] [--no-push] [--project PROJECT]
 ```
 
-Without `-f`, fetches the deployment, renders editable YAML, and opens `$EDITOR`. If `NAME` is omitted in an interactive terminal, `llamactl` asks you to pick a deployment.
+Without `-f`, fetches the deployment, renders editable YAML, and opens `$EDITOR`. If `NAME` is omitted in a TTY, choose from existing deployments. Scripts should pass `NAME`.
 
 With `-f FILE`, updates from YAML without opening an editor. If `NAME` is omitted, the YAML must include top-level `name`.
 
@@ -217,7 +217,7 @@ llamactl deployments history invoice-agent -o yaml
 llamactl deployments rollback NAME [--git-sha SHA] [--project PROJECT]
 ```
 
-Rolls a deployment back to a previous git SHA. In an interactive terminal, omit `--git-sha` to pick from release history. In non-interactive runs, pass `--git-sha`.
+Rolls a deployment back to a previous git SHA. In a TTY, omit `--git-sha` to choose from release history. Scripts should pass `--git-sha`.
 
 Flags:
 
