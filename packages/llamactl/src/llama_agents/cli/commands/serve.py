@@ -331,17 +331,21 @@ def _maybe_select_project_for_env_key() -> None:
             rprint(f"Projects for organization [bold]{org.org_name}[/]")
 
         # Multiple: prompt selection
+        current_project_id = settings.llama_agents_project_id
+        project_items = []
+        current_idx = 0
+        for i, p in enumerate(projects):
+            label = f"{p.project_id}  {p.project_name} ({p.deployment_count} deployments)"
+            if p.project_id == current_project_id:
+                label += " [current]"
+                current_idx = i
+            project_items.append((p.project_id, label))
         choice = select_or_exit(
-            [
-                (
-                    p.project_id,
-                    f"{p.project_id}  {p.project_name} ({p.deployment_count} deployments)",
-                )
-                for p in projects
-            ],
+            project_items,
             "Select a project",
             hint_flag="LLAMA_AGENTS_PROJECT_ID",
             hint_command="llamactl auth project <project_id>",
+            selected=current_idx,
         )
         _set_project_id(choice)
     except Exception:

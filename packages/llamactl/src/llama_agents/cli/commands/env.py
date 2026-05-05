@@ -198,15 +198,18 @@ def _select_environment(
         raise click.ClickException(
             "No environments found. This is a bug and shouldn't happen."
         )
+    items = []
+    current_idx = 0
+    for i, env in enumerate(envs):
+        label = env.api_url
+        if env.api_url == current_env.api_url:
+            label += " [current]"
+            current_idx = i
+        items.append((env, label))
     return select_or_exit(
-        [
-            (
-                env,
-                f"{env.api_url} {'(current)' if env.api_url == current_env.api_url else ''}",
-            )
-            for env in envs
-        ],
+        items,
         message,
         hint_flag="<api_url>",
         hint_command="llamactl auth env list",
+        selected=current_idx,
     )

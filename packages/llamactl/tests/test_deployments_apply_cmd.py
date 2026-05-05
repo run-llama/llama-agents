@@ -746,11 +746,17 @@ def test_delete_from_file(patched_auth: Any, tmp_path: Any) -> None:
     assert call_args[0][0] == "doomed-app"
 
 
-def test_delete_requires_name_or_file() -> None:
+def test_delete_requires_name_or_file(patched_auth: Any) -> None:
     runner = CliRunner()
-    result = runner.invoke(app, ["deployments", "delete"])
+    client = _apply_client_mock()
+    client.list_deployments = AsyncMock(
+        return_value=[make_deployment("my-app"), make_deployment("other")]
+    )
+    with patch_project_client(client):
+        result = runner.invoke(app, ["deployments", "delete"])
     assert result.exit_code != 0
-    assert "deployment ID or --filename is required" in result.output
+    assert "llamactl deployments delete <deployment_id>" in result.output
+    assert "my-app" in result.output
 
 
 def test_delete_file_and_positional_mutually_exclusive(

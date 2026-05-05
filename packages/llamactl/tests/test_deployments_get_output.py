@@ -251,12 +251,17 @@ def test_deployments_list_hidden_in_help(patched_auth: Any) -> None:
     ["configure-git-remote", "update", "history", "rollback", "logs"],
 )
 def test_deployment_name_required_for_single_deployment_commands(
+    patched_auth: Any,
     command: str,
 ) -> None:
     runner = CliRunner()
-    result = runner.invoke(app, ["deployments", command])
+    deployments = [make_deployment("app-a"), make_deployment("app-b")]
+    client_mock = _make_client_mock(deployments)
+    with patch_project_client(client_mock):
+        result = runner.invoke(app, ["deployments", command])
     assert result.exit_code != 0
-    assert "Missing argument 'DEPLOYMENT_ID'" in result.output
+    assert f"llamactl deployments {command} <deployment_id>" in result.output
+    assert "app-a" in result.output
 
 
 def test_deployments_get_project_override_threads_to_client(

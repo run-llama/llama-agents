@@ -347,22 +347,21 @@ def change_project(project_id: str | None, org_id: str | None) -> None:
         rprint(f"Set active project to [bold green]{project_id}[/]")
         return
     try:
-        projects = _list_projects(auth_svc, org_id=org_id)
+        projects = _list_projects(auth_svc)
 
         if not projects:
             rprint(f"[{WARNING}]No projects found[/]")
             return
 
-        if org is not None:
-            rprint(f"Projects for organization [bold]{org.org_name}[/]")
-
-        items = [
-            (
-                project.project_id,
-                f"{project.project_id}  {project.project_name} ({project.deployment_count} deployments)",
-            )
-            for project in projects
-        ]
+        current_project_id = profile.project_id
+        items = []
+        current_idx = 0
+        for i, project in enumerate(projects):
+            label = f"{project.project_id}  {project.project_name} ({project.deployment_count} deployments)"
+            if project.project_id == current_project_id:
+                label += " [current]"
+                current_idx = i
+            items.append((project.project_id, label))
         if not auth_svc.env.requires_auth:
             items.append(("__CREATE__", "Create new project"))
 
@@ -371,6 +370,7 @@ def change_project(project_id: str | None, org_id: str | None) -> None:
             "Select a project",
             hint_flag="<project_id>",
             hint_command="llamactl auth project <project_id>",
+            selected=current_idx,
         )
         if result == "__CREATE__":
             project_id = click.prompt(
@@ -869,10 +869,12 @@ def _select_profile(auth_svc: AuthService, profile_name: str | None) -> Auth | N
 
         current = auth_svc.get_current_profile()
         choices = []
-        for profile in profiles:
+        current_idx = 0
+        for i, profile in enumerate(profiles):
             title = f"{profile.name} ({profile.api_url})"
             if profile == current:
                 title += " [current]"
+                current_idx = i
             choices.append((profile, title))
 
         return select_or_exit(
@@ -880,6 +882,7 @@ def _select_profile(auth_svc: AuthService, profile_name: str | None) -> Auth | N
             "Select profile:",
             hint_flag="<name>",
             hint_command="llamactl auth list",
+            selected=current_idx,
         )
 
     except click.ClickException:

@@ -15,7 +15,11 @@ from typing import Any, Literal, NoReturn
 
 import click
 import yaml
-from llama_agents.cli.interactive import is_interactive_session, select_or_exit
+from llama_agents.cli.interactive import (
+    is_interactive_session,
+    require_or_list_choices,
+    select_or_exit,
+)
 from llama_agents.cli.param_types import DeploymentType, GitShaType
 from llama_agents.cli.styles import WARNING
 from llama_agents.core.git.git_util import is_git_repo
@@ -667,9 +671,9 @@ def create_deployment(
 
 @deployments.command("configure-git-remote")
 @global_options
-@click.argument("deployment_id", required=True, type=DeploymentType())
+@click.argument("deployment_id", required=False, type=DeploymentType())
 @project_option
-def configure_git_remote_cmd(deployment_id: str, project: str | None) -> None:
+def configure_git_remote_cmd(deployment_id: str | None, project: str | None) -> None:
     """Configure a git remote for a deployment.
 
     Sets up authentication and a git remote named 'llamaagents-<deployment_id>'
@@ -679,6 +683,9 @@ def configure_git_remote_cmd(deployment_id: str, project: str | None) -> None:
     Tip: 'llamactl deployments update' handles pushing and redeployment in one
     step. This command is useful for troubleshooting git push issues.
     """
+    deployment_id = _require_deployment_id(
+        deployment_id, "configure-git-remote", project
+    )
     try:
         if not is_git_repo():
             raise click.ClickException("Not a git repository")
@@ -730,7 +737,7 @@ def delete_deployment(
             raise click.ClickException(str(exc)) from exc
 
     if deployment_id is None:
-        raise click.ClickException("deployment ID or --filename is required")
+        _require_deployment_id(None, "delete", project)
 
     try:
         client = get_project_client(project_id_override=project)
@@ -1146,12 +1153,13 @@ def edit_deployment(
         )
         return
 
+    deployment_id = _require_deployment_id(deployment_id, "edit", project)
+
     if _requires_file_for_editor():
         raise click.ClickException("pass -f <file> for non-interactive edit")
 
     effective_project: str | None = project
     try:
-        deployment_id = select_deployment(deployment_id, project_id_override=project)
         effective_project, current_deployment = asyncio.run(
             _fetch_deployment_for_editor(project=project, deployment_id=deployment_id)
         )
@@ -1211,7 +1219,7 @@ def _push_internal_for_update(
 
 @deployments.command("update")
 @global_options
-@click.argument("deployment_id", required=True, type=DeploymentType())
+@click.argument("deployment_id", required=False, type=DeploymentType())
 @click.option(
     "--git-ref",
     help="Reference branch, tag, or commit SHA for the deployment. If not provided, the current reference and latest commit on it will be used.",
@@ -1219,11 +1227,12 @@ def _push_internal_for_update(
 )
 @project_option
 def refresh_deployment(
-    deployment_id: str,
+    deployment_id: str | None,
     git_ref: str | None,
     project: str | None,
 ) -> None:
     """Update the deployment, pulling the latest code from it's branch"""
+    deployment_id = _require_deployment_id(deployment_id, "update", project)
     try:
         # Single asyncio.run with one client: reusing a ProjectClient across
         # two asyncio.run calls binds the underlying httpx pool to a closed
@@ -1265,15 +1274,16 @@ def refresh_deployment(
 
 @deployments.command("history")
 @global_options
-@click.argument("deployment_id", required=True, type=DeploymentType())
+@click.argument("deployment_id", required=False, type=DeploymentType())
 @output_option
 @project_option
 def show_history(
-    deployment_id: str,
+    deployment_id: str | None,
     output: str,
     project: str | None,
 ) -> None:
     """Show release history for a deployment."""
+    deployment_id = _require_deployment_id(deployment_id, "history", project)
     try:
 
         async def _fetch_history() -> DeploymentHistoryResponse:
@@ -1300,17 +1310,18 @@ def show_history(
 
 @deployments.command("rollback")
 @global_options
-@click.argument("deployment_id", required=True, type=DeploymentType())
+@click.argument("deployment_id", required=False, type=DeploymentType())
 @click.option(
     "--git-sha", required=False, type=GitShaType(), help="Git SHA to roll back to"
 )
 @project_option
 def rollback(
-    deployment_id: str,
+    deployment_id: str | None,
     git_sha: str | None,
     project: str | None,
 ) -> None:
     """Rollback a deployment to a previous git sha."""
+    deployment_id = _require_deployment_id(deployment_id, "rollback", project)
     try:
         if not git_sha:
             # If not provided, prompt from history
@@ -1331,11 +1342,14 @@ def rollback(
                 history.history or [], key=lambda it: it.released_at, reverse=True
             )
             choices: list[tuple[str, str]] = []
-            for it in items_sorted:
+            current_idx = 0
+            for i, it in enumerate(items_sorted):
                 short = short_sha(it.git_sha)
-                suffix = (
-                    " [current]" if current_sha and it.git_sha == current_sha else ""
-                )
+                if current_sha and it.git_sha == current_sha:
+                    suffix = " [current]"
+                    current_idx = i
+                else:
+                    suffix = ""
                 choices.append((it.git_sha, f"{short}{suffix} ({it.released_at})"))
             git_sha = select_or_exit(
                 choices,
@@ -1343,6 +1357,7 @@ def rollback(
                 hint_flag="--git-sha",
                 hint_command=f"llamactl deployments history {deployment_id}",
                 empty_message="No history available",
+                selected=current_idx,
             )
 
         async def _do_rollback() -> DeploymentResponse:
@@ -1361,7 +1376,7 @@ def rollback(
 
 @deployments.command("logs")
 @global_options
-@click.argument("deployment_id", required=True, type=DeploymentType())
+@click.argument("deployment_id", required=False, type=DeploymentType())
 @click.option(
     "--follow",
     "-f",
@@ -1399,7 +1414,7 @@ def rollback(
 )
 @project_option
 def deployment_logs(
-    deployment_id: str,
+    deployment_id: str | None,
     follow: bool,
     json_lines: bool,
     tail: int,
@@ -1413,6 +1428,7 @@ def deployment_logs(
     stream open until you Ctrl-C. Use ``--json`` to emit one JSON
     ``LogEvent`` per line for downstream tooling (jsonl).
     """
+    deployment_id = _require_deployment_id(deployment_id, "logs", project)
 
     async def _consume() -> int:
         events_seen = 0
@@ -1457,27 +1473,19 @@ def _emit_log_event(ev: LogEvent, *, json_lines: bool) -> None:
     click.echo(f"{prefix} {body}" if prefix else body)
 
 
-def select_deployment(
+def _require_deployment_id(
     deployment_id: str | None,
+    subcommand: str,
     project_id_override: str | None = None,
 ) -> str:
-    """
-    Select a deployment interactively if ID not provided.
-    Returns the selected deployment ID. Raises if cancelled or non-interactive.
-    """
+    """Return deployment_id if provided, otherwise list deployments and error."""
     if deployment_id:
         return deployment_id
 
     client = get_project_client(project_id_override=project_id_override)
-    deployments = asyncio.run(client.list_deployments())
-
-    return select_or_exit(
-        [
-            (deployment.id, f"{deployment.id} - {deployment.status}")
-            for deployment in deployments
-        ],
-        "Select deployment:",
-        hint_flag="<deployment_id>",
-        hint_command="llamactl deployments get",
+    all_deployments = asyncio.run(client.list_deployments())
+    require_or_list_choices(
+        [(d.id, f"{d.id} - {d.status}") for d in all_deployments],
+        hint_command=f"llamactl deployments {subcommand} <deployment_id>",
         empty_message=f"No deployments found for project {client.project_id}",
     )
