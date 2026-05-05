@@ -7,8 +7,7 @@ The control plane's log SSE endpoint emits ``LogEvent`` envelopes whose
 ``{"event": "...", "level": "info", "timestamp": "...", "logger": "..."}``,
 but sometimes a plain string (e.g. application stdout). This module owns the
 parsing of that body and the plain-text renderer used by the
-``deployments logs`` CLI command. The Textual deployment-monitor renderer
-calls into the same parser and adds Rich styling on top.
+``deployments logs`` CLI command.
 
 This module knows nothing about ``LogEvent.pod`` / ``LogEvent.container`` /
 ``LogEvent.timestamp`` — those live on the envelope and are formatted by
@@ -75,7 +74,7 @@ def parse_log_body(line: str) -> ParsedLogBody:
 
 
 def trim_timestamp(ts: str) -> str:
-    """Trim ISO timestamp to its time portion (shared with the Textual renderer)."""
+    """Trim ISO timestamp to its time portion."""
     if "T" in ts:
         ts = ts.split("T", 1)[1]
         for suffix in ("Z", "+00:00"):
@@ -86,8 +85,7 @@ def trim_timestamp(ts: str) -> str:
 def render_plain(parsed: ParsedLogBody) -> str:
     """Render ``parsed`` as a plain string (no Rich/ANSI).
 
-    Used by ``llamactl deployments logs`` text mode. Mirrors the layout of
-    the Textual renderer so a single mental model applies.
+    Used by ``llamactl deployments logs`` text mode.
     """
     if not parsed.structured:
         return parsed.event or parsed.raw

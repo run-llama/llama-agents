@@ -4,7 +4,7 @@ import logging
 def setup_file_logging(
     log_file: str = "llamactl.log", level: int = logging.DEBUG
 ) -> None:
-    """Set up global file logging for debugging when TUI takes over the terminal"""
+    """Set up global file logging for debugging CLI commands."""
     # Configure the root logger
     logging.basicConfig(
         level=level,

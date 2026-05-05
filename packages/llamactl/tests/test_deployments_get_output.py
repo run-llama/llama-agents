@@ -135,21 +135,13 @@ def test_deployments_get_yaml_list(patched_auth: Any) -> None:
     assert parsed[0]["name"] == "only-one"
 
 
-def test_deployments_get_single_text_no_tui(patched_auth: Any) -> None:
-    """``deployments get <name>`` should never launch the Textual monitor."""
+def test_deployments_get_single_text_outputs_table(patched_auth: Any) -> None:
     runner = CliRunner()
     deployments = [make_deployment("my-app")]
     client_mock = _make_client_mock(deployments)
-    with (
-        patch_project_client(client_mock),
-        patch(
-            "llama_agents.cli.textual.deployment_monitor.monitor_deployment_screen"
-        ) as mock_monitor,
-    ):
-        # Even if interactive=True, get must print a table — TUI is gone.
+    with patch_project_client(client_mock):
         result = runner.invoke(app, ["deployments", "get", "my-app"])
     assert result.exit_code == 0, result.output
-    assert mock_monitor.call_count == 0
     assert "my-app" in result.output
     # Single-row uses the same column layout as the list view.
     assert "NAME" in result.output

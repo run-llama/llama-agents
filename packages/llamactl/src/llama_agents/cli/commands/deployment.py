@@ -536,8 +536,8 @@ def _do_get(
     """Implementation of ``deployments get`` shared with the hidden ``list`` alias.
 
     No ``deployment_id`` → list all deployments (kubectl-style). With an ID →
-    a single-row table for that deployment. Never launches the TUI; for a
-    live view use ``deployments logs --follow``.
+    a single-row table for that deployment. For a live view use
+    ``deployments logs --follow``.
     """
     mode = output.lower()
     if mode == "template" and not deployment_id:

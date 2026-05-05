@@ -11,9 +11,7 @@ def test_llamactl_help_does_not_import_heavy_modules() -> None:
     """
     forbidden_prefixes = (
         "llama_agents.appserver",
-        "questionary",
         "aiohttp",
-        "textual",
         "httpx",
         "llama_index",
     )

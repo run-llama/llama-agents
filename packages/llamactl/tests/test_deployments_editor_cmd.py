@@ -531,7 +531,7 @@ def test_ci_forces_editor_commands_to_require_file(
     assert "pass -f <file> for non-interactive edit" in result.output
 
 
-def test_editor_commands_do_not_import_textual_deployment_form_on_help() -> None:
+def test_editor_command_help_avoids_deployment_implementation_imports() -> None:
     script = textwrap.dedent(
         """
         import sys
@@ -541,7 +541,7 @@ def test_editor_commands_do_not_import_textual_deployment_form_on_help() -> None
         result = CliRunner().invoke(app, ["deployments", "create", "--help"])
         if result.exit_code != 0:
             raise SystemExit(result.exit_code)
-        print("llama_agents.cli.textual.deployment_form" in sys.modules)
+        print("llama_agents.cli.apply" in sys.modules)
         """
     )
 
