@@ -24,19 +24,17 @@ Before you start:
 
 ## Install
 
-Install `llamactl` with `pip`:
+Install `llamactl` globally with `uv`:
 
 ```bash
-pip install llamactl
+uv tool install -U llamactl
 ```
 
-Or run it on demand with `uvx`:
+Or pin it to a project:
 
 ```bash
-uvx llamactl --help
+uv add --dev llamactl
 ```
-
-If you use `uvx`, replace `llamactl` with `uvx llamactl` in the commands below.
 
 ## Authenticate
 

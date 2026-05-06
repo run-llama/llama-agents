@@ -6,16 +6,16 @@ For the full guide, see the [LlamaAgents `llamactl` docs](https://developers.lla
 
 ## Installation
 
-Install from PyPI:
+Install globally with `uv`:
 
 ```bash
-pip install llamactl
+uv tool install -U llamactl
 ```
 
-Or run without installing:
+Or pin it to a project:
 
 ```bash
-uvx llamactl --help
+uv add --dev llamactl
 ```
 
 ## Quick Start
