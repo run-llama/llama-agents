@@ -15,7 +15,7 @@ dev = [
 
 [project]
 name = "llama-agents-agentcore"
-version = "0.9.2"
+version = "0.9.3"
 description = "LlamaAgents x Bedrock AgentCore deployment utilities"
 readme = "README.md"
 requires-python = ">=3.10,<4"

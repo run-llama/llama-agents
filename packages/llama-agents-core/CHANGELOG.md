@@ -1,5 +1,11 @@
 # llama-agents-core
 
+## 0.10.2
+
+### Patch Changes
+
+- c3fac21: Validate `appserver_version` as a public PEP 440 version
+
 ## 0.10.1
 
 ### Patch Changes
