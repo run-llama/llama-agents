@@ -251,8 +251,8 @@ def test_template_advertises_template_only_on_deployments_get() -> None:
     other read commands that share the same output decorator."""
     runner = CliRunner()
     for argv in (
-        ["auth", "organizations", "--help"],
-        ["auth", "env", "list", "--help"],
+        ["organizations", "get", "--help"],
+        ["environments", "get", "--help"],
         ["deployments", "history", "--help"],
     ):
         result = runner.invoke(app, argv)

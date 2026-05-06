@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 LlamaIndex Inc.
+
 from __future__ import annotations
 
 from importlib import metadata as importlib_metadata
@@ -10,9 +13,9 @@ from llama_agents.cli.output import status, warning
 from llama_agents.cli.param_types import EnvironmentType
 from packaging import version as packaging_version
 
+from ..app import app
 from ..display import EnvDisplay
-from ..options import global_options, output_option, render_output
-from .auth import auth
+from ..options import global_options, render_output, simple_output_option
 
 if TYPE_CHECKING:
     from llama_agents.cli.config.env_service import EnvService
@@ -29,24 +32,31 @@ def _env_service() -> EnvService:
     return service
 
 
-@auth.group(
-    name="env",
-    help="Manage environments (control plane API URLs)",
+@app.group(
+    name="environments",
+    help="Manage control plane API URLs.",
     no_args_is_help=True,
 )
 @global_options
-def env_group() -> None:
+def environments() -> None:
     pass
 
 
-@env_group.command("list")
+@environments.command("get")
+@click.argument("api_url", required=False, type=EnvironmentType())
 @global_options
-@output_option
-def list_environments_cmd(output: str) -> None:
+@simple_output_option
+def get_environments_cmd(api_url: str | None, output: str) -> None:
+    """List environments or show one environment."""
     try:
         service = _env_service()
         envs = service.list_environments()
         current_env = service.get_current_environment()
+        if api_url:
+            normalized = api_url.rstrip("/")
+            envs = [env for env in envs if env.api_url == normalized]
+            if not envs:
+                raise click.ClickException(f"Environment '{normalized}' not found")
 
         if not envs and output == "text":
             status("no environments found")
@@ -56,21 +66,26 @@ def list_environments_cmd(output: str) -> None:
         displays = [
             EnvDisplay.from_environment(env, current_url=current_url) for env in envs
         ]
-        render_output(displays, output)
+        render_output(
+            displays[0] if api_url and len(displays) == 1 else displays, output
+        )
+    except click.ClickException:
+        raise
     except Exception as e:
         raise click.ClickException(str(e)) from e
 
 
-@env_group.command("add")
+@environments.command("add")
 @click.argument("api_url", required=False)
 @global_options
 def add_environment_cmd(api_url: str | None) -> None:
+    """Probe and store an environment."""
     try:
         service = _env_service()
         if not api_url:
             if not is_interactive_session():
                 raise click.ClickException(
-                    "Pass <api_url> as an argument. To see existing environments, run: llamactl auth env list"
+                    "Pass <api_url> as an argument. To see existing environments, run: llamactl environments get"
                 )
             current_env = service.get_current_environment()
             entered = click.prompt(
@@ -99,10 +114,11 @@ def add_environment_cmd(api_url: str | None) -> None:
         raise click.ClickException(str(e)) from e
 
 
-@env_group.command("delete")
+@environments.command("delete")
 @click.argument("api_url", required=False, type=EnvironmentType())
 @global_options
 def delete_environment_cmd(api_url: str | None) -> None:
+    """Delete an environment and its profiles."""
     try:
         service = _env_service()
         if not api_url:
@@ -126,10 +142,11 @@ def delete_environment_cmd(api_url: str | None) -> None:
         raise click.ClickException(str(e)) from e
 
 
-@env_group.command("switch")
+@environments.command("use")
 @click.argument("api_url", required=False, type=EnvironmentType())
 @global_options
-def switch_environment_cmd(api_url: str | None) -> None:
+def use_environment_cmd(api_url: str | None) -> None:
+    """Set the active environment."""
     try:
         service = _env_service()
         selected_url = api_url
@@ -185,7 +202,7 @@ def _maybe_warn_min_version(min_required: str | None) -> None:
 
 def _select_environment(
     envs: list[Environment],
-    current_env: Environment,
+    current_env: Environment | None,
     message: str = "Select environment",
 ) -> Environment:
     if not envs:
@@ -196,7 +213,7 @@ def _select_environment(
     current_idx = 0
     for i, env in enumerate(envs):
         label = env.api_url
-        if env.api_url == current_env.api_url:
+        if current_env is not None and env.api_url == current_env.api_url:
             label += " [current]"
             current_idx = i
         items.append((env, label))
@@ -204,6 +221,6 @@ def _select_environment(
         items,
         message,
         hint_flag="<api_url>",
-        hint_command="llamactl auth env list",
+        hint_command="llamactl environments get",
         selected=current_idx,
     )

@@ -26,7 +26,7 @@ _ClickPath = getattr(click, "Path")
 
 @app.group(
     name="dev",
-    help="Development utilities for llama-deploy projects",
+    help="Development utilities for llama-deploy projects.",
     cls=AliasedGroup,
     no_args_is_help=True,
 )

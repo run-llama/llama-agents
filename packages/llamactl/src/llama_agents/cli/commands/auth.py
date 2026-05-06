@@ -12,12 +12,12 @@ from typing import TYPE_CHECKING
 import click
 from llama_agents.cli.interactive import is_interactive_session, select_or_exit
 from llama_agents.cli.output import status, warning
-from llama_agents.cli.param_types import OrgType, ProfileType, ProjectType
+from llama_agents.cli.param_types import ProfileType
 from llama_agents.cli.utils.capabilities import probe_organizations_support
 
 from ..app import app
-from ..display import AuthProfileDisplay, OrgDisplay
-from ..options import global_options, output_option, render_output
+from ..display import AuthProfileDisplay
+from ..options import global_options, render_output, simple_output_option
 
 if TYPE_CHECKING:
     from llama_agents.cli.config.auth_service import AuthService
@@ -29,6 +29,26 @@ if TYPE_CHECKING:
 
 class NoProjectsFoundError(Exception):
     """Raised when the authenticated user has no accessible projects on an org-less server."""
+
+
+class AuthGroup(click.Group):
+    _removed_command_hints = {
+        "list": "Use `llamactl auth get` instead.",
+        "switch": "Use `llamactl auth use` instead.",
+        "env": "Use `llamactl environments get` instead.",
+        "project": "Use `llamactl projects` instead.",
+        "organizations": "Use `llamactl organizations get` instead.",
+        "destroy": "Use `llamactl config destroy` instead.",
+        "show-db": "Use `llamactl config show-db` instead.",
+    }
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        command = super().get_command(ctx, cmd_name)
+        if command is not None:
+            return command
+        if hint := self._removed_command_hints.get(cmd_name):
+            raise click.ClickException(f"No such command '{cmd_name}'. {hint}")
+        return None
 
 
 _ClickPath = getattr(click, "Path")
@@ -47,12 +67,13 @@ def _get_service() -> EnvService:
 
 # Create sub-applications for organizing commands
 @app.group(
-    help="Login to llama cloud control plane to manage deployments",
+    help="Manage login profiles and credentials.",
+    cls=AuthGroup,
     no_args_is_help=True,
 )
 @global_options
 def auth() -> None:
-    """Login to llama cloud control plane"""
+    """Manage login profiles and credentials."""
     pass
 
 
@@ -120,7 +141,7 @@ def create_api_key_profile(
 @auth.command("login")
 @global_options
 def device_login() -> None:
-    """Login via web browser"""
+    """Log in with a web browser."""
     from llama_agents.cli.auth.client import OIDCNotEnabledError
 
     try:
@@ -144,15 +165,20 @@ def device_login() -> None:
         raise click.ClickException(str(e)) from e
 
 
-@auth.command("list")
+@auth.command("get")
+@click.argument("name", required=False, type=ProfileType())
 @global_options
-@output_option
-def list_profiles(output: str) -> None:
-    """List all logged in users/tokens"""
+@simple_output_option
+def get_profiles(name: str | None, output: str) -> None:
+    """List auth profiles or show one profile."""
     try:
         auth_svc = _get_service().current_auth_service()
         profiles = auth_svc.list_profiles()
         current = auth_svc.get_current_profile()
+        if name:
+            profiles = [profile for profile in profiles if profile.name == name]
+            if not profiles:
+                raise click.ClickException(f"Profile '{name}' not found")
 
         if not profiles and output == "text":
             status("no profiles found")
@@ -167,42 +193,22 @@ def list_profiles(output: str) -> None:
             AuthProfileDisplay.from_profile(p, current_name=current_name)
             for p in profiles
         ]
-        render_output(displays, output)
+        render_output(displays[0] if name and len(displays) == 1 else displays, output)
 
+    except click.ClickException:
+        raise
     except Exception as e:
         raise click.ClickException(str(e)) from e
 
 
-@auth.command("destroy", hidden=True)
-@global_options
-def destroy_database() -> None:
-    """Destroy the database"""
-    from llama_agents.cli.config._config import ConfigManager
-
-    if is_interactive_session() and not click.confirm(
-        "Are you sure you want to destroy all of your local logins? This action cannot be undone."
-    ):
-        return
-    ConfigManager(init_database=False).destroy_database()
-    status("database destroyed")
-
-
-@auth.command("show-db", hidden=True)
-@global_options
-def config_database() -> None:
-    """Config the database"""
-    path = _get_service().config_manager().db_path
-    status(path)
-
-
-@auth.command("switch")
+@auth.command("use")
 @global_options
 @click.argument("name", required=False, type=ProfileType())
-def switch_profile(name: str | None) -> None:
-    """Switch to a different profile"""
+def use_profile(name: str | None) -> None:
+    """Switch to a different profile."""
     auth_svc = _get_service().current_auth_service()
     try:
-        selected_auth = _select_profile(auth_svc, name)
+        selected_auth = _select_profile(auth_svc, name, require_selection=True)
         if not selected_auth:
             status("no profile selected")
             return
@@ -218,7 +224,7 @@ def switch_profile(name: str | None) -> None:
 @global_options
 @click.argument("name", required=False, type=ProfileType())
 def delete_profile(name: str | None) -> None:
-    """Logout from a profile and wipe all associated data"""
+    """Log out from a profile and wipe its local credentials."""
     try:
         auth_svc = _get_service().current_auth_service()
         auth = _select_profile(auth_svc, name)
@@ -266,121 +272,6 @@ def me() -> None:
         raise click.ClickException(str(e)) from e
 
 
-# Organizations commands
-@auth.command("organizations")
-@global_options
-@output_option
-def list_organizations(output: str) -> None:
-    """List organizations available to the current profile"""
-    try:
-        auth_svc = _get_service().current_auth_service()
-        if not probe_organizations_support():
-            if output == "text":
-                warning("this server does not support organizations")
-                return
-            # Structured outputs: emit an empty list so scripts get a
-            # well-typed answer instead of an unparsable warning.
-            render_output([], output)
-            return
-
-        organizations = _list_organizations(auth_svc)
-        if not organizations and output == "text":
-            status("no organizations found")
-            return
-
-        default_org = next((o.org_id for o in organizations if o.is_default), None)
-        displays = [
-            OrgDisplay.from_org_summary(o, current_org_id=default_org)
-            for o in organizations
-        ]
-        render_output(displays, output)
-
-    except Exception as e:
-        raise click.ClickException(str(e)) from e
-
-
-# Projects commands
-@auth.command("project")
-@click.argument("project_id", required=False, type=ProjectType())
-@click.option(
-    "--org",
-    "org_id",
-    default=None,
-    type=OrgType(),
-    help="Organization ID to scope projects to",
-)
-@global_options
-def change_project(project_id: str | None, org_id: str | None) -> None:
-    """Change the active project for the current profile"""
-    auth_svc = _get_service().current_auth_service()
-    profile = validate_authenticated_profile()
-
-    # Discover org if not explicitly provided (profile exists, credentials available)
-    org = None
-    if org_id is None:
-        org = _discover_organization(auth_svc)
-        if org is not None:
-            org_id = org.org_id
-
-    if project_id and profile.project_id == project_id:
-        return
-    if project_id:
-        if auth_svc.env.requires_auth:
-            projects = _list_projects(auth_svc, org_id=org_id)
-            if not next(
-                (project for project in projects if project.project_id == project_id),
-                None,
-            ):
-                raise click.ClickException(f"Project {project_id} not found")
-        auth_svc.set_project(profile.name, project_id)
-        status(f"switched project {project_id}")
-        return
-    try:
-        projects = _list_projects(auth_svc)
-
-        if not projects:
-            status("no projects found")
-            return
-
-        current_project_id = profile.project_id
-        items = []
-        current_idx = 0
-        for i, project in enumerate(projects):
-            label = f"{project.project_id}  {project.project_name} ({project.deployment_count} deployments)"
-            if project.project_id == current_project_id:
-                label += " [current]"
-                current_idx = i
-            items.append((project.project_id, label))
-        if not auth_svc.env.requires_auth:
-            items.append(("__CREATE__", "Create new project"))
-
-        result = select_or_exit(
-            items,
-            "Select a project",
-            hint_flag="<project_id>",
-            hint_command="llamactl auth project <project_id>",
-            selected=current_idx,
-        )
-        if result == "__CREATE__":
-            project_id = click.prompt(
-                "Enter project ID", default="", show_default=False
-            ).strip()
-            result = project_id
-        if result:
-            selected_project = next(
-                (project for project in projects if project.project_id == result), None
-            )
-            name = selected_project.project_name if selected_project else result
-            auth_svc.set_project(profile.name, result)
-            status(f"switched project {name}")
-        else:
-            status("no project selected")
-    except click.ClickException:
-        raise
-    except Exception as e:
-        raise click.ClickException(str(e)) from e
-
-
 @auth.command("inject")
 @global_options
 @click.option(
@@ -393,7 +284,7 @@ def change_project(project_id: str | None, org_id: str | None) -> None:
 def inject_env_vars(
     env_file: Path,
 ) -> None:
-    """Inject auth environment variables into a .env file.
+    """Inject profile credentials into a .env file.
 
     Writes LLAMA_CLOUD_API_KEY, LLAMA_CLOUD_BASE_URL, and LLAMA_AGENTS_PROJECT_ID
     based on the current profile. Always overwrites and creates the file if missing.
@@ -681,7 +572,7 @@ def validate_authenticated_profile() -> Auth:
             [(profile, profile.name) for profile in env_profiles],
             "Select profile",
             hint_flag="<profile>",
-            hint_command="llamactl auth list",
+            hint_command="llamactl auth get",
         )
         auth_svc.set_current_profile(choice.name)
         return choice
@@ -816,7 +707,7 @@ def _select_or_enter_project(
         ],
         "Select a project",
         hint_flag="<project_id>",
-        hint_command="llamactl auth project <project_id>",
+        hint_command="llamactl projects use <project_id>",
     )
 
 
@@ -830,19 +721,22 @@ def _token_flow_for_env(auth_service: AuthService) -> Auth:
     return created
 
 
-def _select_profile(auth_svc: AuthService, profile_name: str | None) -> Auth | None:
+def _select_profile(
+    auth_svc: AuthService, profile_name: str | None, *, require_selection: bool = False
+) -> Auth | None:
     """
     Select a profile interactively if name not provided.
     Returns the selected profile name or None if cancelled.
 
-    In non-interactive sessions, returns None if profile_name is not provided.
+    In non-interactive sessions, returns None if profile_name is not provided
+    unless ``require_selection`` is true.
     """
     if profile_name:
         profile = auth_svc.get_profile(profile_name)
         if profile:
             return profile
 
-    if not is_interactive_session():
+    if not require_selection and not is_interactive_session():
         return None
 
     try:
@@ -866,7 +760,7 @@ def _select_profile(auth_svc: AuthService, profile_name: str | None) -> Auth | N
             choices,
             "Select profile:",
             hint_flag="<name>",
-            hint_command="llamactl auth list",
+            hint_command="llamactl auth get",
             selected=current_idx,
         )
 

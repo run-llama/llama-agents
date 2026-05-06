@@ -18,7 +18,7 @@ SUPPORTED_FORMATS_STR = ", ".join(SUPPORTED_FORMATS)
 
 
 @app.group(
-    help=f"Package your application in different formats. Currently supported: {SUPPORTED_FORMATS_STR}",
+    help=f"Package your application in different formats. Currently supported: {SUPPORTED_FORMATS_STR}.",
     no_args_is_help=True,
     context_settings={"max_content_width": None},
 )

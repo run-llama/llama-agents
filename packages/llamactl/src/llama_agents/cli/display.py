@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Literal, Union, get_args, get_origin
 
-from llama_agents.cli.render import format_iso_z, gh_short, short_sha, star_marker
+from llama_agents.cli.render import format_iso_z, gh_short, short_sha
 from llama_agents.core.schema.deployments import (
     DeploymentCreate,
     DeploymentResponse,
@@ -35,7 +35,7 @@ from llama_agents.core.schema.deployments import (
     LlamaDeploymentPhase,
     ReleaseHistoryItem,
 )
-from llama_agents.core.schema.projects import OrgSummary
+from llama_agents.core.schema.projects import OrgSummary, ProjectSummary
 from pydantic import BaseModel, ConfigDict
 from typing_extensions import Annotated
 
@@ -499,8 +499,12 @@ class ReleaseDisplay(BaseModel):
         )
 
 
+def _yes_no(value: bool) -> str:
+    return "yes" if value else "no"
+
+
 class AuthProfileDisplay(BaseModel):
-    """A locally-stored auth profile, projected for ``auth list``.
+    """A locally-stored auth profile, projected for ``auth get``.
 
     Secret material (``api_key``, OIDC tokens) is intentionally not surfaced.
     """
@@ -510,7 +514,7 @@ class AuthProfileDisplay(BaseModel):
     name: Annotated[str, Column("NAME")]
     api_url: Annotated[str, Column("API_URL")]
     project_id: Annotated[str | None, Column("PROJECT_ID", default="-")] = None
-    active: Annotated[bool, Column("ACTIVE", format=star_marker)] = False
+    active: Annotated[bool, Column("ACTIVE", format=_yes_no)] = False
     auth_type: Annotated[Literal["none", "token", "oidc"], Column("AUTH")] = "none"
 
     @classmethod
@@ -532,12 +536,8 @@ class AuthProfileDisplay(BaseModel):
         )
 
 
-def _bool_str_lower(value: bool) -> str:
-    return "true" if value else "false"
-
-
 class EnvDisplay(BaseModel):
-    """A configured environment, projected for ``auth env list``.
+    """A configured environment, projected for ``environments get``.
 
     ``min_llamactl_version`` is intentionally omitted — it isn't part of the
     public env-list contract.
@@ -546,8 +546,8 @@ class EnvDisplay(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     api_url: Annotated[str, Column("API_URL")]
-    requires_auth: Annotated[bool, Column("REQUIRES_AUTH", format=_bool_str_lower)]
-    active: Annotated[bool, Column("ACTIVE", format=star_marker)] = False
+    requires_auth: Annotated[bool, Column("REQUIRES_AUTH", format=_yes_no)]
+    active: Annotated[bool, Column("ACTIVE", format=_yes_no)] = False
 
     @classmethod
     def from_environment(cls, env: Any, *, current_url: str | None) -> EnvDisplay:
@@ -558,19 +558,15 @@ class EnvDisplay(BaseModel):
         )
 
 
-def _yes_if_true(value: bool) -> str:
-    return "yes" if value else ""
-
-
 class OrgDisplay(BaseModel):
-    """An organization summary, projected for ``auth organizations``."""
+    """An organization summary, projected for ``organizations get``."""
 
     model_config = ConfigDict(extra="forbid")
 
-    org_id: Annotated[str, Column("ORG_ID")]
     org_name: Annotated[str, Column("NAME")]
-    is_default: Annotated[bool, Column("DEFAULT", format=_yes_if_true)]
-    active: Annotated[bool, Column("ACTIVE", format=star_marker)] = False
+    org_id: Annotated[str, Column("ORG_ID")]
+    is_default: Annotated[bool, Column("DEFAULT", format=_yes_no)]
+    active: Annotated[bool, Column("ACTIVE", format=_yes_no)] = False
 
     @classmethod
     def from_org_summary(
@@ -582,3 +578,41 @@ class OrgDisplay(BaseModel):
             is_default=org.is_default,
             active=current_org_id is not None and org.org_id == current_org_id,
         )
+
+    def to_output_dict(self) -> dict[str, Any]:
+        return {
+            "org_id": self.org_id,
+            "org_name": self.org_name,
+            "is_default": self.is_default,
+            "active": self.active,
+        }
+
+
+class ProjectDisplay(BaseModel):
+    """A project summary, projected for ``projects get``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    project_name: Annotated[str, Column("NAME")]
+    project_id: Annotated[str, Column("PROJECT_ID")]
+    deployment_count: Annotated[int, Column("DEPLOYMENTS")]
+    active: Annotated[bool, Column("ACTIVE", format=_yes_no)] = False
+
+    @classmethod
+    def from_project_summary(
+        cls, project: ProjectSummary, *, current_project_id: str | None = None
+    ) -> ProjectDisplay:
+        return cls(
+            project_id=project.project_id,
+            project_name=project.project_name,
+            deployment_count=project.deployment_count,
+            active=project.project_id == current_project_id,
+        )
+
+    def to_output_dict(self) -> dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+            "project_name": self.project_name,
+            "deployment_count": self.deployment_count,
+            "active": self.active,
+        }
