@@ -82,7 +82,7 @@ def render(
     required: Iterable[str] = (),
     name_example: str = "my-app",
     scaffold_generate_name: bool = False,
-    strip_mask_sentinels: bool = True,
+    strip_mask_sentinels: bool = False,
 ) -> str:
     """Render ``display`` as a commented apply-shaped YAML string.
 
@@ -112,10 +112,11 @@ def render(
             ``False`` (the default), the
             field is omitted entirely. Only the offline ``deployments
             template`` flow opts in; ``get -o template`` does not.
-        strip_mask_sentinels: When ``True`` (default), omit masked secret
-            values from output so template output can be piped back into
-            apply. The editor loop sets this to ``False`` so existing secret
-            names remain visible as masked entries.
+        strip_mask_sentinels: When ``True``, omit masked secret values
+            from output so they don't round-trip into apply input.  The
+            default is ``False`` — masked placeholders are preserved so
+            ``get -o template`` and the editor both show which secrets
+            exist.  Stripping happens on the apply/parse side instead.
     """
     required_set = set(required)
     out: list[str] = []

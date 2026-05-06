@@ -571,11 +571,11 @@ def test_deployments_get_template_single_emits_apply_shape(patched_auth: Any) ->
     assert "phase" not in out
     # Doc comments above fields.
     assert "## Stable id for the deployment" in out
-    # Masked secrets / PAT are stripped at the emit boundary — they must not
-    # round-trip as literal ``********`` values into apply input.
-    assert "********" not in out
-    assert "secrets" not in (parsed["spec"] or {})
-    assert "personal_access_token" not in (parsed["spec"] or {})
+    # Masked secrets / PAT are preserved as placeholders so the user can see
+    # which secrets exist.  Stripping happens on the apply/parse side.
+    assert "OPENAI_API_KEY" in out
+    assert parsed["spec"]["secrets"] == {"OPENAI_API_KEY": "********"}
+    assert parsed["spec"]["personal_access_token"] == "********"
 
 
 def test_deployments_get_template_does_not_scaffold_generate_name(
