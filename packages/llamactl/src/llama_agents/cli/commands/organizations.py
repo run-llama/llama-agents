@@ -40,8 +40,7 @@ def get_organizations(output: str) -> None:
 
         default_org = next((o.org_id for o in orgs if o.is_default), None)
         displays = [
-            OrgDisplay.from_org_summary(org, current_org_id=default_org)
-            for org in orgs
+            OrgDisplay.from_org_summary(org, current_org_id=default_org) for org in orgs
         ]
         render_output(displays, output)
 

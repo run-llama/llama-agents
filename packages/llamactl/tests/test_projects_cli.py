@@ -25,7 +25,9 @@ def test_projects_get_lists_projects_json() -> None:
             "llama_agents.cli.commands.projects._discover_organization",
             return_value=None,
         ),
-        patch("llama_agents.cli.commands.projects._list_projects", return_value=projects),
+        patch(
+            "llama_agents.cli.commands.projects._list_projects", return_value=projects
+        ),
         patch("llama_agents.cli.config.env_service.service") as mock_service,
     ):
         mock_service.current_auth_service.return_value = MagicMock()
@@ -52,7 +54,9 @@ def test_projects_get_single_project() -> None:
             "llama_agents.cli.commands.projects._discover_organization",
             return_value=None,
         ),
-        patch("llama_agents.cli.commands.projects._list_projects", return_value=projects),
+        patch(
+            "llama_agents.cli.commands.projects._list_projects", return_value=projects
+        ),
         patch("llama_agents.cli.config.env_service.service") as mock_service,
     ):
         mock_service.current_auth_service.return_value = MagicMock()

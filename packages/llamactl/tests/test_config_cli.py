@@ -17,7 +17,9 @@ def test_config_text_shows_current_context() -> None:
     project = SimpleNamespace(project_id="project-1", project_name="Production")
     with (
         patch("llama_agents.cli.config.env_service.service") as mock_service,
-        patch("llama_agents.cli.commands.config._list_projects", return_value=[project]),
+        patch(
+            "llama_agents.cli.commands.config._list_projects", return_value=[project]
+        ),
     ):
         mock_service.get_current_environment.return_value = SimpleNamespace(
             api_url="https://api.example"

@@ -48,7 +48,9 @@ def get_projects(project_id: str | None, org_id: str | None, output: str) -> Non
 
         projects = _list_projects(auth_svc, org_id=org_id)
         if project_id:
-            projects = [project for project in projects if project.project_id == project_id]
+            projects = [
+                project for project in projects if project.project_id == project_id
+            ]
             if not projects:
                 raise click.ClickException(f"Project {project_id} not found")
 
@@ -62,7 +64,9 @@ def get_projects(project_id: str | None, org_id: str | None, output: str) -> Non
             )
             for project in projects
         ]
-        render_output(displays[0] if project_id and len(displays) == 1 else displays, output)
+        render_output(
+            displays[0] if project_id and len(displays) == 1 else displays, output
+        )
 
     except click.ClickException:
         raise
