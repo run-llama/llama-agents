@@ -73,9 +73,13 @@ directory = "./ui"
 
 ### CLI Commands Reference
 ```bash
-llamactl auth env list              # List environments
-llamactl auth env switch <URL>      # Switch current environment
+llamactl environments get           # List environments
+llamactl environments use <URL>     # Switch current environment
 llamactl auth token --project <PROJECT_ID>  # Create/select profile via API key
+llamactl auth get                   # List profiles
+llamactl auth use <NAME>            # Switch profile
+llamactl projects get               # List projects
+llamactl projects use <PROJECT_ID>  # Switch active project
 llamactl deployments template > deployment.yaml  # Generate apply YAML
 llamactl deployments apply -f deployment.yaml    # Create or update from YAML
 llamactl deployments create          # Create new deployment in $EDITOR
