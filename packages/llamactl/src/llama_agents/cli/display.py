@@ -391,15 +391,14 @@ class DeploymentDisplay(BaseModel):
     def to_output_dict(self) -> dict[str, Any]:
         """Return the dict shape used for JSON/YAML rendering.
 
-        Omits fields inside ``spec`` whose value is None and strips the
-        ``SECRET_MASK`` sentinel from ``secrets`` and ``personal_access_token``
-        so a ``get | edit | apply`` round-trip can't push a literal ``********``
-        back as the value. ``generate_name`` is emitted at the top level only
+        Omits fields inside ``spec`` whose value is None.  Masked secret
+        placeholders (``********``) are preserved so the output shows which
+        secrets exist.  ``generate_name`` is emitted at the top level only
         when set. The nested ``status`` block is preserved verbatim so its
         ``warning`` key remains explicit even when ``null``.
         """
         spec_data = self.spec.model_dump(mode="json")
-        spec_data = strip_masks({k: v for k, v in spec_data.items() if v is not None})
+        spec_data = {k: v for k, v in spec_data.items() if v is not None}
         data: dict[str, Any] = {"name": self.name}
         if self.generate_name is not None:
             data["generate_name"] = self.generate_name

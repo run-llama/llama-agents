@@ -318,21 +318,17 @@ def test_to_output_dict_keeps_explicit_status_warning_null() -> None:
     assert data["status"]["warning"] is None
 
 
-def test_to_output_dict_strips_mask_sentinels() -> None:
-    """Mask sentinels are dropped at the emit boundary so a ``get | edit |
-    apply`` round-trip can't push the literal ``********`` back as the value."""
+def test_to_output_dict_preserves_mask_placeholders() -> None:
+    """Masked secret names are preserved so JSON/YAML output shows which
+    secrets exist.  Stripping happens on the apply/parse side instead."""
     response = make_deployment(
         "my-app",
         secret_names=["KEY"],
         has_personal_access_token=True,
     )
     data = DeploymentDisplay.from_response(response).to_output_dict()
-    # ``secrets`` had only mask values → key drops entirely.
-    assert "secrets" not in data["spec"]
-    # PAT mask drops too.
-    assert "personal_access_token" not in data["spec"]
-    # And ``SECRET_MASK`` should not appear anywhere serialized.
-    assert SECRET_MASK not in repr(data)
+    assert data["spec"]["secrets"] == {"KEY": SECRET_MASK}
+    assert data["spec"]["personal_access_token"] == SECRET_MASK
 
 
 def test_to_output_dict_emits_generate_name_when_set() -> None:

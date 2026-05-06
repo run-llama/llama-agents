@@ -29,10 +29,11 @@ Single-character strings are force-quoted so values like ``"."`` read
 unambiguously rather than hitting YAML plain-scalar edge cases.
 
 Mask sentinels (``SECRET_MASK``) inside ``secrets`` and on
-``personal_access_token`` are stripped before rendering — the same filter
-:func:`~llama_agents.cli.display.strip_masks` applies to ``-o yaml`` /
-``-o json`` output, so a ``get -o template | apply`` round-trip can't push a
-literal ``********`` back as the value.
+``personal_access_token`` are preserved in rendered output so the user can see
+which secrets exist.  Stripping happens on the apply/parse side
+(:meth:`~llama_agents.cli.display.DeploymentDisplay.without_mask_sentinels`)
+so a ``get -o template | apply`` round-trip can't push a literal ``********``
+back as the value.
 """
 
 from __future__ import annotations
