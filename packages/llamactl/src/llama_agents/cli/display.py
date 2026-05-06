@@ -35,7 +35,7 @@ from llama_agents.core.schema.deployments import (
     LlamaDeploymentPhase,
     ReleaseHistoryItem,
 )
-from llama_agents.core.schema.projects import OrgSummary
+from llama_agents.core.schema.projects import OrgSummary, ProjectSummary
 from pydantic import BaseModel, ConfigDict
 from typing_extensions import Annotated
 
@@ -500,7 +500,7 @@ class ReleaseDisplay(BaseModel):
 
 
 class AuthProfileDisplay(BaseModel):
-    """A locally-stored auth profile, projected for ``auth list``.
+    """A locally-stored auth profile, projected for ``auth get``.
 
     Secret material (``api_key``, OIDC tokens) is intentionally not surfaced.
     """
@@ -537,7 +537,7 @@ def _bool_str_lower(value: bool) -> str:
 
 
 class EnvDisplay(BaseModel):
-    """A configured environment, projected for ``auth env list``.
+    """A configured environment, projected for ``environments get``.
 
     ``min_llamactl_version`` is intentionally omitted — it isn't part of the
     public env-list contract.
@@ -563,7 +563,7 @@ def _yes_if_true(value: bool) -> str:
 
 
 class OrgDisplay(BaseModel):
-    """An organization summary, projected for ``auth organizations``."""
+    """An organization summary, projected for ``organizations get``."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -581,4 +581,26 @@ class OrgDisplay(BaseModel):
             org_name=org.org_name,
             is_default=org.is_default,
             active=current_org_id is not None and org.org_id == current_org_id,
+        )
+
+
+class ProjectDisplay(BaseModel):
+    """A project summary, projected for ``projects get``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: Annotated[str, Column("PROJECT_ID")]
+    project_name: Annotated[str, Column("NAME")]
+    deployment_count: Annotated[int, Column("DEPLOYMENTS")]
+    active: Annotated[bool, Column("ACTIVE", format=star_marker)] = False
+
+    @classmethod
+    def from_project_summary(
+        cls, project: ProjectSummary, *, current_project_id: str | None = None
+    ) -> ProjectDisplay:
+        return cls(
+            project_id=project.project_id,
+            project_name=project.project_name,
+            deployment_count=project.deployment_count,
+            active=project.project_id == current_project_id,
         )

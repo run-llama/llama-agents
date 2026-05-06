@@ -5,43 +5,43 @@ from click.testing import CliRunner
 from llama_agents.cli.app import app
 from llama_agents.cli.config._config import Environment
 
-_INTERACTIVE_PATCH = "llama_agents.cli.commands.env.is_interactive_session"
+_INTERACTIVE_PATCH = "llama_agents.cli.commands.environments.is_interactive_session"
 
 
-def test_auth_env_list_prints_table() -> None:
+def test_environments_get_prints_table() -> None:
     runner = CliRunner()
     env1 = Environment(api_url="https://api1", requires_auth=False)
     env2 = Environment(api_url="https://api2", requires_auth=True)
     with patch("llama_agents.cli.config.env_service.service") as mock_service:
         mock_service.list_environments.return_value = [env1, env2]
         mock_service.get_current_environment.return_value = env2
-        result = runner.invoke(app, ["auth", "env", "list"])
+        result = runner.invoke(app, ["environments", "get"])
         assert result.exit_code == 0
         assert "https://api1" in result.output
         assert "https://api2" in result.output
 
 
-def test_auth_env_add_probes_and_upserts() -> None:
+def test_environments_add_probes_and_upserts() -> None:
     runner = CliRunner()
     env = Environment(
         api_url="https://api", requires_auth=True, min_llamactl_version=None
     )
     with patch("llama_agents.cli.config.env_service.service") as mock_service:
         mock_service.probe_environment.return_value = env
-        result = runner.invoke(app, ["auth", "env", "add", "https://api/"])
+        result = runner.invoke(app, ["environments", "add", "https://api/"])
         assert result.exit_code == 0
         mock_service.probe_environment.assert_called_once_with("https://api")
         mock_service.create_or_update_environment.assert_called_once_with(env)
 
 
-def test_auth_env_switch_argument_and_interactive() -> None:
+def test_environments_use_argument_and_interactive() -> None:
     runner = CliRunner()
     # Argument path
     env = Environment(api_url="https://api", requires_auth=False)
     with patch("llama_agents.cli.config.env_service.service") as mock_service:
         mock_service.switch_environment.return_value = env
         mock_service.auto_update_env.return_value = env
-        result = runner.invoke(app, ["auth", "env", "switch", "https://api"])
+        result = runner.invoke(app, ["environments", "use", "https://api"])
         assert result.exit_code == 0
         mock_service.switch_environment.assert_called_once_with("https://api")
 
@@ -52,7 +52,7 @@ def test_auth_env_switch_argument_and_interactive() -> None:
     ]
     with (
         patch("llama_agents.cli.config.env_service.service") as mock_service,
-        patch("llama_agents.cli.commands.env.select_or_exit") as mock_select,
+        patch("llama_agents.cli.commands.environments.select_or_exit") as mock_select,
         patch(_INTERACTIVE_PATCH, return_value=True),
     ):
         mock_service.list_environments.return_value = envs
@@ -60,26 +60,26 @@ def test_auth_env_switch_argument_and_interactive() -> None:
         mock_service.switch_environment.return_value = envs[1]
         mock_service.auto_update_env.return_value = envs[1]
         mock_select.return_value = SimpleNamespace(api_url="https://e2")
-        result = runner.invoke(app, ["auth", "env", "switch"])
+        result = runner.invoke(app, ["environments", "use"])
         assert result.exit_code == 0
         mock_service.switch_environment.assert_called_once_with("https://e2")
 
     # Missing environment should error
     with patch("llama_agents.cli.config.env_service.service") as mock_service:
         mock_service.switch_environment.side_effect = ValueError(
-            "Environment 'https://missing' not found. Add it with 'llamactl auth env add <API_URL>'"
+            "Environment 'https://missing' not found. Add it with 'llamactl environments add <API_URL>'"
         )
-        result = runner.invoke(app, ["auth", "env", "switch", "https://missing"])
+        result = runner.invoke(app, ["environments", "use", "https://missing"])
         assert result.exit_code != 0
         assert "not found" in result.output
 
 
-def test_auth_env_add_interactive_selection_for_url() -> None:
+def test_environments_add_interactive_selection_for_url() -> None:
     runner = CliRunner()
     env = Environment(api_url="https://x", requires_auth=False)
     with (
         patch("llama_agents.cli.config.env_service.service") as mock_service,
-        patch("llama_agents.cli.commands.env.click.prompt") as mock_prompt,
+        patch("llama_agents.cli.commands.environments.click.prompt") as mock_prompt,
         patch(_INTERACTIVE_PATCH, return_value=True),
     ):
         mock_service.get_current_environment.return_value = Environment(
@@ -87,23 +87,23 @@ def test_auth_env_add_interactive_selection_for_url() -> None:
         )
         mock_service.probe_environment.return_value = env
         mock_prompt.return_value = "https://x"
-        result = runner.invoke(app, ["auth", "env", "add"])
+        result = runner.invoke(app, ["environments", "add"])
         assert result.exit_code == 0
         mock_service.create_or_update_environment.assert_called_once_with(env)
 
     # Non-interactive missing URL should error with hint
     with patch(_INTERACTIVE_PATCH, return_value=False):
-        result = runner.invoke(app, ["auth", "env", "add"])
+        result = runner.invoke(app, ["environments", "add"])
     assert result.exit_code != 0
     assert "Pass <api_url>" in result.output
 
 
-def test_auth_env_delete_argument_and_prompt() -> None:
+def test_environments_delete_argument_and_prompt() -> None:
     runner = CliRunner()
     # Argument path
     with patch("llama_agents.cli.config.env_service.service") as mock_service:
         mock_service.delete_environment.return_value = True
-        result = runner.invoke(app, ["auth", "env", "delete", "https://api"])
+        result = runner.invoke(app, ["environments", "delete", "https://api"])
         assert result.exit_code == 0
         mock_service.delete_environment.assert_called_once_with("https://api")
 
@@ -114,14 +114,14 @@ def test_auth_env_delete_argument_and_prompt() -> None:
     ]
     with (
         patch("llama_agents.cli.config.env_service.service") as mock_service,
-        patch("llama_agents.cli.commands.env.select_or_exit") as mock_select,
+        patch("llama_agents.cli.commands.environments.select_or_exit") as mock_select,
         patch(_INTERACTIVE_PATCH, return_value=True),
     ):
         mock_service.list_environments.return_value = envs
         mock_service.get_current_environment.return_value = envs[0]
         mock_service.delete_environment.return_value = True
         mock_select.return_value = SimpleNamespace(api_url="https://e2")
-        result = runner.invoke(app, ["auth", "env", "delete"])
+        result = runner.invoke(app, ["environments", "delete"])
         assert result.exit_code == 0
         mock_service.delete_environment.assert_called_once_with("https://e2")
 
@@ -132,6 +132,6 @@ def test_auth_env_delete_argument_and_prompt() -> None:
     ):
         mock_service.list_environments.return_value = envs
         mock_service.get_current_environment.return_value = envs[0]
-        result = runner.invoke(app, ["auth", "env", "delete"])
+        result = runner.invoke(app, ["environments", "delete"])
     assert result.exit_code != 0
     assert "Pass <api_url>" in result.output

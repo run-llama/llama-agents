@@ -10,9 +10,9 @@ from llama_agents.cli.output import status, warning
 from llama_agents.cli.param_types import EnvironmentType
 from packaging import version as packaging_version
 
+from ..app import app
 from ..display import EnvDisplay
 from ..options import global_options, output_option, render_output
-from .auth import auth
 
 if TYPE_CHECKING:
     from llama_agents.cli.config.env_service import EnvService
@@ -29,24 +29,30 @@ def _env_service() -> EnvService:
     return service
 
 
-@auth.group(
-    name="env",
+@app.group(
+    name="environments",
     help="Manage environments (control plane API URLs)",
     no_args_is_help=True,
 )
 @global_options
-def env_group() -> None:
+def environments() -> None:
     pass
 
 
-@env_group.command("list")
+@environments.command("get")
+@click.argument("api_url", required=False, type=EnvironmentType())
 @global_options
 @output_option
-def list_environments_cmd(output: str) -> None:
+def get_environments_cmd(api_url: str | None, output: str) -> None:
     try:
         service = _env_service()
         envs = service.list_environments()
         current_env = service.get_current_environment()
+        if api_url:
+            normalized = api_url.rstrip("/")
+            envs = [env for env in envs if env.api_url == normalized]
+            if not envs:
+                raise click.ClickException(f"Environment '{normalized}' not found")
 
         if not envs and output == "text":
             status("no environments found")
@@ -61,7 +67,7 @@ def list_environments_cmd(output: str) -> None:
         raise click.ClickException(str(e)) from e
 
 
-@env_group.command("add")
+@environments.command("add")
 @click.argument("api_url", required=False)
 @global_options
 def add_environment_cmd(api_url: str | None) -> None:
@@ -70,7 +76,7 @@ def add_environment_cmd(api_url: str | None) -> None:
         if not api_url:
             if not is_interactive_session():
                 raise click.ClickException(
-                    "Pass <api_url> as an argument. To see existing environments, run: llamactl auth env list"
+                    "Pass <api_url> as an argument. To see existing environments, run: llamactl environments get"
                 )
             current_env = service.get_current_environment()
             entered = click.prompt(
@@ -99,7 +105,7 @@ def add_environment_cmd(api_url: str | None) -> None:
         raise click.ClickException(str(e)) from e
 
 
-@env_group.command("delete")
+@environments.command("delete")
 @click.argument("api_url", required=False, type=EnvironmentType())
 @global_options
 def delete_environment_cmd(api_url: str | None) -> None:
@@ -126,10 +132,10 @@ def delete_environment_cmd(api_url: str | None) -> None:
         raise click.ClickException(str(e)) from e
 
 
-@env_group.command("switch")
+@environments.command("use")
 @click.argument("api_url", required=False, type=EnvironmentType())
 @global_options
-def switch_environment_cmd(api_url: str | None) -> None:
+def use_environment_cmd(api_url: str | None) -> None:
     try:
         service = _env_service()
         selected_url = api_url
@@ -204,6 +210,6 @@ def _select_environment(
         items,
         message,
         hint_flag="<api_url>",
-        hint_command="llamactl auth env list",
+        hint_command="llamactl environments get",
         selected=current_idx,
     )

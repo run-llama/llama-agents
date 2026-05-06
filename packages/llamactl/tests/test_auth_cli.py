@@ -80,19 +80,19 @@ def test_auth_create_api_key_profile_project_id_alias() -> None:
     mock_auth_svc.create_profile_from_token.assert_called_once_with("p", "key")
 
 
-def test_auth_list_profiles_no_profiles() -> None:
+def test_auth_get_profiles_no_profiles() -> None:
     runner = CliRunner()
     with patch("llama_agents.cli.config.env_service.service") as mock_service:
         mock_auth_svc = MagicMock()
         mock_auth_svc.list_profiles.return_value = []
         mock_auth_svc.get_current_profile.return_value = None
         mock_service.current_auth_service.return_value = mock_auth_svc
-        result = runner.invoke(app, ["auth", "list"])
+        result = runner.invoke(app, ["auth", "get"])
         assert result.exit_code == 0
         assert "no profiles found" in result.output
 
 
-def test_auth_switch_profile_success_and_missing() -> None:
+def test_auth_use_profile_success_and_missing() -> None:
     runner = CliRunner()
     with (
         patch("llama_agents.cli.commands.auth._select_profile") as mock_select,
@@ -101,7 +101,7 @@ def test_auth_switch_profile_success_and_missing() -> None:
         mock_auth_svc = MagicMock()
         mock_service.current_auth_service.return_value = mock_auth_svc
         mock_select.return_value = SimpleNamespace(name="p1")
-        result = runner.invoke(app, ["auth", "switch", "p1"])
+        result = runner.invoke(app, ["auth", "use", "p1"])
         assert result.exit_code == 0
         mock_auth_svc.set_current_profile.assert_called_once_with("p1")
 
@@ -110,7 +110,7 @@ def test_auth_switch_profile_success_and_missing() -> None:
         patch("llama_agents.cli.config.env_service.service") as mock_service2,
     ):
         mock_service2.current_auth_service.return_value = MagicMock()
-        result = runner.invoke(app, ["auth", "switch", "doesnt-exist"])
+        result = runner.invoke(app, ["auth", "use", "doesnt-exist"])
         assert result.exit_code == 0
         assert "no profile selected" in result.output
 
@@ -141,19 +141,19 @@ def test_auth_logout_missing() -> None:
         assert "Profile 'missing' not found" in result.output
 
 
-def test_auth_project_non_interactive_lists_options_and_hints() -> None:
+def test_projects_use_non_interactive_lists_options_and_hints() -> None:
     runner = CliRunner()
     with (
         patch(
-            "llama_agents.cli.commands.auth.validate_authenticated_profile",
+            "llama_agents.cli.commands.projects.validate_authenticated_profile",
             return_value=MagicMock(name="p", project_id="x"),
         ),
         patch(
-            "llama_agents.cli.commands.auth._discover_organization",
+            "llama_agents.cli.commands.projects._discover_organization",
             return_value=None,
         ),
         patch(
-            "llama_agents.cli.commands.auth._list_projects",
+            "llama_agents.cli.commands.projects._list_projects",
             return_value=[
                 MagicMock(
                     project_id="abc-123", project_name="My Project", deployment_count=2
@@ -161,38 +161,40 @@ def test_auth_project_non_interactive_lists_options_and_hints() -> None:
             ],
         ),
         patch(
-            "llama_agents.cli.commands.auth.is_interactive_session", return_value=False
+            "llama_agents.cli.commands.projects.is_interactive_session",
+            return_value=False,
         ),
     ):
-        result = runner.invoke(app, ["auth", "project"])
+        result = runner.invoke(app, ["projects", "use"])
         assert result.exit_code != 0
         assert "abc-123" in result.output
         assert "Pass <project_id> to choose one" in result.output
 
 
-def test_auth_project_interactive_sets_selected() -> None:
+def test_projects_use_interactive_sets_selected() -> None:
     runner = CliRunner()
     with (
         patch(
-            "llama_agents.cli.commands.auth.validate_authenticated_profile",
+            "llama_agents.cli.commands.projects.validate_authenticated_profile",
             return_value=MagicMock(name="p"),
         ),
         patch(
-            "llama_agents.cli.commands.auth._list_projects",
+            "llama_agents.cli.commands.projects._list_projects",
             return_value=[
                 MagicMock(project_id="proj", project_name="Proj", deployment_count=1)
             ],
         ),
-        patch("llama_agents.cli.commands.auth.select_or_exit") as mock_select,
+        patch("llama_agents.cli.commands.projects.select_or_exit") as mock_select,
         patch("llama_agents.cli.config.env_service.service") as mock_service,
         patch(
-            "llama_agents.cli.commands.auth.is_interactive_session", return_value=True
+            "llama_agents.cli.commands.projects.is_interactive_session",
+            return_value=True,
         ),
     ):
         mock_auth_svc = MagicMock()
         mock_service.current_auth_service.return_value = mock_auth_svc
         mock_select.return_value = "proj"
-        result = runner.invoke(app, ["auth", "project"])
+        result = runner.invoke(app, ["projects", "use"])
         assert result.exit_code == 0
         mock_auth_svc.set_project.assert_called_once()
 

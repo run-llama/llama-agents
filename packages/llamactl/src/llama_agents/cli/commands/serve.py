@@ -340,7 +340,7 @@ def _maybe_select_project_for_env_key() -> None:
             project_items,
             "Select a project",
             hint_flag="LLAMA_AGENTS_PROJECT_ID",
-            hint_command="llamactl auth project <project_id>",
+            hint_command="llamactl projects use <project_id>",
             selected=current_idx,
         )
         _set_project_id(choice)
