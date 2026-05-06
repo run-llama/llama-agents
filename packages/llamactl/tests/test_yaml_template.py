@@ -334,7 +334,7 @@ def test_render_strips_secret_mask_sentinels() -> None:
             secrets={"REAL": "${REAL}", "MASKED": SECRET_MASK},
         ),
     )
-    out = render(display)
+    out = render(display, strip_mask_sentinels=True)
     assert SECRET_MASK not in out
     assert "MASKED" not in out
     # The remaining real secret is still rendered.
@@ -348,7 +348,7 @@ def test_render_drops_secrets_block_when_only_masks() -> None:
             secrets={"ONLY_MASKED": SECRET_MASK},
         ),
     )
-    out = render(display)
+    out = render(display, strip_mask_sentinels=True)
     # No uncommented secrets block — falls into the unset/example branch.
     assert "  secrets:\n    ONLY_MASKED" not in out
     assert SECRET_MASK not in out
@@ -376,7 +376,7 @@ def test_render_strips_personal_access_token_mask() -> None:
         name="my-app",
         spec=DeploymentSpec(personal_access_token=SECRET_MASK),
     )
-    out = render(display)
+    out = render(display, strip_mask_sentinels=True)
     assert SECRET_MASK not in out
     # Falls through to the commented example.
     assert "  # personal_access_token:" in out

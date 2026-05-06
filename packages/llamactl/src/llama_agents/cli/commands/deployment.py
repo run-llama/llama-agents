@@ -315,10 +315,7 @@ def _existing_deployment_template_yaml(deployment: DeploymentResponse) -> str:
 
 
 def _existing_deployment_editor_yaml(deployment: DeploymentResponse) -> str:
-    return render_yaml_template(
-        DeploymentDisplay.from_response(deployment),
-        strip_mask_sentinels=False,
-    )
+    return render_yaml_template(DeploymentDisplay.from_response(deployment))
 
 
 def _parse_deployment_yaml_text(text: str) -> DeploymentDisplay:

@@ -186,10 +186,9 @@ def test_deployments_get_single_yaml(patched_auth: Any) -> None:
     assert obj["status"]["phase"] == "Running"
 
 
-def test_deployments_get_strips_secret_mask_sentinels(patched_auth: Any) -> None:
-    """``********`` mask sentinels never reach structured output; the keys
-    drop entirely so a ``get | edit | apply`` round-trip can't push the mask
-    back as the value."""
+def test_deployments_get_preserves_secret_mask_placeholders(patched_auth: Any) -> None:
+    """Secret names are shown with masked values so the user can see which
+    secrets are configured."""
     runner = CliRunner()
     deployments = [
         make_deployment(
@@ -203,9 +202,11 @@ def test_deployments_get_strips_secret_mask_sentinels(patched_auth: Any) -> None
         result = runner.invoke(app, ["deployments", "get", "secret-app", "-o", "json"])
     assert result.exit_code == 0, result.output
     obj = json.loads(result.output)
-    assert "secrets" not in obj["spec"]
-    assert "personal_access_token" not in obj["spec"]
-    assert "********" not in result.output
+    assert obj["spec"]["secrets"] == {
+        "LLAMA_CLOUD_API_KEY": "********",
+        "OPENAI_API_KEY": "********",
+    }
+    assert obj["spec"]["personal_access_token"] == "********"
 
 
 def test_deployments_get_empty_json_is_array(patched_auth: Any) -> None:
@@ -571,11 +572,11 @@ def test_deployments_get_template_single_emits_apply_shape(patched_auth: Any) ->
     assert "phase" not in out
     # Doc comments above fields.
     assert "## Stable id for the deployment" in out
-    # Masked secrets / PAT are stripped at the emit boundary — they must not
-    # round-trip as literal ``********`` values into apply input.
-    assert "********" not in out
-    assert "secrets" not in (parsed["spec"] or {})
-    assert "personal_access_token" not in (parsed["spec"] or {})
+    # Masked secrets / PAT are preserved as placeholders so the user can see
+    # which secrets exist.  Stripping happens on the apply/parse side.
+    assert "OPENAI_API_KEY" in out
+    assert parsed["spec"]["secrets"] == {"OPENAI_API_KEY": "********"}
+    assert parsed["spec"]["personal_access_token"] == "********"
 
 
 def test_deployments_get_template_does_not_scaffold_generate_name(
