@@ -1,6 +1,6 @@
 {
   "name": "llama-agents-appserver",
-  "version": "0.11.3",
+  "version": "0.11.4",
   "private": false,
   "dependencies": {
     "llama-agents-core": "workspace:*"

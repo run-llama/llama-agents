@@ -16,7 +16,7 @@ dev = [
 
 [project]
 name = "llama-agents-core"
-version = "0.10.1"
+version = "0.10.2"
 description = "Core models and schemas for LlamaDeploy"
 readme = "README.md"
 license = {text = "MIT"}
