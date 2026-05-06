@@ -245,7 +245,7 @@ def _create(template: str | None, dir: Path | None, force: bool) -> None:
     status("    git remote add origin <your-repo-url>")
     status("    git push -u origin main")
     status("")
-    status("    uvx llamactl deploy create")
+    status("    uvx llamactl deployments create")
     status("")
 
 

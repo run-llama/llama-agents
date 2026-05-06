@@ -91,6 +91,8 @@ def test_init_create_with_flags_calls_copier_and_git(tmp_path: Path) -> None:
         calls = [" ".join(call_args.args[0]) for call_args in mock_subproc.mock_calls]
         assert any(cmd.startswith("git --version") for cmd in calls)
         assert target_dir.exists()
+        assert "uvx llamactl deployments create" in result.output
+        assert "uvx llamactl deploy create" not in result.output
         # Symlinks to AGENTS.md should be created by the init flow
         claude_link = target_dir / "CLAUDE.md"
         gemini_link = target_dir / "GEMINI.md"
