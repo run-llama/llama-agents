@@ -63,8 +63,10 @@ llamactl deployments apply -f deployment.yaml
 
 ## Command Groups
 
-- `llamactl auth`: log in, create API-key profiles, switch profiles, select projects, and list organizations.
-- `llamactl auth env`: list, add, inspect, and switch LlamaCloud API environments.
+- `llamactl auth`: log in, create API-key profiles, and switch profiles.
+- `llamactl environments`: list, add, inspect, and switch LlamaCloud API environments.
+- `llamactl projects`: list and select projects.
+- `llamactl organizations`: list organizations.
 - `llamactl deployments`: create, apply, edit, update, inspect, delete, roll back, and stream deployment logs.
 - `llamactl init`: create a new LlamaAgents project from a starter template.
 - `llamactl serve`: run the local app server and optional frontend dev server.

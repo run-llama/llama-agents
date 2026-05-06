@@ -57,7 +57,7 @@ export LLAMA_CLOUD_API_KEY="llx-..."
 export LLAMA_AGENTS_PROJECT_ID="project-id"
 ```
 
-See [`llamactl auth`](/python/llamaagents/llamactl-reference/commands-auth) and [`llamactl auth env`](/python/llamaagents/llamactl-reference/commands-auth-env) for profile and environment commands.
+See [`llamactl auth`](/python/llamaagents/llamactl-reference/commands-auth), [`llamactl environments`](/python/llamaagents/llamactl-reference/commands-environments), and [`llamactl projects`](/python/llamaagents/llamactl-reference/commands-projects) for profile, environment, and project commands.
 
 ## Initialize a Project
 

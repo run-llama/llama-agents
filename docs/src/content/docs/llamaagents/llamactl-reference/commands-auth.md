@@ -13,19 +13,19 @@ llamactl auth [COMMAND] [options]
 
 Commands:
 
-- `token [--project PROJECT] [--api-key KEY]`: Create profile from API key; validates token and selects a project
-- `login`: Login via web browser (OIDC device flow) and create a profile
-- `list`: List login profiles in the current environment
-- `switch [NAME]`: Set currently logged in user/token
-- `logout [NAME]`: Delete a login and its local data
-- `organizations [-o text|json|yaml|wide]`: List organizations available to the current profile
-- `project [PROJECT_ID] [--org ORG_ID]`: Change the active project for the current profile
+- `token [--project PROJECT] [--api-key KEY]`: Create a profile from an API key; validates token and selects a project
+- `login`: Log in via web browser (OIDC device flow) and create a profile
+- `get [NAME] [-o text|json|yaml]`: List profiles or show one profile in the current environment
+- `use [NAME]`: Set the current profile
+- `logout [NAME]`: Delete a profile and its local credentials
 - `inject [--env-file PATH]`: Write profile credentials to a `.env` file
 
 Notes:
 
-- Profiles are filtered by the current environment (`llamactl auth env switch`).
+- Profiles are filtered by the current environment (`llamactl environments use`).
 - `auth token` creates a profile without prompts when both `--api-key` and `--project` are supplied.
+- Project selection moved to `llamactl projects use`.
+- Organization listing moved to `llamactl organizations get`.
 
 ## Commands
 
@@ -35,7 +35,7 @@ Notes:
 llamactl auth token [--project PROJECT] [--api-key KEY]
 ```
 
-Without flags, prompts for an API key, validates it by listing projects, then lets you choose a project. Creates an auto‑named profile and sets it current.
+Without flags, prompts for an API key, validates it by listing projects, then lets you choose a project. Creates an auto-named profile and sets it current.
 
 With both `--api-key` and `--project`, creates the profile without prompts.
 
@@ -51,20 +51,20 @@ llamactl auth token --api-key llx-... --project your-project-id
 llamactl auth login
 ```
 
-Login via your browser using the OIDC device flow, select a project, and create a login profile set as current.
+Log in via your browser using the OIDC device flow, select a project, and create a login profile set as current.
 
-### List
+### Get
 
 ```bash
-llamactl auth list
+llamactl auth get [NAME] [-o text|json|yaml]
 ```
 
-Shows a table of profiles for the current environment with name and active project. The current profile is marked with `*`.
+Shows profiles for the current environment. Pass `NAME` to show one profile.
 
-### Switch
+### Use
 
 ```bash
-llamactl auth switch [NAME]
+llamactl auth use [NAME]
 ```
 
 Set the current profile. If `NAME` is omitted in a TTY, choose from the available profiles. Scripts should pass `NAME`.
@@ -77,31 +77,6 @@ llamactl auth logout [NAME]
 
 Delete a profile. If the deleted profile is current, the current selection is cleared.
 
-### Organizations
-
-```bash
-llamactl auth organizations [-o text|json|yaml|wide]
-```
-
-List organizations available to the current profile. Text output marks the default organization.
-
-Examples:
-
-```bash
-llamactl auth organizations
-llamactl auth organizations -o json
-```
-
-### Project
-
-```bash
-llamactl auth project [PROJECT_ID] [--org ORG_ID]
-```
-
-Change the active project for the current profile. If `PROJECT_ID` is omitted in a TTY, choose from server projects. In environments that don't require auth, you can also enter a project ID.
-
-- `--org ORG_ID`: Scope project lookup to an organization.
-
 ### Inject
 
 ```bash
@@ -109,8 +84,6 @@ llamactl auth inject [--env-file PATH]
 ```
 
 Write `LLAMA_CLOUD_API_KEY`, `LLAMA_CLOUD_BASE_URL`, and `LLAMA_AGENTS_PROJECT_ID` from the current profile into a `.env` file. Creates the file if it doesn't exist; overwrites existing values.
-
-- `--env-file PATH`: Defaults to `.env` in the current directory.
 
 ## Environment Variables
 
@@ -139,6 +112,8 @@ Or generate a `.env` from your current profile with [`llamactl auth inject`](#in
 
 ## See also
 
-- Environments: [`llamactl auth env`](/python/llamaagents/llamactl-reference/commands-auth-env/)
+- Environments: [`llamactl environments`](/python/llamaagents/llamactl-reference/commands-environments/)
+- Projects: [`llamactl projects`](/python/llamaagents/llamactl-reference/commands-projects/)
+- Organizations: [`llamactl organizations`](/python/llamaagents/llamactl-reference/commands-organizations/)
 - Getting started: [Introduction](/python/llamaagents/llamactl/getting-started/)
 - Deployments: [`llamactl deployments`](/python/llamaagents/llamactl-reference/commands-deployments/)

@@ -86,7 +86,7 @@ directory = "./ui"
 ### 5. CLI Tool (`llamactl`)
 **Purpose**: Command-line interface for users to interact with the control plane.
 ```bash
-llamactl auth env switch https://api.cloud.llamaindex.ai
+llamactl environments use https://api.cloud.llamaindex.ai
 llamactl auth login
 llamactl auth token --project <PROJECT_ID>
 llamactl auth logout

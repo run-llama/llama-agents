@@ -38,7 +38,7 @@ Skip when the change is fully covered by pytest, or when the failure mode is in 
 ## Pick a backend
 
 1. **Test environment / test project.** Default for QA that creates or mutates deployments. Use a non-production environment or a dedicated test project so throwaway deployments don't pollute real workspaces. **Never run mutating QA commands against production.** When creating test deployments (to later edit/delete them as part of the QA), create them yourself rather than editing existing deployments that may be important. Pin every command with `--project <test-project-id>` so an active-profile slip can't write into the wrong project.
-2. **Local kind + tilt.** When the change is a new API contract (new endpoint, new field, new behavior on the control plane) and you need to exercise it against a control plane that actually has the change. `uv run operator/dev.py up`. See `AGENTS.md` and `operator/AGENTS.md` for setup. Local mode runs with no auth: the `http://localhost:8011` env is preconfigured; switch to it with `llamactl auth env switch http://localhost:8011` (arg is the API URL, not a name) and a `default` profile is created automatically. No tokens, no `auth login`. Before drafting the matrix, list existing deployments with `kubectl get llamadeployments -A` — there's often something already in the cluster from prior work that you can target with `--project <id>`, saving the cost of a fresh `deployments create`.
+2. **Local kind + tilt.** When the change is a new API contract (new endpoint, new field, new behavior on the control plane) and you need to exercise it against a control plane that actually has the change. `uv run operator/dev.py up`. See `AGENTS.md` and `operator/AGENTS.md` for setup. Local mode runs with no auth: the `http://localhost:8011` env is preconfigured; switch to it with `llamactl environments use http://localhost:8011` (arg is the API URL, not a name) and a `default` profile is created automatically. No tokens, no `auth login`. Before drafting the matrix, list existing deployments with `kubectl get llamadeployments -A` — there's often something already in the cluster from prior work that you can target with `--project <id>`, saving the cost of a fresh `deployments create`.
 3. **Offline only.** For changes that only affect local rendering (template output, help text, error formatting), no backend is needed at all. Run commands that don't hit the API (e.g., `deployments template`, `--help`, non-interactive error paths).
 
 Ask the user which backend before drafting the matrix. The answer changes which rows are realistic. Skip this in auto mode and choose from the rules above.
@@ -77,13 +77,13 @@ Don't try to make this temp project deployable to a real backend in the same run
 
 The bits that matter when designing a matrix.
 
-**Scoping hierarchy**: environments → profiles → organizations → projects → deployments. An environment is a control-plane URL (e.g., `http://localhost:8011` for local). Each environment can have one or more profiles (authenticated identities). Each profile has an active organization, and each organization contains projects. Deployments live inside projects. `llamactl auth env list` shows environments. `llamactl auth list` shows profiles in the active environment. `llamactl auth env switch <url>` changes environment. `llamactl auth project [id]` changes the active project within the current profile.
+**Scoping hierarchy**: environments → profiles → organizations → projects → deployments. An environment is a control-plane URL (e.g., `http://localhost:8011` for local). Each environment can have one or more profiles (authenticated identities). Each profile has an active organization, and each organization contains projects. Deployments live inside projects. `llamactl environments get` shows environments. `llamactl auth get` shows profiles in the active environment. `llamactl environments use <url>` changes environment. `llamactl projects use [id]` changes the active project within the current profile.
 
-A profile is `(env, oauth tokens, active org, active project)`. `--project <id>` overrides the profile's active project for one call. Before running any QA, check `llamactl auth env list` and `llamactl auth list` to confirm you're in the right environment and project — don't assume from a previous session. There are multiple environments with deployments available for testing; use a non-production one for mutating operations.
+A profile is `(env, oauth tokens, active org, active project)`. `--project <id>` overrides the profile's active project for one call. Before running any QA, check `llamactl environments get` and `llamactl auth get` to confirm you're in the right environment and project — don't assume from a previous session. There are multiple environments with deployments available for testing; use a non-production one for mutating operations.
 
 Read commands accept `-o text|json|yaml`. Text is human-facing; json/yaml are assertable. Prefer json for QA — exact-match assertions catch field-rename regressions text formatting hides.
 
-Read commands (`deployments get/list/history/logs`, `auth list`, `auth env list`) do not need `--no-interactive` when their argument is supplied. The flag is a no-op there post-Slice-A.5 and slated to be removed in the parent plan's Phase 3. Don't pad commands with it. Write/select commands (`deployments delete`, `deployments edit`, `deployments rollback` without `--git-sha`) still branch on the interactive flag — pass `--no-interactive` for those if you don't want a prompt, or supply every required arg.
+Read commands (`deployments get/list/history/logs`, `auth get`, `environments get`) do not need `--no-interactive` when their argument is supplied. The flag is a no-op there post-Slice-A.5 and slated to be removed in the parent plan's Phase 3. Don't pad commands with it. Write/select commands (`deployments delete`, `deployments edit`, `deployments rollback` without `--git-sha`) still branch on the interactive flag — pass `--no-interactive` for those if you don't want a prompt, or supply every required arg.
 
 The command surface is moving. Run `--help` on any command you're testing before assuming flag names; don't go from memory.
 
@@ -154,7 +154,7 @@ Branch: <branch>  Commit: <short sha>
 <3–6 bullets. These are the things you want the reader's eyes on. Not "all rows passed". Examples:
 - "Is `spec:` + `status:` the right split, or is the extra indent annoying?"
 - "REPO column gets pushed off-screen when the URL isn't a github short. Do we want a `--wide` mode or terminal-aware wrapping?"
-- "`auth list` text mode shows ACTIVE column but the indicator is `*` only — is that legible enough?"
+- "`auth get` text mode shows ACTIVE as yes/no — is that legible enough?"
 - "When secrets are unset, the JSON spec block is just `{display_name, repo_url, deployment_file_path, suspended: false}`. Is `suspended: false` worth showing on a fresh deploy or is it noise?"
 
 Lean open-ended. If a question has an obvious answer, it doesn't belong here.>
@@ -228,12 +228,12 @@ The inline chat reply is one or two sentences pointing at the file. Don't restat
 
 ## Common gotchas
 
-- Stale profile. `llamactl auth list` first, every session. A profile pointing at last week's env produces 401s that look like a code bug.
+- Stale profile. `llamactl auth get` first, every session. A profile pointing at last week's env produces 401s that look like a code bug.
 - Active project drift. A test that "works on my machine" can fail elsewhere because the active project differs. Pin every row with `--project`.
 - Non-test project mutation. If you mutate without `--project`, the active profile decides where it lands. Always pin write commands.
-- Wrong environment for mutations. `llamactl auth env list` shows which environment is active. Never run create/edit/delete against production — switch to a test environment first. The active environment persists across sessions, so always verify before running mutating commands.
+- Wrong environment for mutations. `llamactl environments get` shows which environment is active. Never run create/edit/delete against production — switch to a test environment first. The active environment persists across sessions, so always verify before running mutating commands.
 - Editing existing deployments. Don't edit deployments you didn't create — they may be someone's real work. Create throwaway deployments for QA and delete them when done.
-- TUI/prompt risk on write commands. `deployments delete/edit/rollback` and `create` will prompt when interactive. For QA, supply every required arg or pass `--no-interactive`. Read commands (`get`, `logs`, `history`, `auth list`, `auth env list`) don't need the flag.
+- TUI/prompt risk on write commands. `deployments delete/edit/rollback` and `create` will prompt when interactive. For QA, supply every required arg or pass `--no-interactive`. Read commands (`get`, `logs`, `history`, `auth get`, `environments get`) don't need the flag.
 - `tee` ate a row of a multi-line table once during a run. Use shell `>` redirect for QA captures, not `tee`, when you need every line preserved.
 - `serve` vs tilt. `llamactl serve` runs the appserver locally with no kubernetes. Tilt runs the full cloud stack in kind. Different scopes; pick one.
 - Don't leak IDs. Deployment and org IDs are fine in your terminal and in `thoughts/`, not fine in a public PR description. Strip or alias them in anything that might leave the repo.
