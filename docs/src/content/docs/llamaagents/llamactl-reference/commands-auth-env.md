@@ -14,9 +14,9 @@ llamactl auth env [COMMAND] [options]
 Commands:
 
 - `list`: List known environments and mark the current one
-- `add <API_URL> [--interactive/--no-interactive]`: Probe the server and upsert the environment
-- `switch [API_URL] [--interactive/--no-interactive]`: Select the current environment (prompts if omitted)
-- `delete [API_URL] [--interactive/--no-interactive]`: Remove an environment and its associated profiles
+- `add <API_URL>`: Probe the server and upsert the environment
+- `switch [API_URL]`: Select the current environment
+- `delete [API_URL]`: Remove an environment and its associated profiles
 
 Notes:
 
@@ -39,7 +39,7 @@ Shows a table of environments with API URL, whether auth is required, and the cu
 llamactl auth env add <API_URL>
 ```
 
-Probes the server at `<API_URL>` and stores discovered settings. Interactive mode can prompt for the URL.
+Probes the server at `<API_URL>` and stores discovered settings.
 
 ### Switch
 
@@ -47,7 +47,7 @@ Probes the server at `<API_URL>` and stores discovered settings. Interactive mod
 llamactl auth env switch [API_URL]
 ```
 
-Sets the current environment. If omitted in interactive mode, you’ll be prompted to select one.
+Sets the current environment. If `API_URL` is omitted in a TTY, choose from known environments. Scripts should pass `API_URL`.
 
 ### Delete
 
