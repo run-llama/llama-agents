@@ -56,7 +56,7 @@ def init(
     dir: Path | None,
     force: bool,
 ) -> None:
-    """Create a new app repository from a template"""
+    """Create a new app repository from a template."""
     if update:
         _update()
     else:

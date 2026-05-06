@@ -12,12 +12,12 @@ from ..options import global_options
 
 
 @app.group(
-    help="LlamaAgents x Bedrock AgentCore deployment utilities",
+    help="LlamaAgents x Bedrock AgentCore deployment utilities.",
     no_args_is_help=True,
 )
 @global_options
 def agentcore() -> None:
-    """LlamaAgents x Bedrock AgentCore deployment utilities"""
+    """LlamaAgents x Bedrock AgentCore deployment utilities."""
     pass
 
 

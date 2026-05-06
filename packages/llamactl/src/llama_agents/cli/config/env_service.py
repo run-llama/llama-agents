@@ -21,7 +21,7 @@ class EnvService:
         env = self.config_manager().get_environment(api_url)
         if not env:
             raise ValueError(
-                f"Environment '{api_url}' not found. Add it with 'llamactl auth env add <API_URL>'"
+                f"Environment '{api_url}' not found. Add it with 'llamactl environments add <API_URL>'"
             )
         self.config_manager().set_settings_current_environment(api_url)
         self.config_manager().set_settings_current_profile(None)

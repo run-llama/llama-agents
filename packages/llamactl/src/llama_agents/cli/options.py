@@ -25,6 +25,8 @@ _BASE_OUTPUT_HELP = (
     "Output format. 'json'/'yaml' for machine-readable output; "
     "'wide' for the text table with extra columns."
 )
+_SIMPLE_OUTPUT_CHOICES = ("text", "json", "yaml")
+_SIMPLE_OUTPUT_HELP = "Output format. 'json'/'yaml' for machine-readable output."
 
 
 def _output_option(
@@ -51,6 +53,20 @@ def output_option(f: Callable[P, R]) -> Callable[P, R]:
     """
 
     return _output_option()(f)
+
+
+def simple_output_option(f: Callable[P, R]) -> Callable[P, R]:
+    """Add ``-o/--output`` for commands without a wide text variant."""
+
+    return click.option(
+        "-o",
+        "--output",
+        "output",
+        type=click.Choice(_SIMPLE_OUTPUT_CHOICES, case_sensitive=False),
+        default="text",
+        show_default=True,
+        help=_SIMPLE_OUTPUT_HELP,
+    )(f)
 
 
 def output_option_with_template(f: Callable[P, R]) -> Callable[P, R]:

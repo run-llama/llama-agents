@@ -627,7 +627,7 @@ def test_deployments_get_template_no_name_errors(patched_auth: Any) -> None:
 def test_other_commands_reject_template_mode(patched_auth: Any) -> None:
     """``-o template`` is only meaningful for ``deployments get``."""
     runner = CliRunner()
-    result = runner.invoke(app, ["auth", "list", "-o", "template"])
+    result = runner.invoke(app, ["auth", "get", "-o", "template"])
     # The choice is accepted but render_output rejects it with a clear message.
     assert result.exit_code != 0
     assert "only supported for" in result.output or "template" in result.output

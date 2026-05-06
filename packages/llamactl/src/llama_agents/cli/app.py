@@ -35,9 +35,7 @@ def print_version(ctx: click.Context, param: click.Parameter, value: Any) -> Non
 
 
 # Main CLI application
-@click.group(
-    help="Create, develop, and deploy LlamaIndex workflow based apps", cls=AliasedGroup
-)
+@click.group(help="Create, develop, and deploy LlamaDeploy apps.", cls=AliasedGroup)
 @click.option(
     "--version",
     is_flag=True,
