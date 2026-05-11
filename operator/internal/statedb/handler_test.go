@@ -5,7 +5,6 @@ package statedb
 
 import (
 	"bytes"
-	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -37,9 +36,6 @@ func setupTestServer(t *testing.T) *Server {
 	require.NoError(t, err)
 	srv.db.SetMaxOpenConns(1)
 	t.Cleanup(func() { srv.db.Close() })
-
-	err = runMigrations(context.Background(), srv.db)
-	require.NoError(t, err)
 
 	srv.app = fiber.New()
 	srv.app.Use(authMiddleware(cfg.Token))

@@ -6,7 +6,6 @@ package statedb
 import (
 	"bytes"
 	"compress/gzip"
-	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -39,9 +38,6 @@ func setupBackupServer(t *testing.T) *Server {
 	require.NoError(t, err)
 	srv.db.SetMaxOpenConns(1)
 	t.Cleanup(func() { srv.db.Close() })
-
-	err = runMigrations(context.Background(), srv.db)
-	require.NoError(t, err)
 
 	srv.app = fiber.New()
 	srv.app.Use(authMiddleware(cfg.Token))
@@ -188,42 +184,4 @@ func TestRestore_TooSmall(t *testing.T) {
 
 	resp := doBackupRequest(t, srv, http.MethodPost, "/db/restore", bytes.NewReader([]byte("tiny")), "application/octet-stream")
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-}
-
-func TestRestore_RunsMigrations(t *testing.T) {
-	srv := setupBackupServer(t)
-
-	// Create a bare SQLite database with no tables.
-	barePath := filepath.Join(t.TempDir(), "bare.db")
-	bareDB, err := sql.Open("sqlite", fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)", barePath))
-	require.NoError(t, err)
-	bareDB.SetMaxOpenConns(1)
-	_, err = bareDB.Exec("CREATE TABLE dummy (id INTEGER)")
-	require.NoError(t, err)
-	bareDB.Close()
-
-	bareBytes, err := os.ReadFile(barePath)
-	require.NoError(t, err)
-
-	// Restore the bare DB.
-	resp := doBackupRequest(t, srv, http.MethodPost, "/db/restore", bytes.NewReader(bareBytes), "application/octet-stream")
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	// Verify that migrations ran by checking for the workflow_handlers table.
-	txReq := Request{
-		Transaction: []RequestItem{
-			{Query: "SELECT name FROM sqlite_master WHERE type='table' AND name='workflow_handlers'"},
-		},
-	}
-	b, _ := json.Marshal(txReq)
-	resp = doBackupRequest(t, srv, http.MethodPost, "/db", bytes.NewReader(b), "application/json")
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	var r Response
-	err = json.NewDecoder(resp.Body).Decode(&r)
-	require.NoError(t, err)
-	require.Len(t, r.Results, 1)
-	assert.True(t, r.Results[0].Success)
-	require.Len(t, r.Results[0].ResultSet, 1)
-	assert.Equal(t, "workflow_handlers", r.Results[0].ResultSet[0]["name"])
 }

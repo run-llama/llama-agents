@@ -6,7 +6,6 @@ package statedb
 import (
 	"bytes"
 	"compress/gzip"
-	"context"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -111,10 +110,6 @@ func (s *Server) handleRestore(c *fiber.Ctx) error {
 
 	if err := s.reopenDB(); err != nil {
 		return fmt.Errorf("reopen database: %w", err)
-	}
-
-	if err := runMigrations(context.Background(), s.db); err != nil {
-		return fmt.Errorf("run migrations after restore: %w", err)
 	}
 
 	slog.Info("database restored successfully")

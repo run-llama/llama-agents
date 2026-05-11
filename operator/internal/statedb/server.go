@@ -49,8 +49,8 @@ func New(cfg Config) *Server {
 }
 
 // Start initializes Litestream (if S3 configured), opens the database,
-// runs migrations, and starts the HTTP server. It blocks until the server
-// is shut down or encounters a fatal error.
+// and starts the HTTP server. It blocks until the server is shut down
+// or encounters a fatal error.
 func (s *Server) Start(ctx context.Context) error {
 	// 1. Litestream init (restore from S3 if local DB missing).
 	if !s.cfg.NoS3 {
@@ -64,12 +64,7 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 
-	// 3. Run migrations.
-	if err := runMigrations(ctx, s.db); err != nil {
-		return fmt.Errorf("run migrations: %w", err)
-	}
-
-	// 4. Set up and start the Fiber HTTP server.
+	// 3. Set up and start the Fiber HTTP server.
 	s.app = fiber.New(fiber.Config{
 		DisableStartupMessage: true,
 		ReadTimeout:           30 * time.Second,
