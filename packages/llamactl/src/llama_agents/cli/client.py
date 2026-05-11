@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, AsyncGenerator
 
 import click
 from llama_agents.cli.env_settings import LlamactlEnvSettings, read_env_settings
+from llama_agents.cli.interactive import is_interactive_session
 
 if TYPE_CHECKING:
     from llama_agents.core.client.manage_client import ControlPlaneClient, ProjectClient
@@ -156,6 +157,21 @@ def get_project_client(project_id_override: str | None = None) -> ProjectClient:
             context.api_key,
             context.auth_middleware,
         )
+
+    if is_interactive_session():
+        # Deferred: auth command imports browser/prompt dependencies and also
+        # depends on client helpers for project discovery.
+        from llama_agents.cli.commands.auth import validate_authenticated_profile
+
+        validate_authenticated_profile()
+        context = _auth_context_or_none(project_id_override)
+        if context is not None:
+            return ProjectClient(
+                context.base_url,
+                context.project_id,
+                context.api_key,
+                context.auth_middleware,
+            )
 
     from llama_agents.cli.config.env_service import service
 
