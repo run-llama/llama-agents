@@ -329,6 +329,7 @@ async def _open_github_url_and_poll_access(
     server = _GitHubCallbackServer()
     await server.start()
     try:
+        click.echo(f"Open this URL: {url}", err=True)
         webbrowser.open(url)
 
         interval = 10

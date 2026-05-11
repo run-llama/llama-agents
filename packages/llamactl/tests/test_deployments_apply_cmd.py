@@ -490,6 +490,7 @@ def test_apply_interactive_inaccessible_github_repo_installs_app_and_retries(
 
     assert result.exit_code == 0, result.output
     mock_open.assert_called_once_with(GITHUB_APP_INSTALL_URL)
+    assert f"Open this URL: {GITHUB_APP_INSTALL_URL}" in result.output
     mock_wait.assert_awaited_once()
     assert client.validate_repository.await_count == 2
     client.create_deployment.assert_called_once()
@@ -631,6 +632,8 @@ def test_apply_interactive_github_authorization_runs_before_install(
         GITHUB_APP_AUTHORIZATION_URL,
         GITHUB_APP_INSTALL_URL,
     ]
+    assert f"Open this URL: {GITHUB_APP_AUTHORIZATION_URL}" in result.output
+    assert f"Open this URL: {GITHUB_APP_INSTALL_URL}" in result.output
     assert client.validate_repository.await_count == 3
     client.create_deployment.assert_called_once()
 
