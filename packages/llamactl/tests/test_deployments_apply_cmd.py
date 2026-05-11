@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import textwrap
 from collections.abc import Generator
@@ -24,6 +25,7 @@ from conftest import (
     set_llama_cloud_env,
 )
 from llama_agents.cli.app import app
+from llama_agents.cli.commands import deployment as deployment_cmd
 from llama_agents.core.schema.deployments import DeploymentResponse
 from llama_agents.core.schema.git_validation import RepositoryValidationResponse
 
@@ -136,6 +138,43 @@ MINIMAL_UPDATE_YAML = textwrap.dedent("""\
     spec:
       git_ref: v2
 """)
+
+GITHUB_APP_INSTALL_URL = (
+    "https://github.com/apps/llamaindex/installations/new/permissions?target_id=42"
+)
+GITHUB_APP_SETTINGS_URL = "https://github.com/settings/installations/42"
+GITHUB_APP_AUTHORIZATION_URL = (
+    "https://api.example.test/api/internal/external-credentials/github-app/connect"
+)
+
+
+def _repository_validation_response(
+    *,
+    accessible: bool,
+    message: str,
+    github_app_installation_url: str | None = None,
+    github_app_settings_url: str | None = None,
+    github_app_authorization_url: str | None = None,
+) -> RepositoryValidationResponse:
+    return RepositoryValidationResponse(
+        accessible=accessible,
+        message=message,
+        github_app_name="llamaindex",
+        github_app_installation_url=github_app_installation_url,
+        github_app_settings_url=github_app_settings_url,
+        github_app_authorization_url=github_app_authorization_url,
+    )
+
+
+class _FakeGitHubCallbackServer:
+    async def start(self) -> None:
+        pass
+
+    async def wait(self, timeout: float) -> None:
+        pass
+
+    async def stop(self) -> None:
+        pass
 
 
 def test_apply_creates_when_not_found(patched_auth: Any, tmp_path: Any) -> None:
@@ -416,6 +455,255 @@ def test_apply_validate_repository_blocks_create(
 
     assert result.exit_code != 0
     client.create_deployment.assert_not_called()
+
+
+def test_apply_interactive_inaccessible_github_repo_installs_app_and_retries(
+    patched_auth: Any, tmp_path: Any
+) -> None:
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text(MINIMAL_CREATE_YAML)
+
+    client = _apply_client_mock(created=make_deployment("new-app"))
+    client.validate_repository = AsyncMock(
+        side_effect=[
+            _repository_validation_response(
+                accessible=False,
+                message="GitHub App does not have access",
+                github_app_installation_url=GITHUB_APP_INSTALL_URL,
+            ),
+            _repository_validation_response(accessible=True, message="ok"),
+        ]
+    )
+
+    with (
+        patch_project_client(client),
+        patch(f"{_DEPLOY_CMD}.is_interactive_session", return_value=True),
+        patch("webbrowser.open") as mock_open,
+        patch(f"{_DEPLOY_CMD}._GitHubCallbackServer", _FakeGitHubCallbackServer),
+        patch(
+            f"{_DEPLOY_CMD}._wait_for_callback_or_interval", new_callable=AsyncMock
+        ) as mock_wait,
+    ):
+        mock_wait.return_value = False
+        result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
+
+    assert result.exit_code == 0, result.output
+    mock_open.assert_called_once_with(GITHUB_APP_INSTALL_URL)
+    assert f"Open this URL: {GITHUB_APP_INSTALL_URL}" in result.output
+    mock_wait.assert_awaited_once()
+    assert client.validate_repository.await_count == 2
+    client.create_deployment.assert_called_once()
+    assert "created new-app" in result.output
+
+
+def test_apply_non_interactive_inaccessible_github_repo_error_includes_install_url(
+    patched_auth: Any, tmp_path: Any
+) -> None:
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text(MINIMAL_CREATE_YAML)
+
+    client = _apply_client_mock()
+    client.validate_repository = AsyncMock(
+        return_value=_repository_validation_response(
+            accessible=False,
+            message="GitHub App does not have access",
+            github_app_installation_url=GITHUB_APP_INSTALL_URL,
+        )
+    )
+
+    with (
+        patch_project_client(client),
+        patch(f"{_DEPLOY_CMD}.is_interactive_session", return_value=False),
+    ):
+        result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
+
+    assert result.exit_code != 0
+    assert "GitHub App does not have access" in result.output
+    assert GITHUB_APP_INSTALL_URL in result.output
+    client.create_deployment.assert_not_called()
+
+
+def test_apply_inaccessible_github_repo_without_install_url_preserves_error(
+    patched_auth: Any, tmp_path: Any
+) -> None:
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text(MINIMAL_CREATE_YAML)
+
+    client = _apply_client_mock()
+    client.validate_repository = AsyncMock(
+        return_value=_repository_validation_response(
+            accessible=False,
+            message="repo not found",
+        )
+    )
+
+    with (
+        patch_project_client(client),
+        patch(f"{_DEPLOY_CMD}.is_interactive_session", return_value=True),
+        patch("webbrowser.open") as mock_open,
+    ):
+        result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
+
+    assert result.exit_code != 0
+    assert "repo not found" in result.output
+    assert "Install the GitHub App" not in result.output
+    mock_open.assert_not_called()
+    client.create_deployment.assert_not_called()
+
+
+def test_apply_interactive_github_app_settings_url_preferred_over_install_url(
+    patched_auth: Any, tmp_path: Any
+) -> None:
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text(MINIMAL_CREATE_YAML)
+
+    client = _apply_client_mock(created=make_deployment("new-app"))
+    client.validate_repository = AsyncMock(
+        side_effect=[
+            _repository_validation_response(
+                accessible=False,
+                message="GitHub App does not have access",
+                github_app_installation_url=GITHUB_APP_INSTALL_URL,
+                github_app_settings_url=GITHUB_APP_SETTINGS_URL,
+            ),
+            _repository_validation_response(accessible=True, message="ok"),
+        ]
+    )
+
+    with (
+        patch_project_client(client),
+        patch(f"{_DEPLOY_CMD}.is_interactive_session", return_value=True),
+        patch("webbrowser.open") as mock_open,
+        patch(f"{_DEPLOY_CMD}._GitHubCallbackServer", _FakeGitHubCallbackServer),
+        patch(
+            f"{_DEPLOY_CMD}._wait_for_callback_or_interval", new_callable=AsyncMock
+        ) as mock_wait,
+    ):
+        mock_wait.return_value = False
+        result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
+
+    assert result.exit_code == 0, result.output
+    mock_open.assert_called_once_with(GITHUB_APP_SETTINGS_URL)
+    client.create_deployment.assert_called_once()
+
+
+def test_apply_interactive_github_authorization_runs_before_install(
+    patched_auth: Any, tmp_path: Any
+) -> None:
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text(MINIMAL_CREATE_YAML)
+
+    client = _apply_client_mock(created=make_deployment("new-app"))
+    client.validate_repository = AsyncMock(
+        side_effect=[
+            _repository_validation_response(
+                accessible=False,
+                message="GitHub user authorization required",
+                github_app_authorization_url=GITHUB_APP_AUTHORIZATION_URL,
+            ),
+            _repository_validation_response(
+                accessible=False,
+                message="GitHub App does not have access",
+                github_app_installation_url=GITHUB_APP_INSTALL_URL,
+            ),
+            _repository_validation_response(accessible=True, message="ok"),
+        ]
+    )
+
+    with (
+        patch_project_client(client),
+        patch(f"{_DEPLOY_CMD}.is_interactive_session", return_value=True),
+        patch("webbrowser.open") as mock_open,
+        patch(f"{_DEPLOY_CMD}._GitHubCallbackServer", _FakeGitHubCallbackServer),
+        patch(
+            f"{_DEPLOY_CMD}._wait_for_callback_or_interval", new_callable=AsyncMock
+        ) as mock_wait,
+    ):
+        mock_wait.side_effect = [True, False]
+        result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
+
+    assert result.exit_code == 0, result.output
+    assert [call.args[0] for call in mock_open.call_args_list] == [
+        GITHUB_APP_AUTHORIZATION_URL,
+        GITHUB_APP_INSTALL_URL,
+    ]
+    assert f"Open this URL: {GITHUB_APP_AUTHORIZATION_URL}" in result.output
+    assert f"Open this URL: {GITHUB_APP_INSTALL_URL}" in result.output
+    assert client.validate_repository.await_count == 3
+    client.create_deployment.assert_called_once()
+
+
+def test_apply_interactive_legacy_connect_url_treated_as_authorization(
+    patched_auth: Any, tmp_path: Any
+) -> None:
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text(MINIMAL_CREATE_YAML)
+
+    client = _apply_client_mock(created=make_deployment("new-app"))
+    client.validate_repository = AsyncMock(
+        side_effect=[
+            _repository_validation_response(
+                accessible=False,
+                message="GitHub user authorization required",
+                github_app_installation_url=GITHUB_APP_AUTHORIZATION_URL,
+            ),
+            _repository_validation_response(accessible=True, message="ok"),
+        ]
+    )
+
+    with (
+        patch_project_client(client),
+        patch(f"{_DEPLOY_CMD}.is_interactive_session", return_value=True),
+        patch("webbrowser.open") as mock_open,
+        patch(f"{_DEPLOY_CMD}._GitHubCallbackServer", _FakeGitHubCallbackServer),
+        patch(
+            f"{_DEPLOY_CMD}._wait_for_callback_or_interval", new_callable=AsyncMock
+        ) as mock_wait,
+    ):
+        mock_wait.return_value = True
+        result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
+
+    assert result.exit_code == 0, result.output
+    mock_open.assert_called_once_with(GITHUB_APP_AUTHORIZATION_URL)
+    assert "Opening browser to connect GitHub" in result.output
+    assert "Opening browser to install the GitHub App" not in result.output
+    client.create_deployment.assert_called_once()
+
+
+async def test_github_app_poll_cancelled_error_exits() -> None:
+    client = MagicMock()
+    client.validate_repository = AsyncMock()
+    vr = _repository_validation_response(
+        accessible=False,
+        message="GitHub App does not have access",
+        github_app_installation_url=GITHUB_APP_INSTALL_URL,
+    )
+
+    with (
+        pytest.raises(asyncio.CancelledError),
+        patch("webbrowser.open") as mock_open,
+        patch(f"{_DEPLOY_CMD}._GitHubCallbackServer", _FakeGitHubCallbackServer),
+        patch(
+            f"{_DEPLOY_CMD}._wait_for_callback_or_interval", new_callable=AsyncMock
+        ) as mock_wait,
+    ):
+        mock_wait.side_effect = asyncio.CancelledError
+        await deployment_cmd._resolve_github_app_access(
+            client,
+            vr,
+            "https://github.com/example/repo",
+            None,
+            None,
+        )
+
+    mock_open.assert_called_once_with(GITHUB_APP_INSTALL_URL)
+    client.validate_repository.assert_not_called()
 
 
 def test_apply_validates_payload_before_repository(

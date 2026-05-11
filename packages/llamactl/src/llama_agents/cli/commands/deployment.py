@@ -31,6 +31,7 @@ from llama_agents.core.schema.deployments import (
     DeploymentResponse,
     DeploymentUpdate,
 )
+from llama_agents.core.schema.git_validation import RepositoryValidationResponse
 from pydantic import ValidationError
 
 from ..app import app
@@ -204,6 +205,210 @@ def _repository_error_path(
     return ()
 
 
+def _github_app_access_url(vr: RepositoryValidationResponse) -> str | None:
+    return vr.github_app_settings_url or vr.github_app_installation_url
+
+
+def _is_github_app_connect_url(url: str | None) -> bool:
+    return (
+        url is not None
+        and "/api/internal/external-credentials/github-app/connect" in url
+    )
+
+
+def _github_app_authorization_url(vr: RepositoryValidationResponse) -> str | None:
+    if vr.github_app_authorization_url:
+        return vr.github_app_authorization_url
+    if _is_github_app_connect_url(vr.github_app_installation_url):
+        return vr.github_app_installation_url
+    return None
+
+
+def _github_app_recovery_url(vr: RepositoryValidationResponse) -> str | None:
+    return _github_app_authorization_url(vr) or _github_app_access_url(vr)
+
+
+def _repository_validation_error_message(vr: RepositoryValidationResponse) -> str:
+    message = vr.message
+    authorization_url = _github_app_authorization_url(vr)
+    if authorization_url:
+        message += f"\n\nConnect GitHub: {authorization_url}"
+    else:
+        url = _github_app_access_url(vr)
+        if url:
+            message += f"\n\nInstall the GitHub App: {url}"
+    return message
+
+
+class _GitHubCallbackServer:
+    """Local callback server for GitHub OAuth/App redirects."""
+
+    def __init__(self, port: int = 41010) -> None:
+        self.port = port
+        self.callback_received = asyncio.Event()
+        self.app: Any | None = None
+        self.runner: Any | None = None
+        self.site: Any | None = None
+
+    async def start(self) -> None:
+        # Deferred: aiohttp is only needed for the browser callback path.
+        from aiohttp.web_app import Application
+        from aiohttp.web_response import Response
+        from aiohttp.web_runner import AppRunner, TCPSite
+
+        async def _handle_callback(_: Any) -> Response:
+            self.callback_received.set()
+            return Response(text=self._success_html(), content_type="text/html")
+
+        self.app = Application()
+        self.app.router.add_get("/", _handle_callback)
+        self.app.router.add_get("/{path:.*}", _handle_callback)
+        self.runner = AppRunner(self.app, logger=None)
+        await self.runner.setup()
+        self.site = TCPSite(self.runner, "localhost", self.port)
+        await self.site.start()
+
+    async def wait(self, timeout: float) -> None:
+        try:
+            await asyncio.wait_for(self.callback_received.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            raise TimeoutError(f"GitHub callback timed out after {timeout} seconds")
+
+    async def stop(self) -> None:
+        if self.site is not None:
+            await self.site.stop()
+            self.site = None
+        if self.runner is not None:
+            await self.runner.cleanup()
+            self.runner = None
+        self.app = None
+        self.callback_received.clear()
+
+    def _success_html(self) -> str:
+        return (
+            "<!DOCTYPE html>"
+            "<html>"
+            "<head><title>llamactl - Authentication Complete</title></head>"
+            "<body>"
+            "<h1>Authentication complete</h1>"
+            "<p>Return to your terminal to continue.</p>"
+            "</body>"
+            "</html>"
+        )
+
+
+async def _wait_for_callback_or_interval(
+    server: _GitHubCallbackServer,
+    interval: int,
+) -> bool:
+    callback_task = asyncio.create_task(server.wait(timeout=300))
+    sleep_task = asyncio.create_task(asyncio.sleep(interval))
+    done, pending = await asyncio.wait(
+        {callback_task, sleep_task},
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    for task in pending:
+        task.cancel()
+    for task in done:
+        task.result()
+    return callback_task in done
+
+
+async def _open_github_url_and_poll_access(
+    client: Any,
+    *,
+    url: str,
+    wait_message: str,
+    repo_url: str,
+    deployment_id: str | None,
+    pat: str | None,
+) -> RepositoryValidationResponse:
+    # Deferred: browser launch support is only needed on this auth recovery path.
+    import webbrowser
+
+    server = _GitHubCallbackServer()
+    await server.start()
+    try:
+        click.echo(f"Open this URL: {url}", err=True)
+        webbrowser.open(url)
+
+        interval = 10
+        elapsed = 0
+        while True:
+            callback_received = await _wait_for_callback_or_interval(server, interval)
+            if not callback_received:
+                elapsed += interval
+                click.echo(
+                    f"\r● {wait_message}... ({elapsed}s)",
+                    nl=False,
+                    err=True,
+                )
+            vr = await client.validate_repository(
+                repo_url=repo_url,
+                deployment_id=deployment_id,
+                pat=pat,
+            )
+            if vr.accessible:
+                click.echo(err=True)
+                return vr
+            if callback_received:
+                return vr
+    finally:
+        await server.stop()
+
+
+async def _resolve_github_app_access(
+    client: Any,
+    vr: RepositoryValidationResponse,
+    repo_url: str,
+    deployment_id: str | None,
+    pat: str | None,
+) -> RepositoryValidationResponse:
+    """Open GitHub App access URL and poll until repo validation succeeds."""
+    authorization_url = _github_app_authorization_url(vr)
+    install_url = _github_app_access_url(vr)
+    if authorization_url == install_url:
+        install_url = None
+    if authorization_url is None and install_url is None:
+        return vr
+
+    app_name = vr.github_app_name or "configured"
+    click.echo(
+        f"GitHub App '{app_name}' does not have access to this repository.",
+        err=True,
+    )
+
+    if authorization_url is not None:
+        click.echo("Opening browser to connect GitHub...", err=True)
+        vr = await _open_github_url_and_poll_access(
+            client,
+            url=authorization_url,
+            wait_message="waiting for GitHub authorization",
+            repo_url=repo_url,
+            deployment_id=deployment_id,
+            pat=pat,
+        )
+        if vr.accessible:
+            return vr
+        install_url = _github_app_access_url(vr)
+
+    if install_url is None:
+        return vr
+
+    click.echo(
+        "Opening browser to install the GitHub App... (press Ctrl+C to cancel)",
+        err=True,
+    )
+    return await _open_github_url_and_poll_access(
+        client,
+        url=install_url,
+        wait_message="waiting for GitHub App installation",
+        repo_url=repo_url,
+        deployment_id=deployment_id,
+        pat=pat,
+    )
+
+
 def _read_apply_input(filename: str) -> str:
     if filename == "-":
         return click.get_text_stream("stdin").read()
@@ -244,7 +449,9 @@ def _raise_apply_yaml_click_error(exc: ApplyYamlError) -> NoReturn:
 
 
 def _new_deployment_template_yaml(
-    *, action_hint: str = "Edit, then run: llamactl deployments apply -f <file>"
+    *,
+    action_hint: str = "Edit, then run: llamactl deployments apply -f <file>",
+    logged_in_email: str | None = None,
 ) -> str:
     ctx = gather_local_context()
 
@@ -272,7 +479,10 @@ def _new_deployment_template_yaml(
 
     display = DeploymentDisplay(name=None, generate_name=preferred_name, spec=spec)
 
-    head: list[str] = [f"WARNING: {warning}" for warning in ctx.warnings]
+    head: list[str] = []
+    if logged_in_email:
+        head.append(f"Logged in as {logged_in_email}")
+    head.extend(f"WARNING: {warning}" for warning in ctx.warnings)
     if ctx.warnings:
         head.append("")
     head.append(action_hint)
@@ -652,9 +862,17 @@ def create_deployment(
     if _requires_file_for_editor():
         raise click.ClickException("pass -f <file> for non-interactive create")
 
+    # Deferred: auth command imports browser/prompt dependencies and client.py
+    # imports this command module indirectly during inline auth.
+    from llama_agents.cli.commands.auth import validate_authenticated_profile
+
+    profile = validate_authenticated_profile()
+    logged_in_email = profile.device_oidc.email if profile.device_oidc else None
+
     _edit_deployment_yaml_loop(
         initial_yaml=_new_deployment_template_yaml(
-            action_hint="Edit, save, and close to create the deployment"
+            action_hint="Edit, save, and close to create the deployment",
+            logged_in_email=logged_in_email,
         ),
         project=project,
         no_push=no_push,
@@ -904,8 +1122,18 @@ async def _execute_deployment_operation(
             pat=display.spec.personal_access_token,
         )
         if not vr.accessible:
+            if _github_app_recovery_url(vr) and is_interactive_session():
+                vr = await _resolve_github_app_access(
+                    client,
+                    vr,
+                    repo_url,
+                    existing.id if existing else None,
+                    display.spec.personal_access_token,
+                )
+        if not vr.accessible:
+            message = _repository_validation_error_message(vr)
             raise RepositoryValidationError(
-                vr.message, _repository_error_path(vr.message, display)
+                message, _repository_error_path(message, display)
             )
 
     # Push ordering matrix:

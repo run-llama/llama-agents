@@ -9,6 +9,7 @@ import textwrap
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -156,6 +157,50 @@ def test_create_opens_editor_with_template_and_applies_saved_yaml(
     assert "created editor-app" in result.output
 
 
+def test_create_preflights_auth_and_shows_logged_in_email(
+    patched_auth: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_local_context(monkeypatch)
+    runner = CliRunner()
+    client = _editor_client_mock(created=make_deployment("editor-app"))
+    saved_text = textwrap.dedent("""\
+        generate_name: Editor App
+        spec:
+          repo_url: https://github.com/example/repo
+    """)
+    order: list[str] = []
+    profile = SimpleNamespace(
+        device_oidc=SimpleNamespace(email="user@example.com"),
+    )
+
+    def _validate_profile() -> SimpleNamespace:
+        order.append("auth")
+        return profile
+
+    def _open_editor(text: str) -> str:
+        order.append("editor")
+        assert "## Logged in as user@example.com" in text
+        return saved_text
+
+    with (
+        patch_project_client(client),
+        patch(
+            "llama_agents.cli.commands.auth.validate_authenticated_profile",
+            side_effect=_validate_profile,
+        ) as validate_authenticated_profile,
+        patch(
+            f"{_DEPLOY_CMD}._open_deployment_yaml_editor",
+            side_effect=_open_editor,
+        ),
+    ):
+        result = runner.invoke(app, ["deployments", "create"])
+
+    assert result.exit_code == 0, result.output
+    assert order == ["auth", "editor"]
+    validate_authenticated_profile.assert_called_once_with()
+    client.create_deployment.assert_called_once()
+
+
 def test_create_file_applies_without_editor_and_threads_project_no_push(
     patched_auth: Any, tmp_path: Path
 ) -> None:
@@ -189,6 +234,34 @@ def test_create_file_applies_without_editor_and_threads_project_no_push(
     args, _ = ctor.call_args
     assert args[1] == "proj_other"
     client.create_deployment.assert_called_once()
+
+
+def test_create_file_without_profile_raises_auth_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text("generate_name: File App\nspec:\n  repo_url: ''\n")
+
+    mock_auth_svc = MagicMock()
+    mock_auth_svc.get_current_profile.return_value = None
+    mock_auth_svc.list_profiles.return_value = []
+    mock_auth_svc.env = SimpleNamespace(requires_auth=True)
+
+    mock_service = MagicMock()
+    mock_service.current_auth_service.return_value = mock_auth_svc
+
+    with (
+        patch("llama_agents.cli.config.env_service.service", mock_service),
+        patch("llama_agents.cli.client.is_interactive_session", return_value=False),
+        patch(_INTERACTIVE_PATCH, return_value=False),
+    ):
+        result = runner.invoke(app, ["deployments", "create", "-f", str(f)])
+
+    assert result.exit_code != 0
+    assert "No profile configured. To get started, run: llamactl auth login" in (
+        result.output
+    )
 
 
 def test_create_file_uses_create_intent_not_upsert(

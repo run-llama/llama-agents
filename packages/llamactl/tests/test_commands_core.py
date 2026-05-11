@@ -99,14 +99,43 @@ def test_client_requires_profile_with_project() -> None:
             _close_client(client)
 
 
-def test_client_requires_valid_profile() -> None:
+def test_client_requires_valid_profile(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that client fails when no profile is configured"""
+    monkeypatch.setattr(client_module, "is_interactive_session", lambda: False)
     with patch("llama_agents.cli.config.env_service.service") as mock_service:
         mock_auth_svc = MagicMock()
         mock_auth_svc.get_current_profile.return_value = None
         mock_service.current_auth_service.return_value = mock_auth_svc
         with pytest.raises(click.ClickException, match="No profile configured"):
             get_project_client()
+
+
+def test_interactive_project_client_authenticates_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _profile(project_id="authed-project", api_key="authed-key")
+    monkeypatch.setattr(client_module, "is_interactive_session", lambda: True)
+    with (
+        patch("llama_agents.cli.config.env_service.service") as mock_service,
+        patch(
+            "llama_agents.cli.commands.auth.validate_authenticated_profile",
+            return_value=profile,
+        ) as validate_authenticated_profile,
+    ):
+        mock_auth_svc = MagicMock()
+        mock_auth_svc.get_current_profile.side_effect = [None, profile]
+        mock_auth_svc.auth_middleware.return_value = None
+        mock_service.current_auth_service.return_value = mock_auth_svc
+
+        client = get_project_client()
+
+    try:
+        validate_authenticated_profile.assert_called_once_with()
+        assert client.base_url == "http://test:8011"
+        assert client.project_id == "authed-project"
+        assert client.api_key == "authed-key"
+    finally:
+        _close_client(client)
 
 
 def test_env_var_project_client_uses_default_base_url_and_api_key(
@@ -198,6 +227,7 @@ def test_incomplete_env_var_project_client_without_profile_warns_and_exits(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     set_llama_cloud_env(monkeypatch, api_key="env-api-key")
+    monkeypatch.setattr(client_module, "is_interactive_session", lambda: False)
     _set_current_profile(monkeypatch, None)
 
     with pytest.raises(click.ClickException, match="No profile configured"):
