@@ -1,5 +1,11 @@
 # llamactl
 
+## 0.10.1
+
+### Patch Changes
+
+- 532a6fa: Fix inline auth recovery while saving deployments.
+
 ## 0.10.0
 
 ### Minor Changes
