@@ -1,5 +1,12 @@
 # llamactl
 
+## 0.10.2
+
+### Patch Changes
+
+- 06ff626: Fix `projects use <id>` and `projects get <id>` failing with "not found" for projects outside the default org
+- abc176e: Only auto-push push-mode updates from repos with the deployment remote configured.
+
 ## 0.10.1
 
 ### Patch Changes
