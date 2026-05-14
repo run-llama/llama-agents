@@ -12,6 +12,7 @@ from llama_agents.cli.utils.git_push import (
     configure_git_remote,
     get_api_key,
     get_deployment_git_url,
+    has_deployment_git_remote,
     push_to_remote,
 )
 
@@ -32,6 +33,28 @@ def test_get_deployment_git_url() -> None:
 def test_get_deployment_git_url_strips_trailing_slash() -> None:
     url = get_deployment_git_url("http://localhost:8000/", "dep-1")
     assert url == "http://localhost:8000/api/v1beta1/deployments/dep-1/git"
+
+
+@patch("llama_agents.cli.utils.git_push.subprocess")
+def test_has_deployment_git_remote_returns_true_when_remote_exists(
+    mock_subprocess: MagicMock,
+) -> None:
+    mock_subprocess.run.return_value = MagicMock(returncode=0)
+
+    assert has_deployment_git_remote("dep-1") is True
+    mock_subprocess.run.assert_called_once_with(
+        ["git", "remote", "get-url", "llamaagents-dep-1"],
+        capture_output=True,
+    )
+
+
+@patch("llama_agents.cli.utils.git_push.subprocess")
+def test_has_deployment_git_remote_returns_false_when_remote_missing(
+    mock_subprocess: MagicMock,
+) -> None:
+    mock_subprocess.run.return_value = MagicMock(returncode=2)
+
+    assert has_deployment_git_remote("dep-1") is False
 
 
 # ---------------------------------------------------------------------------

@@ -64,6 +64,7 @@ from ..render import short_sha
 from ..utils.git_push import (
     configure_git_remote,
     get_deployment_git_url,
+    has_deployment_git_remote,
     internal_push_refspec,
     push_to_remote,
 )
@@ -71,6 +72,7 @@ from ..yaml_template import render as render_yaml_template
 
 DeploymentApplyMode = Literal["apply", "create", "update"]
 DeploymentOperationAction = Literal["create", "update"]
+PushPolicy = Literal["auto", "always", "never"]
 
 
 @dataclass(frozen=True)
@@ -532,17 +534,36 @@ def _parse_deployment_yaml_text(text: str) -> DeploymentDisplay:
     return parse_apply_yaml(text)
 
 
+def _push_policy_from_flags(*, push: bool = False, no_push: bool = False) -> PushPolicy:
+    if push and no_push:
+        raise click.ClickException("--push and --no-push are mutually exclusive")
+    if push:
+        return "always"
+    if no_push:
+        return "never"
+    return "auto"
+
+
+def _warn_missing_deployment_remote(deployment_id: str) -> None:
+    remote_name = f"llamaagents-{deployment_id}"
+    warning(
+        f"not pushing code; no {remote_name} remote in this repo. "
+        f"Run llamactl deployments configure-git-remote {deployment_id} "
+        "or pass --push."
+    )
+
+
 async def _apply_deployment_intent(
     *,
     project: str | None,
     intent: _DeploymentIntent,
-    no_push: bool = False,
+    push_policy: PushPolicy = "auto",
 ) -> None:
     async with project_client_context(project_id_override=project) as client:
         await _apply_deployment_from_yaml(
             client,
             intent.display,
-            no_push=no_push,
+            push_policy=push_policy,
             mode=intent.mode,
             update_target=intent.update_target,
         )
@@ -552,7 +573,7 @@ def _apply_deployment_display(
     display: DeploymentDisplay,
     *,
     project: str | None,
-    no_push: bool = False,
+    push_policy: PushPolicy = "auto",
     mode: DeploymentApplyMode = "apply",
     update_target: str | None = None,
 ) -> None:
@@ -564,7 +585,7 @@ def _apply_deployment_display(
                 mode=mode,
                 update_target=update_target,
             ),
-            no_push=no_push,
+            push_policy=push_policy,
         )
     )
 
@@ -573,7 +594,7 @@ def _apply_deployment_yaml_text(
     text: str,
     *,
     project: str | None,
-    no_push: bool = False,
+    push_policy: PushPolicy = "auto",
     mode: DeploymentApplyMode = "apply",
     update_target: str | None = None,
 ) -> None:
@@ -581,7 +602,7 @@ def _apply_deployment_yaml_text(
     _apply_deployment_display(
         display,
         project=project,
-        no_push=no_push,
+        push_policy=push_policy,
         mode=mode,
         update_target=update_target,
     )
@@ -591,7 +612,7 @@ def _apply_deployment_yaml_file(
     *,
     filename: str,
     project: str | None,
-    no_push: bool,
+    push_policy: PushPolicy,
     mode: DeploymentApplyMode = "apply",
     update_target: str | None = None,
 ) -> None:
@@ -605,7 +626,7 @@ def _apply_deployment_yaml_file(
         _apply_deployment_display(
             display,
             project=project,
-            no_push=no_push,
+            push_policy=push_policy,
             mode=mode,
             update_target=update_target,
         )
@@ -662,7 +683,7 @@ def _edit_deployment_yaml_loop(
     *,
     initial_yaml: str,
     project: str | None,
-    no_push: bool,
+    push_policy: PushPolicy,
     mode: DeploymentApplyMode,
     update_target: str | None = None,
 ) -> None:
@@ -687,7 +708,7 @@ def _edit_deployment_yaml_loop(
             _apply_deployment_yaml_text(
                 current_text,
                 project=project,
-                no_push=no_push,
+                push_policy=push_policy,
                 mode=mode,
                 update_target=update_target,
             )
@@ -850,11 +871,12 @@ def create_deployment(
     project: str | None,
 ) -> None:
     """Create a new deployment."""
+    push_policy = _push_policy_from_flags(no_push=no_push)
     if filename is not None:
         _apply_deployment_yaml_file(
             filename=filename,
             project=project,
-            no_push=no_push,
+            push_policy=push_policy,
             mode="create",
         )
         return
@@ -875,7 +897,7 @@ def create_deployment(
             logged_in_email=logged_in_email,
         ),
         project=project,
-        no_push=no_push,
+        push_policy=push_policy,
         mode="create",
     )
 
@@ -1099,7 +1121,7 @@ async def _execute_deployment_operation(
     client: Any,
     operation: _ResolvedDeploymentOperation,
     *,
-    no_push: bool = False,
+    push_policy: PushPolicy = "auto",
 ) -> None:
     display = operation.display
     existing = operation.existing
@@ -1155,12 +1177,22 @@ async def _execute_deployment_operation(
 
     push_before_save = current_is_push and desired_is_push
 
-    if desired_is_push and no_push:
+    if desired_is_push and push_policy == "never":
         desired_is_push = False
         push_before_save = False
 
     if desired_is_push and not is_git_repo():
         warning("not in a git repo; skipping push, server will use last pushed code")
+        desired_is_push = False
+        push_before_save = False
+
+    if (
+        push_before_save
+        and push_policy == "auto"
+        and existing is not None
+        and not has_deployment_git_remote(existing.id)
+    ):
+        _warn_missing_deployment_remote(existing.id)
         desired_is_push = False
         push_before_save = False
 
@@ -1200,7 +1232,7 @@ async def _apply_deployment_from_yaml(
     client: Any,
     display: DeploymentDisplay,
     *,
-    no_push: bool = False,
+    push_policy: PushPolicy = "auto",
     mode: DeploymentApplyMode = "apply",
     update_target: str | None = None,
 ) -> None:
@@ -1214,7 +1246,7 @@ async def _apply_deployment_from_yaml(
             update_target=update_target,
         )
         operation = await _resolve_deployment_operation(client, intent)
-        await _execute_deployment_operation(client, operation, no_push=no_push)
+        await _execute_deployment_operation(client, operation, push_policy=push_policy)
     except ApplyYamlError:
         raise
     except RepositoryValidationError as exc:
@@ -1266,7 +1298,13 @@ async def _apply_deployment_from_yaml(
     "--no-push",
     is_flag=True,
     default=False,
-    help="Skip pushing local code even when the deployment uses push-mode.",
+    help="Skip pushing local code for push-mode deployments.",
+)
+@click.option(
+    "--push",
+    is_flag=True,
+    default=False,
+    help="Push local code even if this repo is not linked to the deployment.",
 )
 @click.option(
     "--annotate-on-error",
@@ -1279,6 +1317,7 @@ def apply_deployment(
     filename: str,
     dry_run: bool,
     no_push: bool,
+    push: bool,
     annotate_on_error: bool,
     project: str | None,
 ) -> None:
@@ -1288,6 +1327,7 @@ def apply_deployment(
     Reads the file (or stdin with ``-f -``), resolves ``${VAR}`` references
     from the environment, and issues the appropriate API call.
     """
+    push_policy = _push_policy_from_flags(push=push, no_push=no_push)
     text = _read_apply_input(filename)
     try:
         display = _parse_deployment_yaml_text(text)
@@ -1322,7 +1362,11 @@ def apply_deployment(
         return
 
     try:
-        _apply_deployment_display(display, project=project, no_push=no_push)
+        _apply_deployment_display(
+            display,
+            project=project,
+            push_policy=push_policy,
+        )
     except ApplyYamlError as exc:
         if annotate_on_error:
             _handle_annotated_apply_error(
@@ -1347,21 +1391,29 @@ def apply_deployment(
     "--no-push",
     is_flag=True,
     default=False,
-    help="Skip pushing local code even when the deployment uses push-mode.",
+    help="Skip pushing local code for push-mode deployments.",
+)
+@click.option(
+    "--push",
+    is_flag=True,
+    default=False,
+    help="Push local code even if this repo is not linked to the deployment.",
 )
 @project_option
 def edit_deployment(
     deployment_id: str | None,
     filename: str | None,
     no_push: bool,
+    push: bool,
     project: str | None,
 ) -> None:
     """Edit a deployment in $EDITOR."""
+    push_policy = _push_policy_from_flags(push=push, no_push=no_push)
     if filename is not None:
         _apply_deployment_yaml_file(
             filename=filename,
             project=project,
-            no_push=no_push,
+            push_policy=push_policy,
             mode="update",
             update_target=deployment_id,
         )
@@ -1380,7 +1432,7 @@ def edit_deployment(
         _edit_deployment_yaml_loop(
             initial_yaml=_existing_deployment_editor_yaml(current_deployment),
             project=project,
-            no_push=no_push,
+            push_policy=push_policy,
             mode="update",
             update_target=deployment_id,
         )
@@ -1399,6 +1451,7 @@ def _push_internal_for_update(
     deployment_id: str,
     git_ref: str | None,
     client: Any,
+    push_policy: PushPolicy,
 ) -> None:
     """Push local code to the internal repo before updating.
 
@@ -1407,6 +1460,10 @@ def _push_internal_for_update(
     """
     if not is_git_repo():
         warning("not in a git repo; skipping push, server will use last pushed code")
+        return
+
+    if push_policy == "auto" and not has_deployment_git_remote(deployment_id):
+        _warn_missing_deployment_remote(deployment_id)
         return
 
     git_url = get_deployment_git_url(client.base_url, deployment_id)
@@ -1443,14 +1500,22 @@ def _push_internal_for_update(
     default=False,
     help="Skip pushing local code for internal-repo deployments.",
 )
+@click.option(
+    "--push",
+    is_flag=True,
+    default=False,
+    help="Push local code even if this repo is not linked to the deployment.",
+)
 @project_option
 def refresh_deployment(
     deployment_id: str | None,
     git_ref: str | None,
     no_push: bool,
+    push: bool,
     project: str | None,
 ) -> None:
     """Update the deployment, pulling the latest code from its branch."""
+    push_policy = _push_policy_from_flags(push=push, no_push=no_push)
     deployment_id = _require_deployment_id(deployment_id, "update", project)
     try:
         # Single asyncio.run with one client: reusing a ProjectClient across
@@ -1460,11 +1525,15 @@ def refresh_deployment(
             async with project_client_context(project_id_override=project) as client:
                 current = await client.get_deployment(deployment_id)
                 effective_git_ref = git_ref or current.git_ref
-                if current.repo_url == INTERNAL_CODE_REPO_SCHEME and not no_push:
+                if (
+                    current.repo_url == INTERNAL_CODE_REPO_SCHEME
+                    and push_policy != "never"
+                ):
                     _push_internal_for_update(
                         deployment_id,
                         effective_git_ref,
                         client=client,
+                        push_policy=push_policy,
                     )
                 # Re-resolves the branch to the latest commit SHA on the server.
                 status(f"refreshing {deployment_id}")

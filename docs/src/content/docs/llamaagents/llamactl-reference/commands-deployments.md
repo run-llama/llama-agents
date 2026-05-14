@@ -32,7 +32,18 @@ Notes:
 
 - `-o json` and `-o yaml` are for scripts. Status messages go to stderr; structured data goes to stdout.
 - `-f -` reads YAML from stdin on commands that accept `-f`.
-- `repo_url: ""` in apply YAML means push the current local working tree. Push-capable deployment mutations support `--no-push` when you have already pushed separately or want the server to use the revision it can already resolve.
+- `repo_url: ""` in apply YAML means push-mode. The deployment stores code in LlamaCloud's internal git repo instead of pulling from an external Git URL.
+
+### Push-mode auto-push
+
+Push-mode commands can mirror local code to the deployment's internal git repo. The local git remote is named `llamaagents-NAME`.
+
+- `create` configures that remote and pushes by default.
+- `edit`, `apply`, and `update` auto-push only when the current repo already has the `llamaagents-NAME` remote.
+- `--push` configures the remote and pushes from the current repo.
+- `--no-push` skips the push and uses code already available to the server.
+
+Use `llamactl deployments configure-git-remote NAME` to link a repo before relying on auto-push.
 
 ## Commands
 
@@ -88,16 +99,19 @@ llamactl deployments create --no-push
 ### Edit
 
 ```bash
-llamactl deployments edit [NAME] [-f FILE] [--no-push] [--project PROJECT]
+llamactl deployments edit [NAME] [-f FILE] [--push] [--no-push] [--project PROJECT]
 ```
 
 Without `-f`, fetches the deployment, renders editable YAML, and opens `$EDITOR`. If `NAME` is omitted in a TTY, choose from existing deployments. Scripts should pass `NAME`.
 
 With `-f FILE`, updates from YAML without opening an editor. If `NAME` is omitted, the YAML must include top-level `name`.
 
+For push-mode deployments, edit auto-pushes only from a repo that already has the `llamaagents-NAME` remote. Pass `--push` to link and push the current repo.
+
 Flags:
 
 - `-f, --filename FILE`: YAML file, or `-` for stdin
+- `--push`: Link and push the current repo even if the deployment remote is not configured
 - `--no-push`: Skip pushing local code for push-mode deployments
 - `--project PROJECT`: Override the active project
 
@@ -112,17 +126,20 @@ llamactl deployments edit -f deployment.yaml
 ### Apply
 
 ```bash
-llamactl deployments apply -f FILE [--dry-run] [--no-push] [--annotate-on-error] [--project PROJECT]
+llamactl deployments apply -f FILE [--dry-run] [--push] [--no-push] [--annotate-on-error] [--project PROJECT]
 ```
 
 Applies deployment YAML declaratively. If the top-level `name` exists, `apply` updates that deployment. If it does not exist, `apply` creates it. YAML produced by `deployments template` or `deployments get NAME -o template` is ready for this command.
 
 `${VAR}` references are resolved from the process environment at apply time. Masked secret values from read output are ignored so round-tripping a deployment does not overwrite existing secrets with placeholders.
 
+For push-mode updates, apply auto-pushes only from a repo that already has the `llamaagents-NAME` remote. Push-mode creates still configure the remote and push by default.
+
 Flags:
 
 - `-f, --filename FILE`: Required YAML file, or `-` for stdin
 - `--dry-run`: Validate and print the resolved payload without changing the deployment
+- `--push`: Link and push the current repo even if the deployment remote is not configured
 - `--no-push`: Skip pushing local code for push-mode deployments
 - `--annotate-on-error`: Write validation errors back into the YAML as comments
 - `--project PROJECT`: Override the active project
@@ -175,16 +192,17 @@ llamactl deployments delete -f deployment.yaml
 ### Update
 
 ```bash
-llamactl deployments update NAME [--git-ref REF] [--no-push] [--project PROJECT]
+llamactl deployments update NAME [--git-ref REF] [--push] [--no-push] [--project PROJECT]
 ```
 
 Resolves the deployment's configured git ref again and starts a new release from the resulting commit. Use `--git-ref` to switch to a branch, tag, or commit before resolving.
 
-For push-mode deployments, `update` mirrors local code before resolving the ref. Use `--no-push` if you already pushed separately or want to redeploy the revision already available to the server.
+For push-mode deployments, `update` mirrors local code only when the current repo already has the deployment remote configured. Use `--push` to link and push the current repo, or `--no-push` if you want to redeploy the revision already available to the server.
 
 Flags:
 
 - `--git-ref REF`: Branch, tag, or commit SHA to deploy
+- `--push`: Link and push the current repo even if the deployment remote is not configured
 - `--no-push`: Skip mirroring local code for push-mode deployments
 - `--project PROJECT`: Override the active project
 
@@ -193,6 +211,7 @@ Examples:
 ```bash
 llamactl deployments update invoice-agent
 llamactl deployments update invoice-agent --git-ref release-2026-05
+llamactl deployments update invoice-agent --push
 llamactl deployments update invoice-agent --no-push
 ```
 
@@ -265,6 +284,8 @@ llamactl deployments configure-git-remote NAME [--project PROJECT]
 ```
 
 Configures an authenticated git remote for a push-mode deployment. The remote is named `llamaagents-NAME`.
+
+After this runs, `deployments edit`, `deployments apply -f`, and `deployments update` can auto-push from the current repo for that deployment.
 
 Examples:
 

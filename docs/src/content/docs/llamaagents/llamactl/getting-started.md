@@ -206,9 +206,10 @@ To point at a specific branch, tag, or commit:
 llamactl deployments update NAME --git-ref main
 ```
 
-For push-mode deployments, `update` pushes local code before resolving the ref. If you have already pushed separately, use `--no-push`:
+For push-mode deployments, `update` pushes local code only when the current repo already has the deployment remote configured. Use `--push` to link and push the current repo, or `--no-push` to redeploy code already available to the server:
 
 ```bash
+llamactl deployments update NAME --push
 llamactl deployments update NAME --no-push
 ```
 

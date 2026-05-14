@@ -11,6 +11,15 @@ def _git_remote_name(deployment_id: str) -> str:
     return f"llamaagents-{deployment_id}"
 
 
+def has_deployment_git_remote(deployment_id: str) -> bool:
+    """Return whether the standard deployment git remote exists."""
+    result = subprocess.run(
+        ["git", "remote", "get-url", _git_remote_name(deployment_id)],
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
 def get_deployment_git_url(base_url: str, deployment_id: str) -> str:
     """Build the git endpoint URL for a deployment."""
     api_url = base_url.rstrip("/")
