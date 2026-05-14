@@ -32,7 +32,18 @@ Notes:
 
 - `-o json` and `-o yaml` are for scripts. Status messages go to stderr; structured data goes to stdout.
 - `-f -` reads YAML from stdin on commands that accept `-f`.
-- `repo_url: ""` in apply YAML means push-mode. Create flows push the current local working tree by default. Update flows auto-push only when the current repo already has the deployment remote configured; use `--push` to link and push the current repo, or `--no-push` to use code already available to the server.
+- `repo_url: ""` in apply YAML means push-mode. The deployment stores code in LlamaCloud's internal git repo instead of pulling from an external Git URL.
+
+### Push-mode auto-push
+
+Push-mode commands can mirror local code to the deployment's internal git repo. The local git remote is named `llamaagents-NAME`.
+
+- `create` configures that remote and pushes by default.
+- `edit`, `apply`, and `update` auto-push only when the current repo already has the `llamaagents-NAME` remote.
+- `--push` configures the remote and pushes from the current repo.
+- `--no-push` skips the push and uses code already available to the server.
+
+Use `llamactl deployments configure-git-remote NAME` to link a repo before relying on auto-push.
 
 ## Commands
 
@@ -95,6 +106,8 @@ Without `-f`, fetches the deployment, renders editable YAML, and opens `$EDITOR`
 
 With `-f FILE`, updates from YAML without opening an editor. If `NAME` is omitted, the YAML must include top-level `name`.
 
+For push-mode deployments, edit auto-pushes only from a repo that already has the `llamaagents-NAME` remote. Pass `--push` to link and push the current repo.
+
 Flags:
 
 - `-f, --filename FILE`: YAML file, or `-` for stdin
@@ -119,6 +132,8 @@ llamactl deployments apply -f FILE [--dry-run] [--push] [--no-push] [--annotate-
 Applies deployment YAML declaratively. If the top-level `name` exists, `apply` updates that deployment. If it does not exist, `apply` creates it. YAML produced by `deployments template` or `deployments get NAME -o template` is ready for this command.
 
 `${VAR}` references are resolved from the process environment at apply time. Masked secret values from read output are ignored so round-tripping a deployment does not overwrite existing secrets with placeholders.
+
+For push-mode updates, apply auto-pushes only from a repo that already has the `llamaagents-NAME` remote. Push-mode creates still configure the remote and push by default.
 
 Flags:
 
@@ -269,6 +284,8 @@ llamactl deployments configure-git-remote NAME [--project PROJECT]
 ```
 
 Configures an authenticated git remote for a push-mode deployment. The remote is named `llamaagents-NAME`.
+
+After this runs, `deployments edit`, `deployments apply -f`, and `deployments update` can auto-push from the current repo for that deployment.
 
 Examples:
 
