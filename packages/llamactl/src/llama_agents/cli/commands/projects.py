@@ -44,18 +44,23 @@ def get_projects(project_id: str | None, org_id: str | None, output: str) -> Non
     try:
         auth_svc = _get_service().current_auth_service()
         profile = validate_authenticated_profile()
-        if org_id is None:
-            org = _discover_organization(auth_svc)
-            if org is not None:
-                org_id = org.org_id
 
-        projects = _list_projects(auth_svc, org_id=org_id)
         if project_id:
+            # Look up a specific project across all accessible orgs,
+            # unless the user explicitly scoped with --org.
+            projects = _list_projects(auth_svc, org_id=org_id)
             projects = [
                 project for project in projects if project.project_id == project_id
             ]
             if not projects:
                 raise click.ClickException(f"Project {project_id} not found")
+        else:
+            # Scope the listing to the default org when --org is not given.
+            if org_id is None:
+                org = _discover_organization(auth_svc)
+                if org is not None:
+                    org_id = org.org_id
+            projects = _list_projects(auth_svc, org_id=org_id)
 
         if not projects and output == "text":
             status("no projects found")
@@ -93,16 +98,13 @@ def use_project(project_id: str | None, org_id: str | None) -> None:
     profile = validate_authenticated_profile()
 
     try:
-        if org_id is None:
-            org = _discover_organization(auth_svc)
-            if org is not None:
-                org_id = org.org_id
-
         if project_id and profile.project_id == project_id:
             return
 
         if project_id:
             if auth_svc.env.requires_auth:
+                # Validate across all accessible orgs (matching tab completion),
+                # unless the user explicitly scoped with --org.
                 projects = _list_projects(auth_svc, org_id=org_id)
                 if not next(
                     (
@@ -117,6 +119,11 @@ def use_project(project_id: str | None, org_id: str | None) -> None:
             status(f"switched project {project_id}")
             return
 
+        # Scope the interactive listing to the default org when --org is not given.
+        if org_id is None:
+            org = _discover_organization(auth_svc)
+            if org is not None:
+                org_id = org.org_id
         projects = _list_projects(auth_svc, org_id=org_id)
 
         if not projects:

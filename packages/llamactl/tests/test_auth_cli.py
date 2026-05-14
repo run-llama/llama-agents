@@ -181,6 +181,42 @@ def test_auth_logout_missing() -> None:
         assert "Profile 'missing' not found" in result.output
 
 
+def test_projects_use_validates_across_all_orgs() -> None:
+    """projects use <id> should not scope validation to the default org.
+
+    Tab completion lists projects from all orgs, so the validation path
+    must also search all orgs — otherwise a project from a non-default org
+    completes but then fails with 'Project not found'.
+    """
+    runner = CliRunner()
+    cross_org_project = MagicMock(project_id="cross-org-proj-id")
+    with (
+        patch(
+            "llama_agents.cli.commands.projects.validate_authenticated_profile",
+            return_value=MagicMock(name="p", project_id="current-proj"),
+        ),
+        patch("llama_agents.cli.config.env_service.service") as mock_service,
+        patch(
+            "llama_agents.cli.commands.projects._list_projects",
+            return_value=[cross_org_project],
+        ) as mock_list,
+        patch(
+            "llama_agents.cli.commands.projects._discover_organization",
+            return_value=MagicMock(org_id="default-org-id"),
+        ),
+    ):
+        mock_auth_svc = MagicMock()
+        mock_auth_svc.env.requires_auth = True
+        mock_service.current_auth_service.return_value = mock_auth_svc
+
+        result = runner.invoke(app, ["projects", "use", "cross-org-proj-id"])
+        assert result.exit_code == 0
+        # Must call _list_projects without org scoping (org_id=None),
+        # not with the auto-discovered default org.
+        mock_list.assert_called_once_with(mock_auth_svc, org_id=None)
+        mock_auth_svc.set_project.assert_called_once()
+
+
 def test_projects_use_non_interactive_lists_options_and_hints() -> None:
     runner = CliRunner()
     with (
