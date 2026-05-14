@@ -95,6 +95,10 @@ def test_deployments_update_internal_repo_push_failure_does_not_abort(
         patch_project_client(client),
         patch("llama_agents.cli.commands.deployment.is_git_repo", return_value=True),
         patch(
+            "llama_agents.cli.commands.deployment.has_deployment_git_remote",
+            return_value=True,
+        ),
+        patch(
             "llama_agents.cli.commands.deployment.configure_git_remote",
             return_value="llamaagents-my-app",
         ),
@@ -118,6 +122,78 @@ def test_deployments_update_internal_repo_push_failure_does_not_abort(
     assert "warning: continuing with update using last pushed code" in result.stderr
     assert "Event loop is closed" not in result.output
     client.get_deployment.assert_called_once()
+    client.update_deployment.assert_called_once()
+
+
+def test_deployments_update_internal_repo_skips_push_when_remote_missing(
+    patched_auth: Any,
+) -> None:
+    runner = CliRunner()
+    current = make_deployment(
+        "my-app", repo_url=INTERNAL_CODE_REPO_SCHEME, git_sha="a" * 40
+    )
+    updated = make_deployment(
+        "my-app", repo_url=INTERNAL_CODE_REPO_SCHEME, git_sha="b" * 40
+    )
+    client = _client_mock(current, updated)
+
+    with (
+        patch_project_client(client),
+        patch("llama_agents.cli.commands.deployment.is_git_repo", return_value=True),
+        patch(
+            "llama_agents.cli.commands.deployment.has_deployment_git_remote",
+            return_value=False,
+        ),
+        patch(
+            "llama_agents.cli.commands.deployment.configure_git_remote"
+        ) as configure_git_remote,
+        patch("llama_agents.cli.commands.deployment.push_to_remote") as push_to_remote,
+    ):
+        result = runner.invoke(app, ["deployments", "update", "my-app"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert "warning: not pushing code; no llamaagents-my-app remote" in result.stderr
+    assert "refreshing my-app" in result.stderr
+    configure_git_remote.assert_not_called()
+    push_to_remote.assert_not_called()
+    client.get_deployment.assert_called_once()
+    client.update_deployment.assert_called_once()
+
+
+def test_deployments_update_push_flag_forces_internal_git_push(
+    patched_auth: Any,
+) -> None:
+    runner = CliRunner()
+    current = make_deployment(
+        "my-app", repo_url=INTERNAL_CODE_REPO_SCHEME, git_sha="a" * 40
+    )
+    updated = make_deployment(
+        "my-app", repo_url=INTERNAL_CODE_REPO_SCHEME, git_sha="b" * 40
+    )
+    client = _client_mock(current, updated)
+
+    with (
+        patch_project_client(client),
+        patch("llama_agents.cli.commands.deployment.is_git_repo", return_value=True),
+        patch(
+            "llama_agents.cli.commands.deployment.has_deployment_git_remote",
+            return_value=False,
+        ),
+        patch(
+            "llama_agents.cli.commands.deployment.configure_git_remote",
+            return_value="llamaagents-my-app",
+        ) as configure_git_remote,
+        patch(
+            "llama_agents.cli.commands.deployment.push_to_remote",
+            return_value=_completed_process(),
+        ) as push_to_remote,
+    ):
+        result = runner.invoke(app, ["deployments", "update", "my-app", "--push"])
+
+    assert result.exit_code == 0, result.output
+    configure_git_remote.assert_called_once()
+    push_to_remote.assert_called_once()
     client.update_deployment.assert_called_once()
 
 
@@ -152,3 +228,26 @@ def test_deployments_update_no_push_skips_internal_git_push(
     push_to_remote.assert_not_called()
     client.get_deployment.assert_called_once()
     client.update_deployment.assert_called_once()
+
+
+def test_deployments_update_push_and_no_push_are_mutually_exclusive(
+    patched_auth: Any,
+) -> None:
+    runner = CliRunner()
+    current = make_deployment(
+        "my-app", repo_url=INTERNAL_CODE_REPO_SCHEME, git_sha="a" * 40
+    )
+    updated = make_deployment(
+        "my-app", repo_url=INTERNAL_CODE_REPO_SCHEME, git_sha="b" * 40
+    )
+    client = _client_mock(current, updated)
+
+    with patch_project_client(client):
+        result = runner.invoke(
+            app, ["deployments", "update", "my-app", "--push", "--no-push"]
+        )
+
+    assert result.exit_code != 0
+    assert "--push and --no-push are mutually exclusive" in result.output
+    client.get_deployment.assert_not_called()
+    client.update_deployment.assert_not_called()

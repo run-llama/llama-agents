@@ -1122,6 +1122,7 @@ def _patched_git_push(
     Yields the ``push_to_remote`` mock for assertions.
     """
     with (
+        patch(f"{_DEPLOY_CMD}.has_deployment_git_remote", return_value=True),
         patch(f"{_DEPLOY_CMD}.configure_git_remote", return_value="llamaagents-test"),
         patch(
             f"{_DEPLOY_CMD}.push_to_remote",
@@ -1288,7 +1289,7 @@ def test_apply_push_mode_create_does_save_then_push(
 def test_apply_push_mode_update_does_push_then_save(
     patched_auth: Any, tmp_path: Any
 ) -> None:
-    """Existing push-mode + desired push-mode → push first, then save."""
+    """Existing push-mode + linked repo → push first, then save."""
     runner = CliRunner()
     f = tmp_path / "deploy.yaml"
     f.write_text("name: my-app\nspec:\n  git_ref: feature-branch\n")
@@ -1302,6 +1303,79 @@ def test_apply_push_mode_update_does_push_then_save(
     assert "updated my-app" in result.output
     mock_push.assert_called_once()
     client.update_deployment.assert_called_once()
+
+
+def test_apply_push_mode_update_skips_push_when_remote_missing(
+    patched_auth: Any, tmp_path: Any
+) -> None:
+    """Existing push-mode + unlinked repo → save without pushing."""
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text("name: my-app\nspec:\n  git_ref: feature-branch\n")
+
+    client = _push_mode_client()
+    with (
+        patch_project_client(client),
+        patch(f"{_DEPLOY_CMD}.is_git_repo", return_value=True),
+        patch(f"{_DEPLOY_CMD}.has_deployment_git_remote", return_value=False),
+        patch(f"{_DEPLOY_CMD}.configure_git_remote") as configure,
+        patch(f"{_DEPLOY_CMD}.push_to_remote") as push,
+    ):
+        result = runner.invoke(app, ["deployments", "apply", "-f", str(f)])
+
+    assert result.exit_code == 0, result.output
+    assert "updated my-app" in result.output
+    assert "warning: not pushing code; no llamaagents-my-app remote" in result.stderr
+    configure.assert_not_called()
+    push.assert_not_called()
+    client.update_deployment.assert_called_once()
+
+
+def test_apply_push_mode_update_push_flag_forces_push(
+    patched_auth: Any, tmp_path: Any
+) -> None:
+    """``--push`` configures and pushes even when the remote is missing."""
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text("name: my-app\nspec:\n  git_ref: feature-branch\n")
+
+    client = _push_mode_client()
+    with (
+        patch_project_client(client),
+        patch(f"{_DEPLOY_CMD}.is_git_repo", return_value=True),
+        patch(f"{_DEPLOY_CMD}.has_deployment_git_remote", return_value=False),
+        patch(f"{_DEPLOY_CMD}.configure_git_remote", return_value="llamaagents-test"),
+        patch(
+            f"{_DEPLOY_CMD}.push_to_remote",
+            return_value=subprocess.CompletedProcess([], 0, stderr=b""),
+        ) as push,
+    ):
+        result = runner.invoke(app, ["deployments", "apply", "-f", str(f), "--push"])
+
+    assert result.exit_code == 0, result.output
+    assert "updated my-app" in result.output
+    push.assert_called_once()
+    client.update_deployment.assert_called_once()
+
+
+def test_apply_push_and_no_push_are_mutually_exclusive(
+    patched_auth: Any, tmp_path: Any
+) -> None:
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text("name: my-app\nspec:\n  git_ref: feature-branch\n")
+
+    client = _push_mode_client()
+    with patch_project_client(client):
+        result = runner.invoke(
+            app,
+            ["deployments", "apply", "-f", str(f), "--push", "--no-push"],
+        )
+
+    assert result.exit_code != 0
+    assert "--push and --no-push are mutually exclusive" in result.output
+    client.get_deployment.assert_not_called()
+    client.update_deployment.assert_not_called()
 
 
 def test_apply_push_then_save_push_failure_aborts(

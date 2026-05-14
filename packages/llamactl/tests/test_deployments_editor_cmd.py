@@ -372,6 +372,33 @@ def test_edit_opens_current_template_and_updates_saved_yaml(patched_auth: Any) -
     assert "updated my-app" in result.output
 
 
+def test_edit_push_mode_skips_push_when_remote_missing(patched_auth: Any) -> None:
+    runner = CliRunner()
+    existing = make_deployment("my-app", repo_url="internal://", git_ref="main")
+    client = _editor_client_mock(existing=existing)
+    saved_text = textwrap.dedent("""\
+        name: my-app
+        spec:
+          git_ref: v2
+    """)
+
+    with (
+        patch_project_client(client),
+        _patch_yaml_editor(saved_text),
+        patch(f"{_DEPLOY_CMD}.is_git_repo", return_value=True),
+        patch(f"{_DEPLOY_CMD}.has_deployment_git_remote", return_value=False),
+        patch(f"{_DEPLOY_CMD}.configure_git_remote") as configure,
+        patch(f"{_DEPLOY_CMD}.push_to_remote") as push,
+    ):
+        result = runner.invoke(app, ["deployments", "edit", "my-app"])
+
+    assert result.exit_code == 0, result.output
+    assert "warning: not pushing code; no llamaagents-my-app remote" in result.stderr
+    configure.assert_not_called()
+    push.assert_not_called()
+    client.update_deployment.assert_called_once()
+
+
 def test_edit_preserves_existing_secret_names_as_masks(patched_auth: Any) -> None:
     runner = CliRunner()
     existing = make_deployment("my-app", secret_names=["MY_SECRET"])
@@ -402,6 +429,57 @@ def test_edit_file_uses_update_intent_not_create(
     client.create_deployment.assert_not_called()
     client.update_deployment.assert_called_once()
     assert client.update_deployment.call_args[0][0] == "my-app"
+
+
+def test_edit_file_push_mode_skips_push_when_remote_missing(
+    patched_auth: Any, tmp_path: Path
+) -> None:
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text("name: my-app\nspec:\n  git_ref: v2\n")
+    client = _editor_client_mock(
+        existing=make_deployment("my-app", repo_url="internal://")
+    )
+
+    with (
+        patch_project_client(client),
+        patch(f"{_DEPLOY_CMD}.is_git_repo", return_value=True),
+        patch(f"{_DEPLOY_CMD}.has_deployment_git_remote", return_value=False),
+        patch(f"{_DEPLOY_CMD}.configure_git_remote") as configure,
+        patch(f"{_DEPLOY_CMD}.push_to_remote") as push,
+    ):
+        result = runner.invoke(app, ["deployments", "edit", "-f", str(f)])
+
+    assert result.exit_code == 0, result.output
+    assert "warning: not pushing code; no llamaagents-my-app remote" in result.stderr
+    configure.assert_not_called()
+    push.assert_not_called()
+    client.update_deployment.assert_called_once()
+
+
+def test_edit_file_push_flag_forces_push(patched_auth: Any, tmp_path: Path) -> None:
+    runner = CliRunner()
+    f = tmp_path / "deploy.yaml"
+    f.write_text("name: my-app\nspec:\n  git_ref: v2\n")
+    client = _editor_client_mock(
+        existing=make_deployment("my-app", repo_url="internal://")
+    )
+
+    with (
+        patch_project_client(client),
+        patch(f"{_DEPLOY_CMD}.is_git_repo", return_value=True),
+        patch(f"{_DEPLOY_CMD}.has_deployment_git_remote", return_value=False),
+        patch(f"{_DEPLOY_CMD}.configure_git_remote", return_value="llamaagents-test"),
+        patch(
+            f"{_DEPLOY_CMD}.push_to_remote",
+            return_value=subprocess.CompletedProcess([], 0, stderr=b""),
+        ) as push,
+    ):
+        result = runner.invoke(app, ["deployments", "edit", "-f", str(f), "--push"])
+
+    assert result.exit_code == 0, result.output
+    push.assert_called_once()
+    client.update_deployment.assert_called_once()
 
 
 def test_interactive_edit_uses_separate_clients_for_fetch_and_apply(
