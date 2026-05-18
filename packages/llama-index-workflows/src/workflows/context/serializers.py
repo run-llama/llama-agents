@@ -7,6 +7,7 @@ import base64
 import json
 import pickle
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from typing import Any
 
 from pydantic import BaseModel
@@ -59,6 +60,27 @@ class JsonSerializer(BaseSerializer):
         - [BaseSerializer][workflows.context.serializers.BaseSerializer]
         - [PickleSerializer][workflows.context.serializers.PickleSerializer]
     """
+
+    def __init__(
+        self,
+        *,
+        allowed_types: Iterable[type[Any] | str] | None = None,
+        allow_unknown_types: bool = True,
+    ) -> None:
+        self._allow_unknown_types = allow_unknown_types
+        self._allowed_type_names = {
+            t if isinstance(t, str) else f"{t.__module__}.{t.__qualname__}"
+            for t in (allowed_types or ())
+        }
+
+    def _validate_qualified_name(self, qualified_name: str) -> None:
+        if self._allow_unknown_types:
+            return
+        if qualified_name not in self._allowed_type_names:
+            raise ValueError(
+                f"Refusing to import disallowed workflow state type: {qualified_name}. "
+                "Pass it via allowed_types or use allow_unknown_types=True only for trusted state."
+            )
 
     def serialize_value(self, value: Any) -> Any:
         """
@@ -124,9 +146,11 @@ class JsonSerializer(BaseSerializer):
         """
         if isinstance(data, dict):
             if data.get("__is_pydantic") and data.get("qualified_name"):
+                self._validate_qualified_name(data["qualified_name"])
                 module_class = import_module_from_qualified_name(data["qualified_name"])
                 return module_class.model_validate(data["value"])
             elif data.get("__is_component") and data.get("qualified_name"):
+                self._validate_qualified_name(data["qualified_name"])
                 module_class = import_module_from_qualified_name(data["qualified_name"])
                 return module_class.from_dict(data["value"])
             return {k: self.deserialize_value(v) for k, v in data.items()}
