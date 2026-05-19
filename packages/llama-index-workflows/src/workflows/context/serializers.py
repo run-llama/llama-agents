@@ -65,21 +65,22 @@ class JsonSerializer(BaseSerializer):
         self,
         *,
         allowed_types: Iterable[type[Any] | str] | None = None,
-        allow_unknown_types: bool = True,
     ) -> None:
-        self._allow_unknown_types = allow_unknown_types
-        self._allowed_type_names = {
-            t if isinstance(t, str) else f"{t.__module__}.{t.__qualname__}"
-            for t in (allowed_types or ())
-        }
+        if allowed_types is None:
+            self._allowed_type_names: frozenset[str] | None = None
+        else:
+            self._allowed_type_names = frozenset(
+                t if isinstance(t, str) else f"{t.__module__}.{t.__qualname__}"
+                for t in allowed_types
+            )
 
     def _validate_qualified_name(self, qualified_name: str) -> None:
-        if self._allow_unknown_types:
+        if self._allowed_type_names is None:
             return
         if qualified_name not in self._allowed_type_names:
             raise ValueError(
                 f"Refusing to import disallowed workflow state type: {qualified_name}. "
-                "Pass it via allowed_types or use allow_unknown_types=True only for trusted state."
+                "Pass it via allowed_types to the JsonSerializer constructor."
             )
 
     def serialize_value(self, value: Any) -> Any:
