@@ -246,7 +246,12 @@ def _import_event_type(qualified_name: str) -> type[Event]:
     module_name, class_name = parts
 
     module = importlib.import_module(module_name)
-    return getattr(module, class_name)
+    resolved = getattr(module, class_name)
+    if not isinstance(resolved, type) or not issubclass(resolved, Event):
+        raise ValueError(
+            f"Resolved event type is not a subclass of workflows.events.Event: {qualified_name}"
+        )
+    return resolved
 
 
 @dataclass(frozen=True)

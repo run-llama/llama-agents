@@ -65,6 +65,7 @@ class JsonSerializer(BaseSerializer):
         self,
         *,
         allowed_types: Iterable[type[Any] | str] | None = None,
+        allow_unknown_types: bool | None = None,
     ) -> None:
         if allowed_types is None:
             self._allowed_type_names: frozenset[str] | None = None
@@ -74,13 +75,21 @@ class JsonSerializer(BaseSerializer):
                 for t in allowed_types
             )
 
+        # Backward compatibility:
+        # - When no allowlist is provided, allow unknown types by default.
+        # - When an allowlist is provided, fail closed by default.
+        if allow_unknown_types is None:
+            self._allow_unknown_types = allowed_types is None
+        else:
+            self._allow_unknown_types = allow_unknown_types
+
     def _validate_qualified_name(self, qualified_name: str) -> None:
-        if self._allowed_type_names is None:
+        if self._allow_unknown_types or self._allowed_type_names is None:
             return
         if qualified_name not in self._allowed_type_names:
             raise ValueError(
                 f"Refusing to import disallowed workflow state type: {qualified_name}. "
-                "Pass it via allowed_types to the JsonSerializer constructor."
+                "Pass it via allowed_types, or set allow_unknown_types=True only for trusted state."
             )
 
     def serialize_value(self, value: Any) -> Any:
@@ -149,10 +158,22 @@ class JsonSerializer(BaseSerializer):
             if data.get("__is_pydantic") and data.get("qualified_name"):
                 self._validate_qualified_name(data["qualified_name"])
                 module_class = import_module_from_qualified_name(data["qualified_name"])
+                if not isinstance(module_class, type) or not issubclass(
+                    module_class, BaseModel
+                ):
+                    raise ValueError(
+                        f"Refusing to deserialize non-Pydantic type: {data['qualified_name']}"
+                    )
                 return module_class.model_validate(data["value"])
             elif data.get("__is_component") and data.get("qualified_name"):
                 self._validate_qualified_name(data["qualified_name"])
                 module_class = import_module_from_qualified_name(data["qualified_name"])
+                if not isinstance(module_class, type) or not hasattr(
+                    module_class, "from_dict"
+                ):
+                    raise ValueError(
+                        f"Refusing to deserialize non-component type: {data['qualified_name']}"
+                    )
                 return module_class.from_dict(data["value"])
             return {k: self.deserialize_value(v) for k, v in data.items()}
         elif isinstance(data, list):

@@ -41,6 +41,11 @@ class MyEvent(Event):
     value: str = "hello"
 
 
+class _NoMessageError(Exception):
+    def __init__(self) -> None:
+        super().__init__("no message")
+
+
 # -- Serialization helper roundtrip tests --
 
 
@@ -69,10 +74,32 @@ def test_exception_roundtrip_unimportable() -> None:
     assert str(result) == "oops"
 
 
+def test_exception_roundtrip_non_exception_type_falls_back() -> None:
+    data = {"exception_type": "builtins.int", "exception_message": "nope"}
+    result = _deserialize_exception(data)
+    assert type(result) is Exception
+    assert str(result) == "nope"
+
+
+def test_exception_roundtrip_bad_ctor_uses_default_ctor() -> None:
+    data = {
+        "exception_type": f"{_NoMessageError.__module__}.{_NoMessageError.__qualname__}",
+        "exception_message": "ignored",
+    }
+    result = _deserialize_exception(data)
+    assert isinstance(result, _NoMessageError)
+    assert str(result) == "no message"
+
+
 def test_event_type_roundtrip() -> None:
     serialized = _serialize_event_type(MyEvent)
     result = _deserialize_event_type(serialized)
     assert result is MyEvent
+
+
+def test_event_type_rejects_non_event_type() -> None:
+    with pytest.raises(ValueError, match="Resolved event type is not a subclass"):
+        _deserialize_event_type("builtins.int")
 
 
 # -- Tick roundtrip tests --

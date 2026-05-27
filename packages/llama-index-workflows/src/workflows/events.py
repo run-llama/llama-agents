@@ -206,8 +206,14 @@ def _deserialize_exception(data: Any) -> Exception:
     exc_message = data["exception_message"]
     try:
         exc_cls = import_module_from_qualified_name(data["exception_type"])
-        return exc_cls(exc_message)
-    except (ImportError, AttributeError, ValueError):
+        if not isinstance(exc_cls, type) or not issubclass(exc_cls, BaseException):
+            raise TypeError("Resolved exception type is not an exception class")
+        try:
+            return exc_cls(exc_message)
+        except TypeError:
+            # Some exceptions do not accept a message; fall back to a default ctor.
+            return exc_cls()
+    except (ImportError, AttributeError, ValueError, TypeError):
         return Exception(exc_message)
 
 
@@ -243,8 +249,17 @@ def _serialize_event_type(event_type: type[Event]) -> str:
 
 def _deserialize_event_type(data: Any) -> type[Event]:
     if isinstance(data, type):
-        return data
-    return import_module_from_qualified_name(data)
+        if issubclass(data, Event):
+            return data
+        raise ValueError(
+            "Resolved event type is not a subclass of workflows.events.Event"
+        )
+    resolved = import_module_from_qualified_name(data)
+    if not isinstance(resolved, type) or not issubclass(resolved, Event):
+        raise ValueError(
+            "Resolved event type is not a subclass of workflows.events.Event"
+        )
+    return resolved
 
 
 SerializableEventType = Annotated[
