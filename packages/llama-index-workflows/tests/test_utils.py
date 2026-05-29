@@ -123,24 +123,28 @@ def test_validate_step_signature_no_events() -> None:
         validate_step_signature(inspect_signature(f))
 
 
-def test_validate_step_signature_too_many_params() -> None:
-    def f1(self, ev: OneTestEvent, foo: OneTestEvent) -> None:  # noqa: ANN001
-        pass
+def test_validate_step_signature_multiple_single_event_params_is_collect_mode() -> None:
+    # More than one single-event parameter is now a valid heterogeneous fan-in
+    # (collect-mode) signature, not a validation error.
+    def f1(self, ev: OneTestEvent, foo: AnotherTestEvent) -> StopEvent:  # noqa: ANN001
+        return StopEvent()
 
-    def f2(ev: OneTestEvent, foo: OneTestEvent) -> None:  # noqa: ANN001
-        pass
+    def f2(ev: OneTestEvent, foo: AnotherTestEvent) -> StopEvent:
+        return StopEvent()
 
-    with pytest.raises(
-        WorkflowValidationError,
-        match="Step signature must contain exactly one parameter of type Event but found 2.",
-    ):
-        validate_step_signature(inspect_signature(f1))
+    # Neither should raise.
+    validate_step_signature(inspect_signature(f1))
+    validate_step_signature(inspect_signature(f2))
 
-    with pytest.raises(
-        WorkflowValidationError,
-        match="Step signature must contain exactly one parameter of type Event but found 2.",
-    ):
-        validate_step_signature(inspect_signature(f2))
+
+def test_validate_step_signature_union_collect_param_rejected() -> None:
+    # A union-typed parameter alongside another event parameter is rejected:
+    # collect-mode parameters must each name a single event type for now.
+    def f(ev: OneTestEvent, foo: AnotherTestEvent | OneTestEvent) -> StopEvent:
+        return StopEvent()
+
+    with pytest.raises(WorkflowValidationError, match="single event type"):
+        validate_step_signature(inspect_signature(f))
 
 
 def test_get_steps_from() -> None:
