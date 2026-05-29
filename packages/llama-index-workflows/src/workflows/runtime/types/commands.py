@@ -63,6 +63,10 @@ class CommandFailWorkflow:
 @dataclass(frozen=True)
 class CommandPublishEvent:
     event: Event
+    # Namespace of the child execution that produced this event. Stamped onto
+    # the event at publish time so the stream can be filtered to root-only by
+    # default; ``()`` (the default) is the root/parent stream.
+    origin_namespace: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

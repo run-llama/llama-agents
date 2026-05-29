@@ -33,6 +33,7 @@ from workflows.events import (
     WorkflowFailedEvent,
     WorkflowIdleEvent,
     WorkflowTimedOutEvent,
+    set_event_origin_namespace,
 )
 from workflows.runtime.types.commands import (
     CommandCompleteRun,
@@ -297,6 +298,8 @@ class _ControlLoopRunner:
             await self.cleanup_tasks()
             return command.result
         elif isinstance(command, CommandPublishEvent):
+            if command.origin_namespace:
+                set_event_origin_namespace(command.event, command.origin_namespace)
             await self.adapter.write_to_event_stream(command.event)
             return None
         elif isinstance(command, CommandFailWorkflow):
@@ -809,7 +812,12 @@ def _process_step_result_tick(
                 # queue any subsequent events
                 # human input required are automatically published to the stream
                 if isinstance(result.result, InputRequiredEvent):
-                    commands.append(CommandPublishEvent(event=result.result))
+                    commands.append(
+                        CommandPublishEvent(
+                            event=result.result,
+                            origin_namespace=tick.step_id.namespace,
+                        )
+                    )
                 commands.append(
                     CommandQueueEvent(
                         event=result.result,
@@ -983,7 +991,12 @@ def _process_step_result_tick(
             else:
                 worker_state.collected_waiters.append(new_waiter)
                 if result.waiter_event:
-                    commands.append(CommandPublishEvent(event=result.waiter_event))
+                    commands.append(
+                        CommandPublishEvent(
+                            event=result.waiter_event,
+                            origin_namespace=tick.step_id.namespace,
+                        )
+                    )
                 if result.timeout is not None:
                     commands.append(
                         CommandScheduleWaiterTimeout(
@@ -1015,7 +1028,8 @@ def _process_step_result_tick(
                     input_event_name=str(type(tick.event)),
                     output_event_name=output_event_name,
                     worker_id=str(tick.worker_id),
-                )
+                ),
+                origin_namespace=tick.step_id.namespace,
             ),
         )
         worker_state.in_progress.remove(this_execution)
@@ -1078,7 +1092,8 @@ def _add_or_enqueue_event(
                     name=str(step_id),
                     input_event_name=type(event.event).__name__,
                     worker_id=str(id),
-                )
+                ),
+                origin_namespace=step_id.namespace,
             )
         )
     else:
@@ -1089,7 +1104,8 @@ def _add_or_enqueue_event(
                     name=str(step_id),
                     input_event_name=type(event.event).__name__,
                     worker_id="<enqueued>",
-                )
+                ),
+                origin_namespace=step_id.namespace,
             )
         )
         state.queue.append(event)

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Coroutine, Generic, TypeVar, cast
 from workflows.context.context_types import MODEL_T
 from workflows.context.state_store import StateStore
 from workflows.errors import WorkflowRuntimeError
+from workflows.events import set_event_origin_namespace
 from workflows.retry_policy import RetryInfo
 from workflows.runtime.types.results import (
     AddCollectedEvent,
@@ -221,6 +222,16 @@ class InternalContext(Generic[MODEL_T]):
     def write_event_to_stream(self, ev: Event | None) -> None:
         """Write an event to the published event stream."""
         if ev is not None:
+            # Tag the event with the emitting step's namespace so child streams
+            # can be filtered out by default (and surfaced via
+            # ``stream_events(include_children=True)``). Same contextvar source
+            # ``send_event`` reads; root steps leave the default ``()``.
+            try:
+                namespace = StepWorkerStateContextVar.get().namespace
+            except LookupError:
+                namespace = ()
+            if namespace:
+                set_event_origin_namespace(ev, namespace)
             self._execute_task(self._internal_adapter.write_to_event_stream(ev))
 
     def retry_info(self) -> RetryInfo:
