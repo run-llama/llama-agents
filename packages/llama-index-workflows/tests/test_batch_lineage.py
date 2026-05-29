@@ -26,6 +26,7 @@ from workflows.runtime.types.commands import (
     CommandQueueEvent,
     CommandRunWorker,
 )
+from workflows.plugins.basic import setting_run_id
 from workflows.runtime.types.internal_state import BrokerState
 from workflows.runtime.types.results import RetryAttempt
 from workflows.runtime.types.step_function import as_step_worker_functions
@@ -247,53 +248,55 @@ async def _drive_reducer(
     pending: list[WorkflowTick] = [TickAddEvent(event=StartEvent())]
     recorded: list[WorkflowTick] = []
     now = 1000.0  # fixed; batch ids never depend on wall-clock
-    for _ in range(1000):  # iteration cap: a logic bug fails fast, not hangs
-        if not pending:
-            break
-        tick = pending.pop(0)
-        recorded.append(tick)
-        state, commands = _cl._reduce_tick(tick, state, now, run_id)
-        for cmd in commands:
-            if isinstance(cmd, CommandQueueEvent):
-                pending.append(
-                    TickAddEvent(
+    # Step workers create an internal Context, which needs the run id in context.
+    with setting_run_id(run_id):
+        for _ in range(1000):  # iteration cap: a logic bug fails fast, not hangs
+            if not pending:
+                break
+            tick = pending.pop(0)
+            recorded.append(tick)
+            state, commands = _cl._reduce_tick(tick, state, now, run_id)
+            for cmd in commands:
+                if isinstance(cmd, CommandQueueEvent):
+                    pending.append(
+                        TickAddEvent(
+                            event=cmd.event,
+                            step_name=cmd.step_name,
+                            attempts=cmd.attempts,
+                            first_attempt_at=cmd.first_attempt_at,
+                            recovery_counts=dict(cmd.recovery_counts),
+                            batch_stack=cmd.batch_stack,
+                        )
+                    )
+                elif isinstance(cmd, CommandCloseBatch):
+                    pending.append(
+                        TickBatchClosed(
+                            batch_id=cmd.batch_id,
+                            step_name=cmd.step_name,
+                            batch_stack=cmd.batch_stack,
+                        )
+                    )
+                elif isinstance(cmd, CommandRunWorker):
+                    worker = next(
+                        w
+                        for w in state.workers[cmd.step_name].in_progress
+                        if w.worker_id == cmd.id
+                    )
+                    result = await step_fns[cmd.step_name](
+                        state=worker.shared_state,
+                        step_name=cmd.step_name,
                         event=cmd.event,
-                        step_name=cmd.step_name,
-                        attempts=cmd.attempts,
-                        first_attempt_at=cmd.first_attempt_at,
-                        recovery_counts=dict(cmd.recovery_counts),
-                        batch_stack=cmd.batch_stack,
+                        workflow=wf,
+                        retry=RetryAttempt(),
                     )
-                )
-            elif isinstance(cmd, CommandCloseBatch):
-                pending.append(
-                    TickBatchClosed(
-                        batch_id=cmd.batch_id,
-                        step_name=cmd.step_name,
-                        batch_stack=cmd.batch_stack,
+                    pending.append(
+                        TickStepResult(
+                            step_name=cmd.step_name,
+                            worker_id=cmd.id,
+                            event=cmd.event,
+                            result=result,
+                        )
                     )
-                )
-            elif isinstance(cmd, CommandRunWorker):
-                worker = next(
-                    w
-                    for w in state.workers[cmd.step_name].in_progress
-                    if w.worker_id == cmd.id
-                )
-                result = await step_fns[cmd.step_name](
-                    state=worker.shared_state,
-                    step_name=cmd.step_name,
-                    event=cmd.event,
-                    workflow=wf,
-                    retry=RetryAttempt(),
-                )
-                pending.append(
-                    TickStepResult(
-                        step_name=cmd.step_name,
-                        worker_id=cmd.id,
-                        event=cmd.event,
-                        result=result,
-                    )
-                )
     return state, recorded
 
 
