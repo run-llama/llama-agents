@@ -33,6 +33,9 @@ class CommandRunWorker:
 class CommandQueueEvent:
     event: Event
     step_id: StepId | None = None
+    # Namespace of the step (or boundary) that emitted this event; threaded into
+    # the resulting TickAddEvent so type-routing stays scoped to the namespace.
+    origin_namespace: tuple[str, ...] = ()
     delay: float | None = None
     attempts: int | None = None
     first_attempt_at: float | None = None

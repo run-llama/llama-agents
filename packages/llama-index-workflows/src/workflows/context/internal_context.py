@@ -159,10 +159,14 @@ class InternalContext(Generic[MODEL_T]):
             self._workflow._validate_valid_step_message(step, message)
 
         recovery_counts: dict[str, int] = {}
+        namespace: tuple[str, ...] = ()
         try:
-            recovery_counts = dict(
-                StepWorkerStateContextVar.get().retry.recovery_counts
-            )
+            step_ctx = StepWorkerStateContextVar.get()
+            recovery_counts = dict(step_ctx.retry.recovery_counts)
+            # Inherit the emitting step's namespace so the event routes within
+            # the same child (or, for a targeted send, to the named step in this
+            # namespace rather than a root step).
+            namespace = step_ctx.namespace
         except LookupError:
             pass
 
@@ -170,7 +174,8 @@ class InternalContext(Generic[MODEL_T]):
             self._internal_adapter.send_event(
                 TickAddEvent(
                     event=message,
-                    step_id=StepId.root(step) if step is not None else None,
+                    step_id=StepId(namespace, step) if step is not None else None,
+                    origin_namespace=namespace,
                     recovery_counts=recovery_counts,
                 )
             )

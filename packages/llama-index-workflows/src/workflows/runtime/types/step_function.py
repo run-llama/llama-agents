@@ -111,6 +111,7 @@ class StepWorkerFunction(Protocol):
         event: Event,
         workflow: Workflow,
         retry: RetryAttempt = RetryAttempt(),
+        namespace: tuple[str, ...] = (),
     ) -> Awaitable[list[StepFunctionResult]]: ...
 
 
@@ -166,6 +167,7 @@ def as_step_worker_function(
         event: Event,
         workflow: Workflow,
         retry: RetryAttempt = RetryAttempt(),
+        namespace: tuple[str, ...] = (),
     ) -> list[StepFunctionResult]:
         from workflows.context.context import Context
 
@@ -177,6 +179,7 @@ def as_step_worker_function(
                 state=state,
                 returns=returns,
                 retry=retry,
+                namespace=namespace,
             )
         )
         ctx_token = InternalContextVar.set(weakref.ref(internal_context))

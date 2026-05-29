@@ -56,6 +56,11 @@ class TickAddEvent(BaseModel):
     type: Literal["add_event"] = "add_event"
     event: SerializableEvent
     step_id: StepId | None = Field(default=None, validation_alias=_STEP_ID_ALIAS)
+    # Namespace of the step (or boundary) that emitted this event. Type-routing
+    # is scoped to this namespace so events emitted inside a child stay in the
+    # child; ``()`` (the default) is the root namespace, preserving the
+    # pre-child wire format for old journals.
+    origin_namespace: tuple[str, ...] = ()
     attempts: int | None = None
     first_attempt_at: float | None = None
     last_exception: SerializableOptionalException = None

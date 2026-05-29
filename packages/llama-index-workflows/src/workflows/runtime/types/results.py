@@ -61,6 +61,10 @@ class StepWorkerContext:
     # add commands here to mutate the internal worker state after step execution
     returns: Returns
     retry: RetryAttempt = dataclasses.field(default_factory=RetryAttempt)
+    # The namespace of the step that is currently executing. Root steps run at
+    # ``()``; a child-workflow step runs under its declared field path. Read by
+    # ``InternalContext.send_event`` so events a child emits stay namespaced.
+    namespace: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

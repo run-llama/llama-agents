@@ -229,6 +229,7 @@ class _ControlLoopRunner:
                     step_name=command.step_id.name,
                     event=command.event,
                     workflow=instance,
+                    namespace=command.step_id.namespace,
                     retry=RetryAttempt(
                         retry_number=worker.attempts,
                         first_attempt_at=worker.first_attempt_at,
@@ -272,6 +273,7 @@ class _ControlLoopRunner:
             event = TickAddEvent(
                 event=command.event,
                 step_id=command.step_id,
+                origin_namespace=command.origin_namespace,
                 attempts=command.attempts,
                 first_attempt_at=command.first_attempt_at,
                 last_exception=command.last_exception,
@@ -493,12 +495,16 @@ class _ControlLoopRunner:
                             "Worker task failed unexpectedly", exc_info=True
                         )
                     else:
-                        # Check if this worker returned a StopEvent - if so,
-                        # cancel other workers immediately to prevent them from
-                        # writing to the event stream after workflow completion
+                        # Check if this worker returned a *root* StopEvent - if
+                        # so, cancel other workers immediately to prevent them
+                        # from writing to the event stream after workflow
+                        # completion. A child's StopEvent is only a boundary
+                        # event, so it must not cancel the parent's workers.
                         for res in tick_result.result:
-                            if isinstance(res, StepWorkerResult) and isinstance(
-                                res.result, StopEvent
+                            if (
+                                isinstance(res, StepWorkerResult)
+                                and isinstance(res.result, StopEvent)
+                                and tick_result.step_id.is_root
                             ):
                                 await self.cleanup_tasks()
                                 break
@@ -768,8 +774,8 @@ def _process_step_result_tick(
     for result in tick.result:
         if isinstance(result, StepWorkerResult):
             output_event_name = str(type(result.result))
-            if isinstance(result.result, StopEvent):
-                # huzzah! The workflow has completed
+            if isinstance(result.result, StopEvent) and tick.step_id.is_root:
+                # huzzah! The (root) workflow has completed
                 commands.append(
                     CommandPublishEvent(event=result.result)
                 )  # stop event always published to the stream
@@ -779,6 +785,26 @@ def _process_step_result_tick(
                     worker.collected_events.clear()
                     worker.collected_waiters.clear()
                 commands.append(CommandCompleteRun(result=result.result))
+            elif isinstance(result.result, StopEvent):
+                # A child's StopEvent is a *boundary* event, not a run terminal:
+                # terminate the child namespace (clear its buffers) and re-inject
+                # the event into the parent namespace as an ordinary routable
+                # event. The run keeps running; only the root StopEvent above
+                # completes it. The event is NOT published to the stream — that
+                # would signal completion to root stream consumers (Phase 5 adds
+                # opt-in child streaming).
+                parent_namespace = tick.step_id.namespace[:-1]
+                for child_step_id, worker in state.workers.items():
+                    if child_step_id.namespace == tick.step_id.namespace:
+                        worker.collected_events.clear()
+                        worker.collected_waiters.clear()
+                commands.append(
+                    CommandQueueEvent(
+                        event=result.result,
+                        origin_namespace=parent_namespace,
+                        recovery_counts=dict(this_execution.recovery_counts),
+                    )
+                )
             elif isinstance(result.result, Event):
                 # queue any subsequent events
                 # human input required are automatically published to the stream
@@ -787,6 +813,7 @@ def _process_step_result_tick(
                 commands.append(
                     CommandQueueEvent(
                         event=result.result,
+                        origin_namespace=tick.step_id.namespace,
                         recovery_counts=dict(this_execution.recovery_counts),
                     )
                 )
@@ -1069,6 +1096,31 @@ def _add_or_enqueue_event(
     return commands
 
 
+def _event_routes_to(
+    origin_namespace: tuple[str, ...],
+    target_namespace: tuple[str, ...],
+    event: Event,
+) -> bool:
+    """Whether a type-routed event from ``origin_namespace`` reaches a step in
+    ``target_namespace``.
+
+    An event stays within the namespace that emitted it, except that a
+    ``StartEvent`` may cross *down* into a direct child namespace (that is how a
+    parent triggers a child). A child's ``StopEvent`` crossing back *up* is
+    handled by re-injecting it with the parent namespace as its origin, so it is
+    just an ordinary same-namespace route here.
+    """
+    if target_namespace == origin_namespace:
+        return True
+    if (
+        isinstance(event, StartEvent)
+        and len(target_namespace) == len(origin_namespace) + 1
+        and target_namespace[: len(origin_namespace)] == origin_namespace
+    ):
+        return True
+    return False
+
+
 def _process_add_event_tick(
     tick: TickAddEvent, init: BrokerState, now_seconds: float
 ) -> tuple[BrokerState, list[WorkflowCommand]]:
@@ -1084,6 +1136,14 @@ def _process_add_event_tick(
     # as a normal accepted event (which would cause duplicate processing).
     waiter_resolved_steps: set[StepId] = set()
     for step_id, step_config in state.config.steps.items():
+        # Scope waiter resolution to the event's namespace (exact step when the
+        # tick is targeted), so a child's waiter is only woken by events in its
+        # own namespace.
+        if tick.step_id is not None:
+            if tick.step_id != step_id:
+                continue
+        elif not _event_routes_to(tick.origin_namespace, step_id.namespace, tick.event):
+            continue
         wait_conditions = state.workers[step_id].collected_waiters
         for wait_condition in wait_conditions:
             is_match = type(tick.event) is wait_condition.waiting_for_event
@@ -1109,7 +1169,13 @@ def _process_add_event_tick(
         if step_id in waiter_resolved_steps:
             continue
         is_accepted = type(tick.event) in step_config.accepted_events
-        if is_accepted and (tick.step_id is None or tick.step_id == step_id):
+        if tick.step_id is not None:
+            routes = tick.step_id == step_id
+        else:
+            routes = _event_routes_to(
+                tick.origin_namespace, step_id.namespace, tick.event
+            )
+        if is_accepted and routes:
             handled = True
             subcommands = _add_or_enqueue_event(
                 EventAttempt(

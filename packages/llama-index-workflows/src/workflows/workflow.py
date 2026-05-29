@@ -702,8 +702,23 @@ class Workflow(metaclass=WorkflowMeta):
         )
 
         step_configs = self._step_configs()
+        # A child is "triggered" when some parent step emits its StartEvent; only
+        # then does it form a boundary in the parent graph (StartEvent crosses
+        # out, StopEvent crosses back in). Children attached but never triggered
+        # are inert and excluded so they don't trip reachability.
+        parent_return_types: set[type] = set()
+        for cfg in step_configs.values():
+            parent_return_types.update(cfg.return_types)
+        child_boundaries = [
+            (child._start_event_class, child._stop_event_class)
+            for child in self._child_workflows.values()
+            if child._start_event_class in parent_return_types
+        ]
         result = _validate_workflow(
-            step_configs, self.__class__.__name__, self._skip_graph_checks
+            step_configs,
+            self.__class__.__name__,
+            self._skip_graph_checks,
+            child_boundaries=child_boundaries,
         )
         self._start_event_class = result.start_event_class
         self._stop_event_class = result.stop_event_class
