@@ -9,6 +9,7 @@ import sys
 from typing import (
     TYPE_CHECKING,
     Any,
+    cast,
     get_args,
 )
 
@@ -424,6 +425,25 @@ class Workflow(metaclass=WorkflowMeta):
         return {**get_steps_from_class(cls), **cls._step_functions}
 
     @classmethod
+    def _get_namespaced_steps_from_class(cls) -> dict[StepId, StepFunction]:
+        """Static counterpart to :meth:`_get_namespaced_steps`.
+
+        Walks declared child-workflow *types* (from class annotations)
+        recursively, with no instantiation, so the merged namespaced graph is
+        statically computable for validation and visualization. Yields the same
+        :class:`StepId` set as the runtime instance walk when every declared
+        child slot is wired.
+        """
+        result: dict[StepId, StepFunction] = {
+            StepId((), name): func for name, func in cls._get_steps_from_class().items()
+        }
+        for field_name, child_type in cls._get_child_workflow_slots().items():
+            child_cls = cast("type[Workflow]", child_type)
+            for child_id, func in child_cls._get_namespaced_steps_from_class().items():
+                result[StepId((field_name, *child_id.namespace), child_id.name)] = func
+        return result
+
+    @classmethod
     def add_step(cls, func: StepFunction) -> None:
         """
         Adds a free function as step for this workflow instance.
@@ -450,19 +470,32 @@ class Workflow(metaclass=WorkflowMeta):
         """Returns this workflow's steps keyed by namespaced :class:`StepId`.
 
         This is the runtime enumeration that feeds ``BrokerState.from_workflow``
-        and the per-run worker table. Root steps live at namespace ``()``; child
-        steps (added in a later phase) namespace under their declared field path.
+        and the per-run worker table. Root steps live at namespace ``()``; each
+        attached child's steps are namespaced under its declared field path, and
+        grandchildren under a flat compound tuple (``(child, grandchild)``).
         """
-        return {StepId((), name): func for name, func in self._get_steps().items()}
+        self._ensure_children_attached()
+        result: dict[StepId, StepFunction] = {
+            StepId((), name): func for name, func in self._get_steps().items()
+        }
+        for field_name, child in self._child_workflows.items():
+            for child_id, func in child._get_namespaced_steps().items():
+                result[StepId((field_name, *child_id.namespace), child_id.name)] = func
+        return result
 
     def _namespace_instances(self) -> dict[tuple[str, ...], Workflow]:
         """Map each namespace path to the workflow instance that owns its steps.
 
         Dispatch resolves the owning instance via this map and binds the bare
-        step name against it. Root maps to ``self``; child namespaces (added in
-        a later phase) map to the attached child instances.
+        step name against it. Root maps to ``self``; each child namespace maps to
+        the attached child instance (grandchildren under a flat compound tuple).
         """
-        return {(): self}
+        self._ensure_children_attached()
+        result: dict[tuple[str, ...], Workflow] = {(): self}
+        for field_name, child in self._child_workflows.items():
+            for ns, inst in child._namespace_instances().items():
+                result[(field_name, *ns)] = inst
+        return result
 
     def _get_start_event_instance(
         self, start_event: StartEvent | None, **kwargs: Any
