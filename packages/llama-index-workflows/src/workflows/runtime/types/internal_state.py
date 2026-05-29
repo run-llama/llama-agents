@@ -43,6 +43,19 @@ class BrokerState:
     is_running: bool
     config: BrokerConfig
     workers: dict[str, InternalStepWorkerState]
+    # Monotonic per-run counter used to mint deterministic batch ids. Incremented
+    # in the reducer when a fan-out batch is opened. Because the reducer is pure
+    # and replayed tick-by-tick, the same fan-out reproduces the same counter
+    # value, hence the same BatchId, on replay. (Central replay-determinism risk.)
+    batch_seq: int = 0
+    # Open fan-out batches -> count of members still flowing toward their collect
+    # step (not yet delivered or dead). A batch closes when this reaches 0.
+    # Tracks closure by branch termination, not events received (per proposal).
+    batch_pending: dict[str, int] = field(default_factory=dict)
+    # Open fan-out batches -> the producer's trigger stack (the stack the batch
+    # id was pushed onto). Used to stamp the close tick so collect outputs inherit
+    # the correct (popped) stack, and to support multi-level nesting.
+    batch_origin: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     def deepcopy(self) -> BrokerState:
         """
@@ -55,6 +68,9 @@ class BrokerState:
                 name: worker_state._deepcopy()
                 for name, worker_state in self.workers.items()
             },
+            batch_seq=self.batch_seq,
+            batch_pending=dict(self.batch_pending),
+            batch_origin=dict(self.batch_origin),
         )
 
     @staticmethod
@@ -81,6 +97,7 @@ class BrokerState:
                     in_progress=[],
                     collected_events={},
                     collected_waiters=[],
+                    batch_buffers={},
                 )
                 for name, step_func in workflow._get_steps().items()
             },
@@ -115,6 +132,7 @@ class BrokerState:
                     last_exception=attempt.last_exception,
                     last_failed_at=attempt.last_failed_at,
                     recovery_counts=dict(attempt.recovery_counts),
+                    batch_stack=list(attempt.batch_stack),
                 )
                 for attempt in worker_state.queue
             ]
@@ -128,6 +146,12 @@ class BrokerState:
             collected_events = {
                 buffer_id: [serializer.serialize(ev) for ev in events]
                 for buffer_id, events in worker_state.collected_events.items()
+            }
+
+            # Serialize batch-lineage fan-in buffers
+            batch_buffers = {
+                batch_id: [serializer.serialize(ev) for ev in events]
+                for batch_id, events in worker_state.batch_buffers.items()
             }
 
             # Serialize waiters
@@ -150,6 +174,7 @@ class BrokerState:
                 in_progress=in_progress,
                 collected_events=collected_events,
                 collected_waiters=waiters,
+                batch_buffers=batch_buffers,
             )
 
         return SerializedContext(
@@ -157,6 +182,9 @@ class BrokerState:
             state={},  # State is filled separately by the state store
             is_running=self.is_running,
             workers=workers_dict,
+            batch_seq=self.batch_seq,
+            batch_pending=dict(self.batch_pending),
+            batch_origin={k: list(v) for k, v in self.batch_origin.items()},
         )
 
     @staticmethod
@@ -174,6 +202,11 @@ class BrokerState:
         # Unfortunately, important to preserve this state, since the workflow needs to know this to decide
         # whether to create a start_event from kwargs (it only constructs and passes a start event if not already running)
         base_state.is_running = serialized.is_running
+        base_state.batch_seq = serialized.batch_seq
+        base_state.batch_pending = dict(serialized.batch_pending)
+        base_state.batch_origin = {
+            k: tuple(v) for k, v in serialized.batch_origin.items()
+        }
 
         # Restore worker state (queues, collected events, waiters)
         # We do this regardless of is_running state so workflows can resume from where they left off
@@ -192,6 +225,7 @@ class BrokerState:
                     last_exception=attempt.last_exception,
                     last_failed_at=attempt.last_failed_at,
                     recovery_counts=dict(attempt.recovery_counts),
+                    batch_stack=tuple(attempt.batch_stack),
                 )
                 for attempt in worker_data.queue
             ]
@@ -211,6 +245,12 @@ class BrokerState:
             worker.collected_events = {
                 buffer_id: [serializer.deserialize(ev) for ev in events]
                 for buffer_id, events in worker_data.collected_events.items()
+            }
+
+            # Restore batch-lineage fan-in buffers
+            worker.batch_buffers = {
+                batch_id: [serializer.deserialize(ev) for ev in events]
+                for batch_id, events in worker_data.batch_buffers.items()
             }
 
             # Restore waiters
@@ -306,6 +346,8 @@ class EventAttempt:
     last_exception: Exception | None = None
     last_failed_at: float | None = None
     recovery_counts: dict[str, int] = field(default_factory=dict)
+    # Batch lineage stack of the event being processed (innermost id last).
+    batch_stack: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass()
@@ -329,6 +371,10 @@ class InternalStepWorkerState:
     in_progress: list[InProgressState]
     collected_events: dict[str, list[Event]]
     collected_waiters: list[StepWorkerWaiter]
+    # Batch-lineage fan-in (L2): events buffered per fan-out batch id, awaiting
+    # the matching TickBatchClosed. Keyed by innermost batch id. Only populated
+    # for steps with a ``batch_collect_param``.
+    batch_buffers: dict[str, list[Event]] = field(default_factory=dict)
 
     def _deepcopy(self) -> InternalStepWorkerState:
         return InternalStepWorkerState(
@@ -337,6 +383,7 @@ class InternalStepWorkerState:
             in_progress=[x._deepcopy() for x in self.in_progress],
             collected_events={k: list(v) for k, v in self.collected_events.items()},
             collected_waiters=[dataclasses.replace(x) for x in self.collected_waiters],
+            batch_buffers={k: list(v) for k, v in self.batch_buffers.items()},
         )
 
 
@@ -368,6 +415,9 @@ class InProgressState:
     last_exception: Exception | None = None
     last_failed_at: float | None = None
     recovery_counts: dict[str, int] = field(default_factory=dict)
+    # Batch lineage stack of the trigger event for this execution. Output events
+    # inherit this (1:1) or extend it (fan-out push) at result-processing time.
+    batch_stack: tuple[str, ...] = field(default_factory=tuple)
 
     def _deepcopy(self) -> InProgressState:
         return InProgressState(
@@ -379,4 +429,5 @@ class InProgressState:
             last_exception=self.last_exception,
             last_failed_at=self.last_failed_at,
             recovery_counts=dict(self.recovery_counts),
+            batch_stack=self.batch_stack,
         )
