@@ -794,15 +794,17 @@ def _close_batch(
 
 
 def _has_fire_on_partial_consumer(state: BrokerState, producer_step: str) -> bool:
-    """True if some batch-collect step accepts this producer's output type and
-    opts into on_partial="fire". Used to decide abort-vs-fail when a fan-out
-    step exhausts its retries mid-stream."""
-    produced_types = set(state.workers[producer_step].config.return_types)
+    """True if a batch-collect step at this producer's batch level opts into
+    on_partial="fire". Used to decide abort-vs-fail when a fan-out step exhausts
+    its retries mid-stream. The consumer may be several 1:1 steps downstream, so
+    membership is checked against the same-level reachable event types (not just
+    the producer's direct outputs)."""
+    reachable = _same_level_event_types(state, producer_step)
     for worker in state.workers.values():
         bcp = worker.config.batch_collect_param
         if bcp is None or worker.config.on_partial != "fire":
             continue
-        if bcp[1] in produced_types:
+        if bcp[1] in reachable:
             return True
     return False
 

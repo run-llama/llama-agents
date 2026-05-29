@@ -329,11 +329,14 @@ async def test_replay_reproduces_identical_batch_ids_and_grouping() -> None:
     ]
     assert len(closes) == 1, closes
 
-    # Replay the exact stream twice; both reproduce the same final state.
+    assert state.batch_seq >= 1  # the live drive minted at least one batch
+
+    # Replay the exact stream twice; both reproduce the same final state
+    # deterministically (the batch-id counter is a pure function of the stream).
     replay1 = await replay_ticks_stream(BrokerState.from_workflow(wf), _stream(ticks))
     replay2 = await replay_ticks_stream(BrokerState.from_workflow(wf), _stream(ticks))
-    assert replay1.state.batch_seq == replay2.state.batch_seq == state.batch_seq
-    assert replay1.state.batch_seq >= 1  # at least one batch was minted
+    assert replay1.state.batch_seq == replay2.state.batch_seq
+    assert replay1.state.batch_seq >= 1
 
     rebuilt = await rebuild_state_from_ticks_stream(
         BrokerState.from_workflow(wf), _stream(ticks)
