@@ -13,6 +13,7 @@ from typing import AsyncIterator
 
 import pytest
 from workflows import Context, Workflow, step
+from workflows.errors import WorkflowRuntimeError
 from workflows.events import Event, StartEvent, StopEvent
 from workflows.retry_policy import ConstantDelayRetryPolicy
 from workflows.runtime import control_loop as _cl
@@ -34,11 +35,6 @@ from workflows.runtime.types.ticks import (
     TickStepResult,
     WorkflowTick,
 )
-
-# Each test gets its own event loop. The session default is a module-scoped
-# loop; with it, a finished run's lingering pull task can survive into the next
-# test and intermittently hang it under xdist.
-pytestmark = pytest.mark.asyncio(loop_scope="function")
 
 
 class Task(Event):
@@ -69,6 +65,18 @@ async def _stream(ticks: list[WorkflowTick]) -> AsyncIterator[WorkflowTick]:
         yield t
 
 
+async def _run(wf: Workflow) -> object:
+    """Run a workflow to completion, draining its event stream first.
+
+    Draining the published-event stream lets the in-memory runtime's pull task
+    finish cleanly so it does not linger on a shared event loop between tests.
+    """
+    handler = wf.run()
+    async for _ in handler.stream_events():
+        pass
+    return await handler
+
+
 async def test_static_list_producer_join_fires_once_with_all() -> None:
     """`join(events: list[Done])` fires once with the full batch, no ctx.store."""
 
@@ -85,7 +93,7 @@ async def test_static_list_producer_join_fires_once_with_all() -> None:
         async def join(self, events: list[Done]) -> StopEvent:
             return StopEvent(result=sorted(e.n for e in events))
 
-    result = await FanOut(timeout=10).run()
+    result = await _run(FanOut(timeout=10))
     assert result == [0, 1, 2, 3, 4]
 
 
@@ -106,7 +114,7 @@ async def test_async_generator_producer_join_fires_once() -> None:
         async def join(self, events: list[Done]) -> StopEvent:
             return StopEvent(result=sorted(e.n for e in events))
 
-    result = await FanOut(timeout=10).run()
+    result = await _run(FanOut(timeout=10))
     assert result == [0, 10, 20, 30]
 
 
@@ -129,7 +137,7 @@ async def test_join_fires_exactly_once() -> None:
             calls.append(len(events))
             return StopEvent(result=len(events))
 
-    result = await FanOut(timeout=10).run()
+    result = await _run(FanOut(timeout=10))
     assert result == 3
     assert calls == [3]
 
@@ -150,7 +158,7 @@ async def test_empty_batch_fires_join_once_with_empty_list() -> None:
         async def join(self, events: list[Done]) -> StopEvent:
             return StopEvent(result=["empty", len(events)])
 
-    result = await FanOut(timeout=10).run()
+    result = await _run(FanOut(timeout=10))
     assert result == ["empty", 0]
 
 
@@ -173,7 +181,7 @@ async def test_branch_death_join_sees_surviving_subset() -> None:
         async def join(self, events: list[Done]) -> StopEvent:
             return StopEvent(result=sorted(e.n for e in events))
 
-    result = await FanOut(timeout=10).run()
+    result = await _run(FanOut(timeout=10))
     assert result == [1, 3, 5]
 
 
@@ -202,7 +210,7 @@ async def test_multi_level_fan_out_joins_at_innermost_level() -> None:
         async def per_outer(self, events: list[InnerSummary]) -> StopEvent:
             return StopEvent(result=sorted((s.outer, s.total) for s in events))
 
-    result = await FanOut(timeout=10).run()
+    result = await _run(FanOut(timeout=10))
     # Three outer tasks, each producing a 2-member inner batch.
     assert result == [(0, 2), (1, 2), (2, 2)]
 
@@ -385,7 +393,7 @@ async def test_batch_aborted_fire_fires_join_with_partial() -> None:
 
     wf = FanOut(timeout=10)
     wf.join._step_config.on_partial = "fire"
-    result = await wf.run()
+    result = await _run(wf)
     # The two pre-failure tasks reached work and the join fired with them.
     assert result[0] == "partial"
     assert result[1] == [0, 1]
@@ -409,7 +417,7 @@ async def test_async_generator_with_context_param() -> None:
         async def join(self, events: list[Done]) -> StopEvent:
             return StopEvent(result=len(events))
 
-    result = await FanOut(timeout=10).run()
+    result = await _run(FanOut(timeout=10))
     assert result == 3
 
 
@@ -430,5 +438,5 @@ async def test_no_ctx_store_threading_needed() -> None:
         async def join(self, events: list[Done]) -> StopEvent:
             return StopEvent(result=len(events))
 
-    result = await FanOut(timeout=10).run()
+    result = await _run(FanOut(timeout=10))
     assert result == 7
