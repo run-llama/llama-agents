@@ -1453,6 +1453,40 @@ def _fire_batch_collect(
     return commands
 
 
+def _reachable_event_types(
+    state: BrokerState, producer_step: str
+) -> set[type[Event]]:
+    """Event types transitively reachable downstream of ``producer_step``.
+
+    Follows the static step graph (a step's ``return_types`` feed steps whose
+    ``accepted_events`` include them). Used to decide which batch-collect steps
+    "own" a batch minted by ``producer_step`` even when no member reached them
+    (empty batch / every branch died): the collect step's element type must be
+    reachable from the producer's outputs.
+    """
+    reachable: set[type[Event]] = set()
+    frontier: list[type[Event]] = [
+        t
+        for t in state.workers[producer_step].config.return_types
+        if isinstance(t, type) and issubclass(t, Event)
+    ]
+    while frontier:
+        ev_type = frontier.pop()
+        if ev_type in reachable:
+            continue
+        reachable.add(ev_type)
+        for worker in state.workers.values():
+            if ev_type in worker.config.accepted_events:
+                for out in worker.config.return_types:
+                    if (
+                        isinstance(out, type)
+                        and issubclass(out, Event)
+                        and out not in reachable
+                    ):
+                        frontier.append(out)
+    return reachable
+
+
 def _process_batch_closed_tick(
     tick: TickBatchClosed, init: BrokerState, now_seconds: float
 ) -> tuple[BrokerState, list[WorkflowCommand]]:
@@ -1465,21 +1499,20 @@ def _process_batch_closed_tick(
     """
     state = init.deepcopy()
     commands: list[WorkflowCommand] = []
+    reachable = _reachable_event_types(state, tick.step_name)
     for step_name, worker_state in state.workers.items():
         if worker_state.config.batch_collect_param is None:
             continue
-        if tick.batch_id not in worker_state.batch_buffers:
-            # This collect step never saw an event for this batch. It still must
-            # fire once on closure (empty batch / branch death) IF this batch's
-            # producer feeds it. Conservatively fire only when the closing step's
-            # output type matches this collect step's element type.
-            element_type = worker_state.config.batch_collect_param[1]
-            producer_out = set(state.workers[tick.step_name].config.return_types)
-            if element_type not in producer_out:
-                continue
-            batch: list[Event] = []
-        else:
+        if tick.batch_id in worker_state.batch_buffers:
             batch = worker_state.batch_buffers.pop(tick.batch_id)
+        else:
+            # This collect step never saw an event for this batch. It still must
+            # fire once on closure (empty batch / every branch died) IF its
+            # element type is reachable downstream of this batch's producer.
+            element_type = worker_state.config.batch_collect_param[1]
+            if element_type not in reachable:
+                continue
+            batch = []
         commands.extend(
             _fire_batch_collect(
                 step_name,
@@ -1504,12 +1537,15 @@ def _process_batch_aborted_tick(
     """
     state = init.deepcopy()
     commands: list[WorkflowCommand] = []
+    reachable = _reachable_event_types(state, tick.step_name)
     for step_name, worker_state in state.workers.items():
         if worker_state.config.batch_collect_param is None:
             continue
         element_type = worker_state.config.batch_collect_param[1]
-        producer_out = set(state.workers[tick.step_name].config.return_types)
-        if element_type not in producer_out:
+        if (
+            element_type not in reachable
+            and tick.batch_id not in worker_state.batch_buffers
+        ):
             continue
         batch = worker_state.batch_buffers.pop(tick.batch_id, [])
         if worker_state.config.on_partial == "fire":
