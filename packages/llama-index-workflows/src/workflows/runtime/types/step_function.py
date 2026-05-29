@@ -271,10 +271,28 @@ def as_step_worker_function(
                         raise captured_cancelled
                     if captured_waiting is not None:
                         raise captured_waiting
-                if result is not None and not isinstance(result, Event):
+                if isinstance(result, list):
+                    # A step that returns ``list[E]`` fans out: each element is
+                    # emitted as its own event (static-list emission). An empty
+                    # list emits nothing but still completes the step.
+                    for item in result:
+                        if not isinstance(item, Event):
+                            msg = (
+                                f"Step function {step_name} returned a list "
+                                f"containing {type(item).__name__} instead of an "
+                                "Event instance."
+                            )
+                            raise WorkflowRuntimeError(msg)
+                    if result:
+                        for item in result:
+                            returns.return_values.append(StepWorkerResult(result=item))
+                    else:
+                        returns.return_values.append(StepWorkerResult(result=None))
+                elif result is not None and not isinstance(result, Event):
                     msg = f"Step function {step_name} returned {type(result).__name__} instead of an Event instance."
                     raise WorkflowRuntimeError(msg)
-                returns.return_values.append(StepWorkerResult(result=result))
+                else:
+                    returns.return_values.append(StepWorkerResult(result=result))
             except WaitingForEvent as e:
                 await asyncio.sleep(0)
                 returns.return_values.append(e.add)
