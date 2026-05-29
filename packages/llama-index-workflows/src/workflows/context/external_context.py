@@ -20,6 +20,7 @@ from workflows.runtime.types.plugin import (
     as_snapshottable_adapter,
     as_v2_runtime_compatibility_shim,
 )
+from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import TickAddEvent, TickCancelRun, WorkflowTick
 
 if TYPE_CHECKING:
@@ -118,7 +119,10 @@ class ExternalContext(Generic[MODEL_T, RunResultT]):
 
         self._execute_task(
             self._external_adapter.send_event(
-                TickAddEvent(event=message, step_name=step)
+                TickAddEvent(
+                    event=message,
+                    step_id=StepId.root(step) if step is not None else None,
+                )
             )
         )
 
@@ -126,7 +130,9 @@ class ExternalContext(Generic[MODEL_T, RunResultT]):
         """Get list of currently running step names."""
         state = self._state
         return [
-            step for step in state.workers.keys() if state.workers[step].in_progress
+            str(step_id)
+            for step_id in state.workers.keys()
+            if state.workers[step_id].in_progress
         ]
 
     def _require_v2_runtime_compatibility(self) -> V2RuntimeCompatibilityShim:

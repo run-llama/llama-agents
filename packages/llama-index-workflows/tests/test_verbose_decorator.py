@@ -11,6 +11,7 @@ from workflows import Workflow, step
 from workflows.events import Event, StartEvent, StepState, StepStateChanged, StopEvent
 from workflows.runtime.types.plugin import InternalRunAdapter, WaitResult, WorkflowTick
 from workflows.runtime.types.results import StepWorkerResult
+from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import (
     TickAddEvent,
     TickCancelRun,
@@ -189,7 +190,7 @@ async def test_verbose_forwards_events(
             id="add-event",
         ),
         pytest.param(
-            TickAddEvent(event=StartEvent(), step_name="retrieve"),
+            TickAddEvent(event=StartEvent(), step_id=StepId.root("retrieve")),
             "[tick] add: StartEvent() -> retrieve",
             id="add-event-targeted",
         ),
@@ -204,7 +205,7 @@ async def test_verbose_forwards_events(
             id="timeout",
         ),
         pytest.param(
-            TickWaiterTimeout(step_name="my_step", waiter_id="w-123"),
+            TickWaiterTimeout(step_id=StepId.root("my_step"), waiter_id="w-123"),
             "[tick] waiter timeout: step my_step waiter w-123",
             id="waiter-timeout",
         ),
@@ -238,7 +239,7 @@ async def test_verbose_tick_step_result_logs_stop_event(
     """TickStepResult with a StopEvent logs a [result] line."""
     _, adapter = verbose_adapter
     tick = TickStepResult(
-        step_name="my_step",
+        step_id=StepId.root("my_step"),
         worker_id=0,
         event=StartEvent(),
         result=[StepWorkerResult(result=StopEvent(result="done"))],
@@ -256,7 +257,7 @@ async def test_verbose_tick_step_result_silent_for_non_stop(
     """TickStepResult without a StopEvent produces no on_tick output."""
     _, adapter = verbose_adapter
     tick = TickStepResult(
-        step_name="my_step",
+        step_id=StepId.root("my_step"),
         worker_id=0,
         event=StartEvent(),
         result=[StepWorkerResult(result=StartEvent())],

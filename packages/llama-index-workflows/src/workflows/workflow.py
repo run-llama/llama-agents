@@ -26,6 +26,7 @@ from .errors import (
 from .events import Event, StartEvent, StopEvent
 from .handler import WorkflowHandler
 from .resource import ResourceManager
+from .runtime.types.step_id import StepId
 from .types import RunResultT
 from .utils import get_steps_from_class, get_steps_from_instance
 
@@ -444,6 +445,24 @@ class Workflow(metaclass=WorkflowMeta):
     def _get_steps(self) -> dict[str, StepFunction]:
         """Returns all the steps, whether defined as methods or free functions."""
         return {**get_steps_from_instance(self), **self.__class__._step_functions}
+
+    def _get_namespaced_steps(self) -> dict[StepId, StepFunction]:
+        """Returns this workflow's steps keyed by namespaced :class:`StepId`.
+
+        This is the runtime enumeration that feeds ``BrokerState.from_workflow``
+        and the per-run worker table. Root steps live at namespace ``()``; child
+        steps (added in a later phase) namespace under their declared field path.
+        """
+        return {StepId((), name): func for name, func in self._get_steps().items()}
+
+    def _namespace_instances(self) -> dict[tuple[str, ...], Workflow]:
+        """Map each namespace path to the workflow instance that owns its steps.
+
+        Dispatch resolves the owning instance via this map and binds the bare
+        step name against it. Root maps to ``self``; child namespaces (added in
+        a later phase) map to the attached child instances.
+        """
+        return {(): self}
 
     def _get_start_event_instance(
         self, start_event: StartEvent | None, **kwargs: Any

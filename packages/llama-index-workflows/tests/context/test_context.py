@@ -222,7 +222,7 @@ async def test_send_event_step_is_none() -> None:
         assert isinstance(external_face, ExternalContext)
 
         # Wait for event to appear in tick log (up to 1 second)
-        expected_tick = TickAddEvent(event=ev, step_name=None)
+        expected_tick = TickAddEvent(event=ev, step_id=None)
         for _ in range(100):
             if expected_tick in external_face._tick_log:
                 break

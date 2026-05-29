@@ -85,6 +85,7 @@ from workflows.runtime.types.step_function import (
     as_step_worker_functions,
     create_workflow_run_function,
 )
+from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import WorkflowTick
 from workflows.workflow import Workflow
 
@@ -402,9 +403,9 @@ class DBOSRuntime(Runtime):
             return await workflow_run_fn(init_state, start_event, tags)
 
         # Wrap steps with stable names
-        wrapped_steps: dict[str, StepWorkerFunction] = {
-            step_name: DBOS.step(name=f"{name}.{step_name}")(step)
-            for step_name, step in as_step_worker_functions(workflow).items()
+        wrapped_steps: dict[StepId, StepWorkerFunction] = {
+            step_id: DBOS.step(name=f"{name}.{step_id}")(step)
+            for step_id, step in as_step_worker_functions(workflow).items()
         }
 
         registered = RegisteredWorkflow(

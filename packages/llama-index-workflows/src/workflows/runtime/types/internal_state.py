@@ -19,6 +19,7 @@ from workflows.decorators import CatchErrorHandler, StepConfig
 from workflows.events import Event
 from workflows.retry_policy import RetryPolicy
 from workflows.runtime.types.results import StepWorkerState, StepWorkerWaiter
+from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import TickAddEvent, WorkflowTick
 from workflows.workflow import Workflow
 
@@ -42,7 +43,7 @@ class BrokerState:
 
     is_running: bool
     config: BrokerConfig
-    workers: dict[str, InternalStepWorkerState]
+    workers: dict[StepId, InternalStepWorkerState]
 
     def deepcopy(self) -> BrokerState:
         """
@@ -52,37 +53,38 @@ class BrokerState:
             is_running=self.is_running,
             config=self.config,  # immutable
             workers={
-                name: worker_state._deepcopy()
-                for name, worker_state in self.workers.items()
+                step_id: worker_state._deepcopy()
+                for step_id, worker_state in self.workers.items()
             },
         )
 
     @staticmethod
     def from_workflow(workflow: Workflow) -> BrokerState:
+        namespaced_steps = workflow._get_namespaced_steps()
         return BrokerState(
             is_running=False,
             config=BrokerConfig(
                 steps={
-                    name: InternalStepConfig(
+                    step_id: InternalStepConfig(
                         accepted_events=step_func._step_config.accepted_events,
                         retry_policy=step_func._step_config.retry_policy,
                         num_workers=step_func._step_config.num_workers,
                     )
-                    for name, step_func in workflow._get_steps().items()
+                    for step_id, step_func in namespaced_steps.items()
                 },
                 timeout=workflow._timeout,
                 catch_error_handlers=dict(workflow._catch_error_handlers),
                 handler_for_step=dict(workflow._handler_for_step),
             ),
             workers={
-                name: InternalStepWorkerState(
+                step_id: InternalStepWorkerState(
                     queue=[],
                     config=step_func._step_config,
                     in_progress=[],
                     collected_events={},
                     collected_waiters=[],
                 )
-                for name, step_func in workflow._get_steps().items()
+                for step_id, step_func in namespaced_steps.items()
             },
         )
 
@@ -91,21 +93,21 @@ class BrokerState:
         Rehydrates non-serializable state by re-running commands
         """
         commands: list[WorkflowTick] = []
-        for step_name, worker_state in sorted(self.workers.items(), key=lambda x: x[0]):
+        for step_id, worker_state in sorted(
+            self.workers.items(), key=lambda x: str(x[0])
+        ):
             for waiter in sorted(
                 worker_state.collected_waiters, key=lambda x: x.waiter_id
             ):
                 if waiter.has_requirements and not waiter.requirements:
-                    commands.append(
-                        TickAddEvent(event=waiter.event, step_name=step_name)
-                    )
+                    commands.append(TickAddEvent(event=waiter.event, step_id=step_id))
         return commands
 
     def to_serialized(self, serializer: BaseSerializer) -> SerializedContext:
         """Serialize the broker state to a SerializedContext."""
 
         workers_dict = {}
-        for step_name, worker_state in self.workers.items():
+        for step_id, worker_state in self.workers.items():
             # Serialize queue with retry info
             queue = [
                 SerializedEventAttempt(
@@ -145,7 +147,10 @@ class BrokerState:
                 for waiter in worker_state.collected_waiters
             ]
 
-            workers_dict[step_name] = SerializedStepWorkerState(
+            # The wire format keys workers by the string projection of the
+            # StepId (root steps -> bare name, identical to the pre-StepId
+            # format; child steps -> "namespace/name").
+            workers_dict[str(step_id)] = SerializedStepWorkerState(
                 queue=queue,
                 in_progress=in_progress,
                 collected_events=collected_events,
@@ -177,11 +182,12 @@ class BrokerState:
 
         # Restore worker state (queues, collected events, waiters)
         # We do this regardless of is_running state so workflows can resume from where they left off
-        for step_name, worker_data in serialized.workers.items():
-            if step_name not in base_state.workers:
+        for step_key, worker_data in serialized.workers.items():
+            step_id = StepId.from_str(step_key)
+            if step_id not in base_state.workers:
                 continue
 
-            worker = base_state.workers[step_name]
+            worker = base_state.workers[step_id]
 
             # Restore queue with retry info
             worker.queue = [
@@ -263,8 +269,12 @@ class BrokerConfig:
         handler_for_step: step name -> handler step name that owns it
     """
 
-    steps: dict[str, InternalStepConfig]
+    steps: dict[StepId, InternalStepConfig]
     timeout: float | None
+    # Catch-error routing is keyed by the handler's bare step name. These
+    # handlers are a root-workflow concept (see _process_step_result_tick's
+    # is_root guard), so they intentionally stay string-keyed rather than
+    # StepId-keyed.
     catch_error_handlers: dict[str, CatchErrorHandler] = field(default_factory=dict)
     handler_for_step: dict[str, str] = field(default_factory=dict)
 
