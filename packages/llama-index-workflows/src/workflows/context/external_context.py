@@ -9,7 +9,7 @@ from typing_extensions import TypeVar
 
 from workflows.context.context_types import MODEL_T
 from workflows.context.serializers import JsonSerializer
-from workflows.context.state_store import StateStore
+from workflows.context.state_store import CHILD_STATES_KEY, StateStore
 from workflows.errors import WorkflowRuntimeError
 from workflows.events import StopEvent
 from workflows.runtime.types.internal_state import BrokerState
@@ -160,11 +160,26 @@ class ExternalContext(Generic[MODEL_T, RunResultT]):
         """Serialize context state for persistence."""
         active_serializer = serializer or self._serializer
 
-        # Fetch state store from adapter and serialize
-        state_data = {}
-        state_store = self._external_adapter.get_state_store()
-        if state_store is not None:
-            state_data = state_store.to_dict(active_serializer)
+        # Fetch state store(s) from adapter and serialize. When the adapter
+        # partitions state by namespace (child workflows), nest each child's
+        # payload under a reserved key in the root payload so the whole tree
+        # round-trips through the single ``SerializedContext.state`` dict.
+        state_data: dict[str, Any] = {}
+        all_stores = self._external_adapter.get_all_state_stores()
+        if all_stores is None:
+            root_store = self._external_adapter.get_state_store()
+            all_stores = {(): root_store} if root_store is not None else {}
+
+        root_store = all_stores.get(())
+        if root_store is not None:
+            state_data = root_store.to_dict(active_serializer)
+            child_payloads = {
+                "/".join(namespace): store.to_dict(active_serializer)
+                for namespace, store in all_stores.items()
+                if namespace != ()
+            }
+            if child_payloads:
+                state_data[CHILD_STATES_KEY] = child_payloads
 
         # Get the broker state
         broker_state = self._state

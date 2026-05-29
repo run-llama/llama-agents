@@ -344,6 +344,17 @@ class ExternalRunAdapter(ABC):
         """
         return None
 
+    def get_all_state_stores(
+        self,
+    ) -> dict[tuple[str, ...], StateStore[Any]] | None:
+        """All per-namespace state stores for this run (``()`` is root).
+
+        Used by ``Context.to_dict`` to serialize a child-workflow tree's state in
+        one blob. Adapters that don't partition state by namespace return
+        ``None``, and the caller falls back to the single root store.
+        """
+        return None
+
 
 @dataclass
 class RunContext:

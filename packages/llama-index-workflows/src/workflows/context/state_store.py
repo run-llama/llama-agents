@@ -34,6 +34,12 @@ MAX_DEPTH = 1000
 # Keys set by pre-built workflows that are known to be unserializable in some cases.
 KNOWN_UNSERIALIZABLE_KEYS: tuple[str, ...] = ("memory",)
 
+# Reserved key under which per-child-namespace state-store payloads are nested
+# inside the root store's serialized payload, so the whole child tree's state
+# round-trips through the single ``SerializedContext.state`` dict. Maps a
+# "/"-joined namespace path -> that namespace's InMemoryStateStore.to_dict().
+CHILD_STATES_KEY = "__child_states__"
+
 
 class InMemorySerializedState(BaseModel):
     """Serialized state containing actual data (from InMemoryStateStore)."""
