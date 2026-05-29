@@ -635,31 +635,23 @@ def test_ExponentialBackoffRetryPolicy_no_jitter() -> None:
 # ---------------------------------------------------------------------------
 
 
-class _CountEvent(Event):
-    """Side-channel event a flaky step emits on each attempt to bump a counter.
-
-    Defined at module scope so it resolves in the producing step's return
-    annotation (`-> StopEvent | _CountEvent`), which the producer-side
-    send_event check requires.
-    """
-
-
 @pytest.mark.asyncio
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 async def test_retry_e2e() -> None:
+    class CountEvent(Event):
+        """Empty event to signal a step to increment a counter in the Context."""
+
     class DummyWorkflow(Workflow):
         @step(retry_policy=ConstantDelayRetryPolicy(delay=0.2, maximum_attempts=4))
-        async def flaky_step(
-            self, ctx: Context, ev: StartEvent
-        ) -> StopEvent | _CountEvent:
+        async def flaky_step(self, ctx: Context, ev: StartEvent) -> StopEvent:
             count = await ctx.store.get("counter", default=0)
-            ctx.send_event(_CountEvent())
+            ctx.send_event(CountEvent())
             if count < 3:
                 raise ValueError("Something bad happened!")
             return StopEvent(result="All good!")
 
         @step
-        async def counter(self, ctx: Context, ev: _CountEvent) -> None:
+        async def counter(self, ctx: Context, ev: CountEvent) -> None:
             count = await ctx.store.get("counter", default=0)
             await ctx.store.set("counter", count + 1)
 
@@ -670,23 +662,24 @@ async def test_retry_e2e() -> None:
 @pytest.mark.asyncio
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 async def test_retry_e2e_exponential() -> None:
+    class CountEvent(Event):
+        """Event to increment a counter in the Context."""
+
     class DummyWorkflow(Workflow):
         @step(
             retry_policy=ExponentialBackoffRetryPolicy(
                 initial_delay=0.05, multiplier=2.0, maximum_attempts=4, jitter=False
             )
         )
-        async def flaky_step(
-            self, ctx: Context, ev: StartEvent
-        ) -> StopEvent | _CountEvent:
+        async def flaky_step(self, ctx: Context, ev: StartEvent) -> StopEvent:
             count = await ctx.store.get("counter", default=0)
-            ctx.send_event(_CountEvent())
+            ctx.send_event(CountEvent())
             if count < 3:
                 raise ValueError("Something bad happened!")
             return StopEvent(result="All good!")
 
         @step
-        async def counter(self, ctx: Context, ev: _CountEvent) -> None:
+        async def counter(self, ctx: Context, ev: CountEvent) -> None:
             count = await ctx.store.get("counter", default=0)
             await ctx.store.set("counter", count + 1)
 
@@ -701,6 +694,9 @@ async def test_retry_e2e_exponential() -> None:
 
 @pytest.mark.asyncio
 async def test_retry_e2e_retry_policy() -> None:
+    class CountEvent(Event):
+        pass
+
     class DummyWorkflow(Workflow):
         @step(
             retry_policy=retry_policy(
@@ -709,17 +705,15 @@ async def test_retry_e2e_retry_policy() -> None:
                 stop=stop_after_attempt(max_attempt_number=4),
             )
         )
-        async def flaky_step(
-            self, ctx: Context, ev: StartEvent
-        ) -> StopEvent | _CountEvent:
+        async def flaky_step(self, ctx: Context, ev: StartEvent) -> StopEvent:
             count = await ctx.store.get("counter", default=0)
-            ctx.send_event(_CountEvent())
+            ctx.send_event(CountEvent())
             if count < 3:
                 raise ValueError("transient failure")
             return StopEvent(result="recovered")
 
         @step
-        async def counter(self, ctx: Context, ev: _CountEvent) -> None:
+        async def counter(self, ctx: Context, ev: CountEvent) -> None:
             count = await ctx.store.get("counter", default=0)
             await ctx.store.set("counter", count + 1)
 

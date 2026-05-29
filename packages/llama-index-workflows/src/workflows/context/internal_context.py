@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Coroutine, Generic, TypeVar, cast
 
 from workflows.context.context_types import MODEL_T
 from workflows.context.state_store import StateStore
-from workflows.errors import WorkflowRuntimeError, WorkflowValidationError
+from workflows.errors import WorkflowRuntimeError
 from workflows.retry_policy import RetryInfo
 from workflows.runtime.types.results import (
     AddCollectedEvent,
@@ -157,8 +157,6 @@ class InternalContext(Generic[MODEL_T]):
         if step is not None:
             self._workflow._validate_valid_step_message(step, message)
 
-        self._validate_producer_event(message)
-
         recovery_counts: dict[str, int] = {}
         try:
             recovery_counts = dict(
@@ -176,49 +174,6 @@ class InternalContext(Generic[MODEL_T]):
                 )
             )
         )
-
-    def _validate_producer_event(self, message: Event) -> None:
-        """Validate that a step only emits events it declared in its return annotation.
-
-        When ``send_event`` is called from within a step, the emitted event's
-        type must be a subclass of one of the calling step's declared return
-        types. Steps whose return annotation declares no event classes (e.g. a
-        step annotated ``-> None``) are deliberately exempt: applying the check
-        to them would break backward compatibility for steps that emit purely
-        via ``send_event`` without declaring it, and graph validation already
-        covers emission honesty for ``-> None`` steps.
-        """
-        try:
-            step_name = StepWorkerStateContextVar.get().state.step_name
-        except LookupError:
-            # Not running within a step (e.g. external callers): no restriction.
-            return
-
-        step_fn = self._workflow._get_steps().get(step_name)
-        if step_fn is None:
-            return
-
-        cfg = step_fn._step_config
-        declared = [
-            rt
-            for rt in cfg.return_types
-            if isinstance(rt, type) and rt is not type(None)
-        ]
-        if not declared:
-            # Deliberate back-compat exemption: a step that declares no event
-            # return types (e.g. ``-> None``) is not subject to the producer
-            # restriction. Graph validation covers honesty for such steps.
-            return
-
-        if not any(issubclass(type(message), rt) for rt in declared):
-            allowed = ", ".join(sorted(rt.__name__ for rt in declared))
-            raise WorkflowValidationError(
-                f"Step '{step_name}' attempted to send_event an event of type "
-                f"'{type(message).__name__}', which is not declared in its return "
-                f"annotation. Declared emitted types: {allowed}. Add it to the "
-                f"step's return annotation (e.g. '-> {type(message).__name__}' or "
-                f"'list[{type(message).__name__}]')."
-            )
 
     async def wait_for_event(
         self,

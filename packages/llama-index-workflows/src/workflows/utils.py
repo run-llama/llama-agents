@@ -228,8 +228,8 @@ def _get_param_types(param: inspect.Parameter, type_hints: dict) -> list[Any]:
 
 
 # Return-annotation origins whose single element type describes emitted events.
-# A step that fans out via ``ctx.send_event`` (or returns one of these directly)
-# honestly declares its emissions as ``list[E]`` / ``AsyncIterator[E]`` etc.
+# A step that returns these directly declares produced events as ``list[E]`` /
+# ``AsyncIterator[E]`` etc. for validation and graph representation.
 _COLLECTION_RETURN_ORIGINS = (
     list,
     cabc.AsyncIterator,
@@ -278,8 +278,8 @@ def _get_return_types(
 
     Handles Union, Optional, and emission-collection types (``list[E]``,
     ``AsyncIterator[E]``, ``AsyncGenerator[E, None]``). Collection wrappers are
-    unwrapped to the event types they emit, so a step's return signature
-    exhaustively describes what it produces.
+    unwrapped to the event types they emit for validation and graph
+    representation.
     """
     type_hints = _resolve_type_hints(func, localns=localns)
     return_hint = type_hints.get("return")
