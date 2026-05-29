@@ -119,9 +119,15 @@ async def partial(
     event: Event,
     context: Context,
     workflow: Workflow,
+    collected_events: dict[str, Event] | None = None,
 ) -> Callable[[], Any]:
     kwargs: dict[str, Any] = {}
-    kwargs[step_config.event_name] = event
+    if collected_events is not None:
+        # Collect-mode (heterogeneous fan-in): bind each declared event
+        # parameter to its collected event instead of a single trigger event.
+        kwargs.update(collected_events)
+    else:
+        kwargs[step_config.event_name] = event
     if step_config.context_parameter:
         # Convert to internal face for step execution
         kwargs[step_config.context_parameter] = context
@@ -182,6 +188,28 @@ def as_step_worker_function(
 
         try:
             config = workflow._get_steps()[step_name]._step_config
+            # Heterogeneous fan-in (collect-mode): a step with more than one
+            # event parameter collects one event of each declared type, then
+            # fires once with each parameter bound to its event. This desugars
+            # onto the existing collect_events buffer and is lineage-blind
+            # (assumes a single batch in flight) until batch lineage lands.
+            collected_binding: dict[str, Event] | None = None
+            if config.collect_params is not None:
+                expected_types = [
+                    event_type for _, event_type in config.collect_params
+                ]
+                collected = internal_context.collect_events(event, expected_types)
+                if collected is None:
+                    # Not every declared type has arrived yet. collect_events
+                    # recorded the buffer add on ``returns``; nothing to invoke.
+                    await internal_context._finalize_step()
+                    return returns.return_values
+                collected_binding = {
+                    name: collected_event
+                    for (name, _), collected_event in zip(
+                        config.collect_params, collected
+                    )
+                }
             # Resolve callable at call time:
             # - If the workflow has an attribute with the step name, use it
             #   (this yields a bound method for instance-defined steps).
@@ -248,6 +276,7 @@ def as_step_worker_function(
                 event=event,
                 context=internal_context,
                 workflow=workflow,
+                collected_events=collected_binding,
             )
 
             try:

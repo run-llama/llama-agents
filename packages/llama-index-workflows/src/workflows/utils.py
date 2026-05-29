@@ -115,6 +115,22 @@ def inspect_signature(
             context_parameter = name
             continue
 
+        # Reject ``list[E]`` fan-in parameters explicitly. Batch-typed collect
+        # parameters (e.g. ``events: list[Done]``) are part of the batch-lineage
+        # phase; rejecting here avoids silently dropping the parameter.
+        if get_origin(annotation) is list:
+            list_args = get_args(annotation)
+            if list_args and all(
+                arg is Event or (inspect.isclass(arg) and issubclass(arg, Event))
+                for arg in list_args
+            ):
+                msg = (
+                    f"Parameter {name!r} is annotated as a list of events "
+                    f"({annotation!r}). Batch-typed (list[E]) collect parameters "
+                    "are not supported yet."
+                )
+                raise WorkflowValidationError(msg)
+
         # Collect name and types of the event param
         param_types = _get_param_types(t, type_hints)
         if all(
@@ -150,8 +166,20 @@ def validate_step_signature(spec: StepSignatureSpec) -> None:
         msg = "Step signature must have at least one parameter annotated as type Event"
         raise WorkflowValidationError(msg)
     elif num_of_events > 1:
-        msg = f"Step signature must contain exactly one parameter of type Event but found {num_of_events}."
-        raise WorkflowValidationError(msg)
+        # Collect-mode (heterogeneous fan-in): a step with more than one
+        # event-shaped parameter fires once when one event of each declared
+        # type has arrived. For now each such parameter must name exactly one
+        # concrete event type; union-typed collect parameters (e.g.
+        # ``x: A | B``) are deferred to a later phase.
+        for name, param_types in spec.accepted_events.items():
+            if len(param_types) != 1:
+                msg = (
+                    "Collect-mode steps (more than one event parameter) require "
+                    f"each event parameter to declare a single event type, but "
+                    f"parameter {name!r} declares {len(param_types)}. Union-typed "
+                    "collect parameters are not supported yet."
+                )
+                raise WorkflowValidationError(msg)
 
     if not spec.return_types:
         msg = "Return types of workflows step functions must be annotated with their type."
