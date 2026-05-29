@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from workflows import Context, Workflow, step
 from workflows.errors import WorkflowValidationError
 from workflows.events import Event, StartEvent, StopEvent
