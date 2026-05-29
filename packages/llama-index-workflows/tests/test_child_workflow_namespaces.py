@@ -11,8 +11,10 @@ the file-level pragmas suppress the expected static-typing diagnostics on the
 
 from __future__ import annotations
 
+import pytest
 from workflows import Workflow
 from workflows.decorators import step
+from workflows.errors import WorkflowValidationError
 from workflows.events import StartEvent, StopEvent
 from workflows.runtime.types.step_id import StepId
 
@@ -122,3 +124,51 @@ def test_childless_workflow_only_root_namespace() -> None:
     assert set(GrandChild._get_namespaced_steps_from_class()) == {
         StepId.root("run_grand")
     }
+
+
+# --- graph validation -------------------------------------------------------
+
+
+def test_valid_child_tree_validates() -> None:
+    Parent(child=Child()).validate()
+    Root(mid=Mid(grand=GrandChild())).validate()
+
+
+class SelfReferential(Workflow):
+    me: SelfReferential
+
+    @step
+    async def start(self, ev: StartEvent) -> StopEvent:
+        return StopEvent(result="x")
+
+
+def test_self_referential_child_type_rejected() -> None:
+    with pytest.raises(WorkflowValidationError, match="type cycle"):
+        SelfReferential().validate()
+
+
+class DupChildA(Workflow):
+    @step
+    async def a(self, ev: ChildStart) -> ChildStop:
+        return ChildStop()
+
+
+class DupChildB(Workflow):
+    @step
+    async def b(self, ev: ChildStart) -> ChildStop:
+        return ChildStop()
+
+
+class DupParent(Workflow):
+    x: DupChildA
+    y: DupChildB
+
+    @step
+    async def start(self, ev: StartEvent) -> StopEvent:
+        return StopEvent(result="x")
+
+
+def test_duplicate_child_start_event_type_rejected() -> None:
+    parent = DupParent(x=DupChildA(), y=DupChildB())
+    with pytest.raises(WorkflowValidationError, match="both accept StartEvent type"):
+        parent.validate()

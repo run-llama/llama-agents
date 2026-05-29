@@ -364,6 +364,46 @@ class Workflow(metaclass=WorkflowMeta):
             if isinstance(child, Workflow):
                 self._attach_child(name, child)
 
+    @classmethod
+    def _validate_child_type_graph(cls) -> None:
+        """Reject cycles in the declared child-workflow *type* graph.
+
+        A child type that transitively declares itself (directly or through a
+        chain of child slots) can never form a finite workflow tree, so it is
+        rejected up front. Walks class annotations only — no instantiation.
+        """
+
+        def walk(node: type[Workflow], path: tuple[type[Workflow], ...]) -> None:
+            for child_type in node._get_child_workflow_slots().values():
+                child_cls = cast("type[Workflow]", child_type)
+                if child_cls in path:
+                    chain = " -> ".join(c.__name__ for c in (*path, child_cls))
+                    raise WorkflowValidationError(
+                        f"Child workflow type cycle detected: {chain}. A child "
+                        "workflow cannot transitively declare itself as a child."
+                    )
+                walk(child_cls, (*path, child_cls))
+
+        walk(cls, (cls,))
+
+    def _validate_child_start_events(self) -> None:
+        """Each direct child's ``StartEvent`` type must be unique.
+
+        Routing into a child is by event type, so two children accepting the
+        same ``StartEvent`` subclass would be ambiguous.
+        """
+        seen: dict[type[StartEvent], str] = {}
+        for field_name, child in self._child_workflows.items():
+            start_cls = child._start_event_class
+            if start_cls in seen:
+                raise WorkflowValidationError(
+                    f"Child workflows '{seen[start_cls]}' and '{field_name}' on "
+                    f"'{type(self).__name__}' both accept StartEvent type "
+                    f"'{start_cls.__name__}'; each child's StartEvent type must "
+                    "be unique so the parent can route to exactly one child."
+                )
+            seen[start_cls] = field_name
+
     @property
     def workflow_name(self) -> str:
         """
@@ -686,6 +726,19 @@ class Workflow(metaclass=WorkflowMeta):
                     "Resource validation failed:\n"
                     + "\n".join(f"  - {e}" for e in errors)
                 )
+
+        # Child-workflow graph checks: reject declared type cycles, require each
+        # direct child's StartEvent type to be unique, and validate each attached
+        # child as its own (namespaced) workflow — so "one StartEvent / one
+        # StopEvent" holds per namespace rather than across a flattened graph.
+        type(self)._validate_child_type_graph()
+        self._validate_child_start_events()
+        for child in self._child_workflows.values():
+            child._validate(
+                validate_resource_configs=validate_resource_configs,
+                validate_resources=validate_resources,
+                force=force,
+            )
 
         self._validation_result = result.uses_hitl
         self._validated_version = self.__class__._step_functions_version
