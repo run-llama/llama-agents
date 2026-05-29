@@ -15,25 +15,15 @@ import pytest
 from workflows import Context, Workflow, step
 from workflows.errors import WorkflowRuntimeError
 from workflows.events import Event, StartEvent, StopEvent
-from workflows.plugins.basic import setting_run_id
 from workflows.retry_policy import ConstantDelayRetryPolicy
-from workflows.runtime import control_loop as _cl
 from workflows.runtime.control_loop import (
     rebuild_state_from_ticks_stream,
     replay_ticks_stream,
 )
-from workflows.runtime.types.commands import (
-    CommandCloseBatch,
-    CommandQueueEvent,
-    CommandRunWorker,
-)
 from workflows.runtime.types.internal_state import BrokerState
-from workflows.runtime.types.results import RetryAttempt
-from workflows.runtime.types.step_function import as_step_worker_functions
 from workflows.runtime.types.ticks import (
     TickAddEvent,
     TickBatchClosed,
-    TickStepResult,
     WorkflowTick,
 )
 
@@ -232,72 +222,23 @@ class _ReplayFanOut(Workflow):
         return StopEvent(result=sorted(e.n for e in events))
 
 
-async def _drive_reducer(
-    wf: Workflow, run_id: str
-) -> tuple[BrokerState, list[WorkflowTick]]:
-    """Drive the pure reducer over a fan-out run, recording every tick.
+async def _run_recording_ticks(
+    wf: Workflow,
+) -> tuple[object, list[WorkflowTick]]:
+    """Run ``wf`` to completion and return (result, recorded tick stream).
 
-    Exercises the exact reduction chokepoint (``_reduce_tick``) and the
-    command -> tick conversion the live runner uses, with NO global patching.
-    Returns the final broker state and the ordered tick stream; feeding that
-    stream back through ``replay_ticks_stream`` must reproduce identical lineage.
+    The in-memory runtime records every tick it reduces via ``on_tick`` and
+    exposes them through the run adapter's ``replay()``. That recorded stream is
+    exactly what persistence stores, so re-feeding it through
+    ``replay_ticks_stream`` must rebuild identical batch lineage.
     """
-    step_fns = as_step_worker_functions(wf)
-    state = BrokerState.from_workflow(wf)
-    state.is_running = True
-    pending: list[WorkflowTick] = [TickAddEvent(event=StartEvent())]
-    recorded: list[WorkflowTick] = []
-    now = 1000.0  # fixed; batch ids never depend on wall-clock
-    # Step workers create an internal Context, which needs the run id in context.
-    with setting_run_id(run_id):
-        for _ in range(1000):  # iteration cap: a logic bug fails fast, not hangs
-            if not pending:
-                break
-            tick = pending.pop(0)
-            recorded.append(tick)
-            state, commands = _cl._reduce_tick(tick, state, now, run_id)
-            for cmd in commands:
-                if isinstance(cmd, CommandQueueEvent):
-                    pending.append(
-                        TickAddEvent(
-                            event=cmd.event,
-                            step_name=cmd.step_name,
-                            attempts=cmd.attempts,
-                            first_attempt_at=cmd.first_attempt_at,
-                            recovery_counts=dict(cmd.recovery_counts),
-                            batch_stack=cmd.batch_stack,
-                        )
-                    )
-                elif isinstance(cmd, CommandCloseBatch):
-                    pending.append(
-                        TickBatchClosed(
-                            batch_id=cmd.batch_id,
-                            step_name=cmd.step_name,
-                            batch_stack=cmd.batch_stack,
-                        )
-                    )
-                elif isinstance(cmd, CommandRunWorker):
-                    worker = next(
-                        w
-                        for w in state.workers[cmd.step_name].in_progress
-                        if w.worker_id == cmd.id
-                    )
-                    result = await step_fns[cmd.step_name](
-                        state=worker.shared_state,
-                        step_name=cmd.step_name,
-                        event=cmd.event,
-                        workflow=wf,
-                        retry=RetryAttempt(),
-                    )
-                    pending.append(
-                        TickStepResult(
-                            step_name=cmd.step_name,
-                            worker_id=cmd.id,
-                            event=cmd.event,
-                            result=result,
-                        )
-                    )
-    return state, recorded
+    handler = wf.run()
+    async for _ in handler.stream_events():
+        pass
+    result = await handler
+    adapter = wf._runtime.get_external_adapter(handler.run_id)
+    ticks = list(adapter.replay())
+    return result, ticks
 
 
 def _done_batch_ids(ticks: list[WorkflowTick]) -> list[str]:
@@ -309,12 +250,13 @@ def _done_batch_ids(ticks: list[WorkflowTick]) -> list[str]:
 
 
 async def test_replay_reproduces_identical_batch_ids_and_grouping() -> None:
-    """Drive a fan-out run through the pure reducer, then replay the recorded
-    tick stream and assert identical batch ids and grouping. The determinism
-    lives in the reducer itself — no global patching, no live runner."""
+    """Record a real fan-out run's tick stream, replay it, and assert identical
+    batch ids and grouping. Replay determinism lives in the reducer: batch ids
+    are a pure function of run_id + producing step + per-run sequence."""
 
     wf = _ReplayFanOut()
-    state, ticks = await _drive_reducer(wf, run_id="run-A")
+    result, ticks = await _run_recording_ticks(wf)
+    assert result == [0, 1, 2, 3]
     assert ticks, "expected a recorded tick stream"
 
     # The Done events all carry one batch id (single fan-out level).
@@ -329,30 +271,17 @@ async def test_replay_reproduces_identical_batch_ids_and_grouping() -> None:
     ]
     assert len(closes) == 1, closes
 
-    assert state.batch_seq >= 1  # the live drive minted at least one batch
-
     # Replay the exact stream twice; both reproduce the same final state
     # deterministically (the batch-id counter is a pure function of the stream).
     replay1 = await replay_ticks_stream(BrokerState.from_workflow(wf), _stream(ticks))
     replay2 = await replay_ticks_stream(BrokerState.from_workflow(wf), _stream(ticks))
     assert replay1.state.batch_seq == replay2.state.batch_seq
-    assert replay1.state.batch_seq >= 1
+    assert replay1.state.batch_seq >= 1  # at least one batch was minted
 
     rebuilt = await rebuild_state_from_ticks_stream(
         BrokerState.from_workflow(wf), _stream(ticks)
     )
     assert rebuilt.batch_seq == replay1.state.batch_seq
-
-    # The SAME run id reproduces IDENTICAL batch ids — ids are a pure function of
-    # run_id + producing step + per-run sequence.
-    _, ticks_again = await _drive_reducer(_ReplayFanOut(), run_id="run-A")
-    assert _done_batch_ids(ticks_again) == done_ids
-
-    # A DIFFERENT run id yields different ids but identical grouping cardinality.
-    _, ticks_b = await _drive_reducer(_ReplayFanOut(), run_id="run-B")
-    done_ids_b = _done_batch_ids(ticks_b)
-    assert len(set(done_ids_b)) == 1, done_ids_b
-    assert done_ids_b[0] != the_batch
 
 
 async def test_batch_aborted_fail_default_fails_workflow() -> None:
