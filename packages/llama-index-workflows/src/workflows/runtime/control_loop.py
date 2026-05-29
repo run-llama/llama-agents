@@ -35,6 +35,8 @@ from workflows.events import (
     WorkflowTimedOutEvent,
 )
 from workflows.runtime.types.commands import (
+    CommandAbortBatch,
+    CommandCloseBatch,
     CommandCompleteRun,
     CommandFailWorkflow,
     CommandHalt,
@@ -77,6 +79,8 @@ from workflows.runtime.types.results import (
 )
 from workflows.runtime.types.ticks import (
     TickAddEvent,
+    TickBatchAborted,
+    TickBatchClosed,
     TickCancelRun,
     TickIdleCheck,
     TickIdleRelease,
@@ -116,6 +120,14 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+class _EmptyBatchTrigger(Event):
+    """Internal carrier event for firing a batch-collect step on an empty batch.
+
+    Never routed or persisted as user data — it only occupies the ``event`` slot
+    of a worker invocation whose real payload is the (empty) ``batch_input``.
+    """
 
 
 class _ControlLoopRunner:
@@ -265,12 +277,33 @@ class _ControlLoopRunner:
                 last_exception=command.last_exception,
                 last_failed_at=command.last_failed_at,
                 recovery_counts=dict(command.recovery_counts),
+                batch_stack=command.batch_stack,
             )
             if command.delay is not None and command.delay > 0:
                 now = await self.adapter.get_now()
                 self.schedule_tick(event, at_time=now + command.delay)
             else:
                 self.tick_buffer.append(event)
+            return None
+        elif isinstance(command, CommandCloseBatch):
+            self.tick_buffer.append(
+                TickBatchClosed(
+                    batch_id=command.batch_id,
+                    step_name=command.step_name,
+                    batch_stack=command.batch_stack,
+                )
+            )
+            return None
+        elif isinstance(command, CommandAbortBatch):
+            self.tick_buffer.append(
+                TickBatchAborted(
+                    batch_id=command.batch_id,
+                    step_name=command.step_name,
+                    partial=command.partial,
+                    error=command.error,
+                    batch_stack=command.batch_stack,
+                )
+            )
             return None
         elif isinstance(command, CommandRunWorker):
             self.run_worker(command)
@@ -648,6 +681,10 @@ def _reduce_tick(
         state, commands = _process_step_result_tick(tick, init, now_seconds, run_id)
     elif isinstance(tick, TickAddEvent):
         state, commands = _process_add_event_tick(tick, init, now_seconds)
+    elif isinstance(tick, TickBatchClosed):
+        state, commands = _process_batch_closed_tick(tick, init, now_seconds)
+    elif isinstance(tick, TickBatchAborted):
+        state, commands = _process_batch_aborted_tick(tick, init, now_seconds)
     elif isinstance(tick, TickCancelRun):
         state, commands = _process_cancel_run_tick(tick, init)
     elif isinstance(tick, TickIdleRelease):
@@ -692,6 +729,7 @@ def rewind_in_progress(
                     last_exception=in_progress.last_exception,
                     last_failed_at=in_progress.last_failed_at,
                     recovery_counts=dict(in_progress.recovery_counts),
+                    batch_stack=in_progress.batch_stack,
                 ),
             )
         step_state.in_progress = []
@@ -724,6 +762,51 @@ def _check_idle_state(state: BrokerState) -> bool:
     return True
 
 
+def _mint_batch_id(state: BrokerState, run_id: str | None, step_name: str) -> str:
+    """Mint a deterministic batch id and advance the per-run counter.
+
+    The id is a pure function of ``run_id``, the producing ``step_name``, and a
+    monotonic per-run sequence number kept in broker state. Because the reducer
+    is pure and replayed tick-by-tick (see ``replay_ticks_stream``), the same
+    fan-out reproduces the same sequence value, hence the same id, on replay.
+    NO uuid / random / wall-clock / id() — those would corrupt replayed lineage.
+    """
+    seq = state.batch_seq
+    state.batch_seq = seq + 1
+    digest = hashlib.sha256(f"{run_id}:{step_name}:{seq}".encode()).hexdigest()
+    return f"batch-{digest[:16]}"
+
+
+def _close_batch(
+    state: BrokerState, batch_id: str, step_name: str
+) -> list[WorkflowCommand]:
+    """Emit a CommandCloseBatch for ``batch_id`` and clear its bookkeeping.
+
+    ``batch_stack`` on the command is the batch's origin (producer trigger)
+    stack, so a collect step's outputs inherit the stack with the closed id
+    already popped.
+    """
+    origin = state.batch_origin.pop(batch_id, ())
+    state.batch_pending.pop(batch_id, None)
+    return [
+        CommandCloseBatch(batch_id=batch_id, step_name=step_name, batch_stack=origin)
+    ]
+
+
+def _has_fire_on_partial_consumer(state: BrokerState, producer_step: str) -> bool:
+    """True if some batch-collect step accepts this producer's output type and
+    opts into on_partial="fire". Used to decide abort-vs-fail when a fan-out
+    step exhausts its retries mid-stream."""
+    produced_types = set(state.workers[producer_step].config.return_types)
+    for worker in state.workers.values():
+        bcp = worker.config.batch_collect_param
+        if bcp is None or worker.config.on_partial != "fire":
+            continue
+        if bcp[1] in produced_types:
+            return True
+    return False
+
+
 def _process_step_result_tick(
     tick: TickStepResult,
     init: BrokerState,
@@ -750,6 +833,20 @@ def _process_step_result_tick(
     )
     step_no_longer_in_progress = True
 
+    # Batch lineage (L2). The trigger stack is carried on the in-progress state.
+    # A fan-out step (list[E] / AsyncIterator[E] return) mints ONE fresh batch id
+    # for this completed execution and stamps every event it emits, then closes
+    # the batch. A 1:1 step's outputs inherit the trigger stack verbatim.
+    trigger_stack = this_execution.batch_stack
+    is_fan_out = worker_state.config.is_fan_out
+    fan_out_batch_id: str | None = None
+    if is_fan_out and did_complete_step:
+        fan_out_batch_id = _mint_batch_id(state, run_id, tick.step_name)
+    if fan_out_batch_id is not None:
+        emit_stack: tuple[str, ...] = trigger_stack + (fan_out_batch_id,)
+    else:
+        emit_stack = trigger_stack
+
     for result in tick.result:
         if isinstance(result, StepWorkerResult):
             output_event_name = str(type(result.result))
@@ -773,6 +870,7 @@ def _process_step_result_tick(
                     CommandQueueEvent(
                         event=result.result,
                         recovery_counts=dict(this_execution.recovery_counts),
+                        batch_stack=emit_stack,
                     )
                 )
             elif result.result is None:
@@ -860,6 +958,36 @@ def _process_step_result_tick(
                                 **this_execution.recovery_counts,
                                 handler.step_name: new_count,
                             },
+                        )
+                    )
+                elif fan_out_batch_id is not None and _has_fire_on_partial_consumer(
+                    state, tick.step_name
+                ):
+                    # A fan-out producer exhausted retries mid-stream and a
+                    # downstream batch-collect step opted into on_partial="fire".
+                    # Treat the partial emissions as a (smaller) successful batch:
+                    # open it with the emitted members so it closes normally once
+                    # those members drain to the collect step. (Firing immediately
+                    # here would race ahead of the in-flight members.) The
+                    # bookkeeping section below opens the batch normally.
+                    pass
+                elif fan_out_batch_id is not None:
+                    # Fan-out producer failed mid-stream with no fire-consumer.
+                    # Emit a TickBatchAborted (journaled) which fails the run via
+                    # the default on_partial="fail".
+                    partial = sum(
+                        1
+                        for x in tick.result
+                        if isinstance(x, StepWorkerResult)
+                        and isinstance(x.result, Event)
+                    )
+                    commands.append(
+                        CommandAbortBatch(
+                            batch_id=fan_out_batch_id,
+                            step_name=tick.step_name,
+                            partial=partial,
+                            error=exception,
+                            batch_stack=trigger_stack,
                         )
                     )
                 else:
@@ -962,6 +1090,52 @@ def _process_step_result_tick(
         else:
             raise ValueError(f"Unknown result type: {type(result)}")
 
+    # ---- Batch lineage bookkeeping (L2) ----
+    # Count events this execution emitted (excludes None / StopEvent).
+    emitted_events = [
+        x.result
+        for x in tick.result
+        if isinstance(x, StepWorkerResult) and isinstance(x.result, Event)
+    ]
+    num_emitted = len(emitted_events)
+    scheduled_retry = any(
+        isinstance(c, CommandQueueEvent) and c.step_name == tick.step_name
+        for c in commands
+    )
+
+    failing_run = any(isinstance(c, CommandFailWorkflow) for c in commands)
+    did_abort = any(isinstance(c, CommandAbortBatch) for c in commands)
+    if (
+        fan_out_batch_id is not None
+        and not scheduled_retry
+        and not failing_run
+        and not did_abort
+    ):
+        # Open a new batch: register its pending-member count (events emitted
+        # into it). An empty batch (count 0) closes immediately. This also covers
+        # the on_partial="fire" case (``fire_partial_abort``): the partial
+        # emissions form a smaller batch that closes once its members drain.
+        num_in_batch = sum(1 for ev in emitted_events if not isinstance(ev, StopEvent))
+        state.batch_pending[fan_out_batch_id] = num_in_batch
+        state.batch_origin[fan_out_batch_id] = trigger_stack
+        if num_in_batch == 0:
+            commands.extend(_close_batch(state, fan_out_batch_id, tick.step_name))
+    elif (
+        fan_out_batch_id is None
+        and did_complete_step
+        and not scheduled_retry
+        and trigger_stack
+    ):
+        # A 1:1 step consumed a member of its innermost batch and re-emitted
+        # ``num_emitted`` continuing members (which inherited the same stack).
+        # Net pending delta for that batch is (emitted - 1): a dead branch
+        # (emitted 0) decrements; a branch that re-emits one keeps it level.
+        inner = trigger_stack[-1]
+        if inner in state.batch_pending:
+            state.batch_pending[inner] += num_emitted - 1
+            if state.batch_pending[inner] <= 0:
+                commands.extend(_close_batch(state, inner, tick.step_name))
+
     is_completed = len([x for x in commands if indicates_exit(x)]) > 0
     if step_no_longer_in_progress:
         commands.insert(
@@ -1026,6 +1200,7 @@ def _add_or_enqueue_event(
                 last_exception=event.last_exception,
                 last_failed_at=event.last_failed_at,
                 recovery_counts=dict(event.recovery_counts),
+                batch_stack=event.batch_stack,
             )
         )
         commands.append(CommandRunWorker(step_name=step_name, event=event.event, id=id))
@@ -1096,6 +1271,22 @@ def _process_add_event_tick(
         is_accepted = type(tick.event) in step_config.accepted_events
         if is_accepted and (tick.step_name is None or tick.step_name == step_name):
             handled = True
+            worker_state = state.workers[step_name]
+            if worker_state.config.batch_collect_param is not None:
+                # Batch-lineage fan-in (L2): buffer the event keyed by its
+                # innermost batch id and wait for the matching TickBatchClosed.
+                # Events that arrive with no batch stack (outside any fan-out)
+                # land under the empty-key bucket; a producer that fans out via
+                # a typed list/iterator return always stamps an id.
+                batch_id = tick.batch_stack[-1] if tick.batch_stack else ""
+                worker_state.batch_buffers.setdefault(batch_id, []).append(tick.event)
+                # This member has been delivered to its collect step; drop it
+                # from the open batch's pending count and close on reaching 0.
+                if batch_id in state.batch_pending:
+                    state.batch_pending[batch_id] -= 1
+                    if state.batch_pending[batch_id] <= 0:
+                        commands.extend(_close_batch(state, batch_id, step_name))
+                continue
             subcommands = _add_or_enqueue_event(
                 EventAttempt(
                     event=tick.event,
@@ -1104,6 +1295,7 @@ def _process_add_event_tick(
                     last_exception=tick.last_exception,
                     last_failed_at=tick.last_failed_at,
                     recovery_counts=dict(tick.recovery_counts),
+                    batch_stack=tuple(tick.batch_stack),
                 ),
                 step_name,
                 state.workers[step_name],
@@ -1200,4 +1392,153 @@ def _process_waiter_timeout_tick(
         now_seconds,
     )
     commands.extend(subcommands)
+    return state, commands
+
+
+def _fire_batch_collect(
+    step_name: str,
+    worker_state: InternalStepWorkerState,
+    batch: list[Event],
+    output_stack: tuple[str, ...],
+    now_seconds: float,
+) -> list[WorkflowCommand]:
+    """Launch a batch-collect step once with the full buffered ``batch``.
+
+    The buffered list rides on the worker snapshot's ``batch_input``; the worker
+    wrapper binds it to the step's ``list[E]`` parameter. ``output_stack`` is the
+    trigger stack the collect step's own outputs should inherit (the closed
+    batch id already popped). A representative carrier event occupies the
+    ``event`` slot but is ignored by the wrapper.
+    """
+    commands: list[WorkflowCommand] = []
+    used = set(x.worker_id for x in worker_state.in_progress)
+    id_candidates = [i for i in range(worker_state.config.num_workers) if i not in used]
+    if not id_candidates:
+        # No capacity — extremely unlikely for a single-fire collect, but be
+        # safe: re-queue handling is not modeled for batch collects, so run with
+        # worker id 0 by waiting is not possible. Fall back to id 0.
+        worker_id = 0
+    else:
+        worker_id = id_candidates[0]
+    # Carrier event: the wrapper ignores it and binds the list from batch_input.
+    carrier: Event = batch[0] if batch else _EmptyBatchTrigger()
+    state_copy = worker_state._deepcopy()
+    shared_state = StepWorkerState(
+        step_name=step_name,
+        collected_events=state_copy.collected_events,
+        collected_waiters=state_copy.collected_waiters,
+        batch_input=list(batch),
+    )
+    worker_state.in_progress.append(
+        InProgressState(
+            event=carrier,
+            worker_id=worker_id,
+            shared_state=shared_state,
+            attempts=0,
+            first_attempt_at=now_seconds,
+            batch_stack=output_stack,
+        )
+    )
+    commands.append(CommandRunWorker(step_name=step_name, event=carrier, id=worker_id))
+    commands.append(
+        CommandPublishEvent(
+            StepStateChanged(
+                step_state=StepState.RUNNING,
+                name=step_name,
+                input_event_name=type(carrier).__name__,
+                worker_id=str(worker_id),
+            )
+        )
+    )
+    return commands
+
+
+def _process_batch_closed_tick(
+    tick: TickBatchClosed, init: BrokerState, now_seconds: float
+) -> tuple[BrokerState, list[WorkflowCommand]]:
+    """Fire every batch-collect step buffering this batch id, once, with its
+    full buffered list. An empty batch still fires once with ``[]``.
+
+    The fired collect step's outputs inherit ``tick.batch_stack`` (the producer's
+    trigger stack), i.e. the closed id is popped — implemented by stamping the
+    in-progress state with that stack.
+    """
+    state = init.deepcopy()
+    commands: list[WorkflowCommand] = []
+    for step_name, worker_state in state.workers.items():
+        if worker_state.config.batch_collect_param is None:
+            continue
+        if tick.batch_id not in worker_state.batch_buffers:
+            # This collect step never saw an event for this batch. It still must
+            # fire once on closure (empty batch / branch death) IF this batch's
+            # producer feeds it. Conservatively fire only when the closing step's
+            # output type matches this collect step's element type.
+            element_type = worker_state.config.batch_collect_param[1]
+            producer_out = set(state.workers[tick.step_name].config.return_types)
+            if element_type not in producer_out:
+                continue
+            batch: list[Event] = []
+        else:
+            batch = worker_state.batch_buffers.pop(tick.batch_id)
+        commands.extend(
+            _fire_batch_collect(
+                step_name,
+                worker_state,
+                batch,
+                tuple(tick.batch_stack),
+                now_seconds,
+            )
+        )
+    return state, commands
+
+
+def _process_batch_aborted_tick(
+    tick: TickBatchAborted, init: BrokerState, now_seconds: float
+) -> tuple[BrokerState, list[WorkflowCommand]]:
+    """Handle a fan-out batch aborted mid-stream.
+
+    For each batch-collect consumer of this batch: on ``on_partial="fire"`` fire
+    once with whatever was buffered; on ``on_partial="fail"`` (default) fail the
+    workflow. (The fan-out reducer only emits an abort when a fire-consumer
+    exists, so the fail path here is a safety net.)
+    """
+    state = init.deepcopy()
+    commands: list[WorkflowCommand] = []
+    for step_name, worker_state in state.workers.items():
+        if worker_state.config.batch_collect_param is None:
+            continue
+        element_type = worker_state.config.batch_collect_param[1]
+        producer_out = set(state.workers[tick.step_name].config.return_types)
+        if element_type not in producer_out:
+            continue
+        batch = worker_state.batch_buffers.pop(tick.batch_id, [])
+        if worker_state.config.on_partial == "fire":
+            commands.extend(
+                _fire_batch_collect(
+                    step_name,
+                    worker_state,
+                    batch,
+                    tuple(tick.batch_stack),
+                    now_seconds,
+                )
+            )
+        else:
+            state.is_running = False
+            err = tick.error or WorkflowRuntimeError(
+                f"Fan-out batch {tick.batch_id} aborted after {tick.partial} "
+                f"emissions from step {tick.step_name!r}"
+            )
+            commands.append(
+                CommandPublishEvent(
+                    event=WorkflowFailedEvent(
+                        step_name=tick.step_name,
+                        exception=err,
+                        attempts=0,
+                        elapsed_seconds=0.0,
+                    )
+                )
+            )
+            commands.append(
+                CommandFailWorkflow(step_name=tick.step_name, exception=err)
+            )
     return state, commands

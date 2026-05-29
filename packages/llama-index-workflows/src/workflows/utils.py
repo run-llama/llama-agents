@@ -42,6 +42,12 @@ class StepSignatureSpec(BaseModel):
     context_parameter: str | None
     context_state_type: Any | None
     resources: list[Any]
+    # Batch-lineage fan-in (L2): (parameter_name, element_event_type) when the
+    # step declares a single ``list[E]`` collect parameter, else None.
+    batch_collect_param: tuple[str, Any] | None = None
+    # Fan-out producer (L2): True when the return annotation is a batch-emission
+    # collection (``list[E]`` / ``AsyncIterator[E]`` / ``AsyncGenerator[E, None]``).
+    is_fan_out: bool = False
 
 
 def inspect_signature(
@@ -73,6 +79,7 @@ def inspect_signature(
     context_parameter = None
     context_state_type = None
     resources = []
+    batch_collect_param: tuple[str, Any] | None = None
 
     # Inspect function parameters
     for name, t in sig.parameters.items():
@@ -115,21 +122,35 @@ def inspect_signature(
             context_parameter = name
             continue
 
-        # Reject ``list[E]`` fan-in parameters explicitly. Batch-typed collect
-        # parameters (e.g. ``events: list[Done]``) are part of the batch-lineage
-        # phase; rejecting here avoids silently dropping the parameter.
+        # Batch-lineage fan-in (L2): a ``list[E]`` parameter (e.g.
+        # ``events: list[Done]``) is a collect-All step. It buffers incoming
+        # ``E`` by batch id and fires once when the batch closes. The element
+        # ``E`` must be a single concrete event type (union element widening is
+        # a later phase). Routing registers the step for ``E``.
         if get_origin(annotation) is list:
             list_args = get_args(annotation)
             if list_args and all(
                 arg is Event or (inspect.isclass(arg) and issubclass(arg, Event))
                 for arg in list_args
             ):
-                msg = (
-                    f"Parameter {name!r} is annotated as a list of events "
-                    f"({annotation!r}). Batch-typed (list[E]) collect parameters "
-                    "are not supported yet."
-                )
-                raise WorkflowValidationError(msg)
+                if len(list_args) != 1:
+                    msg = (
+                        f"Parameter {name!r} is annotated as {annotation!r}. "
+                        "Batch (list[E]) collect parameters must declare a single "
+                        "event type; union element types are not supported yet."
+                    )
+                    raise WorkflowValidationError(msg)
+                if batch_collect_param is not None:
+                    msg = (
+                        "A step may declare at most one batch (list[E]) collect "
+                        f"parameter, but found both {batch_collect_param[0]!r} and "
+                        f"{name!r}."
+                    )
+                    raise WorkflowValidationError(msg)
+                element_type = list_args[0]
+                batch_collect_param = (name, element_type)
+                accepted_events[name] = [element_type]
+                continue
 
         # Collect name and types of the event param
         param_types = _get_param_types(t, type_hints)
@@ -147,6 +168,8 @@ def inspect_signature(
         context_parameter=context_parameter,
         context_state_type=context_state_type,
         resources=resources,
+        batch_collect_param=batch_collect_param,
+        is_fan_out=_is_fan_out_return(fn, localns=localns),
     )
 
 
@@ -165,7 +188,16 @@ def validate_step_signature(spec: StepSignatureSpec) -> None:
     if num_of_events == 0:
         msg = "Step signature must have at least one parameter annotated as type Event"
         raise WorkflowValidationError(msg)
-    elif num_of_events > 1:
+    if spec.batch_collect_param is not None and num_of_events > 1:
+        # A batch (list[E]) collect parameter alongside other event params is a
+        # multi-slot collect — deferred to a later phase.
+        msg = (
+            "A batch (list[E]) collect parameter cannot be combined with other "
+            "event parameters yet. Use a single list[E] parameter, or multiple "
+            "single-event parameters for a heterogeneous join."
+        )
+        raise WorkflowValidationError(msg)
+    if num_of_events > 1:
         # Collect-mode (heterogeneous fan-in): a step with more than one
         # event-shaped parameter fires once when one event of each declared
         # type has arrived. For now each such parameter must name exactly one
@@ -321,6 +353,35 @@ def _get_return_types(
     if not flattened:
         return [type(None)]
     return flattened
+
+
+def _is_fan_out_return(func: Callable, localns: dict[str, Any] | None = None) -> bool:
+    """True if the return annotation is a batch-emission collection.
+
+    A fan-out producer returns ``list[E]`` / ``AsyncIterator[E]`` /
+    ``AsyncIterable[E]`` / ``AsyncGenerator[E, None]``. ``Optional[list[E]]``
+    (``list[E] | None``) also counts — it may emit a batch or nothing. A plain
+    single-event or union-of-single-events return is NOT fan-out.
+    """
+    type_hints = _resolve_type_hints(func, localns=localns)
+    return_hint = type_hints.get("return")
+    if return_hint is None:
+        return False
+    return _return_hint_is_fan_out(return_hint)
+
+
+def _return_hint_is_fan_out(hint: Any) -> bool:
+    if hint is type(None):
+        return False
+    origin = get_origin(hint)
+    if origin in (Union, UnionType):
+        # Optional / unions: fan-out if any non-None member is a collection.
+        return any(
+            _return_hint_is_fan_out(arg)
+            for arg in get_args(hint)
+            if arg is not type(None)
+        )
+    return origin in _COLLECTION_RETURN_ORIGINS
 
 
 def _resolve_type_hints(

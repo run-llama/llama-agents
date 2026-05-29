@@ -120,9 +120,14 @@ async def partial(
     context: Context,
     workflow: Workflow,
     collected_events: dict[str, Event] | None = None,
+    batch_events: dict[str, list[Event]] | None = None,
 ) -> Callable[[], Any]:
     kwargs: dict[str, Any] = {}
-    if collected_events is not None:
+    if batch_events is not None:
+        # Batch-lineage fan-in (L2): bind the ``list[E]`` parameter to the full
+        # closed batch. The trigger ``event`` is a carrier and is ignored.
+        kwargs.update(batch_events)
+    elif collected_events is not None:
         # Collect-mode (heterogeneous fan-in): bind each declared event
         # parameter to its collected event instead of a single trigger event.
         kwargs.update(collected_events)
@@ -188,16 +193,22 @@ def as_step_worker_function(
 
         try:
             config = workflow._get_steps()[step_name]._step_config
+            # Batch-lineage fan-in (L2): a step with a single ``list[E]``
+            # parameter is launched once per closed batch by the reducer, with
+            # the full buffered list riding on ``state.batch_input``. Bind that
+            # list to the collect parameter.
+            collected_binding: dict[str, Event] | None = None
+            batch_binding: dict[str, list[Event]] | None = None
+            if config.batch_collect_param is not None:
+                param_name, _ = config.batch_collect_param
+                batch_binding = {param_name: list(state.batch_input or [])}
             # Heterogeneous fan-in (collect-mode): a step with more than one
             # event parameter collects one event of each declared type, then
             # fires once with each parameter bound to its event. This desugars
             # onto the existing collect_events buffer and is lineage-blind
             # (assumes a single batch in flight) until batch lineage lands.
-            collected_binding: dict[str, Event] | None = None
-            if config.collect_params is not None:
-                expected_types = [
-                    event_type for _, event_type in config.collect_params
-                ]
+            elif config.collect_params is not None:
+                expected_types = [event_type for _, event_type in config.collect_params]
                 collected = internal_context.collect_events(event, expected_types)
                 if collected is None:
                     # Not every declared type has arrived yet. collect_events
@@ -223,6 +234,9 @@ def as_step_worker_function(
             # error spans.
             captured_waiting: WaitingForEvent | None = None
             captured_cancelled: BaseException | None = None
+            is_async_gen = inspect.isasyncgenfunction(
+                getattr(call_func, "__func__", call_func)
+            ) or inspect.isasyncgenfunction(call_func)
             if asyncio.iscoroutinefunction(call_func):
 
                 @functools.wraps(call_func)
@@ -270,17 +284,61 @@ def as_step_worker_function(
                 input_tags = {}
             merged_tags = {**active_instrument_tags.get(), **input_tags}
 
-            partial_func = await partial(
-                func=workflow._dispatcher.span(span_target),
-                step_config=config,
-                event=event,
-                context=internal_context,
-                workflow=workflow,
-                collected_events=collected_binding,
-            )
+            # Async-generator steps build their own partial over the raw function
+            # below; skip the span-wrapped build here to avoid resolving
+            # resources twice.
+            partial_func: Callable[[], Any] | None = None
+            if not is_async_gen:
+                partial_func = await partial(
+                    func=workflow._dispatcher.span(span_target),
+                    step_config=config,
+                    event=event,
+                    context=internal_context,
+                    workflow=workflow,
+                    collected_events=collected_binding,
+                    batch_events=batch_binding,
+                )
 
             try:
                 # coerce to coroutine function
+                if is_async_gen:
+                    # Async-generator step (``-> AsyncIterator[E]``): iterate and
+                    # emit one StepWorkerResult per yielded event (mirrors the
+                    # static-list path). Emissions are NOT deduped — replay may
+                    # re-run the generator and re-emit, which is the documented
+                    # contract (the user dedupes via domain ids if needed). An
+                    # empty generator still completes the step.
+                    emitted_any = False
+                    # Build a partial over the raw async-gen function (not the
+                    # span wrapper, which assumes a sync/coroutine call shape).
+                    agen_partial = await partial(
+                        func=call_func,
+                        step_config=config,
+                        event=event,
+                        context=internal_context,
+                        workflow=workflow,
+                        collected_events=collected_binding,
+                        batch_events=batch_binding,
+                    )
+                    with instrument_tags(merged_tags):
+                        agen = agen_partial()
+                        async for item in agen:
+                            if not isinstance(item, Event):
+                                msg = (
+                                    f"Step function {step_name} yielded "
+                                    f"{type(item).__name__} instead of an Event "
+                                    "instance."
+                                )
+                                raise WorkflowRuntimeError(msg)
+                            _emit_output_event(
+                                WorkflowStepOutputEvent(output=summarize_event(item))
+                            )
+                            returns.return_values.append(StepWorkerResult(result=item))
+                            emitted_any = True
+                    if not emitted_any:
+                        returns.return_values.append(StepWorkerResult(result=None))
+                    await internal_context._finalize_step()
+                    return returns.return_values
                 if not asyncio.iscoroutinefunction(call_func):
                     # run_in_executor doesn't accept **kwargs, so we need to use partial
                     copy = copy_context()
