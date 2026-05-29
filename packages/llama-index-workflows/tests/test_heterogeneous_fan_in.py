@@ -27,11 +27,13 @@ async def test_three_param_heterogeneous_join_fires_once() -> None:
 
     class AssembleWorkflow(Workflow):
         @step
-        async def emit(self, ctx: Context, ev: StartEvent) -> Header | Body | Footer:
+        async def emit(
+            self, ctx: Context, ev: StartEvent
+        ) -> Header | Body | Footer | None:
             ctx.send_event(Header(value="h"))
             ctx.send_event(Body(value="b"))
             ctx.send_event(Footer(value="f"))
-            return None  # type: ignore[return-value]
+            return None
 
         @step
         async def assemble(self, h: Header, b: Body, f: Footer) -> StopEvent:
@@ -49,12 +51,14 @@ async def test_heterogeneous_join_binds_by_parameter_type() -> None:
 
     class OrderWorkflow(Workflow):
         @step
-        async def emit(self, ctx: Context, ev: StartEvent) -> Header | Body | Footer:
+        async def emit(
+            self, ctx: Context, ev: StartEvent
+        ) -> Header | Body | Footer | None:
             # Emit in an order different from the assemble signature.
             ctx.send_event(Footer(value="F"))
             ctx.send_event(Header(value="H"))
             ctx.send_event(Body(value="B"))
-            return None  # type: ignore[return-value]
+            return None
 
         @step
         async def assemble(self, h: Header, b: Body, f: Footer) -> StopEvent:
@@ -73,10 +77,10 @@ async def test_heterogeneous_join_with_context_param() -> None:
 
     class CtxWorkflow(Workflow):
         @step
-        async def emit(self, ctx: Context, ev: StartEvent) -> Header | Body:
+        async def emit(self, ctx: Context, ev: StartEvent) -> Header | Body | None:
             ctx.send_event(Header(value="x"))
             ctx.send_event(Body(value="y"))
-            return None  # type: ignore[return-value]
+            return None
 
         @step
         async def assemble(self, ctx: Context, h: Header, b: Body) -> StopEvent:

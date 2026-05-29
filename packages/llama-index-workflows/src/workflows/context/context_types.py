@@ -152,6 +152,9 @@ class SerializedContext(BaseModel):
     batch_pending: dict[str, int] = Field(default_factory=dict)
     # Open fan-out batch origin stacks (L2), keyed by batch id -> trigger stack.
     batch_origin: dict[str, list[str]] = Field(default_factory=dict)
+    # Open fan-out batch producer step names (L2), keyed by batch id. Persisted so
+    # a resumed run still closes each batch tagged with its producer step.
+    batch_producer: dict[str, str] = Field(default_factory=dict)
 
     @staticmethod
     def from_v0(v0: SerializedContextV0) -> "SerializedContext":

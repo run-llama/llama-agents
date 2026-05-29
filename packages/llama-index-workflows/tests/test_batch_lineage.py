@@ -21,6 +21,7 @@ from workflows.runtime.control_loop import (
     replay_ticks_stream,
 )
 from workflows.runtime.types.internal_state import BrokerState
+from workflows.runtime.types.plugin import as_snapshottable_adapter
 from workflows.runtime.types.ticks import (
     TickAddEvent,
     TickBatchClosed,
@@ -176,17 +177,6 @@ async def test_branch_death_join_sees_surviving_subset() -> None:
     assert result == [1, 3, 5]
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Known L2 limitation: two-level nested fan-out where the inner producer "
-        "ALSO consumes an outer-batch member mis-counts the outer batch's pending "
-        "continuations, so the outer join can fire before the inner summaries "
-        "arrive. Single-level fan-out/fan-in, empty batches, branch death, and "
-        "abort all work; deeper nesting needs the per-level continuation "
-        "accounting reworked (tracked for a follow-up)."
-    ),
-    strict=False,
-)
 async def test_multi_level_fan_out_joins_at_innermost_level() -> None:
     """Nested fan-out: inner joins fire per outer task, then an outer join."""
 
@@ -248,7 +238,9 @@ async def _run_recording_ticks(
         pass
     result = await handler
     adapter = wf._runtime.get_external_adapter(handler.run_id)
-    ticks = list(adapter.replay())
+    snapshottable = as_snapshottable_adapter(adapter)
+    assert snapshottable is not None, "in-memory runtime adapter is snapshottable"
+    ticks = list(snapshottable.replay())
     return result, ticks
 
 
@@ -296,11 +288,19 @@ async def test_replay_reproduces_identical_batch_ids_and_grouping() -> None:
 
 
 async def test_batch_aborted_fail_default_fails_workflow() -> None:
-    """A fan-out exhausting retries mid-stream fails the run under on_partial=fail."""
+    """A fan-out exhausting retries mid-stream fails the run under on_partial=fail.
+
+    The async-generator producer yields one member and THEN raises (retry budget
+    exhausted), so a batch IS minted and a TickBatchAborted is emitted. With the
+    default on_partial="fail" join, this drives the real abort -> fail path in
+    ``_process_batch_aborted_tick`` (not the ordinary step-failure path that a
+    raise-before-yield producer would take).
+    """
 
     class FanOut(Workflow):
         @step(retry_policy=ConstantDelayRetryPolicy(maximum_attempts=1, delay=0))
-        async def fan_out(self, ev: StartEvent) -> list[Task]:
+        async def fan_out(self, ev: StartEvent) -> AsyncIterator[Task]:
+            yield Task(n=0)
             raise RuntimeError("boom mid-stream")
 
         @step
@@ -312,14 +312,21 @@ async def test_batch_aborted_fail_default_fails_workflow() -> None:
             return StopEvent(result=len(events))
 
     with pytest.raises((RuntimeError, WorkflowRuntimeError)):
-        await FanOut(timeout=10).run()
+        await _run(FanOut(timeout=10))
 
 
 async def test_batch_aborted_fire_fires_join_with_partial() -> None:
-    """With on_partial="fire", a mid-stream-aborted batch still fires the join.
+    """A fire-consumer turns a mid-stream producer failure into a normal close.
 
-    on_partial is not user-settable until L3; set it on the config directly to
-    exercise the TickBatchAborted -> fire path end-to-end.
+    When a downstream collect step opts into on_partial="fire", a fan-out producer
+    that exhausts its retries mid-stream does NOT emit a TickBatchAborted. Instead
+    it opens its already-emitted members as a normal (smaller) batch, which closes
+    via the regular TickBatchClosed path once those in-flight members drain to the
+    join — firing the join exactly once with the partial set [0, 1].
+
+    on_partial is not user-settable until L3, so we poke it on the step config
+    directly. This is the legitimate L2 technique for exercising the fire-consumer
+    partial-close mechanism.
     """
 
     class FanOut(Workflow):
@@ -338,9 +345,13 @@ async def test_batch_aborted_fire_fires_join_with_partial() -> None:
             return StopEvent(result=["partial", sorted(e.n for e in events)])
 
     wf = FanOut(timeout=10)
+    # L2 has no public on_partial API; poke the step config so the join is a
+    # fire-consumer, which makes the mid-stream-failed producer open its partial
+    # emissions as a normal batch instead of aborting.
     wf.join._step_config.on_partial = "fire"
     result = await _run(wf)
     # The two pre-failure tasks reached work and the join fired with them.
+    assert isinstance(result, list)
     assert result[0] == "partial"
     assert result[1] == [0, 1]
 

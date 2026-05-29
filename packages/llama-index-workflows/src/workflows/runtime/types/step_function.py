@@ -339,6 +339,9 @@ def as_step_worker_function(
                         returns.return_values.append(StepWorkerResult(result=None))
                     await internal_context._finalize_step()
                     return returns.return_values
+                # The async-gen path returned above; on this path partial_func
+                # was always built (the ``if not is_async_gen`` branch above).
+                assert partial_func is not None
                 if not asyncio.iscoroutinefunction(call_func):
                     # run_in_executor doesn't accept **kwargs, so we need to use partial
                     copy = copy_context()
