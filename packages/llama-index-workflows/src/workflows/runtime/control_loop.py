@@ -1107,36 +1107,44 @@ def _process_step_result_tick(
 
     failing_run = any(isinstance(c, CommandFailWorkflow) for c in commands)
     did_abort = any(isinstance(c, CommandAbortBatch) for c in commands)
+
+    # (1) Account for the member this execution consumed from its OWN enclosing
+    # batch (``trigger_stack[-1]``). The branch terminates here unless it re-emits
+    # continuation(s) that stay at the enclosing level:
+    #   - 1:1 step: ``num_emitted`` outputs inherit ``trigger_stack`` verbatim.
+    #   - fan-out step: outputs go into a DEEPER batch; the enclosing batch sees
+    #     exactly ONE continuation later — the inner batch's collect-step summary,
+    #     stamped with the enclosing stack. So a fan-out is net-neutral here.
+    # A dead 1:1 branch (returns None ⇒ num_emitted 0) decrements and may close.
+    if (
+        did_complete_step
+        and not scheduled_retry
+        and not failing_run
+        and not did_abort
+        and trigger_stack
+    ):
+        enclosing = trigger_stack[-1]
+        if enclosing in state.batch_pending:
+            continuations = 1 if fan_out_batch_id is not None else num_emitted
+            state.batch_pending[enclosing] += continuations - 1
+            if state.batch_pending[enclosing] <= 0:
+                commands.extend(_close_batch(state, enclosing, tick.step_name))
+
+    # (2) If this execution is a fan-out producer, open its new (deeper) batch.
     if (
         fan_out_batch_id is not None
         and not scheduled_retry
         and not failing_run
         and not did_abort
     ):
-        # Open a new batch: register its pending-member count (events emitted
-        # into it). An empty batch (count 0) closes immediately. This also covers
-        # the on_partial="fire" case (``fire_partial_abort``): the partial
-        # emissions form a smaller batch that closes once its members drain.
+        # An empty batch (count 0) closes immediately. This also covers the
+        # on_partial="fire" case: the partial emissions form a smaller batch that
+        # closes once its members drain to the collect step.
         num_in_batch = sum(1 for ev in emitted_events if not isinstance(ev, StopEvent))
         state.batch_pending[fan_out_batch_id] = num_in_batch
         state.batch_origin[fan_out_batch_id] = trigger_stack
         if num_in_batch == 0:
             commands.extend(_close_batch(state, fan_out_batch_id, tick.step_name))
-    elif (
-        fan_out_batch_id is None
-        and did_complete_step
-        and not scheduled_retry
-        and trigger_stack
-    ):
-        # A 1:1 step consumed a member of its innermost batch and re-emitted
-        # ``num_emitted`` continuing members (which inherited the same stack).
-        # Net pending delta for that batch is (emitted - 1): a dead branch
-        # (emitted 0) decrements; a branch that re-emits one keeps it level.
-        inner = trigger_stack[-1]
-        if inner in state.batch_pending:
-            state.batch_pending[inner] += num_emitted - 1
-            if state.batch_pending[inner] <= 0:
-                commands.extend(_close_batch(state, inner, tick.step_name))
 
     is_completed = len([x for x in commands if indicates_exit(x)]) > 0
     if step_no_longer_in_progress:

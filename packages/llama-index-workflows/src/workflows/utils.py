@@ -129,11 +129,22 @@ def inspect_signature(
         # a later phase). Routing registers the step for ``E``.
         if get_origin(annotation) is list:
             list_args = get_args(annotation)
-            if list_args and all(
-                arg is Event or (inspect.isclass(arg) and issubclass(arg, Event))
-                for arg in list_args
-            ):
-                if len(list_args) != 1:
+            # Flatten the element type: ``list[E]`` -> [E]; ``list[A | B]`` ->
+            # [A, B] (the single element arg is itself a union). Drop ``None``.
+            element_types: list[Any] = []
+            for arg in list_args:
+                if get_origin(arg) in (Union, UnionType):
+                    element_types.extend(
+                        a for a in get_args(arg) if a is not type(None)
+                    )
+                else:
+                    element_types.append(arg)
+            is_event_list = bool(element_types) and all(
+                et is Event or (inspect.isclass(et) and issubclass(et, Event))
+                for et in element_types
+            )
+            if is_event_list:
+                if len(element_types) != 1:
                     msg = (
                         f"Parameter {name!r} is annotated as {annotation!r}. "
                         "Batch (list[E]) collect parameters must declare a single "
@@ -147,7 +158,7 @@ def inspect_signature(
                         f"{name!r}."
                     )
                     raise WorkflowValidationError(msg)
-                element_type = list_args[0]
+                element_type = element_types[0]
                 batch_collect_param = (name, element_type)
                 accepted_events[name] = [element_type]
                 continue
