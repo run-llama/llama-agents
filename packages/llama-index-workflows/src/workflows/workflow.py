@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -22,7 +23,7 @@ from .errors import (
     WorkflowRuntimeError,
     WorkflowValidationError,
 )
-from .events import Event, StartEvent
+from .events import Event, StartEvent, StopEvent
 from .handler import WorkflowHandler
 from .resource import ResourceManager
 from .types import RunResultT
@@ -32,10 +33,98 @@ dispatcher = get_dispatcher(__name__)
 logger = logging.getLogger(__name__)
 
 
+def _resolve_child_slots(cls: type) -> dict[str, type]:
+    """Resolve class annotations whose type is a ``Workflow`` subclass.
+
+    Walks the MRO base-first (so leaf annotations win) and resolves each
+    annotation against its defining class's module globals. String annotations
+    (produced by ``from __future__ import annotations``) are eval'd
+    best-effort; unresolvable names are skipped rather than raised, so an
+    unrelated forward reference never breaks child detection.
+
+    Returns a ``{field_name: child_workflow_type}`` mapping. Note the child
+    workflow type must be defined before the parent class that references it,
+    otherwise it cannot be resolved at parent class-creation time.
+    """
+    workflow_cls = globals().get("Workflow")
+    if workflow_cls is None:
+        return {}
+    slots: dict[str, type] = {}
+    for klass in reversed(cls.__mro__):
+        annotations = klass.__dict__.get("__annotations__")
+        if not annotations:
+            continue
+        module = sys.modules.get(klass.__module__)
+        globalns = getattr(module, "__dict__", {})
+        localns = dict(vars(klass))
+        for field_name, annotation in annotations.items():
+            resolved: Any = annotation
+            if isinstance(annotation, str):
+                try:
+                    resolved = eval(annotation, globalns, localns)  # noqa: S307
+                except Exception:
+                    continue
+            if isinstance(resolved, type) and issubclass(resolved, workflow_cls):
+                slots[field_name] = resolved
+    return slots
+
+
+def _synthesized_workflow_init(self: Workflow, *args: Any, **kwargs: Any) -> None:
+    """Constructor synthesized by ``WorkflowMeta`` for classes with child slots.
+
+    Pulls the declared child-workflow fields out of the keyword arguments,
+    forwards the remainder to ``Workflow.__init__``, then attaches each child
+    (adopting the parent runtime and registering eagerly).
+    """
+    slots = type(self)._get_child_workflow_slots()
+    children: dict[str, Any] = {}
+    for slot_name in slots:
+        if slot_name in kwargs:
+            children[slot_name] = kwargs.pop(slot_name)
+    Workflow.__init__(self, *args, **kwargs)
+    for slot_name, child in children.items():
+        self._attach_child(slot_name, child)
+
+
+def _validate_includable_child(child: Workflow, slot_name: str) -> None:
+    """A workflow is includable as a child only if it declares custom
+    ``StartEvent`` and ``StopEvent`` subclasses — the typed IO is the routing
+    contract that maps each child's events to exactly one child.
+    """
+    cls_name = type(child).__name__
+    if child._start_event_class is StartEvent:
+        raise WorkflowValidationError(
+            f"Child workflow '{cls_name}' (slot '{slot_name}') must declare a "
+            "custom StartEvent subclass; a bare StartEvent cannot be routed to a "
+            "child unambiguously."
+        )
+    if child._stop_event_class is StopEvent:
+        raise WorkflowValidationError(
+            f"Child workflow '{cls_name}' (slot '{slot_name}') must declare a "
+            "custom StopEvent subclass; a bare StopEvent cannot be routed back "
+            "to the parent unambiguously."
+        )
+
+
 class WorkflowMeta(type):
     def __init__(cls, name: str, bases: tuple[type, ...], dct: dict[str, Any]) -> None:
         super().__init__(name, bases, dct)
         cls._step_functions: dict[str, StepFunction] = {}
+
+        # Synthesize a child-aware __init__ for subclasses that declare child
+        # workflow fields but no constructor of their own. A user-defined
+        # __init__ (own or inherited from a non-synthesized base) always wins.
+        workflow_cls = globals().get("Workflow")
+        if workflow_cls is None or "__init__" in dct:
+            return
+        if not _resolve_child_slots(cls):
+            return
+        inherited_init = getattr(cls, "__init__", None)
+        if (
+            inherited_init is workflow_cls.__init__
+            or inherited_init is _synthesized_workflow_init
+        ):
+            setattr(cls, "__init__", _synthesized_workflow_init)
 
 
 class Workflow(metaclass=WorkflowMeta):
@@ -89,6 +178,10 @@ class Workflow(metaclass=WorkflowMeta):
     # Populated by the metaclass; declared here for type checkers.
     _step_functions: dict[str, StepFunction]
     _step_functions_version: int = 0
+    # Per-class cache of resolved child-workflow slots (field name -> type).
+    _child_workflow_slots_cache: dict[str, type] | None = None
+    # Attached child-workflow instances, keyed by declared field name.
+    _child_workflows: dict[str, Workflow]
 
     _runtime: Runtime
     _workflow_name: str | None
@@ -153,6 +246,8 @@ class Workflow(metaclass=WorkflowMeta):
         # Populated by _validate(); empty until a successful validation runs.
         self._catch_error_handlers: dict[str, CatchErrorHandler] = {}
         self._handler_for_step: dict[str, str] = {}
+        # Attached child-workflow instances, keyed by declared field name.
+        self._child_workflows = {}
         self._events = _collect_events(step_configs)
         # Resource management
         self._resource_manager = resource_manager or ResourceManager()
@@ -208,6 +303,64 @@ class Workflow(metaclass=WorkflowMeta):
         old.untrack_workflow(self)
         self._runtime = new_runtime
         new_runtime.track_workflow(self)
+
+    @classmethod
+    def _get_child_workflow_slots(cls) -> dict[str, type]:
+        """Return ``{field_name: child_workflow_type}`` declared on this class.
+
+        Resolved from class annotations whose type is a ``Workflow`` subclass.
+        Cached per-class on first access.
+        """
+        cached = cls.__dict__.get("_child_workflow_slots_cache")
+        if cached is None:
+            cached = _resolve_child_slots(cls)
+            cls._child_workflow_slots_cache = cached
+        return cached
+
+    @property
+    def child_workflows(self) -> dict[str, Workflow]:
+        """Attached child-workflow instances, keyed by declared field name."""
+        return dict(self._child_workflows)
+
+    def _attach_child(self, name: str, child: Workflow) -> None:
+        """Wire a child workflow instance into this parent.
+
+        Validates the child is includable (custom Start/Stop events), adopts the
+        parent's runtime, locks the child against runtime override, and registers
+        it eagerly for tracking.
+        """
+        if self._child_workflows.get(name) is child:
+            return
+        if not isinstance(child, Workflow):
+            raise WorkflowValidationError(
+                f"Child workflow slot '{name}' on '{type(self).__name__}' must be "
+                f"a Workflow instance, got {type(child).__name__}."
+            )
+        expected = type(self)._get_child_workflow_slots().get(name)
+        if expected is not None and not isinstance(child, expected):
+            raise WorkflowValidationError(
+                f"Child workflow slot '{name}' on '{type(self).__name__}' expects "
+                f"{expected.__name__}, got {type(child).__name__}."
+            )
+        _validate_includable_child(child, name)
+        # Adopt the parent runtime, then lock so the child can't override it.
+        child._switch_runtime(self._runtime)
+        child._runtime_locked = True
+        setattr(self, name, child)
+        self._child_workflows[name] = child
+
+    def _ensure_children_attached(self) -> None:
+        """Attach any declared child instances not yet wired in.
+
+        Covers the user-defined ``__init__`` path, where children are assigned as
+        plain attributes rather than through the synthesized constructor.
+        """
+        for name in type(self)._get_child_workflow_slots():
+            if name in self._child_workflows:
+                continue
+            child = getattr(self, name, None)
+            if isinstance(child, Workflow):
+                self._attach_child(name, child)
 
     @property
     def workflow_name(self) -> str:
@@ -373,6 +526,8 @@ class Workflow(metaclass=WorkflowMeta):
         """
         from workflows.context import Context
 
+        self._ensure_children_attached()
+
         if not self._runtime_locked:
             # don't allow switching runtime after a workflow has been launched
             self._runtime_locked = True
@@ -440,6 +595,7 @@ class Workflow(metaclass=WorkflowMeta):
         validate_resources: bool = False,
         force: bool = False,
     ) -> bool:
+        self._ensure_children_attached()
         if self._disable_validation and not force:
             return False
         stale = self._validated_version != self.__class__._step_functions_version
