@@ -56,6 +56,12 @@ class BrokerState:
     # id was pushed onto). Used to stamp the close tick so collect outputs inherit
     # the correct (popped) stack, and to support multi-level nesting.
     batch_origin: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # Open fan-out batches -> the name of the step that produced (minted) the
+    # batch. The close tick must carry the PRODUCER step regardless of which code
+    # path closes the batch (enclosing close, empty/immediate close, or
+    # drain-to-zero in a collect step) so downstream same-level reachability is
+    # computed from the producer, not from an unrelated collect step.
+    batch_producer: dict[str, str] = field(default_factory=dict)
 
     def deepcopy(self) -> BrokerState:
         """
@@ -71,6 +77,7 @@ class BrokerState:
             batch_seq=self.batch_seq,
             batch_pending=dict(self.batch_pending),
             batch_origin=dict(self.batch_origin),
+            batch_producer=dict(self.batch_producer),
         )
 
     @staticmethod
@@ -185,6 +192,7 @@ class BrokerState:
             batch_seq=self.batch_seq,
             batch_pending=dict(self.batch_pending),
             batch_origin={k: list(v) for k, v in self.batch_origin.items()},
+            batch_producer=dict(self.batch_producer),
         )
 
     @staticmethod
@@ -207,6 +215,7 @@ class BrokerState:
         base_state.batch_origin = {
             k: tuple(v) for k, v in serialized.batch_origin.items()
         }
+        base_state.batch_producer = dict(serialized.batch_producer)
 
         # Restore worker state (queues, collected events, waiters)
         # We do this regardless of is_running state so workflows can resume from where they left off

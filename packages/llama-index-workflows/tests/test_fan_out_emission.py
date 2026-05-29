@@ -68,7 +68,7 @@ async def test_list_with_non_event_raises() -> None:
     class BadFanOutWorkflow(Workflow):
         @step
         async def fan_out(self, ev: StartEvent) -> list[Task]:
-            return ["not-an-event"]  # type: ignore[list-item]
+            return ["not-an-event"]  # type: ignore
 
         @step
         async def process(self, ev: Task) -> StopEvent | None:
