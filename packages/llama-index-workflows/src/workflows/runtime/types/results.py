@@ -72,12 +72,18 @@ class StepWorkerState:
     step_name: str
     collected_events: dict[str, list[Event]]
     collected_waiters: list[StepWorkerWaiter]
+    # Batch-lineage fan-in (L2): the fully buffered batch handed to a
+    # ``list[E]`` collect step when its batch closes. None for non-collect runs.
+    batch_input: list[Event] | None = None
 
     def _deepcopy(self) -> StepWorkerState:
         return StepWorkerState(
             step_name=self.step_name,
             collected_events={k: list(v) for k, v in self.collected_events.items()},
             collected_waiters=[dataclasses.replace(x) for x in self.collected_waiters],
+            batch_input=list(self.batch_input)
+            if self.batch_input is not None
+            else None,
         )
 
 

@@ -79,6 +79,8 @@ class SerializedEventAttempt(BaseModel):
     # Per-handler recovery counts on this event's lineage. Maps catch_error
     # handler step name -> invocations so far. Empty on the main graph.
     recovery_counts: dict[str, int] = Field(default_factory=dict)
+    # Batch lineage stack (innermost id last). Empty outside any fan-out batch.
+    batch_stack: list[str] = Field(default_factory=list)
 
 
 class SerializedWaiter(BaseModel):
@@ -120,6 +122,8 @@ class SerializedStepWorkerState(BaseModel):
     collected_events: dict[str, list[str]] = Field(default_factory=dict)
     # Active waiters created by ctx.wait_for_event()
     collected_waiters: list[SerializedWaiter] = Field(default_factory=list)
+    # Batch-lineage fan-in buffers (L2), keyed by batch id -> [serialized event, ...]
+    batch_buffers: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class SerializedContext(BaseModel):
@@ -140,6 +144,14 @@ class SerializedContext(BaseModel):
     # Per-step worker state with queues, in-progress events, collected events, and waiters
     # Maps step_name -> SerializedStepWorkerState
     workers: dict[str, SerializedStepWorkerState] = Field(default_factory=dict)
+
+    # Monotonic batch-id counter (L2). Persisted so a resumed run keeps minting
+    # unique, deterministic batch ids.
+    batch_seq: int = Field(default=0)
+    # Open fan-out batch pending-member counts (L2), keyed by batch id.
+    batch_pending: dict[str, int] = Field(default_factory=dict)
+    # Open fan-out batch origin stacks (L2), keyed by batch id -> trigger stack.
+    batch_origin: dict[str, list[str]] = Field(default_factory=dict)
 
     @staticmethod
     def from_v0(v0: SerializedContextV0) -> "SerializedContext":
