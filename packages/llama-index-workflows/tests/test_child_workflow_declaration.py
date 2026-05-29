@@ -6,8 +6,12 @@
 
 The constructor that accepts child-workflow fields is synthesized by
 ``WorkflowMeta`` at runtime, so static type checkers can't see the ``child=``
-keyword yet (ergonomic typing lands with the ``Workflow[TStart, TStop]``
-generic). The file-level pragmas above suppress those expected diagnostics.
+keyword. Exposing it statically would require ``typing.dataclass_transform`` on
+the metaclass, which breaks compat: it makes childless calls like
+``MyFlow(timeout=30)`` a type error (the checker stops honoring the inherited
+``Workflow.__init__``). So the ``child=`` call sites stay suppressed by the
+file-level pragmas above, along with the internal-attribute access these tests
+make. See the Phase 6 decision in the child-workflows plan.
 """
 
 from __future__ import annotations
