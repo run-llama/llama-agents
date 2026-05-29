@@ -56,6 +56,19 @@ class StepConfig:
     # step fires once when one event of each type has arrived. None for the
     # ordinary single-event-trigger model.
     collect_params: list[tuple[str, Any]] | None = None
+    # Fan-out producer (L2): True when the return annotation's origin is one of
+    # list / AsyncIterator / AsyncIterable / AsyncGenerator. Such a step mints a
+    # fresh batch id per execution and stamps every emitted event with it, then
+    # closes the batch. Computed at decoration time from the return annotation.
+    is_fan_out: bool = False
+    # Batch-lineage fan-in (L2): set to ``(parameter_name, element_event_type)``
+    # when the step declares a single ``list[E]`` parameter. Such a step is
+    # collect-mode "All": it buffers incoming ``E`` by innermost batch id and
+    # fires once on the matching TickBatchClosed with the full buffered list.
+    batch_collect_param: tuple[str, Any] | None = None
+    # How a batch-collect step reacts to TickBatchAborted: "fail" (default,
+    # fail the workflow) or "fire" (fire with the partial buffer).
+    on_partial: Literal["fail", "fire"] = "fail"
     role: StepRole = "step"
     # Only meaningful when role == "catch_error".
     # None means wildcard — covers any step not claimed by a scoped handler.
@@ -207,8 +220,7 @@ def make_step_function(
     collect_params: list[tuple[str, Any]] | None = None
     if len(spec.accepted_events) > 1:
         collect_params = [
-            (name, param_types[0])
-            for name, param_types in spec.accepted_events.items()
+            (name, param_types[0]) for name, param_types in spec.accepted_events.items()
         ]
         accepted_events = [event_type for _, event_type in collect_params]
 
@@ -224,6 +236,8 @@ def make_step_function(
         resources=spec.resources,
         skip_graph_checks=skip_graph_checks or [],
         collect_params=collect_params,
+        is_fan_out=spec.is_fan_out,
+        batch_collect_param=spec.batch_collect_param,
     )
 
     return casted
