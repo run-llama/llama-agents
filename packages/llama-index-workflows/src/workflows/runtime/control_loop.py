@@ -1453,18 +1453,19 @@ def _fire_batch_collect(
     return commands
 
 
-def _reachable_event_types(
-    state: BrokerState, producer_step: str
-) -> set[type[Event]]:
-    """Event types transitively reachable downstream of ``producer_step``.
+def _same_level_event_types(state: BrokerState, producer_step: str) -> set[type[Event]]:
+    """Event types reachable downstream of ``producer_step`` WITHOUT crossing
+    another batch boundary.
 
-    Follows the static step graph (a step's ``return_types`` feed steps whose
-    ``accepted_events`` include them). Used to decide which batch-collect steps
-    "own" a batch minted by ``producer_step`` even when no member reached them
-    (empty batch / every branch died): the collect step's element type must be
-    reachable from the producer's outputs.
+    A fan-out batch B minted by ``producer_step`` is consumed by the
+    batch-collect steps whose element type is produced within B's level. The
+    traversal of the static step graph therefore stops at any step that
+    re-scopes the batch — a fan-out producer (pushes a deeper id) or a
+    batch-collect step (pops B's id). This is what lets an empty/branch-dead
+    batch fire exactly the collect step(s) at B's own level, not deeper or
+    shallower ones. (Isomorphic to "nearest enclosing batch producing E".)
     """
-    reachable: set[type[Event]] = set()
+    seen_types: set[type[Event]] = set()
     frontier: list[type[Event]] = [
         t
         for t in state.workers[producer_step].config.return_types
@@ -1472,19 +1473,24 @@ def _reachable_event_types(
     ]
     while frontier:
         ev_type = frontier.pop()
-        if ev_type in reachable:
+        if ev_type in seen_types:
             continue
-        reachable.add(ev_type)
+        seen_types.add(ev_type)
         for worker in state.workers.values():
-            if ev_type in worker.config.accepted_events:
-                for out in worker.config.return_types:
-                    if (
-                        isinstance(out, type)
-                        and issubclass(out, Event)
-                        and out not in reachable
-                    ):
-                        frontier.append(out)
-    return reachable
+            if ev_type not in worker.config.accepted_events:
+                continue
+            # Crossing a fan-out or a batch-collect step changes the batch level,
+            # so do not follow its outputs at this level.
+            if worker.config.is_fan_out or worker.config.batch_collect_param:
+                continue
+            for out in worker.config.return_types:
+                if (
+                    isinstance(out, type)
+                    and issubclass(out, Event)
+                    and out not in seen_types
+                ):
+                    frontier.append(out)
+    return seen_types
 
 
 def _process_batch_closed_tick(
@@ -1499,7 +1505,7 @@ def _process_batch_closed_tick(
     """
     state = init.deepcopy()
     commands: list[WorkflowCommand] = []
-    reachable = _reachable_event_types(state, tick.step_name)
+    reachable = _same_level_event_types(state, tick.step_name)
     for step_name, worker_state in state.workers.items():
         if worker_state.config.batch_collect_param is None:
             continue
@@ -1537,7 +1543,7 @@ def _process_batch_aborted_tick(
     """
     state = init.deepcopy()
     commands: list[WorkflowCommand] = []
-    reachable = _reachable_event_types(state, tick.step_name)
+    reachable = _same_level_event_types(state, tick.step_name)
     for step_name, worker_state in state.workers.items():
         if worker_state.config.batch_collect_param is None:
             continue
