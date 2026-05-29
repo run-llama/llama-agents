@@ -164,6 +164,33 @@ def test_truncated_label() -> None:
     assert node.truncated_label(17) == "my_long_step_name"
 
 
+class FannedOutTask(Event):
+    idx: int
+
+
+def test_produced_by_lists_producing_step() -> None:
+    """A step returning list[Task] records itself as Task's producer."""
+
+    class FanWorkflow(Workflow):
+        @step
+        async def fan_out(self, ev: StartEvent) -> list[FannedOutTask]:
+            return [FannedOutTask(idx=i) for i in range(3)]
+
+        @step
+        async def collect(self, ev: FannedOutTask) -> StopEvent | None:
+            return StopEvent(result=ev.idx)
+
+    graph = get_workflow_representation(FanWorkflow)
+
+    task_nodes = [
+        node
+        for node in graph.nodes
+        if isinstance(node, WorkflowEventNode) and node.event_type == "FannedOutTask"
+    ]
+    assert len(task_nodes) == 1
+    assert "fan_out" in task_nodes[0].produced_by
+
+
 def test_graph_serialization() -> None:
     """Test that WorkflowGraph serializes and restores node types."""
     graph = WorkflowGraph(

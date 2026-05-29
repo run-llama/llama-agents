@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import collections.abc as cabc
 import inspect
 import secrets
 import string
@@ -226,25 +227,72 @@ def _get_param_types(param: inspect.Parameter, type_hints: dict) -> list[Any]:
     return [typ]
 
 
+# Return-annotation origins whose single element type describes emitted events.
+# A step that fans out via ``ctx.send_event`` (or returns one of these directly)
+# honestly declares its emissions as ``list[E]`` / ``AsyncIterator[E]`` etc.
+_COLLECTION_RETURN_ORIGINS = (
+    list,
+    cabc.AsyncIterator,
+    cabc.AsyncIterable,
+    cabc.AsyncGenerator,
+)
+
+
+def _flatten_return_annotation(hint: Any) -> list[Any]:
+    """Flatten a return annotation into the set of produced event types.
+
+    Unwraps unions, ``Optional`` (``None`` is dropped), and the
+    emission-collection wrappers in ``_COLLECTION_RETURN_ORIGINS`` (``list[E]``,
+    ``AsyncIterator[E]``, ``AsyncGenerator[E, None]``). The element ``E`` may
+    itself be a union, which is flattened recursively. ``NoneType`` never appears
+    in the result; order is preserved and duplicates are removed.
+    """
+    if hint is type(None):
+        return []
+
+    origin = get_origin(hint)
+    if origin in (Union, UnionType):
+        # Optional is Union[type, None] so it's covered here.
+        result: list[Any] = []
+        for arg in get_args(hint):
+            for t in _flatten_return_annotation(arg):
+                if t not in result:
+                    result.append(t)
+        return result
+
+    if origin in _COLLECTION_RETURN_ORIGINS:
+        args = get_args(hint)
+        if not args:
+            return []
+        # list[E] -> E; AsyncGenerator[E, None] -> E (first arg is the yield type)
+        return _flatten_return_annotation(args[0])
+
+    return [hint]
+
+
 def _get_return_types(
     func: Callable, localns: dict[str, Any] | None = None
 ) -> list[Any]:
     """
     Extract the return type hints from a function.
 
-    Handles Union, Optional, and List types.
+    Handles Union, Optional, and emission-collection types (``list[E]``,
+    ``AsyncIterator[E]``, ``AsyncGenerator[E, None]``). Collection wrappers are
+    unwrapped to the event types they emit, so a step's return signature
+    exhaustively describes what it produces.
     """
     type_hints = _resolve_type_hints(func, localns=localns)
     return_hint = type_hints.get("return")
     if return_hint is None:
         return []
 
-    origin = get_origin(return_hint)
-    if origin in (Union, UnionType):
-        # Optional is Union[type, None] so it's covered here
-        return [t for t in get_args(return_hint) if t is not type(None)]
-    else:
-        return [return_hint]
+    flattened = _flatten_return_annotation(return_hint)
+    # Preserve the historical contract that a bare ``-> None`` reports
+    # ``[NoneType]`` (a truthy, annotated return) rather than an empty list,
+    # which validation treats as a missing annotation.
+    if not flattened:
+        return [type(None)]
+    return flattened
 
 
 def _resolve_type_hints(

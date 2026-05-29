@@ -2,13 +2,18 @@
 # Copyright (c) 2026 LlamaIndex Inc.
 
 import inspect
-from typing import Any, get_type_hints
+from typing import (
+    Any,
+    AsyncGenerator,
+    AsyncIterator,
+    get_type_hints,
+)
 
 import pytest
 from workflows.context import Context
 from workflows.decorators import step
 from workflows.errors import WorkflowValidationError
-from workflows.events import StartEvent, StopEvent
+from workflows.events import Event, StartEvent, StopEvent
 from workflows.utils import (
     _get_param_types,
     _get_return_types,
@@ -215,10 +220,12 @@ def test_get_return_types_optional() -> None:
 
 
 def test_get_return_types_list() -> None:
+    # list[E] is flattened to its element type: the step's return signature
+    # exhaustively describes the event types it emits.
     def f(foo: int) -> list[str]:
         return [""]
 
-    assert _get_return_types(f) == [list[str]]
+    assert _get_return_types(f) == [str]
 
 
 def test_is_free_function() -> None:
@@ -233,3 +240,76 @@ def test_is_free_function() -> None:
 def test_inspect_signature_raises_if_not_callable() -> None:
     with pytest.raises(TypeError, match="Expected a callable object, got str"):
         inspect_signature("foo")  # type: ignore
+
+
+class _EventA(Event):
+    pass
+
+
+class _EventB(Event):
+    pass
+
+
+def test_return_type_list_is_flattened() -> None:
+    def f(ev: StartEvent) -> list[_EventA]:
+        return [_EventA()]
+
+    spec = inspect_signature(f)
+    assert spec.return_types == [_EventA]
+
+
+def test_return_type_async_iterator_is_flattened() -> None:
+    async def f(ev: StartEvent) -> AsyncIterator[_EventA]:
+        yield _EventA()
+
+    spec = inspect_signature(f)
+    assert spec.return_types == [_EventA]
+
+
+def test_return_type_async_generator_is_flattened() -> None:
+    async def f(ev: StartEvent) -> AsyncGenerator[_EventA, None]:
+        yield _EventA()
+
+    spec = inspect_signature(f)
+    assert spec.return_types == [_EventA]
+
+
+def test_return_type_list_of_union_is_flattened() -> None:
+    def f(ev: StartEvent) -> list[_EventA | _EventB]:
+        return [_EventA()]
+
+    spec = inspect_signature(f)
+    assert spec.return_types == [_EventA, _EventB]
+
+
+def test_return_type_optional_list_strips_none() -> None:
+    def f(ev: StartEvent) -> list[_EventA] | None:
+        return None
+
+    spec = inspect_signature(f)
+    assert spec.return_types == [_EventA]
+
+
+def test_return_type_bare_event_unchanged() -> None:
+    def f(ev: StartEvent) -> _EventA:
+        return _EventA()
+
+    spec = inspect_signature(f)
+    assert spec.return_types == [_EventA]
+
+
+def test_return_type_bare_none_reports_nonetype() -> None:
+    def f(ev: StartEvent) -> None:
+        return None
+
+    spec = inspect_signature(f)
+    assert spec.return_types == [type(None)]
+
+
+def test_validate_step_signature_accepts_list_return() -> None:
+    def f(ev: StartEvent) -> list[_EventA]:
+        return [_EventA()]
+
+    spec = inspect_signature(f)
+    # Should not raise: list[E] flattens to a real event return type.
+    validate_step_signature(spec)

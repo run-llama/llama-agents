@@ -169,6 +169,18 @@ def get_workflow_representation(workflow: Workflow | type[Workflow]) -> Workflow
     workflow_cls = workflow if isinstance(workflow, type) else type(workflow)
     steps: dict[str, StepFunction] = workflow_cls._get_steps_from_class()
 
+    # Map each produced event type (by class name) to the steps that declare it
+    # in their return signature. Collection returns (list[E], AsyncIterator[E])
+    # are already flattened into return_types upstream.
+    produced_by_map: dict[str, list[str]] = {}
+    for step_name, step_func in steps.items():
+        for return_type in step_func._step_config.return_types:
+            if return_type is type(None):
+                continue
+            producers = produced_by_map.setdefault(return_type.__name__, [])
+            if step_name not in producers:
+                producers.append(step_name)
+
     nodes: list[WorkflowGraphNode] = []
     edges: list[WorkflowGraphEdge] = []
     added_nodes: set[str] = set()  # Track added node IDs to avoid duplicates
@@ -298,6 +310,7 @@ def get_workflow_representation(workflow: Workflow | type[Workflow]) -> Workflow
                         event_type=event_type.__name__,
                         event_types=_get_event_type_chain(event_type),
                         event_schema=event_type.model_json_schema(),
+                        produced_by=list(produced_by_map.get(event_type.__name__, [])),
                     )
                 )
                 added_nodes.add(event_type.__name__)
@@ -315,6 +328,7 @@ def get_workflow_representation(workflow: Workflow | type[Workflow]) -> Workflow
                         event_type=return_type.__name__,
                         event_types=_get_event_type_chain(return_type),
                         event_schema=return_type.model_json_schema(),
+                        produced_by=list(produced_by_map.get(return_type.__name__, [])),
                     )
                 )
                 added_nodes.add(return_type.__name__)
