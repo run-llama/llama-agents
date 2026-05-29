@@ -220,8 +220,8 @@ def test_get_return_types_optional() -> None:
 
 
 def test_get_return_types_list() -> None:
-    # list[E] is flattened to its element type: the step's return signature
-    # exhaustively describes the event types it emits.
+    # list[E] is flattened to its element type for workflow validation and
+    # graph representation.
     def f(foo: int) -> list[str]:
         return [""]
 
