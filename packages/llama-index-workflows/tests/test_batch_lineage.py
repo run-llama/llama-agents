@@ -13,7 +13,6 @@ from typing import AsyncIterator
 
 import pytest
 from workflows import Context, Workflow, step
-from workflows.errors import WorkflowRuntimeError
 from workflows.events import Event, StartEvent, StopEvent
 from workflows.retry_policy import ConstantDelayRetryPolicy
 from workflows.runtime import control_loop as _cl
@@ -21,12 +20,25 @@ from workflows.runtime.control_loop import (
     rebuild_state_from_ticks_stream,
     replay_ticks_stream,
 )
+from workflows.runtime.types.commands import (
+    CommandCloseBatch,
+    CommandQueueEvent,
+    CommandRunWorker,
+)
 from workflows.runtime.types.internal_state import BrokerState
+from workflows.runtime.types.results import RetryAttempt
+from workflows.runtime.types.step_function import as_step_worker_functions
 from workflows.runtime.types.ticks import (
     TickAddEvent,
     TickBatchClosed,
+    TickStepResult,
     WorkflowTick,
 )
+
+# Each test gets its own event loop. The session default is a module-scoped
+# loop; with it, a finished run's lingering pull task can survive into the next
+# test and intermittently hang it under xdist.
+pytestmark = pytest.mark.asyncio(loop_scope="function")
 
 
 class Task(Event):
@@ -57,7 +69,6 @@ async def _stream(ticks: list[WorkflowTick]) -> AsyncIterator[WorkflowTick]:
         yield t
 
 
-@pytest.mark.asyncio
 async def test_static_list_producer_join_fires_once_with_all() -> None:
     """`join(events: list[Done])` fires once with the full batch, no ctx.store."""
 
@@ -78,7 +89,6 @@ async def test_static_list_producer_join_fires_once_with_all() -> None:
     assert result == [0, 1, 2, 3, 4]
 
 
-@pytest.mark.asyncio
 async def test_async_generator_producer_join_fires_once() -> None:
     """An `AsyncIterator[E]` (async generator) producer drives the same join."""
 
@@ -100,7 +110,6 @@ async def test_async_generator_producer_join_fires_once() -> None:
     assert result == [0, 10, 20, 30]
 
 
-@pytest.mark.asyncio
 async def test_join_fires_exactly_once() -> None:
     """The join body executes exactly once per batch."""
 
@@ -125,7 +134,6 @@ async def test_join_fires_exactly_once() -> None:
     assert calls == [3]
 
 
-@pytest.mark.asyncio
 async def test_empty_batch_fires_join_once_with_empty_list() -> None:
     """`return []` still closes the batch; the join fires once with `[]`."""
 
@@ -146,7 +154,6 @@ async def test_empty_batch_fires_join_once_with_empty_list() -> None:
     assert result == ["empty", 0]
 
 
-@pytest.mark.asyncio
 async def test_branch_death_join_sees_surviving_subset() -> None:
     """A 1:1 worker returning None drops its branch; the join fires with the rest."""
 
@@ -170,7 +177,6 @@ async def test_branch_death_join_sees_surviving_subset() -> None:
     assert result == [1, 3, 5]
 
 
-@pytest.mark.asyncio
 async def test_multi_level_fan_out_joins_at_innermost_level() -> None:
     """Nested fan-out: inner joins fire per outer task, then an outer join."""
 
@@ -201,59 +207,107 @@ async def test_multi_level_fan_out_joins_at_innermost_level() -> None:
     assert result == [(0, 2), (1, 2), (2, 2)]
 
 
-async def _run_recording_ticks(
-    wf: Workflow,
-) -> tuple[object, list[WorkflowTick]]:
-    """Run ``wf`` to completion, recording every tick fed to the reducer.
+class _ReplayFanOut(Workflow):
+    """Single-level fan-out used by the replay-determinism test."""
 
-    Records by wrapping the module-level ``_reduce_tick`` (the single reduction
-    chokepoint the runner calls). The captured list is the exact, ordered tick
-    stream — feeding it back through ``replay_ticks_stream`` must reproduce the
-    same state and batch lineage.
+    @step
+    async def fan_out(self, ev: StartEvent) -> list[Task]:
+        return [Task(n=i) for i in range(4)]
+
+    @step
+    async def work(self, ev: Task) -> Done:
+        return Done(n=ev.n)
+
+    @step
+    async def join(self, events: list[Done]) -> StopEvent:
+        return StopEvent(result=sorted(e.n for e in events))
+
+
+async def _drive_reducer(
+    wf: Workflow, run_id: str
+) -> tuple[BrokerState, list[WorkflowTick]]:
+    """Drive the pure reducer over a fan-out run, recording every tick.
+
+    Exercises the exact reduction chokepoint (``_reduce_tick``) and the
+    command -> tick conversion the live runner uses, with NO global patching.
+    Returns the final broker state and the ordered tick stream; feeding that
+    stream back through ``replay_ticks_stream`` must reproduce identical lineage.
     """
+    step_fns = as_step_worker_functions(wf)
+    state = BrokerState.from_workflow(wf)
+    state.is_running = True
+    pending: list[WorkflowTick] = [TickAddEvent(event=StartEvent())]
     recorded: list[WorkflowTick] = []
-    orig = _cl._reduce_tick
-
-    def _recording(tick: WorkflowTick, init: object, now: float, run_id=None):  # type: ignore[no-untyped-def]
+    now = 1000.0  # fixed; batch ids never depend on wall-clock
+    for _ in range(1000):  # iteration cap: a logic bug fails fast, not hangs
+        if not pending:
+            break
+        tick = pending.pop(0)
         recorded.append(tick)
-        return orig(tick, init, now, run_id)
+        state, commands = _cl._reduce_tick(tick, state, now, run_id)
+        for cmd in commands:
+            if isinstance(cmd, CommandQueueEvent):
+                pending.append(
+                    TickAddEvent(
+                        event=cmd.event,
+                        step_name=cmd.step_name,
+                        attempts=cmd.attempts,
+                        first_attempt_at=cmd.first_attempt_at,
+                        recovery_counts=dict(cmd.recovery_counts),
+                        batch_stack=cmd.batch_stack,
+                    )
+                )
+            elif isinstance(cmd, CommandCloseBatch):
+                pending.append(
+                    TickBatchClosed(
+                        batch_id=cmd.batch_id,
+                        step_name=cmd.step_name,
+                        batch_stack=cmd.batch_stack,
+                    )
+                )
+            elif isinstance(cmd, CommandRunWorker):
+                worker = next(
+                    w
+                    for w in state.workers[cmd.step_name].in_progress
+                    if w.worker_id == cmd.id
+                )
+                result = await step_fns[cmd.step_name](
+                    state=worker.shared_state,
+                    step_name=cmd.step_name,
+                    event=cmd.event,
+                    workflow=wf,
+                    retry=RetryAttempt(),
+                )
+                pending.append(
+                    TickStepResult(
+                        step_name=cmd.step_name,
+                        worker_id=cmd.id,
+                        event=cmd.event,
+                        result=result,
+                    )
+                )
+    return state, recorded
 
-    _cl._reduce_tick = _recording  # type: ignore[assignment]
-    try:
-        result = await wf.run()
-    finally:
-        _cl._reduce_tick = orig  # type: ignore[assignment]
-    return result, recorded
 
-
-@pytest.mark.asyncio
-async def test_replay_reproduces_identical_batch_ids_and_grouping() -> None:
-    """Record a fan-out run's tick stream, replay it, assert identical lineage."""
-
-    class FanOut(Workflow):
-        @step
-        async def fan_out(self, ev: StartEvent) -> list[Task]:
-            return [Task(n=i) for i in range(4)]
-
-        @step
-        async def work(self, ev: Task) -> Done:
-            return Done(n=ev.n)
-
-        @step
-        async def join(self, events: list[Done]) -> StopEvent:
-            return StopEvent(result=sorted(e.n for e in events))
-
-    wf = FanOut(timeout=10)
-    result, ticks = await _run_recording_ticks(wf)
-    assert result == [0, 1, 2, 3]
-    assert ticks, "expected a recorded tick stream"
-
-    # The Done events all carry one batch id (single fan-out level).
-    done_ids = [
+def _done_batch_ids(ticks: list[WorkflowTick]) -> list[str]:
+    return [
         t.batch_stack[-1]
         for t in ticks
         if isinstance(t, TickAddEvent) and isinstance(t.event, Done) and t.batch_stack
     ]
+
+
+async def test_replay_reproduces_identical_batch_ids_and_grouping() -> None:
+    """Drive a fan-out run through the pure reducer, then replay the recorded
+    tick stream and assert identical batch ids and grouping. The determinism
+    lives in the reducer itself — no global patching, no live runner."""
+
+    wf = _ReplayFanOut()
+    state, ticks = await _drive_reducer(wf, run_id="run-A")
+    assert ticks, "expected a recorded tick stream"
+
+    # The Done events all carry one batch id (single fan-out level).
+    done_ids = _done_batch_ids(ticks)
     assert len(done_ids) == 4, done_ids
     assert len(set(done_ids)) == 1, done_ids
     the_batch = done_ids[0]
@@ -264,10 +318,10 @@ async def test_replay_reproduces_identical_batch_ids_and_grouping() -> None:
     ]
     assert len(closes) == 1, closes
 
-    # Replay the exact stream twice; both reproduce the same deterministic state.
+    # Replay the exact stream twice; both reproduce the same final state.
     replay1 = await replay_ticks_stream(BrokerState.from_workflow(wf), _stream(ticks))
     replay2 = await replay_ticks_stream(BrokerState.from_workflow(wf), _stream(ticks))
-    assert replay1.state.batch_seq == replay2.state.batch_seq
+    assert replay1.state.batch_seq == replay2.state.batch_seq == state.batch_seq
     assert replay1.state.batch_seq >= 1  # at least one batch was minted
 
     rebuilt = await rebuild_state_from_ticks_stream(
@@ -275,22 +329,18 @@ async def test_replay_reproduces_identical_batch_ids_and_grouping() -> None:
     )
     assert rebuilt.batch_seq == replay1.state.batch_seq
 
-    # Re-running the same workflow definition produces an IDENTICAL batch id —
-    # ids are a pure function of run_id + step + sequence, and the in-memory
-    # runtime uses a deterministic run id.
-    wf2 = FanOut(timeout=10)
-    result2, ticks2 = await _run_recording_ticks(wf2)
-    assert result2 == [0, 1, 2, 3]
-    done_ids2 = [
-        t.batch_stack[-1]
-        for t in ticks2
-        if isinstance(t, TickAddEvent) and isinstance(t.event, Done) and t.batch_stack
-    ]
-    # Same grouping cardinality regardless of run-id value.
-    assert len(set(done_ids2)) == 1, done_ids2
+    # The SAME run id reproduces IDENTICAL batch ids — ids are a pure function of
+    # run_id + producing step + per-run sequence.
+    _, ticks_again = await _drive_reducer(_ReplayFanOut(), run_id="run-A")
+    assert _done_batch_ids(ticks_again) == done_ids
+
+    # A DIFFERENT run id yields different ids but identical grouping cardinality.
+    _, ticks_b = await _drive_reducer(_ReplayFanOut(), run_id="run-B")
+    done_ids_b = _done_batch_ids(ticks_b)
+    assert len(set(done_ids_b)) == 1, done_ids_b
+    assert done_ids_b[0] != the_batch
 
 
-@pytest.mark.asyncio
 async def test_batch_aborted_fail_default_fails_workflow() -> None:
     """A fan-out exhausting retries mid-stream fails the run under on_partial=fail."""
 
@@ -311,7 +361,6 @@ async def test_batch_aborted_fail_default_fails_workflow() -> None:
         await FanOut(timeout=10).run()
 
 
-@pytest.mark.asyncio
 async def test_batch_aborted_fire_fires_join_with_partial() -> None:
     """With on_partial="fire", a mid-stream-aborted batch still fires the join.
 
@@ -342,7 +391,6 @@ async def test_batch_aborted_fire_fires_join_with_partial() -> None:
     assert result[1] == [0, 1]
 
 
-@pytest.mark.asyncio
 async def test_async_generator_with_context_param() -> None:
     """An async-generator fan-out may also take a Context parameter."""
 
@@ -365,7 +413,6 @@ async def test_async_generator_with_context_param() -> None:
     assert result == 3
 
 
-@pytest.mark.asyncio
 async def test_no_ctx_store_threading_needed() -> None:
     """Sanity: the terse form needs neither ctx.store nor collect_events."""
 
