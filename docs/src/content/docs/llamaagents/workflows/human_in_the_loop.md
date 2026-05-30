@@ -1,6 +1,6 @@
 ---
 sidebar:
-  order: 7
+  order: 6
 title: Human in the Loop
 ---
 

@@ -1,6 +1,6 @@
 ---
 sidebar:
-  order: 13
+  order: 12
 title: Run Your Workflow as a Server
 ---
 

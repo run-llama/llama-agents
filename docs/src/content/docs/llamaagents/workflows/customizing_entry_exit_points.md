@@ -1,6 +1,6 @@
 ---
 sidebar:
-  order: 8
+  order: 7
 title: Customizing entry and exit points
 ---
 

@@ -1,6 +1,6 @@
 ---
 sidebar:
-  order: 12
+  order: 11
 title: Workflows from unbound functions
 ---
 
