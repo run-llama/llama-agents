@@ -312,3 +312,18 @@ def test_init_raises_skips_finalize() -> None:
             Boom()
     # __call__ propagates the exception; _finalize_construction never runs.
     assert rt.track_calls == []
+
+
+def test_missing_super_init_raises_clear_error() -> None:
+    class NoSuper(Workflow):
+        def __init__(self, **kwargs: Any) -> None:
+            # Intentionally skips super().__init__(): _runtime never gets set,
+            # so finalize would otherwise raise an opaque private-attr error.
+            pass
+
+        @step
+        async def start(self, ev: StartEvent) -> StopEvent:
+            return StopEvent()
+
+    with pytest.raises(WorkflowValidationError, match="did not call super"):
+        NoSuper()

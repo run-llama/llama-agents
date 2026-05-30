@@ -373,6 +373,16 @@ class Workflow(metaclass=WorkflowMeta):
         Tracking here — rather than at the tail of ``Workflow.__init__`` — means
         registration (pre- or post-launch) sees every attached child.
         """
+        if not hasattr(self, "_runtime"):
+            # _runtime is the last attribute set by Workflow.__init__, so its
+            # absence means a subclass __init__ skipped super().__init__().
+            # __call__ runs this for every instance, so without the guard the
+            # next lines raise an opaque AttributeError on a private attribute.
+            raise WorkflowValidationError(
+                f"{type(self).__name__}.__init__ did not call super().__init__(). "
+                "Workflow subclasses with a custom __init__ must call "
+                "super().__init__(...) so the base workflow is initialized."
+            )
         self._ensure_children_attached()
         # Register with runtime for tracking (no-op for BasicRuntime)
         self._runtime.track_workflow(self)
