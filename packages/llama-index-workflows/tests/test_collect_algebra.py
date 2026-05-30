@@ -5,9 +5,9 @@
 Covers the public ``Collect`` / ``Cardinality`` API, signature inference for
 batch fan-in parameters (bare ``list[E]``, the ``Annotated[..., Collect()]``
 synonym, union flat lists, and the ``Take(n)`` marker), the validation errors
-that keep mode determination legible, ``Take(n)`` runtime release, and
-``ctx.replayed_events()``. ``AtLeast`` is v2 (it's a silent alias of ``Take``
-without v2 re-fire / cancellation), so it is intentionally not exported.
+that keep mode determination legible, and ``Take(n)`` runtime release.
+``AtLeast`` is v2 (it's a silent alias of ``Take`` without v2 re-fire /
+cancellation), so it is intentionally not exported.
 
 The cross-level (``at=``) and provenance (``from_=``) knobs and multi-slot joins
 are declared-but-deferred; their tests assert the clear validation error and
@@ -16,10 +16,10 @@ xfail the end-to-end examples.
 
 from __future__ import annotations
 
-from typing import Annotated, Any, AsyncIterator, Callable
+from typing import Annotated, Any, Callable
 
 import pytest
-from workflows import All, Cardinality, Collect, Context, Take, Workflow, step
+from workflows import All, Cardinality, Collect, Take, Workflow, step
 from workflows.decorators import StepConfig, StepFunction
 from workflows.decorators import step as free_step
 from workflows.errors import WorkflowValidationError
@@ -363,51 +363,6 @@ async def test_annotated_all_runs_like_bare_list() -> None:
 
     result = await _run(FanOut(timeout=10))
     assert result == [0, 1, 2, 3]
-
-
-# --------------------------------------------------------------------------- #
-# ctx.replayed_events()
-# --------------------------------------------------------------------------- #
-
-
-async def test_replayed_events_empty_on_first_run() -> None:
-    """`ctx.replayed_events()` returns an empty list on a fresh run."""
-
-    seen: list[int] = []
-
-    class FanOut(Workflow):
-        @step
-        async def fan_out(self, ctx: Context, ev: StartEvent) -> AsyncIterator[Task]:
-            already = ctx.replayed_events()
-            seen.append(len(already))
-            assert already == []
-            for i in range(3):
-                yield Task(n=i)
-
-        @step
-        async def work(self, ev: Task) -> Done:
-            return Done(n=ev.n)
-
-        @step
-        async def join(self, events: list[Done]) -> StopEvent:
-            return StopEvent(result=len(events))
-
-    result = await _run(FanOut(timeout=10))
-    assert result == 3
-    assert seen == [0]
-
-
-def test_replayed_events_outside_step_raises() -> None:
-    from workflows.errors import ContextStateError
-
-    class Trivial(Workflow):
-        @step
-        async def go(self, ev: StartEvent) -> StopEvent:
-            return StopEvent(result="x")
-
-    ctx: Context = Context(Trivial())
-    with pytest.raises(ContextStateError):
-        ctx.replayed_events()
 
 
 # --------------------------------------------------------------------------- #
