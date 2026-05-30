@@ -192,7 +192,9 @@ def test_collect_from_raises_clear_error() -> None:
     with pytest.raises(WorkflowValidationError, match="from_=.*not implemented"):
 
         @free_step(workflow=_W)
-        async def join(events: Annotated[list[Done], Collect(from_="src")]) -> StopEvent:  # type: ignore[unused-ignore]
+        async def join(
+            events: Annotated[list[Done], Collect(from_="src")],
+        ) -> StopEvent:  # type: ignore[unused-ignore]
             return StopEvent(result="x")
 
 
@@ -364,9 +366,7 @@ async def test_annotated_all_runs_like_bare_list() -> None:
             return Done(n=ev.n)
 
         @step
-        async def join(
-            self, events: Annotated[list[Done], Collect()]
-        ) -> StopEvent:
+        async def join(self, events: Annotated[list[Done], Collect()]) -> StopEvent:
             return StopEvent(result=sorted(e.n for e in events))
 
     result = await _run(FanOut(timeout=10))
