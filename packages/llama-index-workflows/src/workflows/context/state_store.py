@@ -40,6 +40,13 @@ KNOWN_UNSERIALIZABLE_KEYS: tuple[str, ...] = ("memory",)
 # "/"-joined namespace path -> that namespace's InMemoryStateStore.to_dict().
 CHILD_STATES_KEY = "__child_states__"
 
+# Reserved key under which the root namespace's payload is nested inside the
+# single durable ``DictState`` blob that backs a child-ful run. Sibling child
+# namespaces ride under ``CHILD_STATES_KEY`` in the same blob. Using a reserved
+# key (rather than spreading the root payload at the blob's top level) keeps the
+# root and child slots symmetric and the blob unambiguous.
+ROOT_STATE_KEY = "__root__"
+
 
 class InMemorySerializedState(BaseModel):
     """Serialized state containing actual data (from InMemoryStateStore)."""
@@ -739,3 +746,130 @@ def _find_most_derived_state_type(state_types: set[type[BaseModel]]) -> type[Bas
         )
 
     return most_derived
+
+
+class _NamespaceStateView(Generic[MODEL_T]):
+    """A :class:`StateStore` view over one namespace's slice of a shared blob.
+
+    Reads and writes go through ``parent.underlying`` -- a single durable
+    ``DictState`` store that holds the whole child tree in one row. This view
+    only ever touches its own slot inside that blob (the root payload under
+    :data:`ROOT_STATE_KEY`, a child's payload under
+    ``CHILD_STATES_KEY[namespace]``), so concurrent namespaces never clobber one
+    another: every write read-modify-writes the live row via
+    ``underlying.edit_state()`` and rewrites only this namespace's slot.
+    """
+
+    state_type: type[MODEL_T]
+
+    def __init__(
+        self,
+        parent: NamespacedStateStores,
+        namespace: tuple[str, ...],
+        state_type: type[MODEL_T],
+    ) -> None:
+        self._parent = parent
+        self._namespace = namespace
+        self.state_type = state_type
+
+    def _read_slot(self, blob: DictState) -> MODEL_T:
+        """Load this namespace's model from the shared blob, or a default."""
+        if self._namespace == ():
+            payload = blob.get(ROOT_STATE_KEY)
+        else:
+            children = blob.get(CHILD_STATES_KEY) or {}
+            payload = children.get("/".join(self._namespace))
+        if not payload:
+            return self.state_type()  # type: ignore[call-arg]
+        return deserialize_state_from_dict(  # type: ignore[return-value]  # ty: ignore[invalid-return-type]
+            payload, self._parent.serializer, self.state_type
+        )
+
+    def _write_slot(self, blob: DictState, model: MODEL_T) -> None:
+        """Persist this namespace's model back into the shared blob in place."""
+        payload = create_in_memory_payload(model, self._parent.serializer).model_dump()
+        if self._namespace == ():
+            blob[ROOT_STATE_KEY] = payload
+        else:
+            children = dict(blob.get(CHILD_STATES_KEY) or {})
+            children["/".join(self._namespace)] = payload
+            blob[CHILD_STATES_KEY] = children
+
+    async def get_state(self) -> MODEL_T:
+        blob = await self._parent.underlying.get_state()
+        return self._read_slot(blob)
+
+    async def set_state(self, state: MODEL_T) -> None:
+        async with self._parent.underlying.edit_state() as blob:
+            current = self._read_slot(blob)
+            merged = merge_state(current, state)
+            self._write_slot(blob, merged)
+
+    async def get(self, path: str, default: Any = Ellipsis) -> Any:
+        blob = await self._parent.underlying.get_state()
+        model = self._read_slot(blob)
+        return get_by_path(model, path, default)
+
+    async def set(self, path: str, value: Any) -> None:
+        async with self._parent.underlying.edit_state() as blob:
+            model = self._read_slot(blob)
+            set_by_path(model, path, value)
+            self._write_slot(blob, model)
+
+    async def clear(self) -> None:
+        async with self._parent.underlying.edit_state() as blob:
+            self._write_slot(blob, create_cleared_state(self.state_type))
+
+    @asynccontextmanager
+    async def edit_state(self) -> AsyncGenerator[MODEL_T, None]:
+        async with self._parent.underlying.edit_state() as blob:
+            model = self._read_slot(blob)
+            yield model
+            self._write_slot(blob, model)
+
+    def to_dict(self, serializer: BaseSerializer) -> dict[str, Any]:
+        # Every namespace returns the same persisted reference to the single
+        # underlying row. ``ExternalContext.to_dict`` nests these per namespace;
+        # resume reconnects every view through the shared root reference.
+        return self._parent.underlying.to_dict(serializer)
+
+
+class NamespacedStateStores:
+    """Per-namespace :class:`StateStore` views over one durable blob store.
+
+    A child-ful run persists its whole namespaced state tree in a single durable
+    row. ``underlying`` is the dumb blob-persister for that row (a ``DictState``
+    store created by the backend); it has no namespace awareness. Each namespace
+    gets a :class:`_NamespaceStateView` that operates only on its slice of the
+    blob, so child ``ctx.store`` writes are isolated from the parent's and from
+    siblings, yet all persist to the same row.
+
+    Built once per run from the ROOT workflow's ``_namespace_instances()`` (so
+    every namespace's state type is known up front) and keyed by ``run_id`` on
+    the runtime decorator. Adapters consult it in ``get_state_store()`` only for
+    child-ful runs; single-namespace runs keep the existing single-store path.
+    """
+
+    def __init__(
+        self,
+        underlying: StateStore[Any],
+        serializer: BaseSerializer,
+        state_types: dict[tuple[str, ...], type[BaseModel]],
+    ) -> None:
+        self.underlying = underlying
+        self.serializer = serializer
+        self.state_types = state_types
+        self._views: dict[tuple[str, ...], _NamespaceStateView[Any]] = {}
+
+    def view(self, namespace: tuple[str, ...]) -> StateStore[Any]:
+        """Return the cached state-store view for ``namespace``."""
+        view = self._views.get(namespace)
+        if view is None:
+            state_type = self.state_types.get(namespace, DictState)
+            view = _NamespaceStateView(self, namespace, state_type)
+            self._views[namespace] = view
+        return view
+
+    def all_views(self) -> dict[tuple[str, ...], StateStore[Any]]:
+        """Return a view for every known namespace (for whole-tree ``to_dict``)."""
+        return {ns: self.view(ns) for ns in self.state_types}

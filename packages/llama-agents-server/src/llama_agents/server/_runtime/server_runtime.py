@@ -17,8 +17,13 @@ from llama_agents.client.protocol.serializable_events import (
     EventEnvelopeWithMetadata,
 )
 from typing_extensions import override
-from workflows.context.serializers import BaseSerializer
+from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import (
+    CHILD_STATES_KEY,
+    ROOT_STATE_KEY,
+    DictState,
+    InMemoryStateStore,
+    NamespacedStateStores,
     StateStore,
     infer_state_type,
 )
@@ -31,6 +36,7 @@ from workflows.events import (
     WorkflowTimedOutEvent,
 )
 from workflows.runtime.runtime_decorators import (
+    BaseExternalRunAdapterDecorator,
     BaseInternalRunAdapterDecorator,
     BaseRuntimeDecorator,
 )
@@ -40,6 +46,7 @@ from workflows.runtime.types.plugin import (
     InternalRunAdapter,
     Runtime,
 )
+from workflows.runtime.types.results import StepWorkerStateContextVar
 from workflows.workflow import Workflow
 
 from .._store.abstract_workflow_store import (
@@ -78,6 +85,19 @@ class _ServerInternalRunAdapter(BaseInternalRunAdapterDecorator):
 
     @override
     def get_state_store(self) -> StateStore[Any]:
+        # Child-ful runs partition state by namespace into a single durable blob.
+        # Select this step's namespace from the contextvar (root steps and any
+        # caller outside a step get ``()``), exactly like the basic adapter.
+        namespaced = self._runtime._namespaced_state.get(self.run_id)
+        if namespaced is not None:
+            namespace: tuple[str, ...] = ()
+            try:
+                namespace = StepWorkerStateContextVar.get().namespace
+            except LookupError:
+                pass
+            return namespaced.view(namespace)
+
+        # Single-namespace run: existing single-store path, byte-identical.
         if self._state_store is not None:
             return self._state_store
         initial = self._runtime._initial_state.pop(self.run_id, None)
@@ -149,6 +169,35 @@ class _ServerInternalRunAdapter(BaseInternalRunAdapterDecorator):
 
 
 # ---------------------------------------------------------------------------
+# _ServerExternalRunAdapter
+# ---------------------------------------------------------------------------
+
+
+class _ServerExternalRunAdapter(BaseExternalRunAdapterDecorator):
+    """External adapter exposing per-namespace durable stores for child-ful runs.
+
+    The base (basic) external adapter only knows the in-memory queues; under the
+    server, child state lives in the durable namespaced blob. Surfacing the
+    namespaced views here lets ``Context.to_dict`` serialize the whole tree.
+    """
+
+    def __init__(
+        self,
+        decorated: ExternalRunAdapter,
+        namespaced: NamespacedStateStores,
+    ) -> None:
+        super().__init__(decorated)
+        self._namespaced = namespaced
+
+    @override
+    def get_state_store(self) -> StateStore[Any] | None:
+        return self._namespaced.view(())
+
+    def get_all_state_stores(self) -> dict[tuple[str, ...], StateStore[Any]]:
+        return self._namespaced.all_views()
+
+
+# ---------------------------------------------------------------------------
 # ServerRuntimeDecorator -- adapter wrapping, handler persistence,
 # status updates, and workflow registry
 # ---------------------------------------------------------------------------
@@ -172,6 +221,10 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
         self._store: AbstractWorkflowStore = store
         self._registered_workflows: dict[str, Workflow] = {}
         self._initial_state: dict[str, Any] = {}
+        # Per-run namespaced state for child-ful workflows: the whole child tree
+        # persists in one durable blob, partitioned per namespace. Keyed by
+        # run_id; absent for single-namespace runs (which use the legacy path).
+        self._namespaced_state: dict[str, NamespacedStateStores] = {}
         self._persistence_backoff = (
             list(persistence_backoff) if persistence_backoff is not None else [0.5, 3]
         )
@@ -252,6 +305,13 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
             store_type = serialized_state.get("store_type")
             if store_type is not None and store_type != "in_memory":
                 passthrough_state = None
+
+        # Build the per-run namespaced state once, from the ROOT workflow, for
+        # child-ful runs only. Single-namespace runs keep the legacy path.
+        self._maybe_build_namespaced_state(
+            run_id, workflow, serialized_state, serializer
+        )
+
         return super().run_workflow(
             run_id,
             workflow,
@@ -261,11 +321,81 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
             serializer=serializer,
         )
 
+    def _maybe_build_namespaced_state(
+        self,
+        run_id: str,
+        workflow: Workflow,
+        serialized_state: dict[str, Any] | None,
+        serializer: BaseSerializer | None,
+    ) -> None:
+        """Construct the run's :class:`NamespacedStateStores` if it has children.
+
+        The underlying durable store is a single ``DictState`` blob row keyed by
+        ``run_id``; per-namespace views read/write their slot of it. Idempotent
+        across fresh-start and idle reload (both call ``run_workflow`` with the
+        root). When the incoming ``serialized_state`` is an in-memory nested blob
+        (a portable ``ctx.to_dict`` payload), seed the row from it; sqlite/postgres
+        references reconnect to the existing row with no seeding.
+        """
+        instances = workflow._namespace_instances()
+        if len(instances) <= 1:
+            return
+        if run_id in self._namespaced_state:
+            return
+
+        active_serializer = serializer or JsonSerializer()
+        state_types: dict[tuple[str, ...], type[Any]] = {
+            namespace: infer_state_type(instance)
+            for namespace, instance in instances.items()
+        }
+
+        seed = self._namespaced_seed(serialized_state, active_serializer)
+        underlying = self._store.create_state_store(
+            run_id, DictState, seed, active_serializer if seed else None
+        )
+        self._namespaced_state[run_id] = NamespacedStateStores(
+            underlying=underlying,
+            serializer=active_serializer,
+            state_types=state_types,
+        )
+
+    @staticmethod
+    def _namespaced_seed(
+        serialized_state: dict[str, Any] | None,
+        serializer: BaseSerializer,
+    ) -> dict[str, Any] | None:
+        """Turn a portable nested ``ctx.to_dict`` blob into a DictState row seed.
+
+        Only in-memory nested blobs (those carrying ``CHILD_STATES_KEY``) need
+        explicit seeding; a persisted reference already has its row. Returns the
+        in-memory payload for the underlying ``DictState`` row, or ``None``.
+        """
+        if not serialized_state:
+            return None
+        if serialized_state.get("store_type") not in (None, "in_memory"):
+            return None
+        if CHILD_STATES_KEY not in serialized_state:
+            return None
+        root_payload = dict(serialized_state)
+        children = root_payload.pop(CHILD_STATES_KEY) or {}
+        blob = DictState()
+        blob[ROOT_STATE_KEY] = root_payload
+        blob[CHILD_STATES_KEY] = children
+        return InMemoryStateStore(blob).to_dict(serializer)
+
     def get_internal_adapter(self, workflow: Workflow) -> InternalRunAdapter:
         """Wraps the inner runtime's adapter in _ServerInternalRunAdapter."""
         inner_adapter = self._decorated.get_internal_adapter(workflow)
         state_type = infer_state_type(workflow)
         return _ServerInternalRunAdapter(inner_adapter, self, state_type=state_type)
+
+    @override
+    def get_external_adapter(self, run_id: str) -> ExternalRunAdapter:
+        inner = self._decorated.get_external_adapter(run_id)
+        namespaced = self._namespaced_state.get(run_id)
+        if namespaced is None:
+            return inner
+        return _ServerExternalRunAdapter(inner, namespaced)
 
     # ------------------------------------------------------------------
     # Handler persistence

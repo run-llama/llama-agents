@@ -2,16 +2,16 @@
 # Copyright (c) 2026 LlamaIndex Inc.
 """Child-workflow composition through the server's durable persistence path.
 
-Phase-4 of the child-workflows feature only exercised the in-memory basic
-runtime. These tests drive a parent-with-child workflow through the server's
+These tests drive a parent-with-child workflow through the server's
 sqlite-backed tick journal + state store, across a full server restart, to
 confirm:
 
 - the namespaced ``StepId`` journal round-trips (child steps deserialize and
   are skipped on resume rather than re-run), and
-- how per-namespace child state behaves under the single-``run_id`` server
-  state store (which, unlike the basic runtime, does not partition by
-  namespace).
+- a child step's ``ctx.store`` writes are durable: they persist into the
+  single ``workflow_state`` row under the nested ``__child_states__`` slot,
+  survive a full server restart, and stay isolated from the parent's root
+  state (and, for grandchildren, from intermediate namespaces).
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from llama_agents.server import (
 )
 from server_test_fixtures import wait_for_passing  # type: ignore[import]
 from workflows import Context, Workflow, step
+from workflows.context.state_store import CHILD_STATES_KEY, ROOT_STATE_KEY
 from workflows.events import Event, StartEvent, StopEvent
 
 # Counts child step executions across the (in-process) server restart so we can
@@ -151,25 +152,22 @@ async def test_child_workflow_journal_round_trips_across_server_restart(
 
 
 @pytest.mark.asyncio
-async def test_child_state_writes_are_not_persisted_under_server_runtime(
+async def test_child_state_writes_are_persisted_under_server_runtime(
     sqlite_store: SqliteWorkflowStore,
 ) -> None:
-    """KNOWN LIMITATION: a child step's ``ctx.store`` writes are NOT durable on
-    the server.
+    """A child step's ``ctx.store`` writes are durable on the server.
 
-    ``add_workflow`` switches the *parent* onto the server runtime, but an
-    already-attached child keeps the basic in-memory runtime it adopted at
-    construction. So a child step resolves an in-memory, per-namespace state
-    store (never serialized to the ``workflow_state`` table), while only the
-    parent's root store is persisted. The child's tick journal *is* persisted
-    via the parent's root adapter, so the child step is replayed (not re-run)
-    and its StopEvent output survives -- but anything it wrote to ``ctx.store``
-    is gone after a reload.
+    The runtime switch now propagates into the child, and the server adapter
+    is namespace-aware: the whole child tree's state persists in the single
+    ``workflow_state`` row, with the child's payload nested under the reserved
+    ``__child_states__`` slot. So a child's write survives a full server
+    restart while staying isolated from the parent's root state.
 
-    This test pins that behavior: the child-only key is absent from the
-    persisted root store, and it did not leak into the parent's state either.
-    A future fix that makes child state durable (per-namespace server stores)
-    should deliberately flip these assertions.
+    The child-only key is NOT at the root store's top level -- a raw read of
+    the row as a flat DictState (what ``create_state_store(run_id).get(...)``
+    does) won't see it. Durability is verified by inspecting the nested
+    ``__child_states__`` slice directly, and by restarting the server and
+    confirming the parent finishes with the child's threaded-through output.
     """
     CHILD_RUN_COUNTS.pop("child", None)
     handler_id = "child-state-1"
@@ -190,8 +188,168 @@ async def test_child_state_writes_are_not_persisted_under_server_runtime(
     ].run_id
     assert run_id is not None
 
+    # A child-ful run nests BOTH the root and every child payload inside the one
+    # ``workflow_state`` row, so a flat read of the row finds neither key at the
+    # top level -- root state lives under ``__root__``, child state under
+    # ``__child_states__``.
     persisted = sqlite_store.create_state_store(run_id)
-    # The child-only key was never persisted (in-memory child store, lost).
+    assert await persisted.get("from_child", sentinel) is sentinel
     assert await persisted.get("child_marker", sentinel) is sentinel
-    # The parent's own write to the root store IS persisted.
-    assert await persisted.get("from_child") == "HELLO"
+
+    blob = await persisted.get_state()
+    root_data = blob.get(ROOT_STATE_KEY)["state_data"]["_data"]
+    child_states = blob.get(CHILD_STATES_KEY)
+    assert child_states is not None
+    assert "child" in child_states
+    child_payload = child_states["child"]["state_data"]["_data"]
+
+    # The parent's root write is durable under the root slot.
+    assert root_data["from_child"] == '"HELLO"'
+    # The child's ``ctx.store`` write is durable in its own nested slot, isolated
+    # from the parent's root namespace.
+    assert child_payload["child_marker"] == '"from-child"'
+    assert "child_marker" not in root_data
+    assert "from_child" not in child_payload
+
+    # Restart: resume from the persisted journal + state, finish the run. The
+    # child step is replayed (not re-run) and its output threads through.
+    server2 = _make_server(sqlite_store)
+    async with server2.contextmanager():
+        await server2._service.send_event(handler_id, HumanGo(answer="ok"))
+        handler = await _wait_handler_status(sqlite_store, handler_id, "completed")
+        assert handler.result is not None
+        assert handler.result.result == "HELLO:ok"
+    assert CHILD_RUN_COUNTS["child"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Three-level (grandchild) durability
+# ---------------------------------------------------------------------------
+
+
+class GrandStart(StartEvent):
+    pass
+
+
+class GrandStop(StopEvent):
+    pass
+
+
+class MidStart(StartEvent):
+    pass
+
+
+class MidStop(StopEvent):
+    pass
+
+
+class StateGrandchild(Workflow):
+    @step
+    async def run_grand(self, ctx: Context, ev: GrandStart) -> GrandStop:
+        CHILD_RUN_COUNTS["grand"] = CHILD_RUN_COUNTS.get("grand", 0) + 1
+        await ctx.store.set("grand_marker", "from-grand")
+        return GrandStop()
+
+
+class StateMid(Workflow):
+    grand: StateGrandchild
+
+    @step
+    async def begin(self, ctx: Context, ev: MidStart) -> GrandStart:
+        await ctx.store.set("mid_marker", "from-mid")
+        return GrandStart()
+
+    @step
+    async def finish(self, ev: GrandStop) -> MidStop:
+        return MidStop()
+
+
+class HitlTopWithGrandchild(Workflow):
+    mid: StateMid
+
+    @step
+    async def begin(self, ev: StartEvent) -> MidStart:
+        return MidStart()
+
+    @step
+    async def gather(self, ctx: Context, ev: MidStop) -> HumanGo:
+        await ctx.store.set("top_marker", "from-top")
+        return await ctx.wait_for_event(HumanGo)
+
+    @step
+    async def complete(self, ctx: Context, ev: HumanGo) -> StopEvent:
+        top = await ctx.store.get("top_marker")
+        return StopEvent(result=f"{top}:{ev.answer}")
+
+
+def _make_grandchild_server(store: SqliteWorkflowStore) -> WorkflowServer:
+    server = WorkflowServer(workflow_store=store, idle_timeout=0.01)
+    server.add_workflow(
+        "test",
+        HitlTopWithGrandchild(mid=StateMid(grand=StateGrandchild())),
+        additional_events=EXTRA_EVENTS,
+    )
+    return server
+
+
+@pytest.mark.asyncio
+async def test_grandchild_state_writes_are_durable_and_isolated(
+    sqlite_store: SqliteWorkflowStore,
+) -> None:
+    """A grandchild's ``ctx.store`` write survives a restart and stays isolated.
+
+    A top -> mid -> grandchild tree, each namespace writing its own marker,
+    idles at a HITL point after the grandchild completed. The persisted row
+    holds each namespace's payload in its own ``__child_states__`` slot keyed by
+    the "/"-joined path (``mid``, ``mid/grand``); markers never cross
+    namespaces. A full server restart resumes and completes the run.
+    """
+    CHILD_RUN_COUNTS.pop("grand", None)
+    handler_id = "grand-state-1"
+    sentinel = object()
+
+    server = _make_grandchild_server(sqlite_store)
+    async with server.contextmanager():
+        wf = server._service._runtime.get_workflow("test")
+        assert wf is not None
+        await server._service.start_workflow(wf, handler_id)
+        await _wait_handler_idle(sqlite_store, handler_id)
+
+    assert CHILD_RUN_COUNTS["grand"] == 1
+
+    run_id = (await sqlite_store.query(HandlerQuery(handler_id_in=[handler_id])))[
+        0
+    ].run_id
+    assert run_id is not None
+
+    persisted = sqlite_store.create_state_store(run_id)
+    blob = await persisted.get_state()
+
+    def _data(payload: dict) -> dict:
+        return payload["state_data"]["_data"]
+
+    root_data = _data(blob.get(ROOT_STATE_KEY))
+    child_states = blob.get(CHILD_STATES_KEY)
+    assert child_states is not None
+    mid_data = _data(child_states["mid"])
+    grand_data = _data(child_states["mid/grand"])
+
+    # Each namespace holds only its own marker.
+    assert root_data["top_marker"] == '"from-top"'
+    assert mid_data["mid_marker"] == '"from-mid"'
+    assert grand_data["grand_marker"] == '"from-grand"'
+    # No cross-namespace leakage.
+    assert "grand_marker" not in root_data and "grand_marker" not in mid_data
+    assert "mid_marker" not in root_data and "mid_marker" not in grand_data
+    assert "top_marker" not in mid_data and "top_marker" not in grand_data
+    # Flat read of the row never surfaces a nested namespace key.
+    assert await persisted.get("grand_marker", sentinel) is sentinel
+
+    # Restart and finish.
+    server2 = _make_grandchild_server(sqlite_store)
+    async with server2.contextmanager():
+        await server2._service.send_event(handler_id, HumanGo(answer="done"))
+        handler = await _wait_handler_status(sqlite_store, handler_id, "completed")
+        assert handler.result is not None
+        assert handler.result.result == "from-top:done"
+    assert CHILD_RUN_COUNTS["grand"] == 1

@@ -57,6 +57,10 @@ from sqlalchemy.engine import Engine
 from typing_extensions import Unpack
 from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import (
+    CHILD_STATES_KEY,
+    ROOT_STATE_KEY,
+    DictState,
+    NamespacedStateStores,
     StateStore,
     deserialize_state_from_dict,
     infer_state_type,
@@ -80,6 +84,7 @@ from workflows.runtime.types.plugin import (
     WaitResultTick,
     WaitResultTimeout,
 )
+from workflows.runtime.types.results import StepWorkerStateContextVar
 from workflows.runtime.types.step_function import (
     StepWorkerFunction,
     as_step_worker_functions,
@@ -112,6 +117,25 @@ from .journal.task_journal import TaskJournal
 STATE_TABLE_NAME = "workflow_state"
 
 logger = logging.getLogger(__name__)
+
+
+def _namespaced_seed_blob(serialized_state: dict[str, Any]) -> DictState | None:
+    """Convert a portable nested ``ctx.to_dict`` blob into a DictState seed row.
+
+    Only in-memory nested blobs (carrying ``CHILD_STATES_KEY``) need explicit
+    seeding into the single durable row; persisted references already have their
+    row. Returns the ``DictState`` to write, or ``None`` if no seeding applies.
+    """
+    if serialized_state.get("store_type") not in (None, "in_memory"):
+        return None
+    if CHILD_STATES_KEY not in serialized_state:
+        return None
+    root_payload = dict(serialized_state)
+    children = root_payload.pop(CHILD_STATES_KEY) or {}
+    blob = DictState()
+    blob[ROOT_STATE_KEY] = root_payload
+    blob[CHILD_STATES_KEY] = children
+    return blob
 
 
 class DBOSWorkflowStore(AbstractWorkflowStore):
@@ -341,6 +365,11 @@ class DBOSRuntime(Runtime):
         self._workflow_store: AbstractWorkflowStore | None = None
         self._lease_manager: ExecutorLeaseManager | None = None
         self._lease_watch_task: asyncio.Task[None] | None = None
+        # Per-run namespaced state for child-ful workflows: the whole child tree
+        # persists in one durable blob, partitioned per namespace. Built lazily
+        # in the internal adapter (so it works for fresh start and DBOS
+        # recovery alike) and keyed by run_id. Shared with each run's adapter.
+        self._namespaced_state: dict[str, NamespacedStateStores] = {}
 
     def _track_task(self, task: asyncio.Task[Any]) -> None:
         self._tasks.append(task)
@@ -578,16 +607,31 @@ class DBOSRuntime(Runtime):
         # Capture values needed in the async task closure
         active_serializer = serializer or JsonSerializer()
 
+        # Child-ful runs persist the whole tree in one DictState blob; their
+        # portable seed carries CHILD_STATES_KEY and must be written as a blob,
+        # not as the root's typed state.
+        is_child_ful = len(workflow._namespace_instances()) > 1
+        seed_blob = (
+            _namespaced_seed_blob(serialized_state)
+            if is_child_ful and serialized_state
+            else None
+        )
+
         async def _run_workflow() -> WorkflowHandleAsync[Any]:
             with SetWorkflowID(run_id):
                 # Write initial state to DB before starting workflow (non-blocking to caller)
                 if serialized_state:
+                    seed_state_type = (
+                        DictState
+                        if seed_blob is not None
+                        else infer_state_type(workflow)
+                    )
                     if self._dsn is not None:
                         pool = await self._ensure_pool()
                         store: StateStore[Any] = PostgresStateStore(
                             pool=pool,
                             run_id=run_id,
-                            state_type=infer_state_type(workflow),
+                            state_type=seed_state_type,
                             serializer=active_serializer,
                             schema=self._schema,
                         )
@@ -595,18 +639,21 @@ class DBOSRuntime(Runtime):
                         store = SqliteStateStore(
                             db_path=self._db_path,
                             run_id=run_id,
-                            state_type=infer_state_type(workflow),
+                            state_type=seed_state_type,
                             serializer=active_serializer,
                         )
                     else:
                         raise RuntimeError("No pool or db_path configured.")
-                    # Deserialize and save the initial state
-                    state = deserialize_state_from_dict(
-                        serialized_state,
-                        active_serializer,
-                        state_type=infer_state_type(workflow),
-                    )
-                    await store.set_state(state)
+                    if seed_blob is not None:
+                        await store.set_state(seed_blob)
+                    else:
+                        # Deserialize and save the initial state
+                        state = deserialize_state_from_dict(
+                            serialized_state,
+                            active_serializer,
+                            state_type=infer_state_type(workflow),
+                        )
+                        await store.set_state(state)
 
                 try:
                     return await DBOS.start_workflow_async(
@@ -649,6 +696,13 @@ class DBOSRuntime(Runtime):
         # Infer state_type from the workflow for typed state support
         state_type = infer_state_type(workflow)
 
+        # Per-namespace state types from the ROOT workflow. >1 entry means the
+        # run is child-ful and state is partitioned into one durable blob.
+        namespace_state_types: dict[tuple[str, ...], type[BaseModel]] = {
+            namespace: infer_state_type(instance)
+            for namespace, instance in workflow._namespace_instances().items()
+        }
+
         engine = self._get_sql_engine()
         return InternalDBOSAdapter(
             run_id,
@@ -666,6 +720,8 @@ class DBOSRuntime(Runtime):
             else None,
             resolved_pool=self._pool,
             db_path=self._db_path,
+            namespace_state_types=namespace_state_types,
+            namespaced_state_cache=self._namespaced_state,
         )
 
     def get_external_adapter(self, run_id: str) -> ExternalRunAdapter:
@@ -1041,6 +1097,8 @@ class InternalDBOSAdapter(InternalRunAdapter):
         pool: PoolProvider | None = None,
         resolved_pool: asyncpg.Pool | None = None,
         db_path: str | None = None,
+        namespace_state_types: dict[tuple[str, ...], type[BaseModel]] | None = None,
+        namespaced_state_cache: dict[str, NamespacedStateStores] | None = None,
     ) -> None:
         self._run_id = run_id
         self._engine = engine
@@ -1051,6 +1109,11 @@ class InternalDBOSAdapter(InternalRunAdapter):
         self._pool_provider = pool
         self._resolved_pool = resolved_pool
         self._db_path = db_path
+        # Per-namespace state types from the root workflow, and the runtime's
+        # shared per-run cache of NamespacedStateStores. Both set only on the
+        # run-level adapter so child steps resolve their own namespace slot.
+        self._namespace_state_types = namespace_state_types or {}
+        self._namespaced_state_cache = namespaced_state_cache
         self._closed = False
         self._shutdown_event = asyncio.Event()
         self._state_store: StateStore[Any] | None = None
@@ -1150,7 +1213,68 @@ class InternalDBOSAdapter(InternalRunAdapter):
                 )
         return self._state_store
 
+    def _get_or_create_namespaced_state(self) -> NamespacedStateStores | None:
+        """Build (once per run) the namespaced state for a child-ful run.
+
+        The underlying durable store is a single ``DictState`` blob row keyed by
+        ``run_id`` -- the same backend the single-store path uses, but holding the
+        whole child tree. Cached on the runtime so every step of the run shares
+        it. Returns ``None`` for single-namespace runs.
+
+        Note: DBOS builds a fresh adapter per child-step *instance*, so a leaf
+        child's adapter only sees its own (single) namespace. The run-level cache
+        is keyed by ``run_id`` and built by the ROOT adapter (which has the full
+        tree and runs first); every other adapter for the run, including leaf
+        children, reuses it. So the cache is checked BEFORE the has-children gate.
+
+        Requires the pool to be resolved already for postgres (the control loop
+        resolves it in ``wait_for_next_task`` before any step runs).
+        """
+        cache = self._namespaced_state_cache
+        if cache is not None and self._run_id in cache:
+            return cache[self._run_id]
+        # Only the child-ful (root) adapter builds it; single-namespace adapters
+        # without an already-built cache use the legacy single-store path.
+        if len(self._namespace_state_types) <= 1:
+            return None
+
+        if self._resolved_pool is not None:
+            underlying: StateStore[Any] = PostgresStateStore(
+                pool=self._resolved_pool,
+                run_id=self._run_id,
+                state_type=DictState,
+                schema=self._schema,
+            )
+        elif self._db_path is not None:
+            underlying = SqliteStateStore(
+                db_path=self._db_path,
+                run_id=self._run_id,
+                state_type=DictState,
+            )
+        else:
+            raise RuntimeError(
+                "No pool or db_path configured for state store. "
+                "Ensure the runtime pool is initialized before accessing state."
+            )
+
+        namespaced = NamespacedStateStores(
+            underlying=underlying,
+            serializer=JsonSerializer(),
+            state_types=self._namespace_state_types,
+        )
+        if cache is not None:
+            cache[self._run_id] = namespaced
+        return namespaced
+
     def get_state_store(self) -> StateStore[Any] | None:
+        namespaced = self._get_or_create_namespaced_state()
+        if namespaced is not None:
+            namespace: tuple[str, ...] = ()
+            try:
+                namespace = StepWorkerStateContextVar.get().namespace
+            except LookupError:
+                pass
+            return namespaced.view(namespace)
         return self._get_or_create_state_store()
 
     def is_replaying(self) -> bool:
