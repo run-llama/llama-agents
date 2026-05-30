@@ -124,6 +124,8 @@ class SerializedStepWorkerState(BaseModel):
     collected_waiters: list[SerializedWaiter] = Field(default_factory=list)
     # Batch-lineage fan-in buffers (L2), keyed by batch id -> [serialized event, ...]
     batch_buffers: dict[str, list[str]] = Field(default_factory=dict)
+    # Batch ids released early via a Take/AtLeast cardinality (L3).
+    batch_fired: list[str] = Field(default_factory=list)
 
 
 class SerializedContext(BaseModel):

@@ -27,6 +27,7 @@ from typing import Union
 
 from pydantic import BaseModel
 
+from .collect import All, AtLeast, Collect, Take
 from .errors import WorkflowValidationError
 from .events import Event, EventType
 from .resource import ResourceDefinition, ResourceDescriptor
@@ -42,9 +43,15 @@ class StepSignatureSpec(BaseModel):
     context_parameter: str | None
     context_state_type: Any | None
     resources: list[Any]
-    # Batch-lineage fan-in (L2): (parameter_name, element_event_type) when the
-    # step declares a single ``list[E]`` collect parameter, else None.
-    batch_collect_param: tuple[str, Any] | None = None
+    # Batch-lineage fan-in (L2/L3): ``(parameter_name, element_event_types)`` when
+    # the step declares a single ``list[E]`` collect parameter, else None. The
+    # element types are a tuple — ``list[Done]`` -> ``(Done,)``; a union flat list
+    # ``list[A | B]`` -> ``(A, B)``.
+    batch_collect_param: tuple[str, tuple[Any, ...]] | None = None
+    # The resolved ``Collect`` marker for the batch collect parameter (L3). A bare
+    # ``list[E]`` parameter resolves to ``Collect()`` (``All`` cardinality). None
+    # when the step is not a batch collect.
+    batch_collect: Any | None = None
     # Fan-out producer (L2): True when the return annotation is a batch-emission
     # collection (``list[E]`` / ``AsyncIterator[E]`` / ``AsyncGenerator[E, None]``).
     is_fan_out: bool = False
@@ -79,7 +86,8 @@ def inspect_signature(
     context_parameter = None
     context_state_type = None
     resources = []
-    batch_collect_param: tuple[str, Any] | None = None
+    batch_collect_param: tuple[str, tuple[Any, ...]] | None = None
+    batch_collect: Collect | None = None
 
     # Inspect function parameters
     for name, t in sig.parameters.items():
@@ -102,12 +110,18 @@ def inspect_signature(
                     context_state_type = args[0]
                 continue
 
-        # Handle Annotated types for resources
+        # Handle Annotated types: resource descriptors and Collect markers. A
+        # ``Collect`` marker unwraps to the inner ``list[E]`` annotation and is
+        # carried forward to the batch-collect handling below; everything else
+        # (unknown metadata) is ignored.
+        collect_marker: Collect | None = None
         if get_origin(annotation) is Annotated:
             args = get_args(annotation)
             type_annotation = args[0] if args else None
-            descriptor = args[1] if len(args) > 1 else None
-            if descriptor is not None and isinstance(descriptor, ResourceDescriptor):
+            descriptor = next(
+                (a for a in args[1:] if isinstance(a, ResourceDescriptor)), None
+            )
+            if descriptor is not None:
                 # Pass localns to resource for nested annotation resolution
                 descriptor.set_localns(localns)
                 resources.append(
@@ -115,53 +129,45 @@ def inspect_signature(
                         name=name, resource=descriptor, type_annotation=type_annotation
                     )
                 )
-            continue
+                continue
+            collect_marker = next((a for a in args[1:] if isinstance(a, Collect)), None)
+            if collect_marker is None:
+                # Unknown Annotated metadata — ignore as before.
+                continue
+            annotation = type_annotation
 
         # Get name and type of the Context param (without state type)
-        if hasattr(annotation, "__name__") and annotation.__name__ == "Context":
+        if getattr(annotation, "__name__", None) == "Context":
             context_parameter = name
             continue
 
-        # Batch-lineage fan-in (L2): a ``list[E]`` parameter (e.g.
-        # ``events: list[Done]``) is a collect-All step. It buffers incoming
-        # ``E`` by batch id and fires once when the batch closes. The element
-        # ``E`` must be a single concrete event type (union element widening is
-        # a later phase). Routing registers the step for ``E``.
-        if get_origin(annotation) is list:
-            list_args = get_args(annotation)
-            # Flatten the element type: ``list[E]`` -> [E]; ``list[A | B]`` ->
-            # [A, B] (the single element arg is itself a union). Drop ``None``.
-            element_types: list[Any] = []
-            for arg in list_args:
-                if get_origin(arg) in (Union, UnionType):
-                    element_types.extend(
-                        a for a in get_args(arg) if a is not type(None)
-                    )
-                else:
-                    element_types.append(arg)
-            is_event_list = bool(element_types) and all(
-                et is Event or (inspect.isclass(et) and issubclass(et, Event))
-                for et in element_types
+        # Batch-lineage fan-in (L2/L3): a ``list[E]`` parameter (e.g.
+        # ``events: list[Done]``) is a collect step. It buffers incoming ``E`` by
+        # batch id and releases per its ``Collect`` cardinality. ``E`` may be a
+        # union (``list[A | B]``) — every member type routes to the step. A bare
+        # ``list[E]`` is exactly ``Annotated[list[E], Collect(All())]``.
+        element_types = _event_list_element_types(annotation)
+        if element_types is not None:
+            marker = collect_marker if collect_marker is not None else Collect()
+            _validate_collect_marker(marker, name)
+            if batch_collect_param is not None:
+                msg = (
+                    "A step may declare at most one batch (list[E]) collect "
+                    f"parameter, but found both {batch_collect_param[0]!r} and "
+                    f"{name!r}. Multi-slot collects are not supported yet."
+                )
+                raise WorkflowValidationError(msg)
+            batch_collect_param = (name, tuple(element_types))
+            batch_collect = marker
+            accepted_events[name] = list(element_types)
+            continue
+        if collect_marker is not None:
+            msg = (
+                f"Parameter {name!r} carries a Collect marker but is not annotated "
+                "as list[E] of an Event subclass. Collect markers apply only to "
+                "batch fan-in (list[Event]) parameters."
             )
-            if is_event_list:
-                if len(element_types) != 1:
-                    msg = (
-                        f"Parameter {name!r} is annotated as {annotation!r}. "
-                        "Batch (list[E]) collect parameters must declare a single "
-                        "event type; union element types are not supported yet."
-                    )
-                    raise WorkflowValidationError(msg)
-                if batch_collect_param is not None:
-                    msg = (
-                        "A step may declare at most one batch (list[E]) collect "
-                        f"parameter, but found both {batch_collect_param[0]!r} and "
-                        f"{name!r}."
-                    )
-                    raise WorkflowValidationError(msg)
-                element_type = element_types[0]
-                batch_collect_param = (name, element_type)
-                accepted_events[name] = [element_type]
-                continue
+            raise WorkflowValidationError(msg)
 
         # Collect name and types of the event param
         param_types = _get_param_types(t, type_hints)
@@ -180,8 +186,68 @@ def inspect_signature(
         context_state_type=context_state_type,
         resources=resources,
         batch_collect_param=batch_collect_param,
+        batch_collect=batch_collect,
         is_fan_out=_is_fan_out_return(fn, localns=localns),
     )
+
+
+def _event_list_element_types(annotation: Any) -> list[Any] | None:
+    """Element event types of a ``list[E]`` annotation, or None if not one.
+
+    ``list[Done]`` -> ``[Done]``; ``list[A | B]`` -> ``[A, B]`` (the single arg is
+    itself a union). ``None`` is dropped. Returns None when ``annotation`` is not
+    a ``list`` of ``Event`` subclasses (so the caller falls through to other
+    parameter handling). Order is preserved; duplicates are removed.
+    """
+    if get_origin(annotation) is not list:
+        return None
+    element_types: list[Any] = []
+    for arg in get_args(annotation):
+        if get_origin(arg) in (Union, UnionType):
+            members = [a for a in get_args(arg) if a is not type(None)]
+        else:
+            members = [arg]
+        for member in members:
+            if member not in element_types:
+                element_types.append(member)
+    if not element_types:
+        return None
+    if all(
+        et is Event or (inspect.isclass(et) and issubclass(et, Event))
+        for et in element_types
+    ):
+        return element_types
+    return None
+
+
+def _validate_collect_marker(marker: Collect, name: str) -> None:
+    """Reject Collect knobs that are accepted on the marker but not yet wired.
+
+    ``at`` (cross-level scope promotion), ``from_`` (provenance restriction), and
+    ``where`` (predicate narrowing) are part of the declared API but not
+    implemented in this phase. Only the v1 cardinalities ``All`` / ``Take`` /
+    ``AtLeast`` are supported.
+    """
+    if marker.where is not None:
+        raise WorkflowValidationError(
+            f"Collect(where=...) on {name!r}: predicate narrowing is not "
+            "supported yet (planned for v2)."
+        )
+    if marker.at is not None:
+        raise WorkflowValidationError(
+            f"Collect(at=...) on {name!r}: cross-level scope promotion is not "
+            "implemented yet."
+        )
+    if marker.from_ is not None:
+        raise WorkflowValidationError(
+            f"Collect(from_=...) on {name!r}: provenance restriction is not "
+            "implemented yet."
+        )
+    if not isinstance(marker.cardinality, (All, Take, AtLeast)):
+        raise WorkflowValidationError(
+            f"Collect cardinality on {name!r} must be All(), Take(n), or "
+            "AtLeast(n). Buffer/Window are deferred to v2."
+        )
 
 
 def validate_step_signature(spec: StepSignatureSpec) -> None:
