@@ -158,10 +158,14 @@ class InternalContext(Generic[MODEL_T]):
             self._workflow._validate_valid_step_message(step, message)
 
         recovery_counts: dict[str, int] = {}
+        batch_stack: tuple[str, ...] = ()
         try:
-            recovery_counts = dict(
-                StepWorkerStateContextVar.get().retry.recovery_counts
-            )
+            step_ctx = StepWorkerStateContextVar.get()
+            recovery_counts = dict(step_ctx.retry.recovery_counts)
+            # Inherit the emitting branch's batch stack so a send_event from
+            # inside a fan-out stays in that batch. batch_counted=False: the work
+            # item is born at routing (it was not pre-counted at any resolve).
+            batch_stack = step_ctx.state.batch_stack
         except LookupError:
             pass
 
@@ -171,6 +175,8 @@ class InternalContext(Generic[MODEL_T]):
                     event=message,
                     step_name=step,
                     recovery_counts=recovery_counts,
+                    batch_stack=batch_stack,
+                    batch_counted=False,
                 )
             )
         )

@@ -127,6 +127,23 @@ class InternalAsyncioAdapter(InternalRunAdapter, SnapshottableAdapter):
         except asyncio.TimeoutError:
             return WaitResultTimeout()
 
+    def drain_ready(self) -> list[WorkflowTick]:
+        """Non-blocking drain of already-queued ticks (in-memory runtime only).
+
+        Lets the control loop deliver a burst emitted back-to-back (e.g. several
+        ``ctx.send_event`` calls from one step) together, instead of one per loop
+        iteration interleaved with idle checks — which would let an All() collect
+        fire on a partial batch. Returns ``[]`` when nothing is immediately ready.
+        Remote adapters (e.g. DBOS) cannot poll cheaply and simply do not provide
+        this method, so the loop falls back to one-tick-at-a-time delivery.
+        """
+        drained: list[WorkflowTick] = []
+        while True:
+            try:
+                drained.append(self._queues.receive_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                return drained
+
     async def on_tick(self, tick: WorkflowTick) -> None:
         self._queues.ticks.append(tick)
 

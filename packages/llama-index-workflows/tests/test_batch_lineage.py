@@ -282,6 +282,35 @@ async def test_replay_reproduces_identical_batch_ids_and_grouping() -> None:
     assert rebuilt.batch_seq == replay1.state.batch_seq
 
 
+async def test_no_batch_state_remains_after_completion() -> None:
+    """A completed fan-out leaves no open batches or fan-in buffers in state."""
+
+    class FanOut(Workflow):
+        @step
+        async def fan_out(self, ev: StartEvent) -> list[Task]:
+            return [Task(n=i) for i in range(4)]
+
+        @step
+        async def work(self, ev: Task) -> Done:
+            return Done(n=ev.n)
+
+        @step
+        async def join(self, events: list[Done]) -> StopEvent:
+            return StopEvent(result=sorted(e.n for e in events))
+
+    wf = FanOut(timeout=10)
+    handler = wf.run()
+    async for _ in handler.stream_events():
+        pass
+    await handler
+
+    serialized = handler.ctx.to_dict()
+    assert serialized.get("batches", {}) == {}, serialized.get("batches")
+    for step_name, worker in serialized.get("workers", {}).items():
+        assert not worker.get("batch_buffers"), (step_name, worker)
+        assert not worker.get("batch_fired"), (step_name, worker)
+
+
 async def test_no_ctx_store_threading_needed() -> None:
     """Sanity: the terse form needs neither ctx.store nor collect_events."""
 

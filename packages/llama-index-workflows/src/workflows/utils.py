@@ -198,7 +198,19 @@ def _event_list_element_types(annotation: Any) -> list[Any] | None:
     itself a union). ``None`` is dropped. Returns None when ``annotation`` is not
     a ``list`` of ``Event`` subclasses (so the caller falls through to other
     parameter handling). Order is preserved; duplicates are removed.
+
+    ``Optional[list[E]]`` / ``list[E] | None`` unwraps to the inner ``list[E]``,
+    mirroring the fan-out *return* side (which already unwraps Optional) so a
+    collect parameter declared optional is recognized rather than rejected with a
+    misleading "no Event parameter" error.
     """
+    if get_origin(annotation) in (Union, UnionType):
+        members = [a for a in get_args(annotation) if a is not type(None)]
+        list_members = [a for a in members if get_origin(a) is list]
+        # Only unwrap the unambiguous ``list[E] | None`` shape: exactly one list
+        # member and no other non-None members.
+        if len(list_members) == 1 and len(members) == 1:
+            annotation = list_members[0]
     if get_origin(annotation) is not list:
         return None
     element_types: list[Any] = []

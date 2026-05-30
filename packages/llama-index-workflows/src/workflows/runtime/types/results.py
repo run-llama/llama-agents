@@ -75,6 +75,9 @@ class StepWorkerState:
     # Batch-lineage fan-in (L2): the fully buffered batch handed to a
     # ``list[E]`` collect step when its batch closes. None for non-collect runs.
     batch_input: list[Event] | None = None
+    # Batch lineage stack of the executing work item, so ``ctx.send_event`` can
+    # stamp emitted events with the branch's stack (keeping them in-batch).
+    batch_stack: tuple[str, ...] = ()
 
     def _deepcopy(self) -> StepWorkerState:
         return StepWorkerState(
@@ -84,6 +87,7 @@ class StepWorkerState:
             batch_input=list(self.batch_input)
             if self.batch_input is not None
             else None,
+            batch_stack=self.batch_stack,
         )
 
 

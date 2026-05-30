@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from workflows.context.context_types import (
+    SerializedBatch,
     SerializedContext,
     SerializedEventAttempt,
     SerializedStepWorkerState,
@@ -28,6 +29,50 @@ if TYPE_CHECKING:
 
 
 @dataclass()
+class Batch:
+    """An open fan-out batch, modeled as an explicit live set of work items.
+
+    A **work item** is one ``(event, step)`` pair: an event routed to a step that
+    accepts it at this batch's level. It is the unit of accounting — an event
+    accepted by N steps is N work items, not one. ``live`` is the cardinality of
+    the live set ``L(B)``; the batch closes exactly when it reaches 0.
+
+    The live set is seeded at open (one work item per emitted member per
+    accepting step), grows when a resolving work item emits same-level
+    successors, and shrinks when a work item resolves (a step completes, a member
+    is delivered to a collect, or a child batch's collect summary lands). A
+    fan-out work item is replaced by a placeholder (one per bound collect of the
+    child batch) that resolves when the child's collect fires — so nesting is
+    represented, not counted.
+
+    Attributes:
+        batch_id: Stable, run-id-free id (deterministic on replay).
+        producer: The fan-out step that opened the batch.
+        origin_stack: The producer's trigger stack — the stack the batch id was
+            pushed onto. A collect step's outputs inherit this (closed id popped).
+        bound_collects: Collect step names statically bound to this batch level
+            (their element type is produced at this level). Fired once on close,
+            even with an empty buffer. Computed at build, never via a runtime walk.
+        live: Cardinality of the live set ``L(B)``. Close when it hits 0.
+    """
+
+    batch_id: str
+    producer: str
+    origin_stack: tuple[str, ...]
+    bound_collects: tuple[str, ...]
+    live: int = 0
+
+    def _copy(self) -> Batch:
+        return Batch(
+            batch_id=self.batch_id,
+            producer=self.producer,
+            origin_stack=self.origin_stack,
+            bound_collects=self.bound_collects,
+            live=self.live,
+        )
+
+
+@dataclass()
 class BrokerState:
     """
     Complete state of the workflow broker at a given point in time.
@@ -43,25 +88,18 @@ class BrokerState:
     is_running: bool
     config: BrokerConfig
     workers: dict[str, InternalStepWorkerState]
-    # Monotonic per-run counter used to mint deterministic batch ids. Incremented
-    # in the reducer when a fan-out batch is opened. Because the reducer is pure
-    # and replayed tick-by-tick, the same fan-out reproduces the same counter
-    # value, hence the same BatchId, on replay. (Central replay-determinism risk.)
+    # Monotonic counter used to mint deterministic batch ids. Incremented in the
+    # reducer when a fan-out batch is opened. Because the reducer is pure and
+    # replayed tick-by-tick, the same fan-out reproduces the same counter value,
+    # hence the same batch id, on replay. The id derivation contains NO run_id,
+    # so a replay (run_id=None) and the live run produce identical ids.
     batch_seq: int = 0
-    # Open fan-out batches -> count of members still flowing toward their collect
-    # step (not yet delivered or dead). A batch closes when this reaches 0.
-    # Tracks closure by branch termination, not events received (per proposal).
-    batch_pending: dict[str, int] = field(default_factory=dict)
-    # Open fan-out batches -> the producer's trigger stack (the stack the batch
-    # id was pushed onto). Used to stamp the close tick so collect outputs inherit
-    # the correct (popped) stack, and to support multi-level nesting.
-    batch_origin: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    # Open fan-out batches -> the name of the step that produced (minted) the
-    # batch. The close tick must carry the PRODUCER step regardless of which code
-    # path closes the batch (enclosing close, empty/immediate close, or
-    # drain-to-zero in a collect step) so downstream same-level reachability is
-    # computed from the producer, not from an unrelated collect step.
-    batch_producer: dict[str, str] = field(default_factory=dict)
+    # Open fan-out batches keyed by batch id. A ``Batch`` models its lifecycle as
+    # an explicit live set of work items (see ``Batch.live``). A batch closes
+    # exactly when its live set empties. Replaces the old scalar ``batch_pending``
+    # counter, whose unit-mismatch (seeded by member count, decremented per
+    # delivery and per branch) silently truncated batches and hung the run.
+    batches: dict[str, Batch] = field(default_factory=dict)
 
     def deepcopy(self) -> BrokerState:
         """
@@ -75,9 +113,7 @@ class BrokerState:
                 for name, worker_state in self.workers.items()
             },
             batch_seq=self.batch_seq,
-            batch_pending=dict(self.batch_pending),
-            batch_origin=dict(self.batch_origin),
-            batch_producer=dict(self.batch_producer),
+            batches={bid: b._copy() for bid, b in self.batches.items()},
         )
 
     @staticmethod
@@ -96,6 +132,7 @@ class BrokerState:
                 timeout=workflow._timeout,
                 catch_error_handlers=dict(workflow._catch_error_handlers),
                 handler_for_step=dict(workflow._handler_for_step),
+                fan_in_bindings=_compute_fan_in_bindings(workflow),
             ),
             workers={
                 name: InternalStepWorkerState(
@@ -144,9 +181,21 @@ class BrokerState:
                 for attempt in worker_state.queue
             ]
 
-            # Serialize in-progress events (just the events, retry info tracked separately)
+            # Serialize in-progress executions with full retry + batch lineage, so
+            # they re-queue on resume WITHOUT losing their batch_stack (the work
+            # item's identity). Dropping it left the restored member unable to
+            # close its batch — a confirmed hang.
             in_progress = [
-                serializer.serialize(ip.event) for ip in worker_state.in_progress
+                SerializedEventAttempt(
+                    event=serializer.serialize(ip.event),
+                    attempts=ip.attempts or 0,
+                    first_attempt_at=ip.first_attempt_at,
+                    last_exception=ip.last_exception,
+                    last_failed_at=ip.last_failed_at,
+                    recovery_counts=dict(ip.recovery_counts),
+                    batch_stack=list(ip.batch_stack),
+                )
+                for ip in worker_state.in_progress
             ]
 
             # Serialize collected events
@@ -191,9 +240,16 @@ class BrokerState:
             is_running=self.is_running,
             workers=workers_dict,
             batch_seq=self.batch_seq,
-            batch_pending=dict(self.batch_pending),
-            batch_origin={k: list(v) for k, v in self.batch_origin.items()},
-            batch_producer=dict(self.batch_producer),
+            batches={
+                bid: SerializedBatch(
+                    batch_id=b.batch_id,
+                    producer=b.producer,
+                    origin_stack=list(b.origin_stack),
+                    bound_collects=list(b.bound_collects),
+                    live=b.live,
+                )
+                for bid, b in self.batches.items()
+            },
         )
 
     @staticmethod
@@ -212,11 +268,16 @@ class BrokerState:
         # whether to create a start_event from kwargs (it only constructs and passes a start event if not already running)
         base_state.is_running = serialized.is_running
         base_state.batch_seq = serialized.batch_seq
-        base_state.batch_pending = dict(serialized.batch_pending)
-        base_state.batch_origin = {
-            k: tuple(v) for k, v in serialized.batch_origin.items()
+        base_state.batches = {
+            bid: Batch(
+                batch_id=b.batch_id,
+                producer=b.producer,
+                origin_stack=tuple(b.origin_stack),
+                bound_collects=tuple(b.bound_collects),
+                live=b.live,
+            )
+            for bid, b in serialized.batches.items()
         }
-        base_state.batch_producer = dict(serialized.batch_producer)
 
         # Restore worker state (queues, collected events, waiters)
         # We do this regardless of is_running state so workflows can resume from where they left off
@@ -240,14 +301,19 @@ class BrokerState:
                 for attempt in worker_data.queue
             ]
 
-            # in_progress events are moved to the queue on deserialization
-            # They will be restarted when the workflow runs
-            for event_str in worker_data.in_progress:
+            # in_progress executions are moved to the queue on deserialization and
+            # restarted when the workflow runs, preserving their batch_stack so the
+            # restored work item still closes its batch.
+            for attempt in worker_data.in_progress:
                 worker.queue.append(
                     EventAttempt(
-                        event=serializer.deserialize(event_str),
-                        attempts=0,
-                        first_attempt_at=None,
+                        event=serializer.deserialize(attempt.event),
+                        attempts=attempt.attempts,
+                        first_attempt_at=attempt.first_attempt_at,
+                        last_exception=attempt.last_exception,
+                        last_failed_at=attempt.last_failed_at,
+                        recovery_counts=dict(attempt.recovery_counts),
+                        batch_stack=tuple(attempt.batch_stack),
                     )
                 )
 
@@ -300,6 +366,70 @@ def _import_event_type(qualified_name: str) -> type[Event]:
     return getattr(module, class_name)
 
 
+def _event_types(types: Any) -> list[type[Event]]:
+    return [t for t in types if isinstance(t, type) and issubclass(t, Event)]
+
+
+def _compute_fan_in_bindings(workflow: Workflow) -> dict[str, tuple[str, ...]]:
+    """Statically bind each fan-out producer to the collect steps at its level.
+
+    A collect step is bound to the batch a producer opens when the collect's
+    element type is *produced at that level* — reachable from the producer
+    without crossing into a deeper batch, plus any summary types a nested child
+    batch's own collects emit back up into this level. This is the closure
+    binding: when a batch closes, exactly these collects fire (once each, even
+    on an empty buffer), with no runtime graph walk.
+    """
+    steps = {name: fn._step_config for name, fn in workflow._get_steps().items()}
+    collects: dict[str, tuple[Any, ...]] = {
+        name: cfg.batch_collect_param[1]
+        for name, cfg in steps.items()
+        if cfg.batch_collect_param is not None
+    }
+
+    def same_level_types(seed_types: Any, guard: frozenset[str]) -> set[type[Event]]:
+        seen: set[type[Event]] = set()
+        frontier: list[type[Event]] = list(_event_types(seed_types))
+        while frontier:
+            t = frontier.pop()
+            if t in seen:
+                continue
+            seen.add(t)
+            for name, cfg in steps.items():
+                if t not in cfg.accepted_events:
+                    continue
+                if cfg.batch_collect_param is not None:
+                    # A collect consumes at this level but emits at the parent
+                    # level — a boundary. Do not traverse its outputs here.
+                    continue
+                if cfg.is_fan_out:
+                    # Opens a child batch. The child's bound collects emit their
+                    # summaries back into THIS level, so fold those summary types
+                    # into the frontier (but not the fan-out's own outputs, which
+                    # live one level deeper).
+                    if name in guard:
+                        continue
+                    child = same_level_types(cfg.return_types, guard | {name})
+                    for cname, cetypes in collects.items():
+                        if any(et in child for et in cetypes):
+                            frontier.extend(_event_types(steps[cname].return_types))
+                    continue
+                frontier.extend(_event_types(cfg.return_types))
+        return seen
+
+    bindings: dict[str, tuple[str, ...]] = {}
+    for name, cfg in steps.items():
+        if not cfg.is_fan_out:
+            continue
+        level_types = same_level_types(cfg.return_types, frozenset({name}))
+        bindings[name] = tuple(
+            cname
+            for cname, cetypes in collects.items()
+            if any(et in level_types for et in cetypes)
+        )
+    return bindings
+
+
 @dataclass(frozen=True)
 class BrokerConfig:
     """
@@ -318,6 +448,13 @@ class BrokerConfig:
     timeout: float | None
     catch_error_handlers: dict[str, CatchErrorHandler] = field(default_factory=dict)
     handler_for_step: dict[str, str] = field(default_factory=dict)
+    # Static fan-in binding (L2): fan-out producer step name -> the collect step
+    # names bound to the batch level it opens. A collect is bound when its element
+    # type is produced at that level (reachable from the producer without crossing
+    # into a deeper batch, including types re-entering from nested child collects).
+    # Computed once at build so batch closure never needs a runtime graph walk;
+    # the bound collects fire exactly once on close, even with an empty buffer.
+    fan_in_bindings: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass()

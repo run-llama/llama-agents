@@ -115,8 +115,10 @@ class SerializedStepWorkerState(BaseModel):
 
     # Queue of events waiting to be processed (with retry info)
     queue: list[SerializedEventAttempt] = Field(default_factory=list)
-    # Events currently being processed (no retry info needed, will be re-queued on failure)
-    in_progress: list[str] = Field(default_factory=list)
+    # Events currently being processed. Serialized with full retry + batch lineage
+    # so a resumed run re-queues them WITHOUT losing their batch_stack (dropping it
+    # was a confirmed hang: the restored member never closed its batch).
+    in_progress: list[SerializedEventAttempt] = Field(default_factory=list)
     # Collected events for ctx.collect_events(), keyed by buffer_id -> [event, ...]
     # Events are serialized strings
     collected_events: dict[str, list[str]] = Field(default_factory=dict)
@@ -126,6 +128,16 @@ class SerializedStepWorkerState(BaseModel):
     batch_buffers: dict[str, list[str]] = Field(default_factory=dict)
     # Batch ids released early via a Take cardinality (L3).
     batch_fired: list[str] = Field(default_factory=list)
+
+
+class SerializedBatch(BaseModel):
+    """Serialized representation of an open fan-out batch (L2)."""
+
+    batch_id: str
+    producer: str
+    origin_stack: list[str] = Field(default_factory=list)
+    bound_collects: list[str] = Field(default_factory=list)
+    live: int = 0
 
 
 class SerializedContext(BaseModel):
@@ -150,13 +162,10 @@ class SerializedContext(BaseModel):
     # Monotonic batch-id counter (L2). Persisted so a resumed run keeps minting
     # unique, deterministic batch ids.
     batch_seq: int = Field(default=0)
-    # Open fan-out batch pending-member counts (L2), keyed by batch id.
-    batch_pending: dict[str, int] = Field(default_factory=dict)
-    # Open fan-out batch origin stacks (L2), keyed by batch id -> trigger stack.
-    batch_origin: dict[str, list[str]] = Field(default_factory=dict)
-    # Open fan-out batch producer step names (L2), keyed by batch id. Persisted so
-    # a resumed run still closes each batch tagged with its producer step.
-    batch_producer: dict[str, str] = Field(default_factory=dict)
+    # Open fan-out batches (L2), keyed by batch id. Each carries its producer,
+    # origin stack, statically-bound collect steps, and the live-set cardinality
+    # used to decide closure. Replaces the old scalar pending-count maps.
+    batches: dict[str, SerializedBatch] = Field(default_factory=dict)
 
     @staticmethod
     def from_v0(v0: SerializedContextV0) -> "SerializedContext":
