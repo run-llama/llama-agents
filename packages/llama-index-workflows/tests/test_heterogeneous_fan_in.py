@@ -117,19 +117,24 @@ def test_list_event_param_accepted_as_batch_collect() -> None:
     cfg = collect._step_config
     assert cfg.batch_collect_param is not None
     assert cfg.batch_collect_param[0] == "events"
-    assert cfg.batch_collect_param[1] is Header
+    assert cfg.batch_collect_param[1] == (Header,)
     # The step routes on the element event type.
     assert Header in cfg.accepted_events
 
 
-def test_list_union_event_param_rejected() -> None:
-    """A ``list[A | B]`` collect parameter is still rejected (deferred)."""
+def test_list_union_event_param_accepted_as_flat_batch() -> None:
+    """A ``list[A | B]`` collect parameter is a flat heterogeneous batch (L3)."""
 
     class _ListUnionWorkflow(Workflow):
         pass
 
-    with pytest.raises(WorkflowValidationError, match="single event type"):
+    @free_step(workflow=_ListUnionWorkflow)
+    async def collect(events: list[Header | Body]) -> StopEvent:  # type: ignore[unused-ignore]
+        return StopEvent(result="x")
 
-        @free_step(workflow=_ListUnionWorkflow)
-        async def collect(events: list[Header | Body]) -> StopEvent:  # type: ignore[unused-ignore]
-            return StopEvent(result="x")
+    cfg = collect._step_config
+    assert cfg.batch_collect_param is not None
+    assert cfg.batch_collect_param[1] == (Header, Body)
+    # Both member types route to the step.
+    assert Header in cfg.accepted_events
+    assert Body in cfg.accepted_events

@@ -217,6 +217,10 @@ class InternalContext(Generic[MODEL_T]):
         if ev is not None:
             self._execute_task(self._internal_adapter.write_to_event_stream(ev))
 
+    def replayed_events(self) -> list[Event]:
+        """Events emitted by the current step on prior runs (for dedup)."""
+        return list(self._internal_adapter.replayed_events())
+
     def retry_info(self) -> RetryInfo:
         """Snapshot of the currently-executing step's retry state.
 

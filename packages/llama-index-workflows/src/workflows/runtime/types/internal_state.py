@@ -182,6 +182,7 @@ class BrokerState:
                 collected_events=collected_events,
                 collected_waiters=waiters,
                 batch_buffers=batch_buffers,
+                batch_fired=sorted(worker_state.batch_fired),
             )
 
         return SerializedContext(
@@ -261,6 +262,7 @@ class BrokerState:
                 batch_id: [serializer.deserialize(ev) for ev in events]
                 for batch_id, events in worker_data.batch_buffers.items()
             }
+            worker.batch_fired = set(worker_data.batch_fired)
 
             # Restore waiters
             worker.collected_waiters = []
@@ -384,6 +386,10 @@ class InternalStepWorkerState:
     # the matching TickBatchClosed. Keyed by innermost batch id. Only populated
     # for steps with a ``batch_collect_param``.
     batch_buffers: dict[str, list[Event]] = field(default_factory=dict)
+    # Cardinality release (L3): batch ids this collect step has already released
+    # early via a Take/AtLeast threshold. Late siblings of a fired batch are
+    # ignored, and the eventual TickBatchClosed does not re-fire the step.
+    batch_fired: set[str] = field(default_factory=set)
 
     def _deepcopy(self) -> InternalStepWorkerState:
         return InternalStepWorkerState(
@@ -393,6 +399,7 @@ class InternalStepWorkerState:
             collected_events={k: list(v) for k, v in self.collected_events.items()},
             collected_waiters=[dataclasses.replace(x) for x in self.collected_waiters],
             batch_buffers={k: list(v) for k, v in self.batch_buffers.items()},
+            batch_fired=set(self.batch_fired),
         )
 
 

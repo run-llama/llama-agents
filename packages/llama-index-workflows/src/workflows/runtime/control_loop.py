@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from workflows.collect import AtLeast, Collect, Take
 from workflows.errors import (
     WorkflowCancelledByUser,
     WorkflowRuntimeError,
@@ -800,6 +801,20 @@ def _close_batch(
     ]
 
 
+def _cardinality_threshold(collect: Collect | None) -> int | None:
+    """Member count that triggers an early release, or None for fire-on-close.
+
+    ``Take(n)`` / ``AtLeast(n)`` release as soon as ``n`` members have arrived;
+    ``All`` (and an absent marker) fire only when the batch closes.
+    """
+    if collect is None:
+        return None
+    card = collect.cardinality
+    if isinstance(card, (Take, AtLeast)):
+        return card.n
+    return None
+
+
 def _has_fire_on_partial_consumer(state: BrokerState, producer_step: str) -> bool:
     """True if a batch-collect step at this producer's batch level opts into
     on_partial="fire". Used to decide abort-vs-fail when a fan-out step exhausts
@@ -811,7 +826,7 @@ def _has_fire_on_partial_consumer(state: BrokerState, producer_step: str) -> boo
         bcp = worker.config.batch_collect_param
         if bcp is None or worker.config.on_partial != "fire":
             continue
-        if bcp[1] in reachable:
+        if any(element_type in reachable for element_type in bcp[1]):
             return True
     return False
 
@@ -1293,15 +1308,44 @@ def _process_add_event_tick(
             handled = True
             worker_state = state.workers[step_name]
             if worker_state.config.batch_collect_param is not None:
-                # Batch-lineage fan-in (L2): buffer the event keyed by its
-                # innermost batch id and wait for the matching TickBatchClosed.
-                # Events that arrive with no batch stack (outside any fan-out)
-                # land under the empty-key bucket; a producer that fans out via
-                # a typed list/iterator return always stamps an id.
+                # Batch-lineage fan-in (L2/L3): buffer the event keyed by its
+                # innermost batch id. Events with no batch stack (outside any
+                # fan-out) land under the empty-key bucket; a producer that fans
+                # out via a typed list/iterator return always stamps an id.
                 batch_id = tick.batch_stack[-1] if tick.batch_stack else ""
-                worker_state.batch_buffers.setdefault(batch_id, []).append(tick.event)
+                already_fired = batch_id in worker_state.batch_fired
+                if not already_fired:
+                    buf = worker_state.batch_buffers.setdefault(batch_id, [])
+                    buf.append(tick.event)
+                    # Cardinality release (L3): Take(n)/AtLeast(n) fire as soon
+                    # as ``n`` members arrive, with the first ``n``, instead of
+                    # waiting for the batch to close. All() has no threshold and
+                    # fires only on TickBatchClosed (the L2 path below). The
+                    # output stack is the trigger stack with this batch id popped
+                    # — i.e. the enclosing stack.
+                    threshold = _cardinality_threshold(
+                        worker_state.config.batch_collect
+                    )
+                    if threshold is not None and len(buf) >= threshold:
+                        released = list(buf[:threshold])
+                        output_stack = (
+                            tuple(tick.batch_stack[:-1]) if tick.batch_stack else ()
+                        )
+                        worker_state.batch_fired.add(batch_id)
+                        worker_state.batch_buffers.pop(batch_id, None)
+                        commands.extend(
+                            _fire_batch_collect(
+                                step_name,
+                                worker_state,
+                                released,
+                                output_stack,
+                                now_seconds,
+                            )
+                        )
                 # This member has been delivered to its collect step; drop it
                 # from the open batch's pending count and close on reaching 0.
+                # Bookkeeping runs even after an early release so the batch's
+                # tracking maps are cleaned up when its last member terminates.
                 if batch_id in state.batch_pending:
                     state.batch_pending[batch_id] -= 1
                     if state.batch_pending[batch_id] <= 0:
@@ -1529,14 +1573,20 @@ def _process_batch_closed_tick(
     for step_name, worker_state in state.workers.items():
         if worker_state.config.batch_collect_param is None:
             continue
+        if tick.batch_id in worker_state.batch_fired:
+            # Already released early via a Take/AtLeast cardinality. Don't
+            # re-fire; just clear the per-batch tracking now that it's closed.
+            worker_state.batch_fired.discard(tick.batch_id)
+            worker_state.batch_buffers.pop(tick.batch_id, None)
+            continue
         if tick.batch_id in worker_state.batch_buffers:
             batch = worker_state.batch_buffers.pop(tick.batch_id)
         else:
             # This collect step never saw an event for this batch. It still must
-            # fire once on closure (empty batch / every branch died) IF its
-            # element type is reachable downstream of this batch's producer.
-            element_type = worker_state.config.batch_collect_param[1]
-            if element_type not in reachable:
+            # fire once on closure (empty batch / every branch died) IF one of
+            # its element types is reachable downstream of this batch's producer.
+            element_types = worker_state.config.batch_collect_param[1]
+            if not any(et in reachable for et in element_types):
                 continue
             batch = []
         commands.extend(

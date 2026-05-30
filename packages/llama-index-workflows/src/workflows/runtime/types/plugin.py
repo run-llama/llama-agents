@@ -208,6 +208,18 @@ class InternalRunAdapter(ABC):
         """
         return False
 
+    def replayed_events(self) -> list[Event]:
+        """Events the current step emitted on prior runs of this execution.
+
+        Used by a fan-out producer (``list[E]`` / ``AsyncIterator[E]``) to skip
+        already-emitted work on replay — the framework does not dedupe emissions,
+        it exposes the journal and the user dedupes by domain id. Empty on a first
+        run and on runtimes that never replay step bodies (the in-memory runtime
+        runs each step exactly once); durable runtimes that re-execute a step on
+        recovery override this to return the prior emissions.
+        """
+        return []
+
     async def on_tick(self, tick: WorkflowTick) -> None:
         """
         Called whenever a tick event is processed by the control loop.

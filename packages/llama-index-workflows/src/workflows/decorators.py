@@ -20,6 +20,7 @@ from typing import (
 
 from pydantic import BaseModel
 
+from .collect import Collect
 from .errors import WorkflowValidationError
 from .events import StepFailedEvent
 from .resource import ResourceDefinition
@@ -61,11 +62,17 @@ class StepConfig:
     # fresh batch id per execution and stamps every emitted event with it, then
     # closes the batch. Computed at decoration time from the return annotation.
     is_fan_out: bool = False
-    # Batch-lineage fan-in (L2): set to ``(parameter_name, element_event_type)``
-    # when the step declares a single ``list[E]`` parameter. Such a step is
-    # collect-mode "All": it buffers incoming ``E`` by innermost batch id and
-    # fires once on the matching TickBatchClosed with the full buffered list.
-    batch_collect_param: tuple[str, Any] | None = None
+    # Batch-lineage fan-in (L2/L3): set to ``(parameter_name, element_event_types)``
+    # when the step declares a single ``list[E]`` parameter. The element types are
+    # a tuple — ``list[Done]`` -> ``(Done,)``; a union flat list ``list[A | B]`` ->
+    # ``(A, B)`` (every member routes to the step). The step buffers incoming
+    # members by innermost batch id and releases per ``batch_collect``.
+    batch_collect_param: tuple[str, tuple[Any, ...]] | None = None
+    # The resolved ``Collect`` marker for the batch collect parameter (L3),
+    # carrying the release cardinality (``All`` / ``Take`` / ``AtLeast``). A bare
+    # ``list[E]`` parameter resolves to ``Collect()`` (``All``). None when the
+    # step is not a batch collect.
+    batch_collect: Collect | None = None
     # How a batch-collect step reacts to TickBatchAborted: "fail" (default,
     # fail the workflow) or "fire" (fire with the partial buffer).
     on_partial: Literal["fail", "fire"] = "fail"
@@ -238,6 +245,7 @@ def make_step_function(
         collect_params=collect_params,
         is_fan_out=spec.is_fan_out,
         batch_collect_param=spec.batch_collect_param,
+        batch_collect=spec.batch_collect,
     )
 
     return casted

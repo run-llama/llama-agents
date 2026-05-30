@@ -620,6 +620,34 @@ class Context(Generic[MODEL_T]):
         """
         self._require_internal(fn="write_event_to_stream").write_event_to_stream(ev)
 
+    def replayed_events(self) -> list[Event]:
+        """Events this step emitted on prior runs of the current execution.
+
+        A fan-out producer (`-> list[E]` / `-> AsyncIterator[E]`) re-runs from the
+        start on recovery, and the framework does not dedupe emissions — it
+        exposes the journal so the step can skip work it already did. "Same event"
+        is a domain concept (id, content hash, position in some stream), so the
+        dedupe policy is yours.
+
+        Returns an empty list on a first run and on runtimes that execute each
+        step body exactly once (the default in-memory runtime). Durable runtimes
+        that re-execute a step on recovery populate it with the prior emissions.
+
+        Examples:
+            ```python
+            @step
+            async def fan_out(self, ctx: Context, ev: StartEvent) -> AsyncIterator[Task]:
+                seen = {e.item_id for e in ctx.replayed_events()}
+                for item in source():
+                    if item.id not in seen:
+                        yield Task(item_id=item.id)
+            ```
+
+        Raises:
+            ContextStateError: If called outside of a running workflow step.
+        """
+        return self._require_internal(fn="replayed_events").replayed_events()
+
     async def _finalize_step(self) -> None:
         """Finalize step execution by awaiting background tasks.
 
