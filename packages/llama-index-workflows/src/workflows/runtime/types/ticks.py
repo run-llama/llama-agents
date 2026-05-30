@@ -56,8 +56,8 @@ class TickAddEvent(BaseModel):
 class TickBatchClosed(BaseModel):
     """Marks a fan-out batch as fully emitted.
 
-    Emitted after a fan-out step (``list[E]`` return) exhausts its emissions.
-    Collect-mode steps keyed on ``batch_id`` fire once
+    Emitted after a fan-out step (``list[E]`` / ``AsyncIterator[E]`` return)
+    exhausts its emissions. Collect-mode steps keyed on ``batch_id`` fire once
     when they observe this tick. ``batch_stack`` is the *trigger* stack of the
     fan-out step (i.e. the stack the closing batch id was pushed onto), so a
     collect step's outputs inherit it after popping the closed id.
@@ -67,6 +67,23 @@ class TickBatchClosed(BaseModel):
     type: Literal["batch_closed"] = "batch_closed"
     batch_id: str
     step_name: str
+    batch_stack: tuple[str, ...] = Field(default_factory=tuple)
+
+
+class TickBatchAborted(BaseModel):
+    """Marks a fan-out batch as aborted mid-stream (retry budget exhausted).
+
+    Carries how many members were emitted before the abort (``partial``) and the
+    failing exception. Collect-mode steps honor ``on_partial`` ("fail" default,
+    or "fire" with the partial buffer).
+    """
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+    type: Literal["batch_aborted"] = "batch_aborted"
+    batch_id: str
+    step_name: str
+    partial: int
+    error: SerializableOptionalException = None
     batch_stack: tuple[str, ...] = Field(default_factory=tuple)
 
 
@@ -125,6 +142,7 @@ WorkflowTick = Annotated[
     TickStepResult
     | TickAddEvent
     | TickBatchClosed
+    | TickBatchAborted
     | TickCancelRun
     | TickPublishEvent
     | TickTimeout

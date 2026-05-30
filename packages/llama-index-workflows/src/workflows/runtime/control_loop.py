@@ -36,6 +36,7 @@ from workflows.events import (
     WorkflowTimedOutEvent,
 )
 from workflows.runtime.types.commands import (
+    CommandAbortBatch,
     CommandCloseBatch,
     CommandCompleteRun,
     CommandFailWorkflow,
@@ -79,6 +80,7 @@ from workflows.runtime.types.results import (
 )
 from workflows.runtime.types.ticks import (
     TickAddEvent,
+    TickBatchAborted,
     TickBatchClosed,
     TickCancelRun,
     TickIdleCheck,
@@ -289,6 +291,17 @@ class _ControlLoopRunner:
                 TickBatchClosed(
                     batch_id=command.batch_id,
                     step_name=command.step_name,
+                    batch_stack=command.batch_stack,
+                )
+            )
+            return None
+        elif isinstance(command, CommandAbortBatch):
+            self.tick_buffer.append(
+                TickBatchAborted(
+                    batch_id=command.batch_id,
+                    step_name=command.step_name,
+                    partial=command.partial,
+                    error=command.error,
                     batch_stack=command.batch_stack,
                 )
             )
@@ -671,6 +684,8 @@ def _reduce_tick(
         state, commands = _process_add_event_tick(tick, init, now_seconds)
     elif isinstance(tick, TickBatchClosed):
         state, commands = _process_batch_closed_tick(tick, init, now_seconds)
+    elif isinstance(tick, TickBatchAborted):
+        state, commands = _process_batch_aborted_tick(tick, init, now_seconds)
     elif isinstance(tick, TickCancelRun):
         state, commands = _process_cancel_run_tick(tick, init)
     elif isinstance(tick, TickIdleRelease):
@@ -800,6 +815,22 @@ def _cardinality_threshold(collect: Collect | None) -> int | None:
     return None
 
 
+def _has_fire_on_partial_consumer(state: BrokerState, producer_step: str) -> bool:
+    """True if a batch-collect step at this producer's batch level opts into
+    on_partial="fire". Used to decide abort-vs-fail when a fan-out step exhausts
+    its retries mid-stream. The consumer may be several 1:1 steps downstream, so
+    membership is checked against the same-level reachable event types (not just
+    the producer's direct outputs)."""
+    reachable = _same_level_event_types(state, producer_step)
+    for worker in state.workers.values():
+        bcp = worker.config.batch_collect_param
+        if bcp is None or worker.config.on_partial != "fire":
+            continue
+        if any(element_type in reachable for element_type in bcp[1]):
+            return True
+    return False
+
+
 def _process_step_result_tick(
     tick: TickStepResult,
     init: BrokerState,
@@ -827,9 +858,9 @@ def _process_step_result_tick(
     step_no_longer_in_progress = True
 
     # Batch lineage (L2). The trigger stack is carried on the in-progress state.
-    # A fan-out step (list[E] return) mints ONE fresh batch id for this completed
-    # execution and stamps every event it emits, then closes the batch. A 1:1
-    # step's outputs inherit the trigger stack verbatim.
+    # A fan-out step (list[E] / AsyncIterator[E] return) mints ONE fresh batch id
+    # for this completed execution and stamps every event it emits, then closes
+    # the batch. A 1:1 step's outputs inherit the trigger stack verbatim.
     trigger_stack = this_execution.batch_stack
     is_fan_out = worker_state.config.is_fan_out
     fan_out_batch_id: str | None = None
@@ -953,6 +984,38 @@ def _process_step_result_tick(
                             },
                         )
                     )
+                elif fan_out_batch_id is not None and _has_fire_on_partial_consumer(
+                    state, tick.step_name
+                ):
+                    # A fan-out producer exhausted retries mid-stream and a
+                    # downstream batch-collect step opted into on_partial="fire".
+                    # Treat the partial emissions as a (smaller) successful batch:
+                    # open it with the emitted members so it closes normally once
+                    # those members drain to the collect step. (Firing immediately
+                    # here would race ahead of the in-flight members.) The
+                    # bookkeeping section below opens the batch normally.
+                    pass
+                elif fan_out_batch_id is not None:
+                    # Fan-out producer failed mid-stream with no fire-consumer.
+                    # This is the ONLY site that emits a TickBatchAborted; it
+                    # journals the abort and fails the run (see
+                    # _process_batch_aborted_tick). on_partial="fire" never gets
+                    # here — it took the partial-batch ``pass`` branch above.
+                    partial = sum(
+                        1
+                        for x in tick.result
+                        if isinstance(x, StepWorkerResult)
+                        and isinstance(x.result, Event)
+                    )
+                    commands.append(
+                        CommandAbortBatch(
+                            batch_id=fan_out_batch_id,
+                            step_name=tick.step_name,
+                            partial=partial,
+                            error=exception,
+                            batch_stack=trigger_stack,
+                        )
+                    )
                 else:
                     # Publish a WorkflowFailedEvent to inform stream consumers about the failure
                     state.is_running = False
@@ -1067,6 +1130,7 @@ def _process_step_result_tick(
     )
 
     failing_run = any(isinstance(c, CommandFailWorkflow) for c in commands)
+    did_abort = any(isinstance(c, CommandAbortBatch) for c in commands)
 
     # (1) Account for the member this execution consumed from its OWN enclosing
     # batch (``trigger_stack[-1]``). The branch terminates here unless it re-emits
@@ -1076,7 +1140,13 @@ def _process_step_result_tick(
     #     exactly ONE continuation later — the inner batch's collect-step summary,
     #     stamped with the enclosing stack. So a fan-out is net-neutral here.
     # A dead 1:1 branch (returns None ⇒ num_emitted 0) decrements and may close.
-    if did_complete_step and not scheduled_retry and not failing_run and trigger_stack:
+    if (
+        did_complete_step
+        and not scheduled_retry
+        and not failing_run
+        and not did_abort
+        and trigger_stack
+    ):
         enclosing = trigger_stack[-1]
         if enclosing in state.batch_pending:
             continuations = 1 if fan_out_batch_id is not None else num_emitted
@@ -1085,8 +1155,15 @@ def _process_step_result_tick(
                 commands.extend(_close_batch(state, enclosing, tick.step_name))
 
     # (2) If this execution is a fan-out producer, open its new (deeper) batch.
-    if fan_out_batch_id is not None and not scheduled_retry and not failing_run:
-        # An empty batch (count 0) closes immediately.
+    if (
+        fan_out_batch_id is not None
+        and not scheduled_retry
+        and not failing_run
+        and not did_abort
+    ):
+        # An empty batch (count 0) closes immediately. This also covers the
+        # on_partial="fire" case: the partial emissions form a smaller batch that
+        # closes once its members drain to the collect step.
         num_in_batch = sum(1 for ev in emitted_events if not isinstance(ev, StopEvent))
         state.batch_pending[fan_out_batch_id] = num_in_batch
         state.batch_origin[fan_out_batch_id] = trigger_stack
@@ -1521,4 +1598,37 @@ def _process_batch_closed_tick(
                 now_seconds,
             )
         )
+    return state, commands
+
+
+def _process_batch_aborted_tick(
+    tick: TickBatchAborted, init: BrokerState, now_seconds: float
+) -> tuple[BrokerState, list[WorkflowCommand]]:
+    """Handle a fan-out batch aborted mid-stream by failing the run.
+
+    A TickBatchAborted is only ever emitted by the producer-side reducer when NO
+    downstream batch-collect step opts into ``on_partial="fire"`` at this batch's
+    level (see ``_process_step_result_tick``). The ``on_partial="fire"`` case is
+    handled upstream at the producer, which instead opens its partial emissions as
+    a normal (smaller) batch that closes via the regular TickBatchClosed path once
+    the in-flight members drain. So this handler's sole job is to fail the run once
+    with the abort's error.
+    """
+    state = init.deepcopy()
+    state.is_running = False
+    err = tick.error or WorkflowRuntimeError(
+        f"Fan-out batch {tick.batch_id} aborted after {tick.partial} "
+        f"emissions from step {tick.step_name!r}"
+    )
+    commands: list[WorkflowCommand] = [
+        CommandPublishEvent(
+            event=WorkflowFailedEvent(
+                step_name=tick.step_name,
+                exception=err,
+                attempts=0,
+                elapsed_seconds=0.0,
+            )
+        ),
+        CommandFailWorkflow(step_name=tick.step_name, exception=err),
+    ]
     return state, commands

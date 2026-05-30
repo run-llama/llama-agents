@@ -2,10 +2,9 @@
 # Copyright (c) 2026 LlamaIndex Inc.
 """Batch-lineage fan-out / fan-in (Phase L2).
 
-Covers the terse ``join(events: list[Done])`` form for static ``list[E]``
-producers, multi-level fan-out, replay equality of batch ids and grouping,
-empty batches, and branch death. Async-iterator (streaming) producers are a
-follow-up and are rejected at decoration.
+Covers the terse ``join(events: list[Done])`` form for both static ``list[E]``
+and ``AsyncIterator[E]`` producers, multi-level fan-out, replay equality of
+batch ids and grouping, empty batches, branch death, and BatchAborted.
 """
 
 from __future__ import annotations
@@ -14,8 +13,9 @@ from typing import AsyncIterator
 
 import pytest
 from workflows import Context, Workflow, step
-from workflows.errors import WorkflowValidationError
+from workflows.errors import WorkflowRuntimeError
 from workflows.events import Event, StartEvent, StopEvent
+from workflows.retry_policy import ConstantDelayRetryPolicy
 from workflows.runtime.control_loop import (
     rebuild_state_from_ticks_stream,
     replay_ticks_stream,
@@ -89,20 +89,25 @@ async def test_static_list_producer_join_fires_once_with_all() -> None:
     assert result == [0, 1, 2, 3, 4]
 
 
-def test_async_generator_producer_rejected_at_decoration() -> None:
-    """Async-iterator (streaming) fan-out is deferred; declaring one errors."""
+async def test_async_generator_producer_join_fires_once() -> None:
+    """An `AsyncIterator[E]` (async generator) producer drives the same join."""
 
-    with pytest.raises(WorkflowValidationError, match="Async-iterator fan-out"):
+    class FanOut(Workflow):
+        @step
+        async def fan_out(self, ev: StartEvent) -> AsyncIterator[Task]:
+            for i in range(4):
+                yield Task(n=i)
 
-        class FanOut(Workflow):
-            @step
-            async def fan_out(self, ev: StartEvent) -> AsyncIterator[Task]:
-                for i in range(4):
-                    yield Task(n=i)
+        @step
+        async def work(self, ev: Task) -> Done:
+            return Done(n=ev.n * 10)
 
-            @step
-            async def join(self, events: list[Done]) -> StopEvent:
-                return StopEvent(result=sorted(e.n for e in events))
+        @step
+        async def join(self, events: list[Done]) -> StopEvent:
+            return StopEvent(result=sorted(e.n for e in events))
+
+    result = await _run(FanOut(timeout=10))
+    assert result == [0, 10, 20, 30]
 
 
 async def test_join_fires_exactly_once() -> None:
@@ -280,6 +285,97 @@ async def test_replay_reproduces_identical_batch_ids_and_grouping() -> None:
         BrokerState.from_workflow(wf), _stream(ticks)
     )
     assert rebuilt.batch_seq == replay1.state.batch_seq
+
+
+async def test_batch_aborted_fail_default_fails_workflow() -> None:
+    """A fan-out exhausting retries mid-stream fails the run under on_partial=fail.
+
+    The async-generator producer yields one member and THEN raises (retry budget
+    exhausted), so a batch IS minted and a TickBatchAborted is emitted. With the
+    default on_partial="fail" join, this drives the real abort -> fail path in
+    ``_process_batch_aborted_tick`` (not the ordinary step-failure path that a
+    raise-before-yield producer would take).
+    """
+
+    class FanOut(Workflow):
+        @step(retry_policy=ConstantDelayRetryPolicy(maximum_attempts=1, delay=0))
+        async def fan_out(self, ev: StartEvent) -> AsyncIterator[Task]:
+            yield Task(n=0)
+            raise RuntimeError("boom mid-stream")
+
+        @step
+        async def work(self, ev: Task) -> Done:
+            return Done(n=ev.n)
+
+        @step
+        async def join(self, events: list[Done]) -> StopEvent:
+            return StopEvent(result=len(events))
+
+    with pytest.raises((RuntimeError, WorkflowRuntimeError)):
+        await _run(FanOut(timeout=10))
+
+
+async def test_batch_aborted_fire_fires_join_with_partial() -> None:
+    """A fire-consumer turns a mid-stream producer failure into a normal close.
+
+    When a downstream collect step opts into on_partial="fire", a fan-out producer
+    that exhausts its retries mid-stream does NOT emit a TickBatchAborted. Instead
+    it opens its already-emitted members as a normal (smaller) batch, which closes
+    via the regular TickBatchClosed path once those in-flight members drain to the
+    join — firing the join exactly once with the partial set [0, 1].
+
+    on_partial is not user-settable until L3, so we poke it on the step config
+    directly. This is the legitimate L2 technique for exercising the fire-consumer
+    partial-close mechanism.
+    """
+
+    class FanOut(Workflow):
+        @step(retry_policy=ConstantDelayRetryPolicy(maximum_attempts=1, delay=0))
+        async def fan_out(self, ev: StartEvent) -> AsyncIterator[Task]:
+            yield Task(n=0)
+            yield Task(n=1)
+            raise RuntimeError("mid-stream boom")
+
+        @step
+        async def work(self, ev: Task) -> Done:
+            return Done(n=ev.n)
+
+        @step
+        async def join(self, events: list[Done]) -> StopEvent:
+            return StopEvent(result=["partial", sorted(e.n for e in events)])
+
+    wf = FanOut(timeout=10)
+    # L2 has no public on_partial API; poke the step config so the join is a
+    # fire-consumer, which makes the mid-stream-failed producer open its partial
+    # emissions as a normal batch instead of aborting.
+    wf.join._step_config.on_partial = "fire"
+    result = await _run(wf)
+    # The two pre-failure tasks reached work and the join fired with them.
+    assert isinstance(result, list)
+    assert result[0] == "partial"
+    assert result[1] == [0, 1]
+
+
+async def test_async_generator_with_context_param() -> None:
+    """An async-generator fan-out may also take a Context parameter."""
+
+    class FanOut(Workflow):
+        @step
+        async def fan_out(self, ctx: Context, ev: StartEvent) -> AsyncIterator[Task]:
+            await ctx.store.set("emitted", 3)
+            for i in range(3):
+                yield Task(n=i)
+
+        @step
+        async def work(self, ev: Task) -> Done:
+            return Done(n=ev.n)
+
+        @step
+        async def join(self, events: list[Done]) -> StopEvent:
+            return StopEvent(result=len(events))
+
+    result = await _run(FanOut(timeout=10))
+    assert result == 3
 
 
 async def test_no_ctx_store_threading_needed() -> None:

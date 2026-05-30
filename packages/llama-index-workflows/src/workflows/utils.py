@@ -52,7 +52,8 @@ class StepSignatureSpec(BaseModel):
     # ``list[E]`` parameter resolves to ``Collect()`` (``All`` cardinality). None
     # when the step is not a batch collect.
     batch_collect: Any | None = None
-    # Fan-out producer (L2): True when the return annotation is ``list[E]``.
+    # Fan-out producer (L2): True when the return annotation is a batch-emission
+    # collection (``list[E]`` / ``AsyncIterator[E]`` / ``AsyncGenerator[E, None]``).
     is_fan_out: bool = False
 
 
@@ -80,7 +81,6 @@ def inspect_signature(
 
     sig = inspect.signature(fn)
     type_hints = _resolve_type_hints(fn, include_extras=True, localns=localns)
-    _reject_async_iterator_return(fn, type_hints.get("return"))
 
     accepted_events: dict[str, list[EventType]] = {}
     context_parameter = None
@@ -365,15 +365,10 @@ def _get_param_types(param: inspect.Parameter, type_hints: dict) -> list[Any]:
 
 
 # Return-annotation origins whose single element type describes emitted events.
-# A step that returns ``list[E]`` declares produced events for validation and
-# graph representation. Async-iterator fan-out (``AsyncIterator[E]`` etc.) is a
-# separate follow-up; such returns are rejected at decoration (see
-# ``_reject_async_iterator_return``).
-_COLLECTION_RETURN_ORIGINS = (list,)
-
-# Async-iterator return origins, rejected at decoration with a pointer to
-# ``list[E]``. Streaming fan-out is deferred to a follow-up change.
-_ASYNC_ITERATOR_RETURN_ORIGINS = (
+# A step that returns these directly declares produced events as ``list[E]`` /
+# ``AsyncIterator[E]`` etc. for validation and graph representation.
+_COLLECTION_RETURN_ORIGINS = (
+    list,
     cabc.AsyncIterator,
     cabc.AsyncIterable,
     cabc.AsyncGenerator,
@@ -384,10 +379,10 @@ def _flatten_return_annotation(hint: Any) -> list[Any]:
     """Flatten a return annotation into the set of produced event types.
 
     Unwraps unions, ``Optional`` (``None`` is dropped), and the
-    emission-collection wrappers in ``_COLLECTION_RETURN_ORIGINS`` (``list[E]``).
-    The element ``E`` may itself be a union, which is flattened recursively.
-    ``NoneType`` never appears in the result; order is preserved and duplicates
-    are removed.
+    emission-collection wrappers in ``_COLLECTION_RETURN_ORIGINS`` (``list[E]``,
+    ``AsyncIterator[E]``, ``AsyncGenerator[E, None]``). The element ``E`` may
+    itself be a union, which is flattened recursively. ``NoneType`` never appears
+    in the result; order is preserved and duplicates are removed.
     """
     if hint is type(None):
         return []
@@ -406,7 +401,7 @@ def _flatten_return_annotation(hint: Any) -> list[Any]:
         args = get_args(hint)
         if not args:
             return []
-        # list[E] -> E
+        # list[E] -> E; AsyncGenerator[E, None] -> E (first arg is the yield type)
         return _flatten_return_annotation(args[0])
 
     return [hint]
@@ -418,8 +413,9 @@ def _get_return_types(
     """
     Extract the return type hints from a function.
 
-    Handles Union, Optional, and the ``list[E]`` emission collection, which is
-    unwrapped to the event types it emits for validation and graph
+    Handles Union, Optional, and emission-collection types (``list[E]``,
+    ``AsyncIterator[E]``, ``AsyncGenerator[E, None]``). Collection wrappers are
+    unwrapped to the event types they emit for validation and graph
     representation.
     """
     type_hints = _resolve_type_hints(func, localns=localns)
@@ -436,32 +432,11 @@ def _get_return_types(
     return flattened
 
 
-def _reject_async_iterator_return(func: Callable, return_hint: Any) -> None:
-    """Reject async-iterator fan-out returns until streaming lands.
-
-    A step that is an async generator, or annotates its return as
-    ``AsyncIterator[E]`` / ``AsyncIterable[E]`` / ``AsyncGenerator[E, None]``,
-    today buffers every yield and dispatches the whole batch at step completion —
-    no real-time streaming. Rather than ship a type that implies streaming the
-    engine does not do, async-iterator fan-out is deferred to a follow-up.
-    Producers should return ``list[E]`` (static batch) or use ``ctx.send_event``.
-    """
-    is_async_gen = inspect.isasyncgenfunction(
-        getattr(func, "__func__", func)
-    ) or inspect.isasyncgenfunction(func)
-    origin = get_origin(return_hint)
-    if is_async_gen or origin in _ASYNC_ITERATOR_RETURN_ORIGINS:
-        raise WorkflowValidationError(
-            "Async-iterator fan-out (AsyncIterator[E] / AsyncGenerator[E, None] / "
-            "async generator steps) is not supported yet. Return list[E] for a "
-            "static batch, or emit incrementally with ctx.send_event."
-        )
-
-
 def _is_fan_out_return(func: Callable, localns: dict[str, Any] | None = None) -> bool:
     """True if the return annotation is a batch-emission collection.
 
-    A fan-out producer returns ``list[E]``. ``Optional[list[E]]``
+    A fan-out producer returns ``list[E]`` / ``AsyncIterator[E]`` /
+    ``AsyncIterable[E]`` / ``AsyncGenerator[E, None]``. ``Optional[list[E]]``
     (``list[E] | None``) also counts — it may emit a batch or nothing. A plain
     single-event or union-of-single-events return is NOT fan-out.
     """
