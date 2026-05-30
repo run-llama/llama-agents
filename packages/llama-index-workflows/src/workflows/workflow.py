@@ -144,6 +144,32 @@ def _warn_ignored_child_config(child: Workflow, slot_name: str) -> None:
     )
 
 
+def _warn_child_catch_error_handlers(child: Workflow, slot_name: str) -> None:
+    """Warn when a child declares ``@catch_error`` handlers.
+
+    Catch-error recovery is a root-workflow concept: the control loop only looks
+    up a handler when the failing step is a root step, and only the parent's
+    handler table is consulted. A handler defined on a nested child is therefore
+    never invoked -- a child step failure fails the whole run instead. Flag it so
+    the recovery logic isn't mistaken for being active when nested.
+    """
+    handlers = [
+        name
+        for name, config in child._step_configs().items()
+        if config.role == "catch_error"
+    ]
+    if not handlers:
+        return
+    cls_name = type(child).__name__
+    warnings.warn(
+        f"Child workflow '{cls_name}' (slot '{slot_name}') declares @catch_error "
+        f"handler(s) {handlers}, which do not run when the workflow is nested: "
+        "catch-error recovery only applies to the root workflow, so a child step "
+        "failure fails the whole run. Handle errors on the root workflow instead.",
+        stacklevel=3,
+    )
+
+
 def _config_field(*, alias: str, default: Any = None) -> Any:
     """dataclass_transform field specifier for Workflow config params. These are
     *phantom* fields: declared only so dataclass_transform gives subclasses a
@@ -410,6 +436,7 @@ class Workflow(metaclass=WorkflowMeta):
             )
         _validate_includable_child(child, name)
         _warn_ignored_child_config(child, name)
+        _warn_child_catch_error_handlers(child, name)
         # Adopt the parent runtime, then lock so the child can't override it.
         child._switch_runtime(self._runtime)
         child._runtime_locked = True
