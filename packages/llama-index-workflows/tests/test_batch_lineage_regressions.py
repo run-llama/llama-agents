@@ -46,10 +46,6 @@ async def _run(wf: Workflow, timeout: float = 6.0) -> object:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="batch_pending decremented per accepting collect step; batch truncates",
-    strict=True,
-)
 async def test_two_collects_same_type_see_full_batch() -> None:
     """Two `list[Done]` joins on the same element type each see the whole batch."""
     a_calls: list[list[int]] = []
@@ -79,10 +75,6 @@ async def test_two_collects_same_type_see_full_batch() -> None:
     assert b_calls == [[0, 1, 2]], b_calls
 
 
-@pytest.mark.xfail(
-    reason="event routed to a 1:1 step and a join double-debits the batch; closes early",
-    strict=True,
-)
 async def test_event_routed_to_step_and_join_keeps_full_batch() -> None:
     """A fanned-out event consumed by both a 1:1 step and a join loses no members."""
 
@@ -126,10 +118,6 @@ async def test_event_routed_to_step_and_join_keeps_full_batch() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="retry CommandQueueEvent omits batch_stack; retried member never closes the batch",
-    strict=True,
-)
 async def test_retried_batch_member_keeps_lineage() -> None:
     """A member that fails once and succeeds on retry still closes the batch."""
     attempts = {"n2": 0}
@@ -156,10 +144,6 @@ async def test_retried_batch_member_keeps_lineage() -> None:
     assert result == [0, 1, 2, 3, 4], result
 
 
-@pytest.mark.xfail(
-    reason="catch_error recovery re-enters at top level with no batch_stack; join hangs",
-    strict=True,
-)
 async def test_catch_error_recovery_closes_batch() -> None:
     """A member recovered by @catch_error must still let the batch close."""
 
@@ -193,10 +177,6 @@ async def test_catch_error_recovery_closes_batch() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="_fire_batch_collect worker_id-0 fallback aliases overlapping batches; one is lost",
-    strict=True,
-)
 async def test_num_workers_1_collect_overlapping_batches() -> None:
     class Seed(Event):
         gid: int
@@ -293,10 +273,6 @@ async def test_nested_partial_inner_drop_sees_subset() -> None:
     assert result == [(0, 2), (2, 2)], result
 
 
-@pytest.mark.xfail(
-    reason="empty-batch firing gate halts at the fan-out boundary; outer join never fires",
-    strict=True,
-)
 async def test_nested_all_inner_dropped_terminates() -> None:
     """Every inner join drops; the outer join must still fire once with []."""
     wf = _nested_workflow(lambda outer: True)
@@ -334,10 +310,6 @@ def _gated_fan_out_workflow() -> type[Workflow]:
     return FanOut
 
 
-@pytest.mark.xfail(
-    reason="resume re-mints batch ids under run_id=None and drops in_progress lineage; hangs",
-    strict=True,
-)
 async def test_resume_mid_open_batch_completes() -> None:
     _RESUME_GATE.clear()
     _RESUME_SEEN.clear()
@@ -371,10 +343,6 @@ async def test_resume_mid_open_batch_completes() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="join(a: A, b: A) accepted at validation then deadlocks; should reject at decoration",
-    strict=True,
-)
 async def test_same_type_multi_slot_join_rejected() -> None:
     class A(Event):
         value: str
@@ -398,10 +366,6 @@ async def test_same_type_multi_slot_join_rejected() -> None:
     pytest.fail("workflow completed unexpectedly")
 
 
-@pytest.mark.xfail(
-    reason="Optional[list[E]] collect param rejected with a misleading generic error",
-    strict=True,
-)
 def test_optional_list_collect_param_not_generic_error() -> None:
     """Fan-out return unwraps Optional/Union; the fan-in param side should too."""
 
@@ -423,7 +387,7 @@ def test_optional_list_collect_param_not_generic_error() -> None:
 
 # ---------------------------------------------------------------------------
 # Heterogeneous one-of-each join downstream of a fan-out: the legacy collect
-# buffer is lineage-blind, so pairs mis-match across batches and events strand.
+# buffer is lineage-blind, so pairs mismatch across batches and events strand.
 # ---------------------------------------------------------------------------
 
 
@@ -503,10 +467,6 @@ async def test_send_event_into_take_collect_fires() -> None:
     assert result == [0, 1, 2], result
 
 
-@pytest.mark.xfail(
-    reason="send_event events land in the never-closed '' batch bucket; All() join hangs",
-    strict=True,
-)
 async def test_send_event_into_all_collect_fires() -> None:
     class WF(Workflow):
         @step

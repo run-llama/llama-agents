@@ -40,6 +40,12 @@ class CommandQueueEvent:
     recovery_counts: dict[str, int] = field(default_factory=dict)
     # Batch lineage stack to stamp onto the resulting TickAddEvent (L2).
     batch_stack: tuple[str, ...] = field(default_factory=tuple)
+    # Live-set accounting (L2): True when this event's birth into its batch was
+    # already counted at the producing step's resolve (every reducer-emitted
+    # event: 1:1 outputs, fan-out members, retries, catch_error routing). False
+    # only for events that enter via ``ctx.send_event``, whose birth is counted
+    # at routing time. Prevents double-counting work items in the live set.
+    batch_counted: bool = True
 
 
 @dataclass(frozen=True)

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from typing import Any
 
 from workflows.decorators import CatchErrorHandler, StepConfig, WorkflowGraphCheck
 from workflows.errors import WorkflowConfigurationError, WorkflowValidationError
@@ -596,6 +597,31 @@ class _WorkflowValidationResult:
     uses_hitl: bool
 
 
+def _validate_collect_param_slots(steps: dict[str, StepConfig]) -> None:
+    """Reject heterogeneous joins with two slots of the same event type.
+
+    ``join(a: A, b: A)`` is unsatisfiable: collect-mode fires once one event of
+    each declared type has arrived, but a single ``A`` resolves only one slot, so
+    the step waits forever for a second distinct arrival and deadlocks. Surface
+    it as a validation error at run instead of a silent hang. To collect many
+    events of one type, use a single ``list[A]`` parameter.
+    """
+    for name, cfg in steps.items():
+        if not cfg.collect_params:
+            continue
+        seen: dict[Any, str] = {}
+        for param_name, event_type in cfg.collect_params:
+            if event_type in seen:
+                raise WorkflowValidationError(
+                    f"Step '{name}' declares two parameters of the same event "
+                    f"type {event_type.__name__!r} ({seen[event_type]!r} and "
+                    f"{param_name!r}). A single event resolves only one slot, so "
+                    "this join can never fire. Use a single list[E] parameter to "
+                    "collect many events of one type."
+                )
+            seen[event_type] = param_name
+
+
 def _validate_workflow(
     steps: dict[str, StepConfig],
     workflow_cls_name: str,
@@ -620,6 +646,8 @@ def _validate_workflow(
 
     start_event_class = _ensure_start_event_class(steps, workflow_cls_name)
     stop_event_class = _ensure_stop_event_class(steps, workflow_cls_name)
+
+    _validate_collect_param_slots(steps)
 
     uses_hitl = _validate_event_connectivity(steps, start_event_class)
 
