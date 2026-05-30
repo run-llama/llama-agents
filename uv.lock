@@ -2175,6 +2175,7 @@ dependencies = [
     { name = "llama-agents-appserver" },
     { name = "llama-agents-core" },
     { name = "llama-agents-server" },
+    { name = "llama-index-workflows" },
 ]
 
 [package.dev-dependencies]
@@ -2196,6 +2197,7 @@ requires-dist = [
     { name = "llama-agents-appserver", editable = "packages/llama-agents-appserver" },
     { name = "llama-agents-core", editable = "packages/llama-agents-core" },
     { name = "llama-agents-server", editable = "packages/llama-agents-server" },
+    { name = "llama-index-workflows", editable = "packages/llama-index-workflows" },
 ]
 
 [package.metadata.requires-dev]

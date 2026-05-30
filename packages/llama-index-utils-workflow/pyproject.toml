@@ -21,7 +21,7 @@ authors = [{name = "Adrian Lyjak", email = "adrianlyjak@gmail.com"}]
 requires-python = ">=3.10"
 dependencies = [
   "llama-index-core>=0.14,<0.15.0",
-  "llama-index-workflows>=2.13.0,<3.0.0",
+  "llama-index-workflows>=2.21.0,<3.0.0",
   "pyvis>=0.3.2"
 ]
 
