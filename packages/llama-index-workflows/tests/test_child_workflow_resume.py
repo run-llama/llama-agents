@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LlamaIndex Inc.
-# ty: ignore[unknown-argument]
-# pyright: reportCallIssue=false, reportArgumentType=false, reportPrivateUsage=false, reportIndexIssue=false
 """Phase 4: one ``to_dict()`` blob checkpoints the whole child tree, and resume
 skips steps that already completed (children included)."""
 
@@ -54,7 +52,7 @@ class HitlParent(Workflow):
     async def gather(self, ctx: Context, ev: ChildStop) -> InputRequiredEvent:
         # Child has completed by now; stash its output and pause for a human.
         await ctx.store.set("from_child", ev.out)
-        return InputRequiredEvent(prefix="continue?")
+        return InputRequiredEvent(prefix="continue?")  # type: ignore  # dynamic event kwarg
 
     @step
     async def complete(self, ctx: Context, ev: HumanResponseEvent) -> StopEvent:
@@ -84,7 +82,7 @@ async def test_kill_after_child_completes_resume_does_not_rerun_child() -> None:
 
     # Resume from the single blob and feed the human response.
     new_handler = workflow.run(ctx=Context.from_dict(workflow, ctx_dict))
-    new_handler.ctx.send_event(HumanResponseEvent(response="42"))
+    new_handler.ctx.send_event(HumanResponseEvent(response="42"))  # type: ignore  # dynamic event kwarg
     result = await new_handler
     assert result == "HELLO:42"
 

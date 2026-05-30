@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LlamaIndex Inc.
-# ty: ignore[unknown-argument]
-# pyright: reportCallIssue=false, reportArgumentType=false, reportPrivateUsage=false
 """Phase 4: namespaced child-workflow execution and the StopEvent boundary.
 
 A parent triggers a child by emitting the child's ``StartEvent``; the child runs

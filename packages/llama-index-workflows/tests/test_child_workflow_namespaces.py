@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LlamaIndex Inc.
-# ty: ignore[unknown-argument]
-# pyright: reportCallIssue=false, reportArgumentType=false, reportPrivateUsage=false
 """Tests for namespaced step enumeration across a child-workflow tree.
 
 The child-aware constructor is synthesized by ``WorkflowMeta`` at runtime, so
@@ -144,7 +142,7 @@ class SelfReferential(Workflow):
 
 def test_self_referential_child_type_rejected() -> None:
     with pytest.raises(WorkflowValidationError, match="type cycle"):
-        SelfReferential().validate()
+        SelfReferential().validate()  # type: ignore  # self-referential child is uninstantiable
 
 
 class DupChildA(Workflow):

@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LlamaIndex Inc.
-# ty: ignore[unknown-argument]
-# pyright: reportCallIssue=false, reportArgumentType=false, reportPrivateUsage=false
 """Phase 4: each namespace gets its own state store, so a child's state writes
 are invisible to the parent (and vice versa)."""
 

@@ -6,15 +6,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import warnings
 from typing import (
     TYPE_CHECKING,
     Any,
+    ClassVar,
     cast,
     get_args,
 )
 
 from llama_index_instrumentation import get_dispatcher
 from pydantic import ValidationError
+from typing_extensions import dataclass_transform
 
 if TYPE_CHECKING:  # pragma: no cover
     from .context import Context
@@ -33,6 +36,10 @@ from .utils import get_steps_from_class, get_steps_from_instance
 
 dispatcher = get_dispatcher(__name__)
 logger = logging.getLogger(__name__)
+
+# Default run timeout. Referenced by the constructor, the phantom config field,
+# and the dead-child-config warning so the three stay in sync.
+DEFAULT_TIMEOUT = 45.0
 
 
 def _resolve_child_slots(cls: type) -> dict[str, type]:
@@ -108,6 +115,47 @@ def _validate_includable_child(child: Workflow, slot_name: str) -> None:
         )
 
 
+def _warn_ignored_child_config(child: Workflow, slot_name: str) -> None:
+    """Warn when a child carries run-level config that is dead once nested.
+
+    A child runs inside the parent's single control loop, so the parent's
+    run-level config governs execution. ``timeout``, ``verbose`` and
+    ``num_concurrent_runs`` set on the child are silently ignored — flag them so
+    the value isn't mistaken for having an effect. (``runtime`` is also
+    overridden, but it is reassigned here deliberately and a default is always
+    present, so there is nothing reliable to compare against.)
+    """
+    ignored: list[str] = []
+    if child._timeout != DEFAULT_TIMEOUT:
+        ignored.append(f"timeout={child._timeout!r}")
+    if child._verbose:
+        ignored.append("verbose=True")
+    if child._num_concurrent_runs is not None:
+        ignored.append(f"num_concurrent_runs={child._num_concurrent_runs!r}")
+    if not ignored:
+        return
+    cls_name = type(child).__name__
+    warnings.warn(
+        f"Child workflow '{cls_name}' (slot '{slot_name}') was constructed with "
+        f"{', '.join(ignored)}, which has no effect on a child: the parent's "
+        "run-level config governs execution. Set these on the root workflow "
+        "instead.",
+        stacklevel=3,
+    )
+
+
+def config_field(*, alias: str, default: Any = None) -> Any:
+    """dataclass_transform field specifier for Workflow config params. These are
+    *phantom* fields: declared only so dataclass_transform gives subclasses a
+    typed ``__init__`` (config kwargs + declared child fields). Real storage is
+    owned by the hand-written ``Workflow.__init__`` under the ``_<name>`` attr,
+    so the ``_<name>_arg`` field never clashes with that attr or the public
+    ``runtime``/``workflow_name`` properties, and config-param types can't widen
+    the stored attribute types."""
+    return default
+
+
+@dataclass_transform(kw_only_default=True, field_specifiers=(config_field,))
 class WorkflowMeta(type):
     def __init__(cls, name: str, bases: tuple[type, ...], dct: dict[str, Any]) -> None:
         super().__init__(name, bases, dct)
@@ -177,20 +225,34 @@ class Workflow(metaclass=WorkflowMeta):
         - [RetryPolicy][workflows.retry_policy.RetryPolicy]
     """
 
-    # Populated by the metaclass; declared here for type checkers.
-    _step_functions: dict[str, StepFunction]
-    _step_functions_version: int = 0
-    # Per-class cache of resolved child-workflow slots (field name -> type).
-    _child_workflow_slots_cache: dict[str, type] | None = None
-    # Attached child-workflow instances, keyed by declared field name.
-    _child_workflows: dict[str, Workflow]
+    # Class-level state (metaclass / per-class), NOT constructor fields.
+    _step_functions: ClassVar[dict[str, StepFunction]]
+    _step_functions_version: ClassVar[int] = 0
+    _child_workflow_slots_cache: ClassVar[dict[str, type] | None] = None
 
-    _runtime: Runtime
-    _workflow_name: str | None
+    # Config constructor params as phantom dataclass_transform fields, so
+    # subclasses get a typed __init__ that merges these kwargs with declared
+    # child fields. See config_field: real storage is owned by __init__ below.
+    _timeout_arg: float | None = config_field(alias="timeout", default=DEFAULT_TIMEOUT)
+    _disable_validation_arg: bool = config_field(
+        alias="disable_validation", default=False
+    )
+    _verbose_arg: bool = config_field(alias="verbose", default=False)
+    _resource_manager_arg: ResourceManager | None = config_field(
+        alias="resource_manager", default=None
+    )
+    _num_concurrent_runs_arg: int | None = config_field(
+        alias="num_concurrent_runs", default=None
+    )
+    _runtime_arg: Runtime | None = config_field(alias="runtime", default=None)
+    _workflow_name_arg: str | None = config_field(alias="workflow_name", default=None)
+    _skip_graph_checks_arg: set[WorkflowGraphCheck] | None = config_field(
+        alias="skip_graph_checks", default=None
+    )
 
     def __init__(
         self,
-        timeout: float | None = 45.0,
+        timeout: float | None = DEFAULT_TIMEOUT,
         disable_validation: bool = False,
         verbose: bool = False,
         resource_manager: ResourceManager | None = None,
@@ -238,7 +300,7 @@ class Workflow(metaclass=WorkflowMeta):
         self._disable_validation = disable_validation
         self._num_concurrent_runs = num_concurrent_runs
         # Store explicit name (None means use computed name)
-        self._workflow_name = workflow_name
+        self._workflow_name: str | None = workflow_name
 
         step_configs = self._step_configs()
         cls_name = self.__class__.__name__
@@ -249,7 +311,7 @@ class Workflow(metaclass=WorkflowMeta):
         self._catch_error_handlers: dict[str, CatchErrorHandler] = {}
         self._handler_for_step: dict[str, str] = {}
         # Attached child-workflow instances, keyed by declared field name.
-        self._child_workflows = {}
+        self._child_workflows: dict[str, Workflow] = {}
         self._events = _collect_events(step_configs)
         # Resource management
         self._resource_manager = resource_manager or ResourceManager()
@@ -271,7 +333,9 @@ class Workflow(metaclass=WorkflowMeta):
         self._skip_graph_checks: set[WorkflowGraphCheck] = checks
 
         # Runtime registration: explicit > context-scoped > basic_runtime
-        self._runtime = runtime if runtime is not None else get_current_runtime()
+        self._runtime: Runtime = (
+            runtime if runtime is not None else get_current_runtime()
+        )
         if self._verbose:
             self._runtime = VerboseDecorator(self._runtime)
         # Register with runtime for tracking (no-op for BasicRuntime)
@@ -345,6 +409,7 @@ class Workflow(metaclass=WorkflowMeta):
                 f"{expected.__name__}, got {type(child).__name__}."
             )
         _validate_includable_child(child, name)
+        _warn_ignored_child_config(child, name)
         # Adopt the parent runtime, then lock so the child can't override it.
         child._switch_runtime(self._runtime)
         child._runtime_locked = True

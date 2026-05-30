@@ -1,21 +1,16 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LlamaIndex Inc.
-# ty: ignore[unknown-argument]
-# pyright: reportCallIssue=false, reportArgumentType=false, reportPrivateUsage=false
 """Tests for declaring child workflows as typed class fields.
 
-The constructor that accepts child-workflow fields is synthesized by
-``WorkflowMeta`` at runtime, so static type checkers can't see the ``child=``
-keyword. Exposing it statically would require ``typing.dataclass_transform`` on
-the metaclass, which breaks compat: it makes childless calls like
-``MyFlow(timeout=30)`` a type error (the checker stops honoring the inherited
-``Workflow.__init__``). So the ``child=`` call sites stay suppressed by the
-file-level pragmas above, along with the internal-attribute access these tests
-make. See the Phase 6 decision in the child-workflows plan.
+``WorkflowMeta`` is a ``dataclass_transform``, so a parent's child fields and the
+base config kwargs both type-check on the constructor (``Parent(child=Child(),
+timeout=30)``) with no suppression. The only per-line ignore below is on a test
+that deliberately passes the wrong child type to exercise the runtime check.
 """
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import pytest
@@ -139,7 +134,7 @@ def test_wrong_child_type_rejected() -> None:
             return OtherStop()
 
     with pytest.raises(WorkflowValidationError, match="expects Child"):
-        Parent(child=Other())
+        Parent(child=Other())  # type: ignore  # wrong child type, rejected at runtime
 
 
 class ParentWithUserInit(Workflow):
@@ -175,3 +170,17 @@ def test_childless_workflow_unaffected() -> None:
     wf = NoChildren(timeout=10)
     assert wf._timeout == 10
     assert wf.child_workflows == {}
+
+
+def test_dead_child_config_warns() -> None:
+    """Run-level config set on a child is ignored once nested, so attaching it
+    emits a warning naming the dead params."""
+    with pytest.warns(UserWarning, match="timeout=10.*verbose=True"):
+        Parent(child=Child(timeout=10, verbose=True))
+
+
+def test_honored_child_config_does_not_warn() -> None:
+    """A child with default run-level config attaches silently."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        Parent(child=Child())
