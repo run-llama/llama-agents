@@ -57,17 +57,6 @@ class CommandCloseBatch:
 
 
 @dataclass(frozen=True)
-class CommandAbortBatch:
-    """Emitted when a fan-out step exhausts its retry budget mid-stream (L2)."""
-
-    batch_id: str
-    step_name: str
-    partial: int
-    error: Exception | None = None
-    batch_stack: tuple[str, ...] = field(default_factory=tuple)
-
-
-@dataclass(frozen=True)
 class CommandHalt:
     exception: Exception
 
@@ -112,7 +101,6 @@ WorkflowCommand = (
     CommandRunWorker
     | CommandQueueEvent
     | CommandCloseBatch
-    | CommandAbortBatch
     | CommandHalt
     | CommandCompleteRun
     | CommandFailWorkflow

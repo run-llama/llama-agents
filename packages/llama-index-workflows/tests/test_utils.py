@@ -262,20 +262,20 @@ def test_return_type_list_is_flattened() -> None:
     assert spec.return_types == [_EventA]
 
 
-def test_return_type_async_iterator_is_flattened() -> None:
+def test_async_iterator_return_is_rejected() -> None:
     async def f(ev: StartEvent) -> AsyncIterator[_EventA]:
         yield _EventA()
 
-    spec = inspect_signature(f)
-    assert spec.return_types == [_EventA]
+    with pytest.raises(WorkflowValidationError, match="Async-iterator fan-out"):
+        inspect_signature(f)
 
 
-def test_return_type_async_generator_is_flattened() -> None:
+def test_async_generator_return_is_rejected() -> None:
     async def f(ev: StartEvent) -> AsyncGenerator[_EventA, None]:
         yield _EventA()
 
-    spec = inspect_signature(f)
-    assert spec.return_types == [_EventA]
+    with pytest.raises(WorkflowValidationError, match="Async-iterator fan-out"):
+        inspect_signature(f)
 
 
 def test_return_type_list_of_union_is_flattened() -> None:
