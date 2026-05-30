@@ -44,6 +44,12 @@ class BrokerState:
     is_running: bool
     config: BrokerConfig
     workers: dict[StepId, InternalStepWorkerState]
+    # Per-child-namespace activation times: the moment the first event routed
+    # into a namespace that declares a ``timeout``. Used to arm and to staleness-
+    # check :class:`TickNamespaceTimeout`. Cleared when the namespace completes
+    # (StopEvent boundary) or is expired, so a re-triggered child re-arms. Not
+    # serialized — runtime scheduling state, like waiter timeouts.
+    namespace_started: dict[tuple[str, ...], float] = field(default_factory=dict)
 
     def deepcopy(self) -> BrokerState:
         """
@@ -56,11 +62,32 @@ class BrokerState:
                 step_id: worker_state._deepcopy()
                 for step_id, worker_state in self.workers.items()
             },
+            namespace_started=dict(self.namespace_started),
         )
 
     @staticmethod
     def from_workflow(workflow: Workflow) -> BrokerState:
         namespaced_steps = workflow._get_namespaced_steps()
+        # Catch-error tables are per-instance (bare-name keyed) on each workflow;
+        # namespace them by the owning instance's path so a child's handlers
+        # recover its own steps. Root steps (namespace ()) project back to bare
+        # names, preserving the pre-namespace wire format.
+        catch_error_handlers: dict[StepId, CatchErrorHandler] = {}
+        handler_for_step: dict[StepId, StepId] = {}
+        # Per-child-namespace timeouts from each child instance's ``_timeout``.
+        # The root timeout (namespace ()) stays the single global deadline
+        # scheduled in the control loop's ``run()``; only child namespaces get a
+        # per-namespace deadline here.
+        namespace_timeouts: dict[tuple[str, ...], float] = {}
+        for namespace, instance in workflow._namespace_instances().items():
+            for name, handler in instance._catch_error_handlers.items():
+                catch_error_handlers[StepId(namespace, name)] = handler
+            for step_name, handler_name in instance._handler_for_step.items():
+                handler_for_step[StepId(namespace, step_name)] = StepId(
+                    namespace, handler_name
+                )
+            if namespace != () and instance._timeout is not None:
+                namespace_timeouts[namespace] = instance._timeout
         return BrokerState(
             is_running=False,
             config=BrokerConfig(
@@ -73,8 +100,9 @@ class BrokerState:
                     for step_id, step_func in namespaced_steps.items()
                 },
                 timeout=workflow._timeout,
-                catch_error_handlers=dict(workflow._catch_error_handlers),
-                handler_for_step=dict(workflow._handler_for_step),
+                catch_error_handlers=catch_error_handlers,
+                handler_for_step=handler_for_step,
+                namespace_timeouts=namespace_timeouts,
             ),
             workers={
                 step_id: InternalStepWorkerState(
@@ -265,18 +293,23 @@ class BrokerConfig:
     Attributes:
         steps: Configuration for each step indexed by step name
         timeout: Maximum seconds before the workflow times out, or None for no timeout
-        catch_error_handlers: handler step name -> CatchErrorHandler descriptor
-        handler_for_step: step name -> handler step name that owns it
+        catch_error_handlers: handler StepId -> CatchErrorHandler descriptor
+        handler_for_step: covered step's StepId -> the handler StepId that owns it
     """
 
     steps: dict[StepId, InternalStepConfig]
     timeout: float | None
-    # Catch-error routing is keyed by the handler's bare step name. These
-    # handlers are a root-workflow concept (see _process_step_result_tick's
-    # is_root guard), so they intentionally stay string-keyed rather than
-    # StepId-keyed.
-    catch_error_handlers: dict[str, CatchErrorHandler] = field(default_factory=dict)
-    handler_for_step: dict[str, str] = field(default_factory=dict)
+    # Catch-error routing is keyed by StepId so a handler declared on a child
+    # recovers only that child's steps and keeps a recovery budget distinct from
+    # a same-named root handler. Merged from every namespace instance in
+    # ``from_workflow``; ``handler_for_step`` maps a covered step's StepId to its
+    # handler's StepId, ``catch_error_handlers`` maps a handler StepId to its
+    # descriptor.
+    catch_error_handlers: dict[StepId, CatchErrorHandler] = field(default_factory=dict)
+    handler_for_step: dict[StepId, StepId] = field(default_factory=dict)
+    # Per-child-namespace timeout (seconds), from each child's ``_timeout``.
+    # Root (``()``) is absent: its deadline is the global ``timeout`` above.
+    namespace_timeouts: dict[tuple[str, ...], float] = field(default_factory=dict)
 
 
 @dataclass()

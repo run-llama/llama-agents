@@ -43,11 +43,13 @@ from workflows.runtime.types.commands import (
     CommandQueueEvent,
     CommandRunWorker,
     CommandScheduleIdleCheck,
+    CommandScheduleNamespaceTimeout,
     CommandScheduleWaiterTimeout,
     WorkflowCommand,
     indicates_exit,
 )
 from workflows.runtime.types.internal_state import (
+    BrokerConfig,
     BrokerState,
     EventAttempt,
     InProgressState,
@@ -82,6 +84,7 @@ from workflows.runtime.types.ticks import (
     TickCancelRun,
     TickIdleCheck,
     TickIdleRelease,
+    TickNamespaceTimeout,
     TickPublishEvent,
     TickStepResult,
     TickTimeout,
@@ -315,6 +318,16 @@ class _ControlLoopRunner:
             self.schedule_tick(
                 TickWaiterTimeout(step_id=command.step_id, waiter_id=command.waiter_id),
                 at_time=now + command.timeout,
+            )
+            return None
+        elif isinstance(command, CommandScheduleNamespaceTimeout):
+            self.schedule_tick(
+                TickNamespaceTimeout(
+                    namespace=command.namespace,
+                    timeout=command.timeout,
+                    started_at=command.started_at,
+                ),
+                at_time=command.started_at + command.timeout,
             )
             return None
         else:
@@ -683,6 +696,8 @@ def _reduce_tick(
         state, commands = _process_timeout_tick(tick, init)
     elif isinstance(tick, TickWaiterTimeout):
         state, commands = _process_waiter_timeout_tick(tick, init, now_seconds)
+    elif isinstance(tick, TickNamespaceTimeout):
+        state, commands = _process_namespace_timeout_tick(tick, init, now_seconds)
     elif isinstance(tick, TickIdleCheck):
         # Return early — idle check ticks don't schedule further idle checks
         if _check_idle_state(init):
@@ -801,6 +816,9 @@ def _process_step_result_tick(
                     if child_step_id.namespace == tick.step_id.namespace:
                         worker.collected_events.clear()
                         worker.collected_waiters.clear()
+                # The child completed: clear its timeout activation so a pending
+                # namespace-timeout tick no-ops, and a re-trigger re-arms.
+                state.namespace_started.pop(tick.step_id.namespace, None)
                 commands.append(
                     CommandQueueEvent(
                         event=result.result,
@@ -874,28 +892,34 @@ def _process_step_result_tick(
                 total_attempts = this_execution.attempts + 1
                 elapsed = result.failed_at - this_execution.first_attempt_at
 
-                # Catch-error handlers are a root-workflow concept, keyed by
-                # bare step name; only root steps route to them.
-                handler_name = (
-                    state.config.handler_for_step.get(tick.step_id.name)
-                    if tick.step_id.is_root
+                # Route a failed step to the catch-error handler in its own
+                # namespace, if any. Tables are StepId-keyed, so a child's
+                # handler recovers only the child's steps; the recovery budget is
+                # keyed by the handler's str(StepId) to avoid colliding with a
+                # same-named root handler.
+                handler_step_id = state.config.handler_for_step.get(tick.step_id)
+                handler = (
+                    state.config.catch_error_handlers.get(handler_step_id)
+                    if handler_step_id is not None
                     else None
                 )
-                handler = (
-                    state.config.catch_error_handlers.get(handler_name)
-                    if handler_name is not None
-                    else None
+                recovery_key = (
+                    str(handler_step_id) if handler_step_id is not None else None
                 )
                 current_count = (
-                    this_execution.recovery_counts.get(handler.step_name, 0)
-                    if handler is not None
+                    this_execution.recovery_counts.get(recovery_key, 0)
+                    if recovery_key is not None
                     else 0
                 )
                 new_count = current_count + 1
                 should_route = (
                     handler is not None and new_count <= handler.max_recoveries
                 )
-                if should_route and handler is not None:
+                if (
+                    should_route
+                    and handler_step_id is not None
+                    and recovery_key is not None
+                ):
                     # Route to the catch-error handler. Keep workflow running so
                     # the handler can produce either a StopEvent or a new failure.
                     step_failed_event = StepFailedEvent(
@@ -911,10 +935,10 @@ def _process_step_result_tick(
                     commands.append(
                         CommandQueueEvent(
                             event=step_failed_event,
-                            step_id=StepId.root(handler.step_name),
+                            step_id=handler_step_id,
                             recovery_counts={
                                 **this_execution.recovery_counts,
-                                handler.step_name: new_count,
+                                recovery_key: new_count,
                             },
                         )
                     )
@@ -1147,6 +1171,9 @@ def _process_add_event_tick(
     if isinstance(tick.event, StartEvent):
         state.is_running = True
 
+    # Namespaces this event routed work into; used to arm per-child timeouts.
+    touched_namespaces: set[tuple[str, ...]] = set()
+
     # First, check if the event resolves any waiters. Track which steps were
     # woken via waiter resolution so we don't also route the event to them
     # as a normal accepted event (which would cause duplicate processing).
@@ -1170,6 +1197,7 @@ def _process_add_event_tick(
             if is_match:
                 handled = True
                 waiter_resolved_steps.add(step_id)
+                touched_namespaces.add(step_id.namespace)
                 wait_condition.resolved_event = tick.event
                 subcommands = _add_or_enqueue_event(
                     EventAttempt(event=wait_condition.event),
@@ -1193,6 +1221,7 @@ def _process_add_event_tick(
             )
         if is_accepted and routes:
             handled = True
+            touched_namespaces.add(step_id.namespace)
             subcommands = _add_or_enqueue_event(
                 EventAttempt(
                     event=tick.event,
@@ -1207,6 +1236,21 @@ def _process_add_event_tick(
                 now_seconds,
             )
             commands.extend(subcommands)
+
+    # Arm a per-namespace timeout the first time an event routes into a child
+    # namespace that declares one. Re-arms after a prior activation completed
+    # (its start was cleared); only the root deadline is the global timeout.
+    for namespace in sorted(touched_namespaces):
+        timeout = state.config.namespace_timeouts.get(namespace)
+        if timeout is None or namespace in state.namespace_started:
+            continue
+        state.namespace_started[namespace] = now_seconds
+        commands.append(
+            CommandScheduleNamespaceTimeout(
+                namespace=namespace, timeout=timeout, started_at=now_seconds
+            )
+        )
+
     if not handled:
         # InputRequiredEvent subclasses are intentionally designed to be handled
         # externally by human consumers, not by workflow steps. Don't emit
@@ -1304,3 +1348,108 @@ def _process_waiter_timeout_tick(
     )
     commands.extend(subcommands)
     return state, commands
+
+
+def _namespace_catch_error_handler(
+    config: BrokerConfig, namespace: tuple[str, ...]
+) -> StepId | None:
+    """The handler StepId that can catch a failure within ``namespace``, if any.
+
+    Prefers a wildcard handler (``for_steps is None``) since a child timeout is
+    not attributable to one specific step; falls back to any handler declared in
+    the namespace.
+    """
+    candidates = [
+        handler_id
+        for handler_id in config.catch_error_handlers
+        if handler_id.namespace == namespace
+    ]
+    if not candidates:
+        return None
+    for handler_id in candidates:
+        if config.catch_error_handlers[handler_id].for_steps is None:
+            return handler_id
+    return candidates[0]
+
+
+def _process_namespace_timeout_tick(
+    tick: TickNamespaceTimeout, init: BrokerState, now_seconds: float
+) -> tuple[BrokerState, list[WorkflowCommand]]:
+    """Expire a single child namespace on its own deadline.
+
+    A no-op if the namespace already completed or was re-armed (its recorded
+    start no longer matches this tick). Otherwise terminate the namespace's
+    workers and route a :class:`WorkflowTimeoutError` through the namespaced
+    catch-error path so the child's ``@catch_error`` can recover it. If no
+    handler catches it, the uncaught child timeout fails the whole run — but it
+    never ``CommandHalt``s, since only the root timeout halts the run.
+    """
+    state = init.deepcopy()
+    namespace = tick.namespace
+    # Stale tick: the child completed or a re-trigger re-armed with a new start.
+    if state.namespace_started.get(namespace) != tick.started_at:
+        return state, []
+
+    # Representative in-flight event for the StepFailedEvent payload, and the
+    # namespace's active steps for the timeout event.
+    input_event: Event | None = None
+    active_steps: list[str] = []
+    for step_id, worker in init.workers.items():
+        if step_id.namespace != namespace:
+            continue
+        if worker.in_progress or worker.queue:
+            active_steps.append(str(step_id))
+        if input_event is None:
+            if worker.in_progress:
+                input_event = worker.in_progress[0].event
+            elif worker.queue:
+                input_event = worker.queue[0].event
+            elif worker.collected_waiters:
+                input_event = worker.collected_waiters[0].event
+
+    # Terminate the namespace: drop all of its in-flight work and buffers, and
+    # clear its activation so the run can't keep waiting on the dead child.
+    for step_id, worker in state.workers.items():
+        if step_id.namespace == namespace:
+            worker.in_progress = []
+            worker.queue = []
+            worker.collected_events.clear()
+            worker.collected_waiters.clear()
+    state.namespace_started.pop(namespace, None)
+
+    timeout_error = WorkflowTimeoutError(
+        f"Child workflow '{'/'.join(namespace)}' timed out after "
+        f"{tick.timeout} seconds."
+    )
+
+    handler_step_id = _namespace_catch_error_handler(state.config, namespace)
+    if handler_step_id is not None:
+        step_failed_event = StepFailedEvent(
+            step_name="/".join(namespace),
+            input_event=input_event if input_event is not None else Event(),
+            exception=timeout_error,
+            attempts=1,
+            elapsed_seconds=tick.timeout,
+            failed_at=datetime.fromtimestamp(now_seconds, tz=timezone.utc),
+        )
+        return state, [
+            CommandQueueEvent(event=step_failed_event, step_id=handler_step_id)
+        ]
+
+    # Uncaught child timeout: fail the whole run (no CommandHalt — that is for the
+    # root timeout only). Report the child's own namespace, not the whole run.
+    state.is_running = False
+    failing_step_id = next(
+        (sid for sid in state.workers if sid.namespace == namespace),
+        StepId(namespace, namespace[-1] if namespace else ""),
+    )
+    return state, [
+        CommandPublishEvent(
+            event=WorkflowTimedOutEvent(
+                timeout=tick.timeout,
+                active_steps=active_steps,
+            ),
+            origin_namespace=namespace,
+        ),
+        CommandFailWorkflow(step_id=failing_step_id, exception=timeout_error),
+    ]

@@ -107,6 +107,24 @@ class TickWaiterTimeout(BaseModel):
     waiter_id: str
 
 
+class TickNamespaceTimeout(BaseModel):
+    """When processed, times out a single child namespace (not the whole run).
+
+    Scheduled when the first event routes into a child namespace that declares a
+    ``timeout``. On fire it expires *that child* through the namespaced failure
+    path (so the child's ``@catch_error`` can recover it); only the root timeout
+    (:class:`TickTimeout`) halts the whole run. ``started_at`` pins the activation
+    this tick was scheduled for: if the namespace has since completed or been
+    re-armed, the tick is a stale no-op.
+    """
+
+    model_config = ConfigDict(frozen=True)
+    type: Literal["namespace_timeout"] = "namespace_timeout"
+    namespace: tuple[str, ...]
+    timeout: float
+    started_at: float
+
+
 class TickIdleCheck(BaseModel):
     """Scheduled after state appears idle, to re-check after async events drain.
 
@@ -126,6 +144,7 @@ WorkflowTick = Annotated[
     | TickPublishEvent
     | TickTimeout
     | TickWaiterTimeout
+    | TickNamespaceTimeout
     | TickIdleCheck
     | TickIdleRelease,
     Discriminator("type"),

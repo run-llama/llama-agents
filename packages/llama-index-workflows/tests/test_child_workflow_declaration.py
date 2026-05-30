@@ -174,9 +174,18 @@ def test_childless_workflow_unaffected() -> None:
 
 def test_dead_child_config_warns() -> None:
     """Run-level config set on a child is ignored once nested, so attaching it
-    emits a warning naming the dead params."""
-    with pytest.warns(UserWarning, match="timeout=10.*verbose=True"):
+    emits a warning naming the dead params. ``timeout`` is NOT dead -- it bounds
+    the child's own execution -- so only ``verbose`` is flagged here."""
+    with pytest.warns(UserWarning, match="verbose=True"):
         Parent(child=Child(timeout=10, verbose=True))
+
+
+def test_child_timeout_does_not_warn() -> None:
+    """A child ``timeout`` is honored (per-namespace deadline), not ignored, so
+    setting it alone attaches silently."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        Parent(child=Child(timeout=10))
 
 
 def test_honored_child_config_does_not_warn() -> None:

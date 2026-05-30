@@ -77,6 +77,20 @@ class CommandScheduleWaiterTimeout:
 
 
 @dataclass(frozen=True)
+class CommandScheduleNamespaceTimeout:
+    """Schedule a per-child-namespace timeout via TickNamespaceTimeout.
+
+    Emitted when the first event routes into a child namespace that declares a
+    ``timeout``. ``started_at`` is the routing time; the tick fires at
+    ``started_at + timeout`` and is pinned to this activation.
+    """
+
+    namespace: tuple[str, ...]
+    timeout: float
+    started_at: float
+
+
+@dataclass(frozen=True)
 class CommandScheduleIdleCheck:
     """Schedule a deferred idle check via TickIdleCheck.
 
@@ -98,6 +112,7 @@ WorkflowCommand = (
     | CommandPublishEvent
     | CommandScheduleIdleCheck
     | CommandScheduleWaiterTimeout
+    | CommandScheduleNamespaceTimeout
 )
 
 

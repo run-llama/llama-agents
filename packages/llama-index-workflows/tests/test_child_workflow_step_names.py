@@ -14,8 +14,7 @@ from __future__ import annotations
 
 import pytest
 from workflows import Context, Workflow
-from workflows.decorators import step
-from workflows.decorators import catch_error
+from workflows.decorators import catch_error, step
 from workflows.events import (
     Event,
     StartEvent,
@@ -127,9 +126,7 @@ class TopWithGrandChild(Workflow):
 async def test_grandchild_step_failure_event_carries_compound_namespace() -> None:
     """A failing grandchild step's ``step_name`` is the full compound path
     ``mid/grand/run_grand``."""
-    handler = TopWithGrandChild(
-        mid=MidWithGrandChild(grand=FailingGrandChild())
-    ).run()
+    handler = TopWithGrandChild(mid=MidWithGrandChild(grand=FailingGrandChild())).run()
     events = await _collect_until_done(handler)
 
     with pytest.raises(ValueError, match="boom-in-grandchild"):
@@ -140,7 +137,7 @@ async def test_grandchild_step_failure_event_carries_compound_namespace() -> Non
     assert failed[0].step_name == "mid/grand/run_grand"
 
 
-# --- @catch_error on a child is a silent no-op: warn, and prove it ------------
+# --- @catch_error on a child recovers the child's own steps -------------------
 
 
 class RecoveringChild(Workflow):
@@ -150,7 +147,8 @@ class RecoveringChild(Workflow):
 
     @catch_error
     async def recover(self, ev: StepFailedEvent) -> ChildStop:
-        # Never reached when nested: catch-error is root-only.
+        # The child's handler recovers the child's failing step and emits the
+        # child's StopEvent, which crosses the boundary back into the parent.
         return ChildStop()
 
 
@@ -166,28 +164,26 @@ class ParentOfRecoveringChild(Workflow):
         return StopEvent(result="recovered")
 
 
-def test_child_catch_error_handler_warns_on_attach() -> None:
-    """Declaring @catch_error on a child warns that it won't fire when nested."""
-    with pytest.warns(UserWarning, match="catch-error recovery only applies"):
+def test_child_catch_error_handler_attaches_without_warning() -> None:
+    """A child declaring @catch_error attaches silently; its handlers run when
+    nested (see the recovery test below)."""
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
         ParentOfRecoveringChild(child=RecoveringChild())
 
 
 @pytest.mark.asyncio
-async def test_child_catch_error_handler_does_not_recover_when_nested() -> None:
-    """The child's @catch_error handler never runs; the child failure fails the
-    whole run rather than being recovered."""
-    import warnings
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        handler = ParentOfRecoveringChild(child=RecoveringChild()).run()
+async def test_child_catch_error_handler_recovers_when_nested() -> None:
+    """The child's @catch_error handler recovers its own failing step: the child
+    StopEvent crosses back into the parent and the run completes."""
+    handler = ParentOfRecoveringChild(child=RecoveringChild()).run()
     events = await _collect_until_done(handler)
 
-    with pytest.raises(ValueError, match="boom-in-child"):
-        await handler
+    result = await handler
+    assert result == "recovered"
 
-    # The handler did not recover the run: a WorkflowFailedEvent for the child
-    # step was emitted (the catch-error handler was bypassed).
+    # No run-level failure: the child failure was caught within its namespace.
     failed = [ev for ev in events if isinstance(ev, WorkflowFailedEvent)]
-    assert len(failed) == 1
-    assert failed[0].step_name == "child/run_child"
+    assert failed == []

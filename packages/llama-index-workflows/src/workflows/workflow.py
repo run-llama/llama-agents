@@ -119,15 +119,14 @@ def _warn_ignored_child_config(child: Workflow, slot_name: str) -> None:
     """Warn when a child carries run-level config that is dead once nested.
 
     A child runs inside the parent's single control loop, so the parent's
-    run-level config governs execution. ``timeout``, ``verbose`` and
-    ``num_concurrent_runs`` set on the child are silently ignored — flag them so
-    the value isn't mistaken for having an effect. (``runtime`` is also
-    overridden, but it is reassigned here deliberately and a default is always
-    present, so there is nothing reliable to compare against.)
+    run-level config governs execution. ``verbose`` and ``num_concurrent_runs``
+    set on the child are silently ignored — flag them so the value isn't mistaken
+    for having an effect. (``runtime`` is also overridden, but it is reassigned
+    here deliberately and a default is always present, so there is nothing
+    reliable to compare against. ``timeout`` is NOT ignored: it now bounds the
+    child's own execution as a per-namespace deadline in the control loop.)
     """
     ignored: list[str] = []
-    if child._timeout != DEFAULT_TIMEOUT:
-        ignored.append(f"timeout={child._timeout!r}")
     if child._verbose:
         ignored.append("verbose=True")
     if child._num_concurrent_runs is not None:
@@ -140,32 +139,6 @@ def _warn_ignored_child_config(child: Workflow, slot_name: str) -> None:
         f"{', '.join(ignored)}, which has no effect on a child: the parent's "
         "run-level config governs execution. Set these on the root workflow "
         "instead.",
-        stacklevel=3,
-    )
-
-
-def _warn_child_catch_error_handlers(child: Workflow, slot_name: str) -> None:
-    """Warn when a child declares ``@catch_error`` handlers.
-
-    Catch-error recovery is a root-workflow concept: the control loop only looks
-    up a handler when the failing step is a root step, and only the parent's
-    handler table is consulted. A handler defined on a nested child is therefore
-    never invoked -- a child step failure fails the whole run instead. Flag it so
-    the recovery logic isn't mistaken for being active when nested.
-    """
-    handlers = [
-        name
-        for name, config in child._step_configs().items()
-        if config.role == "catch_error"
-    ]
-    if not handlers:
-        return
-    cls_name = type(child).__name__
-    warnings.warn(
-        f"Child workflow '{cls_name}' (slot '{slot_name}') declares @catch_error "
-        f"handler(s) {handlers}, which do not run when the workflow is nested: "
-        "catch-error recovery only applies to the root workflow, so a child step "
-        "failure fails the whole run. Handle errors on the root workflow instead.",
         stacklevel=3,
     )
 
@@ -384,17 +357,40 @@ class Workflow(metaclass=WorkflowMeta):
         """The runtime this workflow is registered with."""
         return self._runtime
 
-    def _switch_runtime(self, new_runtime: Runtime) -> None:
-        if new_runtime is self._runtime:
-            return
-        if self._runtime_locked:
-            raise RuntimeError(
-                "Cannot reassign runtime after workflow has been launched"
-            )
-        old = self._runtime
-        old.untrack_workflow(self)
-        self._runtime = new_runtime
-        new_runtime.track_workflow(self)
+    def _switch_runtime(self, new_runtime: Runtime, *, register: bool = True) -> None:
+        """Reassign this workflow's runtime, propagating into children.
+
+        A child's steps resolve their run adapter through the child instance's
+        own ``_runtime`` (see ``Context._create_internal``), so a parent switching
+        to a server/DBOS runtime must carry its children along — otherwise child
+        steps keep resolving the inner in-memory adapter and child state is never
+        persisted. Children are locked against user override, so the recursion
+        temporarily unlocks each child, switches it, and relocks.
+
+        Children switch with ``register=False``: they untrack from their old
+        runtime (no stale strong reference) but are *not* tracked as named
+        workflows on the new one. The parent already holds a strong reference and
+        drives the run; registering a child would expose it as an independently
+        runnable workflow (e.g. a spurious ``/workflows/{ChildClass}`` route).
+        """
+        if new_runtime is not self._runtime:
+            if self._runtime_locked:
+                raise RuntimeError(
+                    "Cannot reassign runtime after workflow has been launched"
+                )
+            self._runtime.untrack_workflow(self)
+            self._runtime = new_runtime
+            if register:
+                new_runtime.track_workflow(self)
+        # Propagate unconditionally: a descendant attached after this node last
+        # switched may still be on the old runtime even when this node is current.
+        for child in self._child_workflows.values():
+            was_locked = child._runtime_locked
+            child._runtime_locked = False
+            try:
+                child._switch_runtime(new_runtime, register=False)
+            finally:
+                child._runtime_locked = was_locked
 
     @classmethod
     def _get_child_workflow_slots(cls) -> dict[str, type]:
@@ -436,7 +432,6 @@ class Workflow(metaclass=WorkflowMeta):
             )
         _validate_includable_child(child, name)
         _warn_ignored_child_config(child, name)
-        _warn_child_catch_error_handlers(child, name)
         # Adopt the parent runtime, then lock so the child can't override it.
         child._switch_runtime(self._runtime)
         child._runtime_locked = True
