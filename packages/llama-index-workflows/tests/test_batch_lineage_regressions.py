@@ -481,3 +481,139 @@ async def test_send_event_into_all_collect_fires() -> None:
 
     result = await _run(WF(disable_validation=True, timeout=10), timeout=5)
     assert result == [0, 1, 2], result
+
+
+# ---------------------------------------------------------------------------
+# send_event from INSIDE a fan-out batch into a same-level typed collect.
+# A fan-out member's birth is counted at the producing step's resolve, but a
+# send_event member is only counted when its own TickAddEvent is processed —
+# which can land after the eagerly-counted returned members have already driven
+# the batch's live set to zero and closed it. The send_evented member's +1/-1
+# then both no-op against the closed batch, so it is silently dropped (or, on a
+# different interleaving, strands and the run hangs). The plan lists this as
+# "designed out (#14)"; it is not. A correct fix counts a send_event member's
+# birth eagerly at the emitting step's resolve (like a return value), not lazily
+# at routing. xfail(strict) so it flips green the moment that lands.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xfail(
+    reason="send_event member born too late: batch closes on eager returns before "
+    "the lazily-counted send_event member is registered; member dropped/hangs",
+    strict=True,
+)
+async def test_send_event_extra_member_into_batch_join_not_lost() -> None:
+    """A branch that returns one member AND send_events another keeps both."""
+
+    class WF(Workflow):
+        @step
+        async def fan_out(self, ev: StartEvent) -> list[Task]:
+            return [Task(n=i) for i in range(3)]
+
+        @step
+        async def work(self, ctx: Context, ev: Task) -> Done:
+            if ev.n == 2:
+                ctx.send_event(Done(n=99))
+            return Done(n=ev.n)
+
+        @step
+        async def join(self, events: list[Done]) -> StopEvent:
+            return StopEvent(result=sorted(e.n for e in events))
+
+    result = await _run(WF(disable_validation=True, timeout=6), timeout=5)
+    assert result == [0, 1, 2, 99], result
+
+
+@pytest.mark.xfail(
+    reason="pure send_event from inside a batch into a typed collect: the collect "
+    "is neither statically bound nor flushed (it carries a batch stack), so it hangs",
+    strict=True,
+)
+async def test_send_event_only_into_batch_join_fires() -> None:
+    """Members produced solely via send_event from a batch branch still join."""
+
+    class WF(Workflow):
+        @step
+        async def fan_out(self, ev: StartEvent) -> list[Task]:
+            return [Task(n=i) for i in range(3)]
+
+        @step
+        async def work(self, ctx: Context, ev: Task) -> None:
+            ctx.send_event(Done(n=ev.n))
+            return None
+
+        @step
+        async def join(self, events: list[Done]) -> StopEvent:
+            return StopEvent(result=sorted(e.n for e in events))
+
+    result = await _run(WF(disable_validation=True, timeout=6), timeout=5)
+    assert result == [0, 1, 2], result
+
+
+# ---------------------------------------------------------------------------
+# Resume mid-batch with a member retrying. Combines the persist/resume path with
+# an in-flight retry: the snapshot must preserve both the open batch's live count
+# and the retrying member's batch_stack, and the resumed run must not double- or
+# under-count the member when it re-runs.
+# ---------------------------------------------------------------------------
+
+
+_RETRY_RESUME_GATE = asyncio.Event()
+_RETRY_RESUME_SEEN: list[int] = []
+_RETRY_RESUME_FAILED: dict[int, bool] = {}
+
+
+def _gated_retry_fan_out_workflow() -> type[Workflow]:
+    class FanOut(Workflow):
+        @step
+        async def fan_out(self, ev: StartEvent) -> list[Task]:
+            return [Task(n=i) for i in range(5)]
+
+        @step(
+            num_workers=8,
+            retry_policy=retry_policy(
+                wait=wait_fixed(0.01), stop=stop_after_attempt(3)
+            ),
+        )
+        async def work(self, ev: Task) -> Done:
+            _RETRY_RESUME_SEEN.append(ev.n)
+            if ev.n == 3 and not _RETRY_RESUME_FAILED.get(3):
+                _RETRY_RESUME_FAILED[3] = True
+                raise RuntimeError("transient on member 3")
+            await _RETRY_RESUME_GATE.wait()  # hold the batch open at snapshot time
+            return Done(n=ev.n)
+
+        @step
+        async def join(self, events: list[Done]) -> StopEvent:
+            return StopEvent(result=sorted(e.n for e in events))
+
+    return FanOut
+
+
+async def test_resume_mid_batch_with_retry_in_flight_completes() -> None:
+    _RETRY_RESUME_GATE.clear()
+    _RETRY_RESUME_SEEN.clear()
+    _RETRY_RESUME_FAILED.clear()
+
+    wf = _gated_retry_fan_out_workflow()(timeout=30)
+    handler = wf.run()
+    # Wait until member 3 has failed once (its retry is now scheduled/in flight).
+    for _ in range(300):
+        if _RETRY_RESUME_FAILED.get(3):
+            break
+        await asyncio.sleep(0.02)
+    assert _RETRY_RESUME_FAILED.get(3), "member 3 never failed"
+    await asyncio.sleep(0.2)  # let the batch settle with the retry pending
+
+    snapshot = handler.ctx.to_dict()
+    await handler.cancel_run()
+    try:
+        await asyncio.wait_for(handler, timeout=2)
+    except BaseException:
+        pass
+
+    _RETRY_RESUME_GATE.set()
+    wf2 = _gated_retry_fan_out_workflow()(timeout=30)
+    restored = Context.from_dict(wf2, snapshot)
+    result = await asyncio.wait_for(wf2.run(ctx=restored), timeout=10)
+    assert result == [0, 1, 2, 3, 4], result

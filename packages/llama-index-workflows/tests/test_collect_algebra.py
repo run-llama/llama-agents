@@ -323,6 +323,72 @@ async def test_take_covers_quorum() -> None:
     assert result == 3
 
 
+async def test_take_below_threshold_fires_on_close() -> None:
+    """`Take(n)` with fewer than n members fires on batch close, not early."""
+
+    class FanOut(Workflow):
+        @step
+        async def fan_out(self, ev: StartEvent) -> list[Task]:
+            return [Task(n=i) for i in range(3)]
+
+        @step
+        async def work(self, ev: Task) -> Done:
+            return Done(n=ev.n)
+
+        @step
+        async def commit(
+            self, events: Annotated[list[Done], Collect(Take(5))]
+        ) -> StopEvent:
+            return StopEvent(result=sorted(e.n for e in events))
+
+    result = await _run(FanOut(timeout=10))
+    assert result == [0, 1, 2]
+
+
+async def test_take_inside_nested_batch_releases_per_inner_level() -> None:
+    """`Take(n)` on an inner join releases early within each inner batch and the
+    outer join still sees one summary per inner batch."""
+
+    class InnerTask(Event):
+        outer: int
+        inner: int
+
+    class InnerDone(Event):
+        outer: int
+        inner: int
+
+    class InnerSummary(Event):
+        outer: int
+        count: int
+
+    class FanOut(Workflow):
+        @step
+        async def outer(self, ev: StartEvent) -> list[Task]:
+            return [Task(n=o) for o in range(2)]
+
+        @step
+        async def inner(self, ev: Task) -> list[InnerTask]:
+            return [InnerTask(outer=ev.n, inner=i) for i in range(4)]
+
+        @step
+        async def inner_work(self, ev: InnerTask) -> InnerDone:
+            return InnerDone(outer=ev.outer, inner=ev.inner)
+
+        @step
+        async def per_inner(
+            self, events: Annotated[list[InnerDone], Collect(Take(2))]
+        ) -> InnerSummary:
+            return InnerSummary(outer=events[0].outer, count=len(events))
+
+        @step
+        async def per_outer(self, events: list[InnerSummary]) -> StopEvent:
+            return StopEvent(result=sorted((s.outer, s.count) for s in events))
+
+    result = await _run(FanOut(timeout=10))
+    # Each inner batch releases exactly 2 (Take(2)); one summary per outer.
+    assert result == [(0, 2), (1, 2)], result
+
+
 async def test_union_flat_list_collects_all_member_types() -> None:
     """`list[Done | Skipped]` collects both member types into one closed batch."""
 
