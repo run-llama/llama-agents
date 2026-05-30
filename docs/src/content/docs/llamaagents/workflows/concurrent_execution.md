@@ -4,7 +4,7 @@ sidebar:
 title: Concurrent execution of workflows
 ---
 
-Workflows can run steps concurrently. When several steps are independent and spend their time `await`ing something slow, running them in parallel instead of one after another is a big win.
+Workflows can run steps concurrently. When several steps are independent and spend their time `await`ing something slow, running them in parallel speeds things up.
 
 The usual shape is fan-out / fan-in: split the work into pieces, run them at once, then join the results back together. You write it directly in the step signatures. Return a `list` from a step and it fans out, one event per element. Take a `list` parameter and it fans in, firing once on the whole batch. The `@step` decorator reads those types, so the validator and the [visualization](/python/llamaagents/workflows/drawing) wire the producer to its consumers for free. When you need to emit events that don't follow from the signature, drop to `ctx.send_event`, covered as an [escape hatch](#the-dynamic-api) at the end.
 
@@ -60,7 +60,7 @@ class ConcurrentFlow(Workflow):
         return StopEvent(result=sorted(e.n for e in events))
 ```
 
-`fan_out` returns `list[Task]` and `join` takes `list[Done]`, so the framework knows the batch from the types alone. No counter in `ctx.store`, no re-running `join` on every arrival; it fires once when the batch is done.
+`fan_out` returns `list[Task]` and `join` takes `list[Done]`, so the framework knows the batch from the types alone and fires `join` once it's complete.
 
 A worker can drop its own branch by returning `None`. The batch tracks which branches are still alive, so `join` still fires once, just with the survivors:
 
@@ -229,7 +229,9 @@ Each join stays at its own level. `per_inner` runs three times, once per outer `
 
 ## The dynamic API
 
-When the events you emit don't follow from the step's shape, send them yourself with `ctx.send_event` and collect them with `ctx.collect_events`. Reach for this when emission is conditional or open-ended, or when you want to emit one event at a time: a `list` return goes out as a single batch when the step returns, while `ctx.send_event` fires the moment you call it, so downstream steps can start before the producer is done.
+When the events you emit don't follow from the step's shape, send them yourself with `ctx.send_event` and collect them with `ctx.collect_events`. Reach for this when emission is conditional or open-ended, or when you want to emit incrementally rather than in one batch.
+
+The trade-off is atomicity. A `list` return is all or nothing: it goes out as one batch when the step returns, so if the step raises first, nothing is emitted. `ctx.send_event` fires the moment you call it, so downstream steps can start before the producer is done, but anything already sent stays out even if the step later fails.
 
 `ctx.send_event` emits one event at a time:
 
