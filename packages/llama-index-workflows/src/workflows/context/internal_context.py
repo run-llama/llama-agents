@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Coroutine, Generic, TypeVar, cast
 from workflows.context.context_types import MODEL_T
 from workflows.context.state_store import StateStore
 from workflows.errors import WorkflowRuntimeError
-from workflows.events import set_event_origin_namespace
+from workflows.events import _set_event_origin_namespace
 from workflows.retry_policy import RetryInfo
 from workflows.runtime.types.results import (
     AddCollectedEvent,
@@ -231,7 +231,7 @@ class InternalContext(Generic[MODEL_T]):
             except LookupError:
                 namespace = ()
             if namespace:
-                set_event_origin_namespace(ev, namespace)
+                _set_event_origin_namespace(ev, namespace)
             self._execute_task(self._internal_adapter.write_to_event_stream(ev))
 
     def retry_info(self) -> RetryInfo:

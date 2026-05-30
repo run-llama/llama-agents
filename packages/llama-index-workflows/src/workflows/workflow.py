@@ -144,7 +144,7 @@ def _warn_ignored_child_config(child: Workflow, slot_name: str) -> None:
     )
 
 
-def config_field(*, alias: str, default: Any = None) -> Any:
+def _config_field(*, alias: str, default: Any = None) -> Any:
     """dataclass_transform field specifier for Workflow config params. These are
     *phantom* fields: declared only so dataclass_transform gives subclasses a
     typed ``__init__`` (config kwargs + declared child fields). Real storage is
@@ -155,7 +155,7 @@ def config_field(*, alias: str, default: Any = None) -> Any:
     return default
 
 
-@dataclass_transform(kw_only_default=True, field_specifiers=(config_field,))
+@dataclass_transform(kw_only_default=True, field_specifiers=(_config_field,))
 class WorkflowMeta(type):
     def __init__(cls, name: str, bases: tuple[type, ...], dct: dict[str, Any]) -> None:
         super().__init__(name, bases, dct)
@@ -232,21 +232,21 @@ class Workflow(metaclass=WorkflowMeta):
 
     # Config constructor params as phantom dataclass_transform fields, so
     # subclasses get a typed __init__ that merges these kwargs with declared
-    # child fields. See config_field: real storage is owned by __init__ below.
-    _timeout_arg: float | None = config_field(alias="timeout", default=DEFAULT_TIMEOUT)
-    _disable_validation_arg: bool = config_field(
+    # child fields. See _config_field: real storage is owned by __init__ below.
+    _timeout_arg: float | None = _config_field(alias="timeout", default=DEFAULT_TIMEOUT)
+    _disable_validation_arg: bool = _config_field(
         alias="disable_validation", default=False
     )
-    _verbose_arg: bool = config_field(alias="verbose", default=False)
-    _resource_manager_arg: ResourceManager | None = config_field(
+    _verbose_arg: bool = _config_field(alias="verbose", default=False)
+    _resource_manager_arg: ResourceManager | None = _config_field(
         alias="resource_manager", default=None
     )
-    _num_concurrent_runs_arg: int | None = config_field(
+    _num_concurrent_runs_arg: int | None = _config_field(
         alias="num_concurrent_runs", default=None
     )
-    _runtime_arg: Runtime | None = config_field(alias="runtime", default=None)
-    _workflow_name_arg: str | None = config_field(alias="workflow_name", default=None)
-    _skip_graph_checks_arg: set[WorkflowGraphCheck] | None = config_field(
+    _runtime_arg: Runtime | None = _config_field(alias="runtime", default=None)
+    _workflow_name_arg: str | None = _config_field(alias="workflow_name", default=None)
+    _skip_graph_checks_arg: set[WorkflowGraphCheck] | None = _config_field(
         alias="skip_graph_checks", default=None
     )
 

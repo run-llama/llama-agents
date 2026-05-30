@@ -170,9 +170,10 @@ def get_event_origin_namespace(event: Event) -> tuple[str, ...]:
     return event._origin_namespace
 
 
-def set_event_origin_namespace(event: Event, namespace: tuple[str, ...]) -> None:
+def _set_event_origin_namespace(event: Event, namespace: tuple[str, ...]) -> None:
     """Tag a published event with the namespace of the child execution it came
-    from. Used by the runtime at the stream-publish chokepoints."""
+    from. Package-internal: the runtime stamps this at the stream-publish
+    chokepoints. Read it back with the public ``get_event_origin_namespace``."""
     event._origin_namespace = namespace
 
 

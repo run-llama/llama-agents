@@ -33,7 +33,7 @@ from workflows.events import (
     WorkflowFailedEvent,
     WorkflowIdleEvent,
     WorkflowTimedOutEvent,
-    set_event_origin_namespace,
+    _set_event_origin_namespace,
 )
 from workflows.runtime.types.commands import (
     CommandCompleteRun,
@@ -299,7 +299,7 @@ class _ControlLoopRunner:
             return command.result
         elif isinstance(command, CommandPublishEvent):
             if command.origin_namespace:
-                set_event_origin_namespace(command.event, command.origin_namespace)
+                _set_event_origin_namespace(command.event, command.origin_namespace)
             await self.adapter.write_to_event_stream(command.event)
             return None
         elif isinstance(command, CommandFailWorkflow):
@@ -1222,7 +1222,11 @@ def _process_add_event_tick(
                         if tick.step_id is not None
                         else None,
                         idle=_check_idle_state(state),
-                    )
+                    ),
+                    # An unhandled event from inside a child is a child-stream
+                    # diagnostic, so tag it by origin and keep it out of the
+                    # default (root) stream like every other child event.
+                    origin_namespace=tick.origin_namespace,
                 )
             )
     return state, commands
