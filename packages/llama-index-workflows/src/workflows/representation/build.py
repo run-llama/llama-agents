@@ -170,8 +170,8 @@ def get_workflow_representation(workflow: Workflow | type[Workflow]) -> Workflow
     steps: dict[str, StepFunction] = workflow_cls._get_steps_from_class()
 
     # Map each produced event type (by class name) to the steps that declare it
-    # in their return signature. Collection returns (list[E], AsyncIterator[E])
-    # are already flattened into return_types upstream.
+    # in their return signature. Collection returns (list[E]) are already
+    # flattened into return_types upstream.
     produced_by_map: dict[str, list[str]] = {}
     for step_name, step_func in steps.items():
         for return_type in step_func._step_config.return_types:

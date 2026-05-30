@@ -57,10 +57,10 @@ class StepConfig:
     # step fires once when one event of each type has arrived. None for the
     # ordinary single-event-trigger model.
     collect_params: list[tuple[str, Any]] | None = None
-    # Fan-out producer (L2): True when the return annotation's origin is one of
-    # list / AsyncIterator / AsyncIterable / AsyncGenerator. Such a step mints a
-    # fresh batch id per execution and stamps every emitted event with it, then
-    # closes the batch. Computed at decoration time from the return annotation.
+    # Fan-out producer (L2): True when the return annotation is ``list[E]``. Such
+    # a step mints a fresh batch id per execution and stamps every emitted event
+    # with it, then closes the batch. Computed at decoration time from the return
+    # annotation.
     is_fan_out: bool = False
     # Batch-lineage fan-in (L2/L3): set to ``(parameter_name, element_event_types)``
     # when the step declares a single ``list[E]`` parameter. The element types are
@@ -73,9 +73,6 @@ class StepConfig:
     # ``list[E]`` parameter resolves to ``Collect()`` (``All``). None when the
     # step is not a batch collect.
     batch_collect: Collect | None = None
-    # How a batch-collect step reacts to TickBatchAborted: "fail" (default,
-    # fail the workflow) or "fire" (fire with the partial buffer).
-    on_partial: Literal["fail", "fire"] = "fail"
     role: StepRole = "step"
     # Only meaningful when role == "catch_error".
     # None means wildcard — covers any step not claimed by a scoped handler.

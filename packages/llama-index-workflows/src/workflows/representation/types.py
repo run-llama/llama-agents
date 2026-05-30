@@ -50,7 +50,7 @@ class WorkflowEventNode(WorkflowNodeBase):
     produced_by: list[str] = Field(
         default_factory=list,
         description="Names of steps whose declared return signature emits this "
-        "event type (including via list[E] / AsyncIterator[E] returns).",
+        "event type (including via list[E] returns).",
     )
 
     def is_subclass_of(self, *type_names: str) -> bool:
