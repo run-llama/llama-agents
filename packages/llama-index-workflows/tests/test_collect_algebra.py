@@ -4,9 +4,10 @@
 
 Covers the public ``Collect`` / ``Cardinality`` API, signature inference for
 batch fan-in parameters (bare ``list[E]``, the ``Annotated[..., Collect()]``
-synonym, union flat lists, and cardinality markers), the validation errors that
-keep mode determination legible, ``Take(n)`` / ``AtLeast(n)`` runtime release,
-and ``ctx.replayed_events()``.
+synonym, union flat lists, and the ``Take(n)`` marker), the validation errors
+that keep mode determination legible, ``Take(n)`` runtime release, and
+``ctx.replayed_events()``. ``AtLeast`` is v2 (it's a silent alias of ``Take``
+without v2 re-fire / cancellation), so it is intentionally not exported.
 
 The cross-level (``at=``) and provenance (``from_=``) knobs and multi-slot joins
 are declared-but-deferred; their tests assert the clear validation error and
@@ -15,10 +16,10 @@ xfail the end-to-end examples.
 
 from __future__ import annotations
 
-from typing import Annotated, AsyncIterator, Callable
+from typing import Annotated, Any, AsyncIterator, Callable
 
 import pytest
-from workflows import All, AtLeast, Cardinality, Collect, Context, Take, Workflow, step
+from workflows import All, Cardinality, Collect, Context, Take, Workflow, step
 from workflows.decorators import StepConfig, StepFunction
 from workflows.decorators import step as free_step
 from workflows.errors import WorkflowValidationError
@@ -61,16 +62,20 @@ def test_collect_defaults_to_all_cardinality() -> None:
 def test_cardinality_hierarchy() -> None:
     assert isinstance(All(), Cardinality)
     assert isinstance(Take(1), Cardinality)
-    assert isinstance(AtLeast(2), Cardinality)
     assert Take(3).n == 3
-    assert AtLeast(4).n == 4
 
 
-@pytest.mark.parametrize("card", [Take, AtLeast])
+def test_atleast_is_not_exported() -> None:
+    """AtLeast is deferred to v2; it must not be importable from the package."""
+    import workflows
+
+    assert not hasattr(workflows, "AtLeast")
+
+
 @pytest.mark.parametrize("bad", [0, -1, 1.5, "2"])
-def test_take_and_atleast_reject_bad_n(card: type, bad: object) -> None:
+def test_take_rejects_bad_n(bad: Any) -> None:
     with pytest.raises(ValueError):
-        card(bad)
+        Take(bad)
 
 
 # --------------------------------------------------------------------------- #
@@ -88,7 +93,7 @@ def _config_for(fn_builder: Callable[[type[Workflow]], StepFunction]) -> StepCon
 
 
 def test_bare_list_infers_collect_all() -> None:
-    def build(w):
+    def build(w: type[Workflow]) -> StepFunction:
         @free_step(workflow=w)
         async def join(events: list[Done]) -> StopEvent:  # type: ignore[unused-ignore]
             return StopEvent(result="x")
@@ -102,7 +107,7 @@ def test_bare_list_infers_collect_all() -> None:
 
 
 def test_annotated_collect_is_synonym_for_bare_list() -> None:
-    def build(w):
+    def build(w: type[Workflow]) -> StepFunction:
         @free_step(workflow=w)
         async def join(events: Annotated[list[Done], Collect()]) -> StopEvent:  # type: ignore[unused-ignore]
             return StopEvent(result="x")
@@ -116,7 +121,7 @@ def test_annotated_collect_is_synonym_for_bare_list() -> None:
 
 
 def test_annotated_take_cardinality_inferred() -> None:
-    def build(w):
+    def build(w: type[Workflow]) -> StepFunction:
         @free_step(workflow=w)
         async def join(events: Annotated[list[Done], Collect(Take(2))]) -> StopEvent:  # type: ignore[unused-ignore]
             return StopEvent(result="x")
@@ -128,21 +133,8 @@ def test_annotated_take_cardinality_inferred() -> None:
     assert cfg.batch_collect.cardinality == Take(2)
 
 
-def test_annotated_atleast_cardinality_inferred() -> None:
-    def build(w):
-        @free_step(workflow=w)
-        async def join(acks: Annotated[list[Done], Collect(AtLeast(3))]) -> StopEvent:  # type: ignore[unused-ignore]
-            return StopEvent(result="x")
-
-        return join
-
-    cfg = _config_for(build)
-    assert cfg.batch_collect is not None
-    assert cfg.batch_collect.cardinality == AtLeast(3)
-
-
 def test_union_flat_list_infers_all_member_types() -> None:
-    def build(w):
+    def build(w: type[Workflow]) -> StepFunction:
         @free_step(workflow=w)
         async def report(events: list[Done | Skipped]) -> StopEvent:  # type: ignore[unused-ignore]
             return StopEvent(result="x")
@@ -157,7 +149,7 @@ def test_union_flat_list_infers_all_member_types() -> None:
 
 
 def test_single_event_param_is_not_batch_collect() -> None:
-    def build(w):
+    def build(w: type[Workflow]) -> StepFunction:
         @free_step(workflow=w)
         async def work(ev: Task) -> Done:  # type: ignore[unused-ignore]
             return Done(n=ev.n)
@@ -192,7 +184,9 @@ def test_collect_from_raises_clear_error() -> None:
     with pytest.raises(WorkflowValidationError, match="from_=.*not implemented"):
 
         @free_step(workflow=_W)
-        async def join(events: Annotated[list[Done], Collect(from_="src")]) -> StopEvent:  # type: ignore[unused-ignore]
+        async def join(
+            events: Annotated[list[Done], Collect(from_="src")],
+        ) -> StopEvent:  # type: ignore[unused-ignore]
             return StopEvent(result="x")
 
 
@@ -307,8 +301,8 @@ async def test_take_two_fires_with_two() -> None:
     assert result == 2
 
 
-async def test_atleast_fires_at_quorum() -> None:
-    """`AtLeast(3)` releases as soon as three members have arrived."""
+async def test_take_covers_quorum() -> None:
+    """Quorum (commit once N have arrived) is `Take(N)` in v1: release at N."""
 
     class FanOut(Workflow):
         @step
@@ -321,7 +315,7 @@ async def test_atleast_fires_at_quorum() -> None:
 
         @step
         async def commit(
-            self, acks: Annotated[list[Done], Collect(AtLeast(3))]
+            self, acks: Annotated[list[Done], Collect(Take(3))]
         ) -> StopEvent:
             return StopEvent(result=len(acks))
 
@@ -364,9 +358,7 @@ async def test_annotated_all_runs_like_bare_list() -> None:
             return Done(n=ev.n)
 
         @step
-        async def join(
-            self, events: Annotated[list[Done], Collect()]
-        ) -> StopEvent:
+        async def join(self, events: Annotated[list[Done], Collect()]) -> StopEvent:
             return StopEvent(result=sorted(e.n for e in events))
 
     result = await _run(FanOut(timeout=10))

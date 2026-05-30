@@ -27,7 +27,7 @@ from typing import Union
 
 from pydantic import BaseModel
 
-from .collect import All, AtLeast, Collect, Take
+from .collect import All, Collect, Take
 from .errors import WorkflowValidationError
 from .events import Event, EventType
 from .resource import ResourceDefinition, ResourceDescriptor
@@ -225,8 +225,8 @@ def _validate_collect_marker(marker: Collect, name: str) -> None:
 
     ``at`` (cross-level scope promotion), ``from_`` (provenance restriction), and
     ``where`` (predicate narrowing) are part of the declared API but not
-    implemented in this phase. Only the v1 cardinalities ``All`` / ``Take`` /
-    ``AtLeast`` are supported.
+    implemented in this phase. Only the v1 cardinalities ``All`` / ``Take`` are
+    supported (``AtLeast`` / ``Buffer`` / ``Window`` are v2).
     """
     if marker.where is not None:
         raise WorkflowValidationError(
@@ -243,10 +243,10 @@ def _validate_collect_marker(marker: Collect, name: str) -> None:
             f"Collect(from_=...) on {name!r}: provenance restriction is not "
             "implemented yet."
         )
-    if not isinstance(marker.cardinality, (All, Take, AtLeast)):
+    if not isinstance(marker.cardinality, (All, Take)):
         raise WorkflowValidationError(
-            f"Collect cardinality on {name!r} must be All(), Take(n), or "
-            "AtLeast(n). Buffer/Window are deferred to v2."
+            f"Collect cardinality on {name!r} must be All() or Take(n). "
+            "AtLeast/Buffer/Window are deferred to v2."
         )
 
 

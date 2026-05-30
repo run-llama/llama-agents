@@ -69,7 +69,7 @@ class StepConfig:
     # members by innermost batch id and releases per ``batch_collect``.
     batch_collect_param: tuple[str, tuple[Any, ...]] | None = None
     # The resolved ``Collect`` marker for the batch collect parameter (L3),
-    # carrying the release cardinality (``All`` / ``Take`` / ``AtLeast``). A bare
+    # carrying the release cardinality (``All`` / ``Take``). A bare
     # ``list[E]`` parameter resolves to ``Collect()`` (``All``). None when the
     # step is not a batch collect.
     batch_collect: Collect | None = None

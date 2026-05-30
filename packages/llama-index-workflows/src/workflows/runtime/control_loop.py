@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from workflows.collect import AtLeast, Collect, Take
+from workflows.collect import Collect, Take
 from workflows.errors import (
     WorkflowCancelledByUser,
     WorkflowRuntimeError,
@@ -804,13 +804,13 @@ def _close_batch(
 def _cardinality_threshold(collect: Collect | None) -> int | None:
     """Member count that triggers an early release, or None for fire-on-close.
 
-    ``Take(n)`` / ``AtLeast(n)`` release as soon as ``n`` members have arrived;
-    ``All`` (and an absent marker) fire only when the batch closes.
+    ``Take(n)`` releases as soon as ``n`` members have arrived; ``All`` (and an
+    absent marker) fires only when the batch closes.
     """
     if collect is None:
         return None
     card = collect.cardinality
-    if isinstance(card, (Take, AtLeast)):
+    if isinstance(card, Take):
         return card.n
     return None
 
@@ -1317,7 +1317,7 @@ def _process_add_event_tick(
                 if not already_fired:
                     buf = worker_state.batch_buffers.setdefault(batch_id, [])
                     buf.append(tick.event)
-                    # Cardinality release (L3): Take(n)/AtLeast(n) fire as soon
+                    # Cardinality release (L3): Take(n) fires as soon
                     # as ``n`` members arrive, with the first ``n``, instead of
                     # waiting for the batch to close. All() has no threshold and
                     # fires only on TickBatchClosed (the L2 path below). The
@@ -1574,7 +1574,7 @@ def _process_batch_closed_tick(
         if worker_state.config.batch_collect_param is None:
             continue
         if tick.batch_id in worker_state.batch_fired:
-            # Already released early via a Take/AtLeast cardinality. Don't
+            # Already released early via a Take cardinality. Don't
             # re-fire; just clear the per-batch tracking now that it's closed.
             worker_state.batch_fired.discard(tick.batch_id)
             worker_state.batch_buffers.pop(tick.batch_id, None)
