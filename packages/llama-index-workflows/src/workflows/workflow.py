@@ -156,6 +156,27 @@ def _config_field(*, alias: str, default: Any = None) -> Any:
 
 @dataclass_transform(kw_only_default=True, field_specifiers=(_config_field,))
 class WorkflowMeta(type):
+    # Defined only at runtime, hidden from type checkers. As a metaclass
+    # __call__ it is the single entry point for every instantiation and sits
+    # above the whole __init__/super() chain: type.__call__ drives __new__ and
+    # the complete chain as one unit, so when it returns — every derived
+    # __init__ done and all children assigned — _finalize_construction runs at
+    # the true outermost point of construction. Registration then sees the full
+    # child tree regardless of init style, subclassing depth, or launch timing.
+    #
+    # It is hidden behind ``if not TYPE_CHECKING`` because a typed metaclass
+    # __call__ can't satisfy both type checkers at once: basedpyright needs a
+    # generic ``cls: type[T] -> T`` self-type to preserve the constructed type,
+    # but that exact annotation makes ty reject the ``super().__call__`` as not
+    # bound to the metaclass. Hiding it lets both fall back to the correct
+    # dataclass_transform constructor typing (``Parent(...)`` -> ``Parent``).
+    if not TYPE_CHECKING:
+
+        def __call__(cls, *args: Any, **kwargs: Any) -> Any:
+            obj = super().__call__(*args, **kwargs)
+            obj._finalize_construction()
+            return obj
+
     def __init__(cls, name: str, bases: tuple[type, ...], dct: dict[str, Any]) -> None:
         super().__init__(name, bases, dct)
         cls._step_functions: dict[str, StepFunction] = {}
@@ -337,6 +358,22 @@ class Workflow(metaclass=WorkflowMeta):
         )
         if self._verbose:
             self._runtime = VerboseDecorator(self._runtime)
+        # Tracking is deferred to _finalize_construction (driven by
+        # WorkflowMeta.__call__), so it fires after the outermost __init__ has
+        # attached children — registration then sees the full child tree.
+
+    def _finalize_construction(self) -> None:
+        """Finalize construction after the outermost ``__init__`` returns.
+
+        Driven by :meth:`WorkflowMeta.__call__` once the whole
+        ``__init__``/``super()`` chain has run, so the full child tree exists.
+        Attaches any children assigned as plain attributes (the user-defined
+        ``__init__`` path, where children are not wired through the synthesized
+        constructor), then tracks the workflow with its runtime exactly once.
+        Tracking here — rather than at the tail of ``Workflow.__init__`` — means
+        registration (pre- or post-launch) sees every attached child.
+        """
+        self._ensure_children_attached()
         # Register with runtime for tracking (no-op for BasicRuntime)
         self._runtime.track_workflow(self)
 

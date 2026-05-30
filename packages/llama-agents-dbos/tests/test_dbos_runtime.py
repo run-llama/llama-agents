@@ -642,3 +642,123 @@ async def test_child_state_durable_in_nested_blob_postgres(
         with suppress(Exception):
             await runtime.destroy()
         DBOS.destroy()
+
+
+# ---------------------------------------------------------------------------
+# Post-launch construction of a child-ful parent (init-ordering repro)
+#
+# A parent-with-children constructed AFTER launch() used to freeze a
+# parent-only step set -- registration fired from the innermost
+# Workflow.__init__, before the subclass attached its children -- and then
+# KeyError'd on the child's first step at run. WorkflowMeta.__call__ now defers
+# tracking to _finalize_construction (after the outermost __init__ returns), so
+# the full child tree is registered regardless of launch timing or init style.
+# ---------------------------------------------------------------------------
+
+
+class _TopUserInit(Workflow):
+    """Hand-written __init__ variant: children assigned as plain attributes."""
+
+    mid: _StateMid
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.mid = _StateMid(grand=_StateGrandchild())
+
+    @step
+    async def begin(self, ctx: Context, ev: StartEvent) -> _MidStart:
+        await ctx.store.set("top_marker", "from-top")
+        return _MidStart()
+
+    @step
+    async def finish(self, ev: _MidStop) -> StopEvent:
+        return StopEvent(result="ok")
+
+
+def _make_sqlite_dbos(db_file: Any, name: str) -> DBOSRuntime:
+    system_db_url = f"sqlite+pysqlite:///{db_file}?check_same_thread=false"
+    DBOS.destroy()
+    DBOS(
+        config={
+            "name": name,
+            "system_database_url": system_db_url,
+            "run_admin_server": False,
+        }  # type: ignore[arg-type]
+    )
+    return DBOSRuntime(polling_interval_sec=0.01)
+
+
+@pytest.mark.asyncio
+async def test_post_launch_synthesized_child_runs_sqlite(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """Synthesized-init parent constructed AFTER launch runs its child tree
+    without KeyError (the prior init-ordering bug)."""
+    db_file = tmp_path_factory.mktemp("dbos_post_launch") / "syn.sqlite3"
+    runtime = _make_sqlite_dbos(db_file, "wf-dbos-postlaunch-syn")
+    try:
+        await runtime.launch()
+        wf = _TopWithGrandchild(
+            mid=_StateMid(grand=_StateGrandchild()), runtime=runtime
+        )
+        result = await wf.run()
+        assert result == "ok"
+    finally:
+        with suppress(Exception):
+            await runtime.destroy()
+        DBOS.destroy()
+
+
+@pytest.mark.asyncio
+async def test_post_launch_user_init_child_runs_sqlite(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """User-defined-init parent constructed AFTER launch runs its child tree
+    without KeyError."""
+    db_file = tmp_path_factory.mktemp("dbos_post_launch") / "user.sqlite3"
+    runtime = _make_sqlite_dbos(db_file, "wf-dbos-postlaunch-user")
+    try:
+        await runtime.launch()
+        wf = _TopUserInit(runtime=runtime)
+        result = await wf.run()
+        assert result == "ok"
+    finally:
+        with suppress(Exception):
+            await runtime.destroy()
+        DBOS.destroy()
+
+
+@pytest.mark.docker
+@pytest.mark.asyncio(loop_scope="function")
+async def test_post_launch_synthesized_child_runs_postgres(
+    postgres_dsn: str,
+) -> None:
+    """Postgres mirror of the post-launch construction repro.
+
+    Runs on a function-scoped event loop: this module's other postgres docker
+    test tears its DBOS instance down on the shared module loop, shutting down
+    that loop's default executor (asyncpg resolves the host through it), so a
+    second postgres test on the same loop would fail to connect. A fresh loop
+    sidesteps that teardown coupling.
+    """
+    system_db_url = postgres_dsn.replace("postgresql://", "postgresql+psycopg://")
+    DBOS.destroy()
+    DBOS(
+        config={
+            "name": "wf-dbos-postlaunch-pg",
+            "system_database_url": system_db_url,
+            "run_admin_server": False,
+        }  # type: ignore[arg-type]
+    )
+    runtime = DBOSRuntime(polling_interval_sec=0.01)
+    try:
+        await runtime.launch()
+        wf = _TopWithGrandchild(
+            mid=_StateMid(grand=_StateGrandchild()), runtime=runtime
+        )
+        result = await wf.run()
+        assert result == "ok"
+    finally:
+        with suppress(Exception):
+            await runtime.destroy()
+        DBOS.destroy()

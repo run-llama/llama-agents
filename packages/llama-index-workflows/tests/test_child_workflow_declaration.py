@@ -19,6 +19,7 @@ from workflows.decorators import step
 from workflows.errors import WorkflowValidationError
 from workflows.events import StartEvent, StopEvent
 from workflows.plugins import BasicRuntime
+from workflows.runtime.types.step_id import StepId
 
 
 class ChildStart(StartEvent):
@@ -149,11 +150,12 @@ class ParentWithUserInit(Workflow):
         return StopEvent()
 
 
-def test_user_defined_init_attaches_children_on_validate() -> None:
+def test_user_defined_init_attaches_children_at_construction() -> None:
     parent = ParentWithUserInit()
-    # User-init path: not attached at construction, wired in at validate/run.
-    assert parent._child_workflows == {}
-    parent.validate()
+    # User-init path: the child is assigned as a plain attribute inside the
+    # user __init__, then WorkflowMeta.__call__ runs _finalize_construction
+    # (-> _ensure_children_attached) once the outermost __init__ returns, so
+    # the child is wired in by the time construction completes.
     assert isinstance(parent.child, Child)
     assert parent._child_workflows == {"child": parent.child}
     assert parent.child.runtime is parent.runtime
@@ -193,3 +195,120 @@ def test_honored_child_config_does_not_warn() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         Parent(child=Child())
+
+
+# ---------------------------------------------------------------------------
+# Tracking ordering: registration must see the full child tree.
+#
+# WorkflowMeta.__call__ runs _finalize_construction (-> _ensure_children_attached
+# then track_workflow) only after the outermost __init__ returns, so by the time
+# the runtime tracks a workflow its children are already attached. These tests
+# capture the namespaced step set at track time to prove the child steps are
+# present -- the precise condition a DBOS launch later freezes into the step set.
+# ---------------------------------------------------------------------------
+
+
+class _RecordingRuntime(BasicRuntime):
+    """Records the namespaced step set observed at each ``track_workflow``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.track_calls: list[tuple[int, frozenset[StepId]]] = []
+
+    def track_workflow(self, workflow: Workflow) -> None:
+        self.track_calls.append(
+            (id(workflow), frozenset(workflow._get_namespaced_steps().keys()))
+        )
+        super().track_workflow(workflow)
+
+
+def _steps_at_track(rt: _RecordingRuntime, wf: Workflow) -> list[frozenset[StepId]]:
+    """The step sets captured each time ``wf`` was tracked (one per call)."""
+    return [steps for wf_id, steps in rt.track_calls if wf_id == id(wf)]
+
+
+def _has_child_steps(steps: frozenset[StepId]) -> bool:
+    return any(sid.namespace == ("child",) for sid in steps)
+
+
+def test_synthesized_init_tracks_after_children_attached() -> None:
+    rt = _RecordingRuntime()
+    with rt.registering():
+        parent = Parent(child=Child())
+    captures = _steps_at_track(rt, parent)
+    assert len(captures) == 1
+    assert _has_child_steps(captures[0])
+
+
+def test_user_init_tracks_after_children_attached() -> None:
+    rt = _RecordingRuntime()
+    with rt.registering():
+        parent = ParentWithUserInit()
+    captures = _steps_at_track(rt, parent)
+    assert len(captures) == 1
+    assert _has_child_steps(captures[0])
+
+
+def test_subclass_of_user_init_tracks_after_children_attached() -> None:
+    class SubOfUserInit(ParentWithUserInit):
+        """No own __init__: still instantiated through WorkflowMeta.__call__,
+        finalize resolves child slots from ``type(self)``."""
+
+    rt = _RecordingRuntime()
+    with rt.registering():
+        # dataclass_transform synthesizes a `child`-requiring __init__ for the
+        # subclass (it declares no __init__ of its own), but at runtime the
+        # inherited user __init__ constructs the child, so no arg is needed.
+        parent = SubOfUserInit()  # type: ignore  # synthesized init wants child; inherited user init supplies it
+    captures = _steps_at_track(rt, parent)
+    assert len(captures) == 1
+    assert _has_child_steps(captures[0])
+    assert isinstance(parent.child, Child)
+
+
+def test_childless_user_init_tracked_exactly_once() -> None:
+    class ChildlessUserInit(Workflow):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            # Work after super().__init__() must not disturb tracking.
+            self.marker = "after-super"
+
+        @step
+        async def start(self, ev: StartEvent) -> StopEvent:
+            return StopEvent(result="ok")
+
+    rt = _RecordingRuntime()
+    with rt.registering():
+        wf = ChildlessUserInit()
+    assert wf.marker == "after-super"
+    assert len(_steps_at_track(rt, wf)) == 1
+    assert wf in rt._pending
+
+
+def test_track_fires_once_per_workflow_in_tree() -> None:
+    rt = _RecordingRuntime()
+    with rt.registering():
+        child = Child()
+        parent = Parent(child=child)
+    # Parent and child each tracked exactly once; no double-track from
+    # _attach_child re-homing a same-runtime child.
+    assert len(_steps_at_track(rt, parent)) == 1
+    assert len(_steps_at_track(rt, child)) == 1
+
+
+def test_init_raises_skips_finalize() -> None:
+    class Boom(Workflow):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            raise ValueError("boom")
+
+        @step
+        async def start(self, ev: StartEvent) -> StopEvent:
+            return StopEvent()
+
+    rt = _RecordingRuntime()
+    with rt.registering():
+        with pytest.raises(ValueError, match="boom"):
+            Boom()
+    # __call__ propagates the exception; _finalize_construction never runs.
+    assert rt.track_calls == []
