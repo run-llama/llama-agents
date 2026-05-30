@@ -14,21 +14,24 @@ A bare ``list[E]`` parameter is exactly equivalent to ``Collect(All())`` — fir
 once when the batch closes with every collected event. ``Annotated[list[E],
 Collect()]`` is an explicit, grep-able synonym for the same default.
 
-Only the v1 cardinalities (``All`` / ``Take`` / ``AtLeast``) are implemented.
-``Buffer`` / ``Window`` (streaming aggregation) are deferred to v2. The ``at`` /
-``from_`` / ``where`` knobs are accepted on the marker but not yet wired into
-the runtime — declaring them raises a clear validation error.
+Only the v1 cardinalities (``All`` / ``Take``) are implemented. ``AtLeast`` is
+deferred to v2: its only difference from ``Take`` ("continue accepting" the
+siblings that arrive after release) is unobservable without v2 re-fire
+(``Buffer`` / ``Window``) or a cancellation primitive, so in v1 it would be a
+silent alias of ``Take``. ``Buffer`` / ``Window`` (streaming aggregation) are
+also v2. The ``at`` / ``from_`` / ``where`` knobs are accepted on the marker but
+not yet wired into the runtime — declaring them raises a clear validation error.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Union
+from typing import Any, Callable
 
 # A reference to another step, by name or by the decorated step function itself.
 # Used by ``Collect(at=..., from_=...)``. Resolution to a concrete step is a
 # later phase; the marker only stores the raw reference for now.
-StepRef = Union[str, Callable[..., Any]]
+StepRef = str | Callable[..., Any]
 
 
 @dataclass(frozen=True)
@@ -36,8 +39,8 @@ class Cardinality:
     """Base class for a batch-collect release strategy.
 
     Subclasses describe *when* a collect-mode step fires and *which* members it
-    receives. Instantiate one of ``All`` / ``Take`` / ``AtLeast`` — the base
-    class itself is not a usable strategy.
+    receives. Instantiate one of ``All`` / ``Take`` — the base class itself is
+    not a usable strategy.
     """
 
 
@@ -60,23 +63,6 @@ class Take(Cardinality):
     def __post_init__(self) -> None:
         if not isinstance(self.n, int) or self.n < 1:
             raise ValueError("Take(n) requires an integer n >= 1")
-
-
-@dataclass(frozen=True)
-class AtLeast(Cardinality):
-    """Fire once on the ``n``-th arrival; keep accepting later siblings.
-
-    Quorum semantics: release as soon as ``n`` members have arrived. Unlike
-    ``Take``, later siblings are not dropped — but in v1 they do not trigger a
-    second fire (re-firing / windowing is v2). If the batch closes before ``n``
-    members arrive, the step fires once with whatever did arrive.
-    """
-
-    n: int
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.n, int) or self.n < 1:
-            raise ValueError("AtLeast(n) requires an integer n >= 1")
 
 
 @dataclass(frozen=True)

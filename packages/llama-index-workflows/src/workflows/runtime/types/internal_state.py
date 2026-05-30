@@ -387,7 +387,7 @@ class InternalStepWorkerState:
     # for steps with a ``batch_collect_param``.
     batch_buffers: dict[str, list[Event]] = field(default_factory=dict)
     # Cardinality release (L3): batch ids this collect step has already released
-    # early via a Take/AtLeast threshold. Late siblings of a fired batch are
+    # early via a Take(n) threshold. Late siblings of a fired batch are
     # ignored, and the eventual TickBatchClosed does not re-fire the step.
     batch_fired: set[str] = field(default_factory=set)
 
