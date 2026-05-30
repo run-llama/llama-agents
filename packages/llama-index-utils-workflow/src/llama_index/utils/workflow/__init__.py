@@ -901,7 +901,11 @@ def draw_most_recent_execution_mermaid(
     mermaid_lines = ["flowchart TD"]
 
     cleaned_ids = {
-        node_id: node_id.replace(":", "_").replace("#", "_") for node_id in nodes.keys()
+        # Child-workflow steps carry a namespaced StepId whose string form is
+        # ``child/step`` -- the ``/`` is not a valid Mermaid node-id character,
+        # so it must be sanitized alongside ``:`` and ``#``.
+        node_id: node_id.replace(":", "_").replace("#", "_").replace("/", "_")
+        for node_id in nodes.keys()
     }
 
     for node_id, (label, node_type, ev_type) in nodes.items():

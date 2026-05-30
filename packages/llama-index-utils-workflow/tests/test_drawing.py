@@ -310,6 +310,64 @@ async def test_draw_most_recent_execution_mermaid(workflow: Workflow) -> None:
         assert len(edge_lines) > 0
 
 
+# --- Child-workflow (namespaced StepId) execution rendering ---
+
+
+class _VizChildStart(StartEvent):
+    pass
+
+
+class _VizChildStop(StopEvent):
+    pass
+
+
+class _VizChild(Workflow):
+    @step
+    async def run_child(self, ev: _VizChildStart) -> _VizChildStop:
+        return _VizChildStop()
+
+
+class _VizParent(Workflow):
+    child: _VizChild
+
+    @step
+    async def begin(self, ev: StartEvent) -> _VizChildStart:
+        return _VizChildStart()
+
+    @step
+    async def finish(self, ev: _VizChildStop) -> StopEvent:
+        return StopEvent(result="parent-done")
+
+
+@pytest.mark.asyncio
+async def test_execution_mermaid_sanitizes_namespaced_child_step_ids() -> None:
+    """A child step's StepId stringifies to ``child/run_child``; the ``/`` is not
+    a legal Mermaid node-id character and must be sanitized out of node ids and
+    edges (the human-readable label may still carry it)."""
+    handler = _VizParent(child=_VizChild()).run()
+    await handler
+
+    result = draw_most_recent_execution_mermaid(handler, filename="")
+    lines = result.split("\n")
+
+    # The child step did execute and is rendered (label carries the namespace).
+    assert any("child/run_child" in line for line in lines), (
+        "expected the namespaced child step to appear in the diagram"
+    )
+
+    # Node ids (the token before the shape bracket) must not contain ``/``.
+    node_lines = [line for line in lines if ":::" in line]
+    for line in node_lines:
+        node_id = line.strip().split("[", 1)[0].split("(", 1)[0]
+        assert "/" not in node_id, f"unsanitized ``/`` in mermaid node id: {line!r}"
+
+    # Edge endpoints are bare ids with no label -- none may contain ``/``.
+    edge_lines = [line for line in lines if " --> " in line]
+    assert edge_lines
+    for line in edge_lines:
+        assert "/" not in line, f"unsanitized ``/`` in mermaid edge: {line!r}"
+
+
 # --- Resource node rendering tests ---
 
 
