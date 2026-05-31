@@ -61,6 +61,7 @@ from workflows.context.state_store import (
     StateStore,
     deserialize_state_from_dict,
     infer_state_type,
+    is_child_ful,
     namespaced_seed_blob,
     namespaced_underlying_state_type,
 )
@@ -581,19 +582,23 @@ class DBOSRuntime(Runtime):
         # Capture values needed in the async task closure
         active_serializer = serializer or JsonSerializer()
 
-        # Child-ful runs persist the whole tree in one DictState blob; their
-        # portable seed carries CHILD_STATES_KEY and must be written as a blob,
-        # not as the root's typed state. Core owns the reconvert.
-        seed_blob = namespaced_seed_blob(serialized_state) if serialized_state else None
+        # Child-ful runs persist the whole tree in one DictState blob; their seed
+        # is lifted into the root/child slots (and a flat childless checkpoint is
+        # carried forward into the root slot). Topology, not the seed's presence,
+        # decides the underlying store type. Core owns the reconvert.
+        child_ful = is_child_ful(workflow)
+        seed_blob = (
+            namespaced_seed_blob(serialized_state, child_ful=child_ful)
+            if serialized_state
+            else None
+        )
 
         async def _run_workflow() -> WorkflowHandleAsync[Any]:
             with SetWorkflowID(run_id):
                 # Write initial state to DB before starting workflow (non-blocking to caller)
                 if serialized_state:
                     seed_state_type = (
-                        DictState
-                        if seed_blob is not None
-                        else infer_state_type(workflow)
+                        DictState if child_ful else infer_state_type(workflow)
                     )
                     if self._dsn is not None:
                         pool = await self._ensure_pool()

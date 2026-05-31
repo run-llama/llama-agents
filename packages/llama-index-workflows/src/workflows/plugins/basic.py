@@ -20,6 +20,7 @@ from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import (
     InMemoryStateStore,
     StateStore,
+    is_child_ful,
     namespaced_seed_blob,
     namespaced_underlying_state_type,
 )
@@ -285,7 +286,9 @@ class BasicRuntime(Runtime):
         # nested payload on resume); a childless run gets the typed root store
         # (flat format). The namespace lens slices the blob per child at access.
         active_serializer = serializer or JsonSerializer()
-        seed_blob = namespaced_seed_blob(serialized_state)
+        seed_blob = namespaced_seed_blob(
+            serialized_state, child_ful=is_child_ful(registered.workflow)
+        )
         if seed_blob is not None:
             underlying: StateStore[Any] = InMemoryStateStore(seed_blob)
         elif serialized_state:

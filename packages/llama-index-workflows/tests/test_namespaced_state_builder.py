@@ -122,7 +122,7 @@ async def test_seed_round_trip_rebuilds_slots() -> None:
     tree = namespaced.serialize_tree(serializer)
 
     # Reconvert the portable tree into a fresh durable blob and rebuild.
-    blob = namespaced_seed_blob(tree)
+    blob = namespaced_seed_blob(tree, child_ful=True)
     assert blob is not None
     assert ROOT_STATE_KEY in blob and CHILD_STATES_KEY in blob
 
@@ -133,13 +133,40 @@ async def test_seed_round_trip_rebuilds_slots() -> None:
 
 def test_seed_helpers_noop_for_childless_and_references() -> None:
     serializer = JsonSerializer()
-    # Childless flat payload: nothing to seed.
+    # Childless target keeps the flat format byte-for-byte: nothing to seed.
     flat = InMemoryStateStore(RootState(root_value="x")).to_dict(serializer)
-    assert namespaced_seed_blob(flat) is None
-    assert namespaced_seed_payload(flat, serializer) is None
-    # Persisted reference: nothing to seed.
-    assert namespaced_seed_blob({"store_type": "postgres", "run_id": "r"}) is None
-    assert namespaced_seed_blob(None) is None
+    assert namespaced_seed_blob(flat, child_ful=False) is None
+    assert namespaced_seed_payload(flat, serializer, child_ful=False) is None
+    # Persisted reference: row already exists, nothing to seed (even if child-ful).
+    assert (
+        namespaced_seed_blob({"store_type": "postgres", "run_id": "r"}, child_ful=True)
+        is None
+    )
+    assert namespaced_seed_blob(None, child_ful=True) is None
+
+
+@pytest.mark.asyncio
+async def test_flat_childless_checkpoint_carries_root_state_into_child_ful_run() -> (
+    None
+):
+    """Adding children to a previously-childless workflow must not orphan the
+    root ``ctx.store``. A flat checkpoint resumed into a child-ful run is lifted
+    into the root slot, with children starting empty."""
+    serializer = JsonSerializer()
+    # A flat checkpoint as written by the childless version of the workflow.
+    flat = InMemoryStateStore(DictState(_data={"counter": 5})).to_dict(serializer)
+    assert CHILD_STATES_KEY not in flat
+
+    blob = namespaced_seed_blob(flat, child_ful=True)
+    assert blob is not None
+    assert ROOT_STATE_KEY in blob and CHILD_STATES_KEY in blob
+    assert blob[CHILD_STATES_KEY] == {}
+
+    wf = Parent(child=Child())
+    rebuilt = build_namespaced_state(wf, InMemoryStateStore(blob), serializer)
+    # Root state survived; the child's namespace is a fresh default.
+    assert await rebuilt.view(()).get("counter") == 5
+    assert await rebuilt.view(("child",)).get("child_value", None) is None
 
 
 @pytest.mark.asyncio
@@ -193,7 +220,7 @@ def test_seed_payload_matches_blob_dump() -> None:
         "state_data": {"_data": {"root_value": serializer.serialize("R")}},
         CHILD_STATES_KEY: {"child": {"state_data": {"_data": {}}}},
     }
-    blob = namespaced_seed_blob(tree)
+    blob = namespaced_seed_blob(tree, child_ful=True)
     assert blob is not None
-    payload = namespaced_seed_payload(tree, serializer)
+    payload = namespaced_seed_payload(tree, serializer, child_ful=True)
     assert payload == InMemoryStateStore(blob).to_dict(serializer)

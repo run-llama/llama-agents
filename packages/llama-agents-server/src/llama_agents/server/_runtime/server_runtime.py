@@ -96,7 +96,7 @@ class _ServerInternalRunAdapter(BaseInternalRunAdapterDecorator):
         if self._is_child_ful:
             active = serializer or JsonSerializer()
             seed = (
-                namespaced_seed_payload(serialized_state, active)
+                namespaced_seed_payload(serialized_state, active, child_ful=True)
                 if serialized_state
                 else None
             )

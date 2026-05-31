@@ -950,13 +950,26 @@ class NamespacedStateStores:
         return result
 
 
-def namespaced_seed_blob(serialized_state: dict[str, Any] | None) -> DictState | None:
-    """Convert a portable nested ``ctx.to_dict`` blob into a ``DictState`` seed row.
+def namespaced_seed_blob(
+    serialized_state: dict[str, Any] | None, *, child_ful: bool
+) -> DictState | None:
+    """Convert a portable ``ctx.to_dict`` blob into a ``DictState`` seed row.
 
-    Only in-memory nested blobs (those carrying :data:`CHILD_STATES_KEY`) need
-    explicit seeding into the single durable row; a persisted reference already
-    has its row. Returns the ``DictState`` to write, or ``None`` when no seeding
-    applies (childless payload, persisted reference, or empty).
+    The reconvert decision needs both the *old* payload shape and the *target*
+    run's topology -- ``child_ful`` is that second input. For a child-ful target
+    the root payload is lifted into the :data:`ROOT_STATE_KEY` slot and any
+    children ride under :data:`CHILD_STATES_KEY`, so the namespace lens reads them
+    from the slots it expects. This covers two cases with one shape:
+
+    - a nested payload (already carrying :data:`CHILD_STATES_KEY`) splits back into
+      its root and child slots, and
+    - a **flat** payload from a previously-childless checkpoint is wrapped as
+      ``{ROOT_STATE_KEY: <flat>, CHILD_STATES_KEY: {}}`` so adding children to a
+      workflow carries the prior root ``ctx.store`` forward instead of orphaning it.
+
+    Returns ``None`` -- meaning the payload is loaded as-is -- when no seeding
+    applies: an empty payload, a persisted reference (its row already exists), or a
+    **childless** target (which keeps the flat format byte-for-byte).
 
     This is the single owner of the seed reconvert, shared by every runtime.
     """
@@ -964,10 +977,10 @@ def namespaced_seed_blob(serialized_state: dict[str, Any] | None) -> DictState |
         return None
     if serialized_state.get("store_type") not in (None, "in_memory"):
         return None
-    if CHILD_STATES_KEY not in serialized_state:
+    if not child_ful:
         return None
     root_payload = dict(serialized_state)
-    children = root_payload.pop(CHILD_STATES_KEY) or {}
+    children = root_payload.pop(CHILD_STATES_KEY, None) or {}
     blob = DictState()
     blob[ROOT_STATE_KEY] = root_payload
     blob[CHILD_STATES_KEY] = children
@@ -977,6 +990,8 @@ def namespaced_seed_blob(serialized_state: dict[str, Any] | None) -> DictState |
 def namespaced_seed_payload(
     serialized_state: dict[str, Any] | None,
     serializer: BaseSerializer,
+    *,
+    child_ful: bool,
 ) -> dict[str, Any] | None:
     """Serialized-payload shape of :func:`namespaced_seed_blob`.
 
@@ -984,7 +999,7 @@ def namespaced_seed_payload(
     ``DictState`` row) that ``create_state_store`` expects, or ``None`` when no
     seeding applies.
     """
-    blob = namespaced_seed_blob(serialized_state)
+    blob = namespaced_seed_blob(serialized_state, child_ful=child_ful)
     if blob is None:
         return None
     return InMemoryStateStore(blob).to_dict(serializer)
@@ -1004,6 +1019,16 @@ def namespaced_state_types(
     }
 
 
+def is_child_ful(root_workflow: "Workflow") -> bool:
+    """Whether a run rooted at ``root_workflow`` spans more than one namespace.
+
+    The single source of the child-ful signal. Backends use it to choose the
+    underlying store type and to seed the blob (see :func:`namespaced_seed_blob`),
+    rather than re-deriving it from proxies like ``seed_blob is not None``.
+    """
+    return len(root_workflow._namespace_instances()) > 1
+
+
 def namespaced_underlying_state_type(root_workflow: "Workflow") -> type[BaseModel]:
     """State type for the run's single durable underlying store.
 
@@ -1011,7 +1036,7 @@ def namespaced_underlying_state_type(root_workflow: "Workflow") -> type[BaseMode
     (flat format) for a childless run. This is the type gate the backends apply
     when vending their per-run store.
     """
-    if len(root_workflow._namespace_instances()) > 1:
+    if is_child_ful(root_workflow):
         return DictState
     return infer_state_type(root_workflow)
 
