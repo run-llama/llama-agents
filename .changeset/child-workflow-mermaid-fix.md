@@ -2,4 +2,4 @@
 "llama-index-utils-workflow": patch
 ---
 
-Sanitize the `/` in namespaced child-workflow step ids when rendering an execution Mermaid diagram, so a parent-with-child execution produces valid Mermaid node ids instead of broken ones.
+Sanitize `/` in namespaced child-workflow step ids so parent-with-child executions render valid Mermaid node ids.
