@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LlamaIndex Inc.
-"""Collect selection algebra (Phase L3).
+"""Collect selection algebra.
 
 The ``Collect`` marker and ``Cardinality`` hierarchy let a step declare *how* a
 batch fan-in parameter is released. They are used inside ``Annotated`` on a

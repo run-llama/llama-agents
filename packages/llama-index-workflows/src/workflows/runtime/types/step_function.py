@@ -124,7 +124,7 @@ async def partial(
 ) -> Callable[[], Any]:
     kwargs: dict[str, Any] = {}
     if batch_events is not None:
-        # Batch-lineage fan-in (L2): bind the ``list[E]`` parameter to the full
+        # Batch-lineage fan-in: bind the ``list[E]`` parameter to the full
         # closed batch. The trigger ``event`` is a carrier and is ignored.
         kwargs.update(batch_events)
     elif collected_events is not None:
@@ -192,7 +192,7 @@ def as_step_worker_function(
 
         try:
             config = workflow._get_steps()[step_name]._step_config
-            # Batch-lineage fan-in (L2): a step with a single ``list[E]``
+            # Batch-lineage fan-in: a step with a single ``list[E]``
             # parameter is launched once per closed batch by the reducer, with
             # the full buffered list riding on ``state.batch_input``. Bind that
             # list to the collect parameter.

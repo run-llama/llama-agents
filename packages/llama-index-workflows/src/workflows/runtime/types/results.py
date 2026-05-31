@@ -78,7 +78,7 @@ class StepWorkerState:
     step_name: str
     collected_events: dict[str, list[Event]]
     collected_waiters: list[StepWorkerWaiter]
-    # Batch-lineage fan-in (L2): the fully buffered batch handed to a
+    # Batch-lineage fan-in: the fully buffered batch handed to a
     # ``list[E]`` collect step when its batch closes. None for non-collect runs.
     batch_input: list[Event] | None = None
     # Batch lineage stack of the executing work item, so ``ctx.send_event`` can
@@ -201,7 +201,7 @@ class AddCollectedEvent(BaseModel):
 
 
 class SentEvent(BaseModel):
-    """Records a batched ``ctx.send_event`` for eager live-set accounting (L2).
+    """Records a batched ``ctx.send_event`` for eager live-set accounting.
 
     A send_event from inside an open fan-out batch inherits the emitting work
     item's ``batch_stack``, so the new member is a same-level successor of that

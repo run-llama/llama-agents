@@ -898,7 +898,7 @@ def _process_step_result_tick(
     )
     step_no_longer_in_progress = True
 
-    # Batch lineage (L2). The trigger stack is carried on the in-progress state.
+    # Batch lineage. The trigger stack is carried on the in-progress state.
     # A fan-out step (list[E] return) mints ONE fresh batch id for this completed
     # execution and stamps every event it emits, then closes the batch. A 1:1
     # step's outputs inherit the trigger stack verbatim.
@@ -1144,7 +1144,7 @@ def _process_step_result_tick(
         else:
             raise ValueError(f"Unknown result type: {type(result)}")
 
-    # ---- Batch lineage bookkeeping (L2): resolve one work item ----
+    # ---- Batch lineage bookkeeping: resolve one work item ----
     # This execution IS one live work item in its enclosing batch
     # (``trigger_stack[-1]``). Resolving it removes it from the live set and adds
     # its same-level successors. There is exactly one resolve rule, applied below;
@@ -1166,7 +1166,7 @@ def _process_step_result_tick(
         not did_complete_step or scheduled_retry or failing_run or terminal_run
     )
 
-    # Eager live-set birth for batched ``ctx.send_event`` emissions (L2). Each
+    # Eager live-set birth for batched ``ctx.send_event`` emissions. Each
     # SentEvent inherits the emitting work item's trigger stack, so it is a
     # same-level successor in the SAME enclosing batch. Counting it here — at the
     # producing step's resolve — keeps the batch open until the member is
@@ -1366,7 +1366,7 @@ def _process_add_event_tick(
             handled = True
             worker_state = state.workers[step_name]
             if worker_state.config.batch_collect_param is not None:
-                # Batch-lineage fan-in (L2/L3): buffer the event keyed by its
+                # Batch-lineage fan-in: buffer the event keyed by its
                 # innermost batch id. Events with no batch stack (outside any
                 # fan-out) land under the empty-key bucket; a producer that fans
                 # out via a typed list/iterator return always stamps an id.
@@ -1375,10 +1375,10 @@ def _process_add_event_tick(
                 if not already_fired:
                     buf = worker_state.batch_buffers.setdefault(batch_id, [])
                     buf.append(tick.event)
-                    # Cardinality release (L3): Take(n) fires as soon
+                    # Cardinality release: Take(n) fires as soon
                     # as ``n`` members arrive, with the first ``n``, instead of
                     # waiting for the batch to close. All() has no threshold and
-                    # fires only on TickBatchClosed (the L2 path below). The
+                    # fires only on TickBatchClosed (the batch-closed path below). The
                     # output stack is the trigger stack with this batch id popped
                     # — i.e. the enclosing stack.
                     threshold = _cardinality_threshold(

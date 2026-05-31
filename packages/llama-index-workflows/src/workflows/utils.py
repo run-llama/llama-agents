@@ -43,16 +43,16 @@ class StepSignatureSpec(BaseModel):
     context_parameter: str | None
     context_state_type: Any | None
     resources: list[Any]
-    # Batch-lineage fan-in (L2/L3): ``(parameter_name, element_event_types)`` when
+    # Batch-lineage fan-in: ``(parameter_name, element_event_types)`` when
     # the step declares a single ``list[E]`` collect parameter, else None. The
     # element types are a tuple — ``list[Done]`` -> ``(Done,)``; a union flat list
     # ``list[A | B]`` -> ``(A, B)``.
     batch_collect_param: tuple[str, tuple[Any, ...]] | None = None
-    # The resolved ``Collect`` marker for the batch collect parameter (L3). A bare
+    # The resolved ``Collect`` marker for the batch collect parameter. A bare
     # ``list[E]`` parameter resolves to ``Collect()`` (``All`` cardinality). None
     # when the step is not a batch collect.
     batch_collect: Any | None = None
-    # Fan-out producer (L2): True when the return annotation is ``list[E]``.
+    # Fan-out producer: True when the return annotation is ``list[E]``.
     is_fan_out: bool = False
 
 
@@ -141,7 +141,7 @@ def inspect_signature(
             context_parameter = name
             continue
 
-        # Batch-lineage fan-in (L2/L3): a ``list[E]`` parameter (e.g.
+        # Batch-lineage fan-in: a ``list[E]`` parameter (e.g.
         # ``events: list[Done]``) is a collect step. It buffers incoming ``E`` by
         # batch id and releases per its ``Collect`` cardinality. ``E`` may be a
         # union (``list[A | B]``) — every member type routes to the step. A bare

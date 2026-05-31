@@ -57,18 +57,18 @@ class StepConfig:
     # step fires once when one event of each type has arrived. None for the
     # ordinary single-event-trigger model.
     collect_params: list[tuple[str, Any]] | None = None
-    # Fan-out producer (L2): True when the return annotation is ``list[E]``. Such
+    # Fan-out producer: True when the return annotation is ``list[E]``. Such
     # a step mints a fresh batch id per execution and stamps every emitted event
     # with it, then closes the batch. Computed at decoration time from the return
     # annotation.
     is_fan_out: bool = False
-    # Batch-lineage fan-in (L2/L3): set to ``(parameter_name, element_event_types)``
+    # Batch-lineage fan-in: set to ``(parameter_name, element_event_types)``
     # when the step declares a single ``list[E]`` parameter. The element types are
     # a tuple — ``list[Done]`` -> ``(Done,)``; a union flat list ``list[A | B]`` ->
     # ``(A, B)`` (every member routes to the step). The step buffers incoming
     # members by innermost batch id and releases per ``batch_collect``.
     batch_collect_param: tuple[str, tuple[Any, ...]] | None = None
-    # The resolved ``Collect`` marker for the batch collect parameter (L3),
+    # The resolved ``Collect`` marker for the batch collect parameter,
     # carrying the release cardinality (``All`` / ``Take``). A bare
     # ``list[E]`` parameter resolves to ``Collect()`` (``All``). None when the
     # step is not a batch collect.

@@ -38,9 +38,9 @@ class CommandQueueEvent:
     last_exception: Exception | None = None
     last_failed_at: float | None = None
     recovery_counts: dict[str, int] = field(default_factory=dict)
-    # Batch lineage stack to stamp onto the resulting TickAddEvent (L2).
+    # Batch lineage stack to stamp onto the resulting TickAddEvent.
     batch_stack: tuple[str, ...] = field(default_factory=tuple)
-    # Live-set accounting (L2): True when this event's birth into its batch was
+    # Live-set accounting: True when this event's birth into its batch was
     # already counted at the producing step's resolve (every reducer-emitted
     # event: 1:1 outputs, fan-out members, retries, catch_error routing). False
     # only for events that enter via ``ctx.send_event``, whose birth is counted
@@ -50,7 +50,7 @@ class CommandQueueEvent:
 
 @dataclass(frozen=True)
 class CommandCloseBatch:
-    """Emitted by the runtime to mark a fan-out batch as closed (L2).
+    """Emitted by the runtime to mark a fan-out batch as closed.
 
     The runner turns this into a ``TickBatchClosed`` buffered tick so collect
     steps fire. Kept as a command (not a direct tick append) so it flows through
