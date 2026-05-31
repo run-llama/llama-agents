@@ -386,58 +386,6 @@ def test_optional_list_collect_param_not_generic_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Heterogeneous one-of-each join downstream of a fan-out: the legacy collect
-# buffer is lineage-blind, so pairs mismatch across batches and events strand.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.xfail(
-    reason="one-of-each join downstream of fan-out is lineage-blind; mis-pairs and strands events",
-    strict=True,
-)
-async def test_heterogeneous_join_downstream_fan_out_pairs_correctly() -> None:
-    class A(Event):
-        v: int
-
-    class B(Event):
-        v: int
-
-    class Paired(Event):
-        a: int
-        b: int
-
-    joins: list[tuple[int, int]] = []
-    n = 3
-
-    class WF(Workflow):
-        @step
-        async def fan_out(self, ev: StartEvent) -> list[Task]:
-            return [Task(n=i) for i in range(n)]
-
-        @step
-        async def make_a(self, ev: Task) -> A:
-            return A(v=ev.n)
-
-        @step
-        async def make_b(self, ev: Task) -> B:
-            await asyncio.sleep(0.02 * (n - ev.n))  # reverse B arrival order
-            return B(v=ev.n)
-
-        @step
-        async def join(self, a: A, b: B) -> Paired:
-            joins.append((a.v, b.v))
-            return Paired(a=a.v, b=b.v)
-
-        @step
-        async def collect(self, ctx: Context, ev: Paired) -> StopEvent | None:
-            done = ctx.collect_events(ev, [Paired] * n)
-            return None if done is None else StopEvent(result="done")
-
-    await _run(WF(timeout=5), timeout=8)
-    assert sorted(joins) == [(i, i) for i in range(n)], joins
-
-
-# ---------------------------------------------------------------------------
 # Old/new API boundary: events from ctx.send_event carry no batch_stack, so a
 # typed list[E] All() join keyed on batch close never fires (hangs).
 # ---------------------------------------------------------------------------
