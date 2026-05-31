@@ -6,6 +6,7 @@ from typing import (
     Any,
     AsyncGenerator,
     AsyncIterator,
+    List,
     get_type_hints,
 )
 
@@ -15,6 +16,9 @@ from workflows.decorators import step
 from workflows.errors import WorkflowValidationError
 from workflows.events import Event, StartEvent, StopEvent
 from workflows.utils import (
+    StepSignatureSpec,
+    _event_list_element_types,
+    _flatten_return_annotation,
     _get_param_types,
     _get_return_types,
     get_steps_from_class,
@@ -317,3 +321,39 @@ def test_validate_step_signature_accepts_list_return() -> None:
     spec = inspect_signature(f)
     # Should not raise: list[E] flattens to a real event return type.
     validate_step_signature(spec)
+
+
+def test_validate_step_signature_rejects_batch_param_with_other_events() -> None:
+    # A list[E] batch collect parameter cannot be combined with additional event
+    # params; that is a multi-slot collect deferred to a later phase.
+    spec = StepSignatureSpec(
+        accepted_events={"a": [StartEvent], "b": [StopEvent]},
+        return_types=[StopEvent],
+        context_parameter=None,
+        context_state_type=None,
+        resources=[],
+        batch_collect_param=("a", (StartEvent,)),
+        batch_collect=None,
+        is_fan_out=False,
+    )
+    with pytest.raises(WorkflowValidationError, match="cannot be combined with other"):
+        validate_step_signature(spec)
+
+
+def test_event_list_element_types_union_without_event_members_returns_none() -> None:
+    # A list[Union[...]] whose members are not Event subclasses is not an event-list.
+    assert _event_list_element_types(list[int | str]) is None
+
+
+def test_event_list_element_types_mixed_members_returns_none() -> None:
+    # A list[Union[Event, non-event]] is rejected: not all members are events.
+    assert _event_list_element_types(list[StartEvent | int]) is None
+
+
+def test_event_list_element_types_pure_event_list_is_recognized() -> None:
+    assert _event_list_element_types(list[StartEvent]) == [StartEvent]
+
+
+def test_flatten_return_annotation_unparameterized_collection_returns_empty() -> None:
+    # A collection origin with no type args (bare ``typing.List``) flattens to no types.
+    assert _flatten_return_annotation(List) == []
