@@ -182,13 +182,12 @@ def as_step_worker_function(
         internal_context = Context._create_internal(workflow=workflow)
         returns = Returns(return_values=[])
 
-        token = StepWorkerStateContextVar.set(
-            StepWorkerContext(
-                state=state,
-                returns=returns,
-                retry=retry,
-            )
+        step_ctx = StepWorkerContext(
+            state=state,
+            returns=returns,
+            retry=retry,
         )
+        token = StepWorkerStateContextVar.set(step_ctx)
         ctx_token = InternalContextVar.set(weakref.ref(internal_context))
 
         try:
@@ -214,6 +213,7 @@ def as_step_worker_function(
                     # Not every declared type has arrived yet. collect_events
                     # recorded the buffer add on ``returns``; nothing to invoke.
                     await internal_context._finalize_step()
+                    returns.return_values.extend(step_ctx.sent_events)
                     return returns.return_values
                 collected_binding = {
                     name: collected_event
@@ -343,6 +343,9 @@ def as_step_worker_function(
                 )
 
             await internal_context._finalize_step()
+            # Surface batched ctx.send_event emissions so the reducer counts each
+            # as a same-level successor of this work item (eager live-set birth).
+            returns.return_values.extend(step_ctx.sent_events)
             return returns.return_values
         finally:
             try:

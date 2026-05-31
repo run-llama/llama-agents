@@ -61,6 +61,12 @@ class StepWorkerContext:
     # add commands here to mutate the internal worker state after step execution
     returns: Returns
     retry: RetryAttempt = dataclasses.field(default_factory=RetryAttempt)
+    # Events dispatched via ``ctx.send_event`` during this step's execution that
+    # carry a batch stack. The wrapper drains this into ``SentEvent`` results so
+    # the reducer can count each as a same-level successor of the resolving work
+    # item (eager birth), matching how a returned event is counted — instead of
+    # the send_event member being born late at routing, after the batch closed.
+    sent_events: list[SentEvent] = dataclasses.field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -194,6 +200,28 @@ class AddCollectedEvent(BaseModel):
     event: SerializableEvent
 
 
+class SentEvent(BaseModel):
+    """Records a batched ``ctx.send_event`` for eager live-set accounting (L2).
+
+    A send_event from inside an open fan-out batch inherits the emitting work
+    item's ``batch_stack``, so the new member is a same-level successor of that
+    work item. The reducer counts it at the emitting step's resolve (one work
+    item per accepting step), exactly like a returned event — so the batch
+    cannot close before the member is registered. The member's own
+    ``TickAddEvent`` then arrives ``batch_counted=True`` and is not re-counted.
+
+    ``step_name`` is the optional targeted step (``ctx.send_event(ev, step=...)``):
+    a targeted send is a single work item; an untargeted send is one work item
+    per accepting step.
+    """
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+    type: Literal["sent_event"] = "sent_event"
+    event: SerializableEvent
+    step_name: str | None = None
+    batch_stack: tuple[str, ...] = ()
+
+
 class AddWaiter(BaseModel, Generic[EventType]):
     """Returned after a waiter has been added, and is not yet resolved."""
 
@@ -233,4 +261,5 @@ StepFunctionResult = (
     | DeleteCollectedEvent
     | AddWaiter[Event]
     | DeleteWaiter
+    | SentEvent
 )
