@@ -104,7 +104,12 @@ def test_full_two_collect_batch_drains_to_close() -> None:
 
     # Three 1:1 work resolutions: -1 (death) + 2 (Done accepted by two collects).
     for _ in range(3):
-        assert _apply_live_delta(state, "batch-test", _count_accepting_steps(state, Done) - 1) == []
+        assert (
+            _apply_live_delta(
+                state, "batch-test", _count_accepting_steps(state, Done) - 1
+            )
+            == []
+        )
     assert state.batches["batch-test"].live == 6
 
     # Six collect deliveries (3 Done x 2 collects), each -1. Only the last closes.
