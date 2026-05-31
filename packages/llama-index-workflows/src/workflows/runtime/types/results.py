@@ -208,7 +208,7 @@ class SentEvent(BaseModel):
     work item. The reducer counts it at the emitting step's resolve (one work
     item per accepting step), exactly like a returned event — so the batch
     cannot close before the member is registered. The member's own
-    ``TickAddEvent`` then arrives ``batch_counted=True`` and is not re-counted.
+    ``TickAddEvent`` is then not re-counted at routing.
 
     ``step_name`` is the optional targeted step (``ctx.send_event(ev, step=...)``):
     a targeted send is a single work item; an untargeted send is one work item

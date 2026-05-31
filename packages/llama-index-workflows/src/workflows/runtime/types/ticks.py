@@ -51,12 +51,6 @@ class TickAddEvent(BaseModel):
     # collect step pops the targeted id. 1:1 steps inherit their trigger's stack
     # verbatim. (Isomorphic to OpenTelemetry trace/span/parent-span nesting.)
     batch_stack: tuple[str, ...] = Field(default_factory=tuple)
-    # Live-set accounting: True only for reducer-emitted events (set via
-    # CommandQueueEvent), whose birth into their batch was already counted at the
-    # producing step's resolve. False (the default) for directly-constructed
-    # ticks — ``ctx.send_event``, the initial StartEvent, rehydration — whose
-    # birth is counted at routing instead.
-    batch_counted: bool = False
 
 
 class TickBatchClosed(BaseModel):

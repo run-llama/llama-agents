@@ -165,9 +165,7 @@ class InternalContext(Generic[MODEL_T]):
         # step's resolve (like a returned event), or the batch can close on the
         # eagerly-counted returns before this member is registered and the member
         # is dropped/strands. We record it on the step context so the wrapper
-        # surfaces a ``SentEvent`` result the reducer counts, and mark the tick
-        # ``batch_counted=True`` so routing does not double-count the birth.
-        batch_counted = False
+        # surfaces a ``SentEvent`` result the reducer counts.
         try:
             step_ctx = StepWorkerStateContextVar.get()
             recovery_counts = dict(step_ctx.retry.recovery_counts)
@@ -175,7 +173,6 @@ class InternalContext(Generic[MODEL_T]):
             # inside a fan-out stays in that batch.
             batch_stack = step_ctx.state.batch_stack
             if batch_stack:
-                batch_counted = True
                 step_ctx.sent_events.append(
                     SentEvent(
                         event=message,
@@ -193,7 +190,6 @@ class InternalContext(Generic[MODEL_T]):
                     step_name=step,
                     recovery_counts=recovery_counts,
                     batch_stack=batch_stack,
-                    batch_counted=batch_counted,
                 )
             )
         )

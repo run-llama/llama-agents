@@ -64,13 +64,7 @@ class Batch:
     live: int = 0
 
     def _copy(self) -> Batch:
-        return Batch(
-            batch_id=self.batch_id,
-            producer=self.producer,
-            origin_stack=self.origin_stack,
-            bound_collects=self.bound_collects,
-            live=self.live,
-        )
+        return dataclasses.replace(self)
 
 
 @dataclass()
