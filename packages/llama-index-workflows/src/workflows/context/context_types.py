@@ -90,6 +90,9 @@ class SerializedEventAttempt(BaseModel):
     recovery_counts: dict[str, int] = Field(default_factory=dict)
     # Batch lineage stack (innermost id last). Empty outside any fan-out batch.
     batch_stack: list[str] = Field(default_factory=list)
+    # Closed-batch collect payload, serialized only for queued/in-progress
+    # list[E] collect executions.
+    batch_input: list[str] | None = None
 
 
 class SerializedWaiter(BaseModel):

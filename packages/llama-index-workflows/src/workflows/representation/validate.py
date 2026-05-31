@@ -622,6 +622,86 @@ def _validate_collect_param_slots(steps: dict[str, StepConfig]) -> None:
             seen[event_type] = param_name
 
 
+def _event_types(types: Iterable[Any]) -> list[type[Event]]:
+    return [t for t in types if isinstance(t, type) and issubclass(t, Event)]
+
+
+def _batch_level_types_by_producer(
+    steps: dict[str, StepConfig],
+) -> dict[str, set[type[Event]]]:
+    """Return event types produced inside each returned-list batch level."""
+
+    collects: dict[str, tuple[Any, ...]] = {
+        name: cfg.batch_collect_param[1]
+        for name, cfg in steps.items()
+        if cfg.batch_collect_param is not None
+    }
+
+    def same_level_types(
+        seed_types: Iterable[Any], guard: frozenset[str]
+    ) -> set[type[Event]]:
+        seen: set[type[Event]] = set()
+        frontier = list(_event_types(seed_types))
+        while frontier:
+            event_type = frontier.pop()
+            if event_type in seen:
+                continue
+            seen.add(event_type)
+            for name, cfg in steps.items():
+                if event_type not in cfg.accepted_events:
+                    continue
+                if cfg.batch_collect_param is not None:
+                    continue
+                if cfg.is_fan_out:
+                    if name in guard:
+                        continue
+                    child_types = same_level_types(cfg.return_types, guard | {name})
+                    for collect_name, collect_event_types in collects.items():
+                        if any(et in child_types for et in collect_event_types):
+                            frontier.extend(
+                                _event_types(steps[collect_name].return_types)
+                            )
+                    continue
+                frontier.extend(_event_types(cfg.return_types))
+        return seen
+
+    return {
+        name: same_level_types(cfg.return_types, frozenset({name}))
+        for name, cfg in steps.items()
+        if cfg.is_fan_out
+    }
+
+
+def _validate_batch_collect_bindings(steps: dict[str, StepConfig]) -> None:
+    """Require list[E] fan-in to bind to a static returned-list producer."""
+
+    level_types_by_producer = _batch_level_types_by_producer(steps)
+    errors: list[str] = []
+    for step_name, cfg in steps.items():
+        if cfg.batch_collect_param is None:
+            continue
+        param_name, element_types = cfg.batch_collect_param
+        missing = [
+            event_type
+            for event_type in _event_types(element_types)
+            if not any(
+                event_type in level_types
+                for level_types in level_types_by_producer.values()
+            )
+        ]
+        if missing:
+            names = ", ".join(sorted(t.__name__ for t in missing))
+            errors.append(
+                f"Step '{step_name}' parameter '{param_name}' collects "
+                f"list[{names}], but no returned-list producer creates a batch "
+                "for those event types. list[E] fan-in only consumes events "
+                "from steps annotated as returning list[E]; use ctx.collect_events "
+                "for unbatched ctx.send_event flows."
+            )
+    if errors:
+        raise WorkflowValidationError("\n".join(errors))
+
+
 def _validate_workflow(
     steps: dict[str, StepConfig],
     workflow_cls_name: str,
@@ -648,6 +728,7 @@ def _validate_workflow(
     stop_event_class = _ensure_stop_event_class(steps, workflow_cls_name)
 
     _validate_collect_param_slots(steps)
+    _validate_batch_collect_bindings(steps)
 
     uses_hitl = _validate_event_connectivity(steps, start_event_class)
 

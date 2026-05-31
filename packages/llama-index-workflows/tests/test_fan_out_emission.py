@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from workflows import Context, Workflow, step
+from workflows.errors import WorkflowRuntimeError
 from workflows.events import Event, StartEvent, StopEvent
 
 
@@ -76,3 +77,16 @@ async def test_list_with_non_event_raises() -> None:
 
     with pytest.raises(Exception):
         await BadFanOutWorkflow(timeout=10).run()
+
+
+@pytest.mark.asyncio
+async def test_non_fan_out_list_return_raises() -> None:
+    """A runtime list only fans out when the signature declares list[E]."""
+
+    class BadReturnWorkflow(Workflow):
+        @step
+        async def start(self, ev: StartEvent) -> StopEvent:
+            return [StopEvent(result="not fan-out")]  # type: ignore[return-value]  # ty: ignore[invalid-return-type]
+
+    with pytest.raises(WorkflowRuntimeError, match="returned list"):
+        await BadReturnWorkflow(timeout=10).run()

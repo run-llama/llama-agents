@@ -190,6 +190,8 @@ async def test_num_workers_1_collect_overlapping_batches() -> None:
         n: int
 
     collected: list[tuple[int, int]] = []
+    active_collects = 0
+    max_active_collects = 0
 
     class WF(Workflow):
         @step
@@ -202,9 +204,15 @@ async def test_num_workers_1_collect_overlapping_batches() -> None:
 
         @step(num_workers=1)
         async def collect(self, batch: list[Leaf]) -> Collected:
+            nonlocal active_collects, max_active_collects
+            active_collects += 1
+            max_active_collects = max(max_active_collects, active_collects)
             await asyncio.sleep(0.2)
-            gid = next(iter({b.gid for b in batch}))
-            return Collected(gid=gid, n=len(batch))
+            try:
+                gid = next(iter({b.gid for b in batch}))
+                return Collected(gid=gid, n=len(batch))
+            finally:
+                active_collects -= 1
 
         @step
         async def finish(self, ev: Collected) -> StopEvent | None:
@@ -215,6 +223,7 @@ async def test_num_workers_1_collect_overlapping_batches() -> None:
 
     await _run(WF(timeout=10), timeout=8)
     assert sorted(collected) == [(0, 3), (1, 3)], collected
+    assert max_active_collects == 1
 
 
 # ---------------------------------------------------------------------------
@@ -386,8 +395,8 @@ def test_optional_list_collect_param_not_generic_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Old/new API boundary: events from ctx.send_event carry no batch_stack, so a
-# typed list[E] All() join keyed on batch close never fires (hangs).
+# Old/new API boundary: ctx.send_event is ordinary dispatch, not batch
+# membership. list[E] fan-in is only for returned-list producer batches.
 # ---------------------------------------------------------------------------
 
 
@@ -395,8 +404,8 @@ class Item(Event):
     idx: int
 
 
-async def test_send_event_into_take_collect_fires() -> None:
-    """Cleared behavior: send_event into a Take(n) join fires on the n-th arrival."""
+async def test_send_event_into_take_collect_rejected() -> None:
+    """Unbatched send_event flows must use ctx.collect_events, not list[E]."""
 
     class WF(Workflow):
         @step
@@ -411,11 +420,11 @@ async def test_send_event_into_take_collect_fires() -> None:
         ) -> StopEvent:
             return StopEvent(result=sorted(e.idx for e in events))
 
-    result = await _run(WF(disable_validation=True, timeout=10))
-    assert result == [0, 1, 2], result
+    with pytest.raises(WorkflowValidationError, match="returned-list producer"):
+        await _run(WF(timeout=10))
 
 
-async def test_send_event_into_all_collect_fires() -> None:
+async def test_send_event_into_all_collect_rejected() -> None:
     class WF(Workflow):
         @step
         async def start(self, ctx: Context, ev: StartEvent) -> StopEvent | None:
@@ -427,22 +436,17 @@ async def test_send_event_into_all_collect_fires() -> None:
         async def collect(self, events: list[Item]) -> StopEvent:
             return StopEvent(result=sorted(e.idx for e in events))
 
-    result = await _run(WF(disable_validation=True, timeout=10), timeout=5)
-    assert result == [0, 1, 2], result
+    with pytest.raises(WorkflowValidationError, match="returned-list producer"):
+        await _run(WF(timeout=10), timeout=5)
 
 
 # ---------------------------------------------------------------------------
-# send_event from INSIDE a fan-out batch into a same-level typed collect. A
-# send_event member's birth is counted eagerly at the emitting step's resolve
-# (like a returned event), so the batch can't close on the eager returns before
-# the send_event member is registered. A collect that buffers a member under a
-# batch also fires when that batch closes, even when no static return type bound
-# it. (Previously the member was dropped, or the run hung.)
+# send_event from INSIDE a fan-out branch remains outside batch membership.
 # ---------------------------------------------------------------------------
 
 
-async def test_send_event_extra_member_into_batch_join_not_lost() -> None:
-    """A branch that returns one member AND send_events another keeps both."""
+async def test_send_event_extra_member_inside_batch_is_not_joined() -> None:
+    """A sent event from a branch does not become a member of the return batch."""
 
     class WF(Workflow):
         @step
@@ -459,12 +463,12 @@ async def test_send_event_extra_member_into_batch_join_not_lost() -> None:
         async def join(self, events: list[Done]) -> StopEvent:
             return StopEvent(result=sorted(e.n for e in events))
 
-    result = await _run(WF(disable_validation=True, timeout=6), timeout=5)
-    assert result == [0, 1, 2, 99], result
+    result = await _run(WF(timeout=6), timeout=5)
+    assert result == [0, 1, 2], result
 
 
-async def test_send_event_only_into_batch_join_fires() -> None:
-    """Members produced solely via send_event from a batch branch still join."""
+async def test_send_event_only_inside_batch_collect_rejected() -> None:
+    """A list[E] collect needs a returned-list producer binding."""
 
     class WF(Workflow):
         @step
@@ -480,8 +484,8 @@ async def test_send_event_only_into_batch_join_fires() -> None:
         async def join(self, events: list[Done]) -> StopEvent:
             return StopEvent(result=sorted(e.n for e in events))
 
-    result = await _run(WF(disable_validation=True, timeout=6), timeout=5)
-    assert result == [0, 1, 2], result
+    with pytest.raises(WorkflowValidationError, match="returned-list producer"):
+        await _run(WF(timeout=6), timeout=5)
 
 
 # ---------------------------------------------------------------------------

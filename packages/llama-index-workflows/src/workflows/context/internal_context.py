@@ -18,7 +18,6 @@ from workflows.runtime.types.results import (
     AddWaiter,
     DeleteCollectedEvent,
     DeleteWaiter,
-    SentEvent,
     StepWorkerContext,
     StepWorkerStateContextVar,
     WaitingForEvent,
@@ -159,27 +158,9 @@ class InternalContext(Generic[MODEL_T]):
             self._workflow._validate_valid_step_message(step, message)
 
         recovery_counts: dict[str, int] = {}
-        batch_stack: tuple[str, ...] = ()
-        # A send_event from inside an open fan-out batch is a same-level successor
-        # of the emitting work item. Its birth must be counted eagerly at that
-        # step's resolve (like a returned event), or the batch can close on the
-        # eagerly-counted returns before this member is registered and the member
-        # is dropped/strands. We record it on the step context so the wrapper
-        # surfaces a ``SentEvent`` result the reducer counts.
         try:
             step_ctx = StepWorkerStateContextVar.get()
             recovery_counts = dict(step_ctx.retry.recovery_counts)
-            # Inherit the emitting branch's batch stack so a send_event from
-            # inside a fan-out stays in that batch.
-            batch_stack = step_ctx.state.batch_stack
-            if batch_stack:
-                step_ctx.sent_events.append(
-                    SentEvent(
-                        event=message,
-                        step_name=step,
-                        batch_stack=batch_stack,
-                    )
-                )
         except LookupError:
             pass
 
@@ -189,7 +170,6 @@ class InternalContext(Generic[MODEL_T]):
                     event=message,
                     step_name=step,
                     recovery_counts=recovery_counts,
-                    batch_stack=batch_stack,
                 )
             )
         )

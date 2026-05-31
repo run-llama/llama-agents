@@ -213,7 +213,6 @@ def as_step_worker_function(
                     # Not every declared type has arrived yet. collect_events
                     # recorded the buffer add on ``returns``; nothing to invoke.
                     await internal_context._finalize_step()
-                    returns.return_values.extend(step_ctx.sent_events)
                     return returns.return_values
                 collected_binding = {
                     name: collected_event
@@ -312,7 +311,7 @@ def as_step_worker_function(
                         raise captured_cancelled
                     if captured_waiting is not None:
                         raise captured_waiting
-                if isinstance(result, list):
+                if isinstance(result, list) and config.is_fan_out:
                     # A step that returns ``list[E]`` fans out: each element is
                     # emitted as its own event (static-list emission). An empty
                     # list emits nothing but still completes the step.
@@ -343,9 +342,6 @@ def as_step_worker_function(
                 )
 
             await internal_context._finalize_step()
-            # Surface batched ctx.send_event emissions so the reducer counts each
-            # as a same-level successor of this work item (eager live-set birth).
-            returns.return_values.extend(step_ctx.sent_events)
             return returns.return_values
         finally:
             try:

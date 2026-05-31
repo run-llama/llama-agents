@@ -173,6 +173,9 @@ class BrokerState:
                     last_failed_at=attempt.last_failed_at,
                     recovery_counts=dict(attempt.recovery_counts),
                     batch_stack=list(attempt.batch_stack),
+                    batch_input=[serializer.serialize(ev) for ev in attempt.batch_input]
+                    if attempt.batch_input is not None
+                    else None,
                 )
                 for attempt in worker_state.queue
             ]
@@ -189,6 +192,12 @@ class BrokerState:
                     last_failed_at=ip.last_failed_at,
                     recovery_counts=dict(ip.recovery_counts),
                     batch_stack=list(ip.batch_stack),
+                    batch_input=[
+                        serializer.serialize(ev)
+                        for ev in (ip.shared_state.batch_input or [])
+                    ]
+                    if ip.shared_state.batch_input is not None
+                    else None,
                 )
                 for ip in worker_state.in_progress
             ]
@@ -292,6 +301,11 @@ class BrokerState:
                     last_failed_at=attempt.last_failed_at,
                     recovery_counts=dict(attempt.recovery_counts),
                     batch_stack=tuple(attempt.batch_stack),
+                    batch_input=[
+                        serializer.deserialize(ev) for ev in attempt.batch_input
+                    ]
+                    if attempt.batch_input is not None
+                    else None,
                 )
                 for attempt in worker_data.queue
             ]
@@ -309,6 +323,11 @@ class BrokerState:
                         last_failed_at=attempt.last_failed_at,
                         recovery_counts=dict(attempt.recovery_counts),
                         batch_stack=tuple(attempt.batch_stack),
+                        batch_input=[
+                            serializer.deserialize(ev) for ev in attempt.batch_input
+                        ]
+                        if attempt.batch_input is not None
+                        else None,
                     )
                 )
 
@@ -491,6 +510,10 @@ class EventAttempt:
     recovery_counts: dict[str, int] = field(default_factory=dict)
     # Batch lineage stack of the event being processed (innermost id last).
     batch_stack: tuple[str, ...] = field(default_factory=tuple)
+    # Closed-batch collect payload. Normal event attempts leave this unset; when
+    # a list[E] collect waits behind num_workers capacity, this carries the
+    # already-buffered batch until the worker slot opens.
+    batch_input: list[Event] | None = None
 
 
 @dataclass()
