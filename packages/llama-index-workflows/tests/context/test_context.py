@@ -63,7 +63,7 @@ def internal_ctx(workflow: Workflow) -> Context:
     queues = AsyncioAdapterQueues(
         run_id=run_id,
         init_state=init_state,
-        state_stores={(): InMemoryStateStore(DictState())},
+        state_store=InMemoryStateStore(DictState()),
     )
     runtime._queues[run_id] = queues
     workflow._runtime = runtime

@@ -9,7 +9,7 @@ from typing_extensions import TypeVar
 
 from workflows.context.context_types import MODEL_T
 from workflows.context.serializers import JsonSerializer
-from workflows.context.state_store import CHILD_STATES_KEY, StateStore
+from workflows.context.state_store import StateStore, build_namespaced_state
 from workflows.errors import WorkflowRuntimeError
 from workflows.events import StopEvent
 from workflows.runtime.types.internal_state import BrokerState
@@ -106,11 +106,14 @@ class ExternalContext(Generic[MODEL_T, RunResultT]):
 
     @property
     def store(self) -> StateStore[MODEL_T]:
-        """Access workflow state store."""
-        state_store = self._external_adapter.get_state_store()
-        if state_store is None:
+        """Access workflow state store (the root namespace's view)."""
+        underlying = self._external_adapter.get_underlying_store()
+        if underlying is None:
             raise RuntimeError("State store not available from adapter")
-        return state_store  # type: ignore[return-value]
+        namespaced = build_namespaced_state(
+            self._workflow, underlying, self._serializer
+        )
+        return namespaced.view(())  # type: ignore[return-value]
 
     def send_event(self, message: Event, step: str | None = None) -> None:
         """Send an event into the workflow."""
@@ -160,26 +163,17 @@ class ExternalContext(Generic[MODEL_T, RunResultT]):
         """Serialize context state for persistence."""
         active_serializer = serializer or self._serializer
 
-        # Fetch state store(s) from adapter and serialize. When the adapter
-        # partitions state by namespace (child workflows), nest each child's
-        # payload under a reserved key in the root payload so the whole tree
+        # Serialize the run's whole namespace tree from the single underlying
+        # store. Core owns the format: a childless run stays flat; a child-ful
+        # run nests each child's payload under the reserved key so the whole tree
         # round-trips through the single ``SerializedContext.state`` dict.
         state_data: dict[str, Any] = {}
-        all_stores = self._external_adapter.get_all_state_stores()
-        if all_stores is None:
-            root_store = self._external_adapter.get_state_store()
-            all_stores = {(): root_store} if root_store is not None else {}
-
-        root_store = all_stores.get(())
-        if root_store is not None:
-            state_data = root_store.to_dict(active_serializer)
-            child_payloads = {
-                "/".join(namespace): store.to_dict(active_serializer)
-                for namespace, store in all_stores.items()
-                if namespace != ()
-            }
-            if child_payloads:
-                state_data[CHILD_STATES_KEY] = child_payloads
+        underlying = self._external_adapter.get_underlying_store()
+        if underlying is not None:
+            namespaced = build_namespaced_state(
+                self._workflow, underlying, active_serializer
+            )
+            state_data = namespaced.serialize_tree(active_serializer)
 
         # Get the broker state
         broker_state = self._state

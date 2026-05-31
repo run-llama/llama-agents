@@ -21,6 +21,7 @@ from llama_index_instrumentation.dispatcher import (
 from llama_index_instrumentation.events.span import SpanDropEvent
 from llama_index_instrumentation.span import active_span_id
 from workflows._event_summary import summarize_event
+from workflows.context.state_store import StateStore
 from workflows.decorators import P, StepConfig
 from workflows.errors import WorkflowCancelledByUser, WorkflowRuntimeError
 from workflows.events import (
@@ -112,6 +113,7 @@ class StepWorkerFunction(Protocol):
         workflow: Workflow,
         retry: RetryAttempt = RetryAttempt(),
         namespace: tuple[str, ...] = (),
+        state_store: StateStore[Any] | None = None,
     ) -> Awaitable[list[StepFunctionResult]]: ...
 
 
@@ -168,10 +170,13 @@ def as_step_worker_function(
         workflow: Workflow,
         retry: RetryAttempt = RetryAttempt(),
         namespace: tuple[str, ...] = (),
+        state_store: StateStore[Any] | None = None,
     ) -> list[StepFunctionResult]:
         from workflows.context.context import Context
 
-        internal_context = Context._create_internal(workflow=workflow)
+        internal_context = Context._create_internal(
+            workflow=workflow, state_store=state_store
+        )
         returns = Returns(return_values=[])
 
         token = StepWorkerStateContextVar.set(

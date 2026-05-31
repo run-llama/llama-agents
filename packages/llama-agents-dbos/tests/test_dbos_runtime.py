@@ -27,10 +27,12 @@ from llama_agents.server._store.sqlite.sqlite_state_store import SqliteStateStor
 from pydantic import Field
 from sqlalchemy.engine import Engine
 from workflows.context import Context
+from workflows.context.serializers import JsonSerializer
 from workflows.context.state_store import (
     CHILD_STATES_KEY,
     ROOT_STATE_KEY,
     DictState,
+    build_namespaced_state,
 )
 from workflows.decorators import step
 from workflows.events import Event, StartEvent, StopEvent
@@ -65,7 +67,7 @@ def test_postgres_adapter_uses_resolved_pool_for_sync_state_store() -> None:
         resolved_pool=pool,
     )
 
-    state_store = adapter.get_state_store()
+    state_store = adapter.get_underlying_store()
 
     assert isinstance(state_store, PostgresStateStore)
     assert state_store._pool is pool
@@ -190,7 +192,7 @@ async def test_internal_adapter_run_id_matches(dbos_runtime: DBOSRuntime) -> Non
             internal_adapter = dbos_runtime.get_internal_adapter(self)
             captured_ids["adapter_run_id"] = internal_adapter.run_id
 
-            store = internal_adapter.get_state_store()
+            store = internal_adapter.get_underlying_store()
             captured_ids["state_store_found"] = store is not None
 
             return StopEvent(result="done")
@@ -244,12 +246,12 @@ async def test_state_store_lazy_creation(dbos_runtime: DBOSRuntime) -> None:
             internal_adapter = dbos_runtime.get_internal_adapter(self)
 
             # First call should create the store
-            store1 = internal_adapter.get_state_store()
+            store1 = internal_adapter.get_underlying_store()
             store_info["first_store_id"] = id(store1)
             store_info["first_store_exists"] = store1 is not None
 
             # Second call should return the same store
-            store2 = internal_adapter.get_state_store()
+            store2 = internal_adapter.get_underlying_store()
             store_info["second_store_id"] = id(store2)
             store_info["same_store"] = store1 is store2
 
@@ -602,6 +604,53 @@ async def test_child_state_durable_in_nested_blob_sqlite(
             return await store.get_state()
 
         await _assert_child_state_durable_round_trip(runtime, _read_blob)
+    finally:
+        with suppress(Exception):
+            await runtime.destroy()
+        DBOS.destroy()
+
+
+@pytest.mark.asyncio
+async def test_child_ful_external_serialization_surfaces_whole_tree_sqlite(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """The DBOS external adapter surfaces the whole child tree for serialization.
+
+    Previously ``ExternalDBOSAdapter`` exposed no state store, so a child-ful
+    run's portable ``Context.to_dict`` dropped every child slot. Now it vends the
+    run's single durable store, and core's lens serializes the whole tree: the
+    root payload plus a per-namespace entry under ``__child_states__``.
+    """
+    db_file = tmp_path_factory.mktemp("dbos_ext_tree") / "ext_tree.sqlite3"
+    system_db_url = f"sqlite+pysqlite:///{db_file}?check_same_thread=false"
+    DBOS.destroy()
+    DBOS(
+        config={
+            "name": "workflows-dbos-ext-tree-sqlite",
+            "system_database_url": system_db_url,
+            "run_admin_server": False,
+        }  # type: ignore[arg-type]
+    )
+    runtime = DBOSRuntime(polling_interval_sec=0.01)
+    try:
+        wf = _TopWithGrandchild(
+            mid=_StateMid(grand=_StateGrandchild()), runtime=runtime
+        )
+        await runtime.launch()
+        handler = wf.run()
+        run_id = handler.run_id
+        assert await handler == "ok"
+
+        external = runtime.get_external_adapter(run_id)
+        underlying = external.get_underlying_store()
+        assert underlying is not None
+        serializer = JsonSerializer()
+        tree = build_namespaced_state(wf, underlying, serializer).serialize_tree(
+            serializer
+        )
+        # The whole tree is surfaced: a child-ful run nests every child namespace.
+        child_states = tree[CHILD_STATES_KEY]
+        assert set(child_states) == {"mid", "mid/grand"}
     finally:
         with suppress(Exception):
             await runtime.destroy()

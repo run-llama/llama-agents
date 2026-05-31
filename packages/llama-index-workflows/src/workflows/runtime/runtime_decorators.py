@@ -135,8 +135,8 @@ class BaseInternalRunAdapterDecorator(InternalRunAdapter):
     async def close(self) -> None:
         await self._decorated.close()
 
-    def get_state_store(self) -> StateStore[Any] | None:
-        return self._decorated.get_state_store()
+    def get_underlying_store(self) -> StateStore[Any] | None:
+        return self._decorated.get_underlying_store()
 
     async def finalize_step(self) -> None:
         await self._decorated.finalize_step()
@@ -188,5 +188,5 @@ class BaseExternalRunAdapterDecorator(ExternalRunAdapter):
     async def cancel(self) -> None:
         await self._decorated.cancel()
 
-    def get_state_store(self) -> StateStore[Any] | None:
-        return self._decorated.get_state_store()
+    def get_underlying_store(self) -> StateStore[Any] | None:
+        return self._decorated.get_underlying_store()

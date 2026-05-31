@@ -182,12 +182,16 @@ class InternalRunAdapter(ABC):
         """
         pass
 
-    def get_state_store(self) -> StateStore[Any] | None:
+    def get_underlying_store(self) -> StateStore[Any] | None:
         """
-        Get the state store for this workflow run.
+        Get the single per-run durable store backing this run's state.
 
-        Returns the state store from the runtime, or None if not initialized.
-        Default implementation returns None.
+        This is the dumb blob-persister for the run -- one in-memory/sqlite/
+        postgres ``StateStore``. Namespace routing (slicing the blob per child,
+        the flat-vs-nested gate) is owned by core
+        (:func:`workflows.context.state_store.build_namespaced_state`), which
+        wraps this store; adapters expose only the store. Returns ``None`` if not
+        initialized. Default implementation returns ``None``.
         """
         return None
 
@@ -344,14 +348,12 @@ class ExternalRunAdapter(ABC):
         """
         return None
 
-    def get_all_state_stores(
-        self,
-    ) -> dict[tuple[str, ...], StateStore[Any]] | None:
-        """All per-namespace state stores for this run (``()`` is root).
+    def get_underlying_store(self) -> StateStore[Any] | None:
+        """The single per-run durable store backing this run's state.
 
-        Used by ``Context.to_dict`` to serialize a child-workflow tree's state in
-        one blob. Adapters that don't partition state by namespace return
-        ``None``, and the caller falls back to the single root store.
+        Mirrors :meth:`InternalRunAdapter.get_underlying_store`. ``Context.to_dict``
+        wraps this with core's namespace lens to serialize the whole child tree.
+        Default implementation returns ``None``.
         """
         return None
 

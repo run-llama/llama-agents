@@ -861,8 +861,27 @@ class NamespacedStateStores:
         self.state_types = state_types
         self._views: dict[tuple[str, ...], _NamespaceStateView[Any]] = {}
 
+    @property
+    def is_single_namespace(self) -> bool:
+        """Whether this run is childless (only the root namespace exists).
+
+        A childless run keeps the flat serialized format: ``underlying`` *is* the
+        root store, so ``view(())`` resolves to it directly rather than slicing a
+        ``__root__`` slot. This is the one sanctioned home of the flat-vs-nested
+        gate (see :func:`build_namespaced_state`).
+        """
+        return len(self.state_types) <= 1
+
     def view(self, namespace: tuple[str, ...]) -> StateStore[Any]:
-        """Return the cached state-store view for ``namespace``."""
+        """Return the cached state-store view for ``namespace``.
+
+        For a single-namespace (childless) run the underlying store is returned
+        directly so its serialized form stays the flat ``InMemorySerializedState``
+        contract. For a child-ful run each namespace gets a sliced view over the
+        shared blob.
+        """
+        if self.is_single_namespace:
+            return self.underlying
         view = self._views.get(namespace)
         if view is None:
             state_type = self.state_types.get(namespace, DictState)
@@ -872,4 +891,146 @@ class NamespacedStateStores:
 
     def all_views(self) -> dict[tuple[str, ...], StateStore[Any]]:
         """Return a view for every known namespace (for whole-tree ``to_dict``)."""
+        if self.is_single_namespace:
+            return {(): self.underlying}
         return {ns: self.view(ns) for ns in self.state_types}
+
+    def serialize_tree(self, serializer: BaseSerializer) -> dict[str, Any]:
+        """Serialize the whole namespace tree into one ``SerializedContext.state`` dict.
+
+        Childless runs serialize byte-identically to a plain store (flat
+        ``InMemorySerializedState``). Child-ful runs emit the root namespace's
+        payload at the top level with each child's payload nested under
+        :data:`CHILD_STATES_KEY` (a "/"-joined namespace path -> per-slot payload).
+
+        For durable backends the per-slot payload is a store reference (the actual
+        state lives in the one row, reconnected by ``run_id`` on resume); for the
+        in-memory backend it is the slot's real data.
+        """
+        if self.is_single_namespace:
+            return self.underlying.to_dict(serializer)
+
+        underlying_payload = self.underlying.to_dict(serializer)
+        store_type = underlying_payload.get("store_type")
+        if store_type in (None, "in_memory"):
+            # In-memory underlying: the payload wraps the whole DictState blob,
+            # whose slots are per-namespace InMemorySerializedState dicts encoded
+            # by the serializer. Decode them so each slot serializes deliberately
+            # (per-slot) rather than leaning on the whole-blob reference.
+            blob_data = underlying_payload.get("state_data", {}).get("_data", {})
+            root_encoded = blob_data.get(ROOT_STATE_KEY)
+            children_encoded = blob_data.get(CHILD_STATES_KEY)
+            root_payload = (
+                serializer.deserialize(root_encoded)
+                if root_encoded is not None
+                else None
+            )
+            children = (
+                serializer.deserialize(children_encoded)
+                if children_encoded is not None
+                else {}
+            )
+            if root_payload:
+                result = dict(root_payload)
+            else:
+                result = create_in_memory_payload(
+                    self.state_types.get((), DictState)(), serializer
+                ).model_dump()
+            if children:
+                result[CHILD_STATES_KEY] = children
+            return result
+
+        # Durable underlying: every slot resolves to the same row reference.
+        result = dict(underlying_payload)
+        child_refs = {
+            "/".join(ns): underlying_payload for ns in self.state_types if ns != ()
+        }
+        if child_refs:
+            result[CHILD_STATES_KEY] = child_refs
+        return result
+
+
+def namespaced_seed_blob(serialized_state: dict[str, Any] | None) -> DictState | None:
+    """Convert a portable nested ``ctx.to_dict`` blob into a ``DictState`` seed row.
+
+    Only in-memory nested blobs (those carrying :data:`CHILD_STATES_KEY`) need
+    explicit seeding into the single durable row; a persisted reference already
+    has its row. Returns the ``DictState`` to write, or ``None`` when no seeding
+    applies (childless payload, persisted reference, or empty).
+
+    This is the single owner of the seed reconvert, shared by every runtime.
+    """
+    if not serialized_state:
+        return None
+    if serialized_state.get("store_type") not in (None, "in_memory"):
+        return None
+    if CHILD_STATES_KEY not in serialized_state:
+        return None
+    root_payload = dict(serialized_state)
+    children = root_payload.pop(CHILD_STATES_KEY) or {}
+    blob = DictState()
+    blob[ROOT_STATE_KEY] = root_payload
+    blob[CHILD_STATES_KEY] = children
+    return blob
+
+
+def namespaced_seed_payload(
+    serialized_state: dict[str, Any] | None,
+    serializer: BaseSerializer,
+) -> dict[str, Any] | None:
+    """Serialized-payload shape of :func:`namespaced_seed_blob`.
+
+    Returns the in-memory payload (an ``InMemorySerializedState`` dump of the seed
+    ``DictState`` row) that ``create_state_store`` expects, or ``None`` when no
+    seeding applies.
+    """
+    blob = namespaced_seed_blob(serialized_state)
+    if blob is None:
+        return None
+    return InMemoryStateStore(blob).to_dict(serializer)
+
+
+def namespaced_state_types(
+    root_workflow: "Workflow",
+) -> dict[tuple[str, ...], type[BaseModel]]:
+    """Per-namespace inferred state types for the root workflow's whole tree.
+
+    Walks ``root_workflow._namespace_instances()`` and infers each namespace's
+    state type. ``>1`` entry means the run is child-ful.
+    """
+    return {
+        namespace: infer_state_type(instance)
+        for namespace, instance in root_workflow._namespace_instances().items()
+    }
+
+
+def namespaced_underlying_state_type(root_workflow: "Workflow") -> type[BaseModel]:
+    """State type for the run's single durable underlying store.
+
+    ``DictState`` (the blob) for a child-ful run; the inferred root state type
+    (flat format) for a childless run. This is the type gate the backends apply
+    when vending their per-run store.
+    """
+    if len(root_workflow._namespace_instances()) > 1:
+        return DictState
+    return infer_state_type(root_workflow)
+
+
+def build_namespaced_state(
+    root_workflow: "Workflow",
+    underlying: StateStore[Any],
+    serializer: BaseSerializer,
+) -> NamespacedStateStores:
+    """Build the per-run namespace lens over a single durable ``underlying`` store.
+
+    Core's single entry point for namespace-to-storage routing: folds in the
+    ``_namespace_instances()`` walk and per-namespace ``infer_state_type``. The
+    flat-vs-nested gate lives in the returned :class:`NamespacedStateStores`
+    (``.view(())`` resolves to ``underlying`` for a childless root). The lens is
+    stateless over ``underlying``, so callers may rebuild it freely.
+    """
+    return NamespacedStateStores(
+        underlying=underlying,
+        serializer=serializer,
+        state_types=namespaced_state_types(root_workflow),
+    )

@@ -227,10 +227,15 @@ class Context(Generic[MODEL_T]):
     def _create_internal(
         cls,
         workflow: Workflow,
+        state_store: StateStore[MODEL_T] | None = None,
     ) -> Context[MODEL_T]:
         """Create a Context directly in internal face state.
 
         Requires a current run context (via with_current_run_id) to be set.
+
+        ``state_store`` is the per-namespace view threaded in by the control loop
+        for a step; omitted for the run-level context, where ``store`` resolves
+        the root view on demand.
         """
         internal_adapter = workflow._runtime.get_internal_adapter(workflow)
         new_ctx = cast(Context[MODEL_T], object.__new__(cls))
@@ -239,6 +244,7 @@ class Context(Generic[MODEL_T]):
             InternalContext(
                 internal_adapter=internal_adapter,
                 workflow=workflow,
+                state_store=state_store,
             ),
         )
         return new_ctx

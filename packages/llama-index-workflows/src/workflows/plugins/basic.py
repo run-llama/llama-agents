@@ -18,12 +18,10 @@ from llama_index_instrumentation import get_dispatcher
 
 from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import (
-    CHILD_STATES_KEY as _CHILD_STATES_KEY,
-)
-from workflows.context.state_store import (
     InMemoryStateStore,
     StateStore,
-    infer_state_type,
+    namespaced_seed_blob,
+    namespaced_underlying_state_type,
 )
 from workflows.errors import WorkflowRuntimeError
 from workflows.events import Event, StartEvent, StopEvent
@@ -39,7 +37,6 @@ from workflows.runtime.types.plugin import (
     WaitResultTick,
     WaitResultTimeout,
 )
-from workflows.runtime.types.results import StepWorkerStateContextVar
 from workflows.runtime.types.step_function import (
     as_step_worker_functions,
     create_workflow_run_function,
@@ -63,15 +60,16 @@ class AsyncioAdapterQueues:
         self,
         run_id: str,
         init_state: BrokerState,
-        state_stores: dict[tuple[str, ...], StateStore[Any]] | None = None,
+        state_store: StateStore[Any] | None = None,
     ):
         self.run_id = run_id
         self.init_state = init_state
         self.ticks: list[WorkflowTick] = []
-        # One state store per namespace (``()`` is the root/parent store). Each
-        # child workflow gets its own store so its state is isolated from the
-        # parent's and may use a different typed model.
-        self.state_stores: dict[tuple[str, ...], StateStore[Any]] = state_stores or {}
+        # The single per-run durable (here in-memory) store. For a child-ful run
+        # this is a ``DictState`` blob holding the whole tree; core's namespace
+        # lens slices it per child. For a childless run it is the typed root
+        # store (flat format). ``None`` until run_workflow builds it.
+        self.state_store: StateStore[Any] | None = state_store
 
     # created lazily via cached_property for Python 3.14+ compatibility (they require a running event loop)
     @functools.cached_property
@@ -140,17 +138,8 @@ class InternalAsyncioAdapter(InternalRunAdapter, SnapshottableAdapter):
     def replay(self) -> list[WorkflowTick]:
         return self._queues.ticks
 
-    def get_state_store(self) -> StateStore[Any] | None:
-        # Select the store for the step currently executing. A child step runs
-        # under its namespace (set on StepWorkerContext), so it sees its own
-        # store; root steps (and any caller outside a step) get the root store.
-        namespace: tuple[str, ...] = ()
-        try:
-            namespace = StepWorkerStateContextVar.get().namespace
-        except LookupError:
-            pass
-        stores = self._queues.state_stores
-        return stores.get(namespace) or stores.get(())
+    def get_underlying_store(self) -> StateStore[Any] | None:
+        return self._queues.state_store
 
 
 class ExternalAsyncioAdapter(
@@ -190,13 +179,8 @@ class ExternalAsyncioAdapter(
     def replay(self) -> list[WorkflowTick]:
         return self._queues.ticks
 
-    def get_state_store(self) -> StateStore[Any] | None:
-        # External/handler access is always the root namespace store.
-        return self._queues.state_stores.get(())
-
-    def get_all_state_stores(self) -> dict[tuple[str, ...], StateStore[Any]]:
-        """All per-namespace stores, for whole-tree serialization (``to_dict``)."""
-        return dict(self._queues.state_stores)
+    def get_underlying_store(self) -> StateStore[Any] | None:
+        return self._queues.state_store
 
     async def get_result(self) -> StopEvent:
         return await self._queues.complete
@@ -296,33 +280,26 @@ class BasicRuntime(Runtime):
 
         registered = self.get_or_register(workflow)
 
-        # Build one state store per namespace (root + each child). Child payloads
-        # ride under a reserved key in the root serialized state so the whole
-        # tree round-trips through the existing single ``serialized_state`` dict.
+        # Build the single per-run underlying store. Core owns the format gate:
+        # a child-ful run gets one ``DictState`` blob (seeded from the portable
+        # nested payload on resume); a childless run gets the typed root store
+        # (flat format). The namespace lens slices the blob per child at access.
         active_serializer = serializer or JsonSerializer()
-        root_state = serialized_state
-        child_states: dict[str, dict[str, Any]] = {}
-        if root_state is not None and _CHILD_STATES_KEY in root_state:
-            root_state = dict(root_state)
-            child_states = root_state.pop(_CHILD_STATES_KEY) or {}
-
-        state_stores: dict[tuple[str, ...], StateStore[Any]] = {}
-        for namespace, instance in registered.workflow._namespace_instances().items():
-            payload = (
-                root_state if namespace == () else child_states.get("/".join(namespace))
+        seed_blob = namespaced_seed_blob(serialized_state)
+        if seed_blob is not None:
+            underlying: StateStore[Any] = InMemoryStateStore(seed_blob)
+        elif serialized_state:
+            underlying = InMemoryStateStore.from_dict(
+                serialized_state, active_serializer
             )
-            if payload:
-                state_stores[namespace] = InMemoryStateStore.from_dict(
-                    payload, active_serializer
-                )
-            else:
-                state_stores[namespace] = InMemoryStateStore(
-                    infer_state_type(instance)()
-                )
+        else:
+            underlying = InMemoryStateStore(
+                namespaced_underlying_state_type(registered.workflow)()
+            )
 
         # might want to lock this better. Unlikely race condition if you spam with the same run_id.
         queues = self._get_or_create_queues(run_id, init_state)
-        queues.state_stores = state_stores
+        queues.state_store = underlying
 
         # Capture propagation context (otel trace, instrument tags, etc.)
         # BEFORE creating the task — contextvars won't be inherited.

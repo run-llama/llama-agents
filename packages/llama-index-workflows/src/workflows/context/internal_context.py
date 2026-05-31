@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Coroutine, Generic, TypeVar, cast
 
 from workflows.context.context_types import MODEL_T
-from workflows.context.state_store import StateStore
+from workflows.context.serializers import JsonSerializer
+from workflows.context.state_store import StateStore, build_namespaced_state
 from workflows.errors import WorkflowRuntimeError
 from workflows.events import _set_event_origin_namespace
 from workflows.retry_policy import RetryInfo
@@ -51,9 +52,14 @@ class InternalContext(Generic[MODEL_T]):
         self,
         internal_adapter: InternalRunAdapter,
         workflow: Workflow,
+        state_store: StateStore[Any] | None = None,
     ) -> None:
         self._internal_adapter = internal_adapter
         self._workflow = workflow
+        # The per-namespace state view threaded in by the control loop for a
+        # step. ``None`` outside a step (e.g. the run-level context); ``store``
+        # then resolves the root view on demand from the underlying store.
+        self._state_store = state_store
         self._workers = []
 
     def _execute_task(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
@@ -110,11 +116,21 @@ class InternalContext(Generic[MODEL_T]):
 
     @property
     def store(self) -> StateStore[MODEL_T]:
-        """Access workflow state store."""
-        state_store = self._internal_adapter.get_state_store()
-        if state_store is None:
+        """Access workflow state store.
+
+        Inside a step the per-namespace view is threaded in at construction. For
+        a context built outside a step (no threaded view), resolve the root view
+        on demand from the run's single underlying store.
+        """
+        if self._state_store is not None:
+            return cast("StateStore[MODEL_T]", self._state_store)
+        underlying = self._internal_adapter.get_underlying_store()
+        if underlying is None:
             raise RuntimeError("State store not available from adapter")
-        return state_store  # type: ignore[return-value]
+        namespaced = build_namespaced_state(
+            self._workflow, underlying, JsonSerializer()
+        )
+        return namespaced.view(())  # type: ignore[return-value]
 
     def collect_events(
         self,
