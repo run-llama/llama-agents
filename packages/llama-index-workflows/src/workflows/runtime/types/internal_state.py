@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from workflows.context.context_types import (
+    CURRENT_SERIALIZED_VERSION,
     SerializedBatch,
     SerializedContext,
     SerializedEventAttempt,
@@ -96,9 +97,10 @@ class BrokerState:
     batch_seq: int = 0
     # Open fan-out batches keyed by batch id. A ``Batch`` models its lifecycle as
     # an explicit live set of work items (see ``Batch.live``). A batch closes
-    # exactly when its live set empties. Replaces the old scalar ``batch_pending``
-    # counter, whose unit-mismatch (seeded by member count, decremented per
-    # delivery and per branch) silently truncated batches and hung the run.
+    # exactly when its live set empties. A live set rather than a scalar pending
+    # counter: a counter seeded by member count and decremented per delivery and
+    # per branch suffers a unit mismatch that silently truncates batches and hangs
+    # the run.
     batches: dict[str, Batch] = field(default_factory=dict)
 
     def deepcopy(self) -> BrokerState:
@@ -235,7 +237,7 @@ class BrokerState:
             )
 
         return SerializedContext(
-            version=1,
+            version=CURRENT_SERIALIZED_VERSION,
             state={},  # State is filled separately by the state store
             is_running=self.is_running,
             workers=workers_dict,
@@ -448,7 +450,7 @@ class BrokerConfig:
     timeout: float | None
     catch_error_handlers: dict[str, CatchErrorHandler] = field(default_factory=dict)
     handler_for_step: dict[str, str] = field(default_factory=dict)
-    # Static fan-in binding (L2): fan-out producer step name -> the collect step
+    # Static fan-in binding: fan-out producer step name -> the collect step
     # names bound to the batch level it opens. A collect is bound when its element
     # type is produced at that level (reachable from the producer without crossing
     # into a deeper batch, including types re-entering from nested child collects).
@@ -519,11 +521,11 @@ class InternalStepWorkerState:
     in_progress: list[InProgressState]
     collected_events: dict[str, list[Event]]
     collected_waiters: list[StepWorkerWaiter]
-    # Batch-lineage fan-in (L2): events buffered per fan-out batch id, awaiting
+    # Batch-lineage fan-in: events buffered per fan-out batch id, awaiting
     # the matching TickBatchClosed. Keyed by innermost batch id. Only populated
     # for steps with a ``batch_collect_param``.
     batch_buffers: dict[str, list[Event]] = field(default_factory=dict)
-    # Cardinality release (L3): batch ids this collect step has already released
+    # Cardinality release: batch ids this collect step has already released
     # early via a Take(n) threshold. Late siblings of a fired batch are
     # ignored, and the eventual TickBatchClosed does not re-fire the step.
     batch_fired: set[str] = field(default_factory=set)

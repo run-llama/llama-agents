@@ -10,6 +10,15 @@ from workflows.events import SerializableOptionalException
 
 MODEL_T = TypeVar("MODEL_T", bound=BaseModel, default=DictState)  # type: ignore[reportGeneralTypeIssues]
 
+# Serialization format version.
+#   v0: legacy nested-JSON-string format (SerializedContextV0).
+#   v1: structured format; per-worker ``in_progress`` was a list of event strings.
+#   v2: ``in_progress`` carries full SerializedEventAttempt entries (retry +
+#       batch_stack), plus batch-lineage fields (batch_seq, batches,
+#       batch_buffers, batch_fired). Required for fan-out/fan-in to resume
+#       without dropping a member's batch lineage.
+CURRENT_SERIALIZED_VERSION = 2
+
 
 class SerializedContextV0(BaseModel):
     """
@@ -124,14 +133,14 @@ class SerializedStepWorkerState(BaseModel):
     collected_events: dict[str, list[str]] = Field(default_factory=dict)
     # Active waiters created by ctx.wait_for_event()
     collected_waiters: list[SerializedWaiter] = Field(default_factory=list)
-    # Batch-lineage fan-in buffers (L2), keyed by batch id -> [serialized event, ...]
+    # Batch-lineage fan-in buffers, keyed by batch id -> [serialized event, ...]
     batch_buffers: dict[str, list[str]] = Field(default_factory=dict)
-    # Batch ids released early via a Take cardinality (L3).
+    # Batch ids released early via a Take cardinality.
     batch_fired: list[str] = Field(default_factory=list)
 
 
 class SerializedBatch(BaseModel):
-    """Serialized representation of an open fan-out batch (L2)."""
+    """Serialized representation of an open fan-out batch."""
 
     batch_id: str
     producer: str
@@ -146,8 +155,8 @@ class SerializedContext(BaseModel):
     This format better represents BrokerState needs including retry information and waiter state.
     """
 
-    # Version marker to distinguish from V0
-    version: int = Field(default=1)
+    # Serialization format version. See CURRENT_SERIALIZED_VERSION.
+    version: int = Field(default=CURRENT_SERIALIZED_VERSION)
 
     # Serialized state store payload (same format as V0)
     state: dict[str, Any] = Field(default_factory=dict)
@@ -159,12 +168,12 @@ class SerializedContext(BaseModel):
     # Maps step_name -> SerializedStepWorkerState
     workers: dict[str, SerializedStepWorkerState] = Field(default_factory=dict)
 
-    # Monotonic batch-id counter (L2). Persisted so a resumed run keeps minting
+    # Monotonic batch-id counter. Persisted so a resumed run keeps minting
     # unique, deterministic batch ids.
     batch_seq: int = Field(default=0)
-    # Open fan-out batches (L2), keyed by batch id. Each carries its producer,
+    # Open fan-out batches, keyed by batch id. Each carries its producer,
     # origin stack, statically-bound collect steps, and the live-set cardinality
-    # used to decide closure. Replaces the old scalar pending-count maps.
+    # used to decide closure.
     batches: dict[str, SerializedBatch] = Field(default_factory=dict)
 
     @staticmethod
@@ -229,19 +238,45 @@ class SerializedContext(BaseModel):
             )
 
         return SerializedContext(
-            version=1,
+            version=CURRENT_SERIALIZED_VERSION,
             state=v0.state,
             is_running=v0.is_running,
             workers=workers,
         )
 
     @staticmethod
+    def from_v1(data: dict[str, Any]) -> "SerializedContext":
+        """Migrate a v1 payload to the current format.
+
+        v1 serialized each worker's ``in_progress`` as a list of event strings.
+        v2 serializes them as full SerializedEventAttempt entries so a resumed
+        run keeps retry counts and batch lineage. The other v2 fields (batch_seq,
+        batches, per-worker batch_buffers/batch_fired, per-attempt batch_stack)
+        are absent in v1 and fall back to their defaults.
+        """
+        migrated = dict(data)
+        migrated["version"] = CURRENT_SERIALIZED_VERSION
+        workers: dict[str, Any] = {}
+        for step_name, worker in (data.get("workers") or {}).items():
+            worker = dict(worker)
+            worker["in_progress"] = [
+                {"event": ev, "attempts": 0, "first_attempt_at": None}
+                if isinstance(ev, str)
+                else ev
+                for ev in worker.get("in_progress", [])
+            ]
+            workers[step_name] = worker
+        migrated["workers"] = workers
+        return SerializedContext.model_validate(migrated)
+
+    @staticmethod
     def from_dict_auto(data: dict[str, Any]) -> "SerializedContext":
-        """Parse a dict as either V0 or V1 format and return V1."""
-        # Check if it has version field
-        if "version" in data and data["version"] == 1:
+        """Parse a dict as V0, v1, or current format and return the current format."""
+        version = data.get("version")
+        if version == CURRENT_SERIALIZED_VERSION:
             return SerializedContext.model_validate(data)
-        else:
-            # Assume V0 format
-            v0 = SerializedContextV0.model_validate(data)
-            return SerializedContext.from_v0(v0)
+        if version == 1:
+            return SerializedContext.from_v1(data)
+        # No (or older) version marker: assume legacy V0 format.
+        v0 = SerializedContextV0.model_validate(data)
+        return SerializedContext.from_v0(v0)
