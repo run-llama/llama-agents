@@ -179,8 +179,7 @@ class BrokerState:
 
             # Serialize in-progress executions with full retry + batch lineage, so
             # they re-queue on resume WITHOUT losing their batch_stack (the work
-            # item's identity). Dropping it left the restored member unable to
-            # close its batch — a confirmed hang.
+            # item's identity) — a member restored without it can't close its batch.
             in_progress = [
                 SerializedEventAttempt(
                     event=serializer.serialize(ip.event),

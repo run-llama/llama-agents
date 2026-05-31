@@ -125,8 +125,8 @@ class SerializedStepWorkerState(BaseModel):
     # Queue of events waiting to be processed (with retry info)
     queue: list[SerializedEventAttempt] = Field(default_factory=list)
     # Events currently being processed. Serialized with full retry + batch lineage
-    # so a resumed run re-queues them WITHOUT losing their batch_stack (dropping it
-    # was a confirmed hang: the restored member never closed its batch).
+    # so a resumed run re-queues them WITHOUT losing their batch_stack — a member
+    # restored without its lineage can't close its batch.
     in_progress: list[SerializedEventAttempt] = Field(default_factory=list)
     # Collected events for ctx.collect_events(), keyed by buffer_id -> [event, ...]
     # Events are serialized strings
