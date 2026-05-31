@@ -432,24 +432,15 @@ async def test_send_event_into_all_collect_fires() -> None:
 
 
 # ---------------------------------------------------------------------------
-# send_event from INSIDE a fan-out batch into a same-level typed collect.
-# A fan-out member's birth is counted at the producing step's resolve, but a
-# send_event member is only counted when its own TickAddEvent is processed —
-# which can land after the eagerly-counted returned members have already driven
-# the batch's live set to zero and closed it. The send_evented member's +1/-1
-# then both no-op against the closed batch, so it is silently dropped (or, on a
-# different interleaving, strands and the run hangs). The plan lists this as
-# "designed out (#14)"; it is not. A correct fix counts a send_event member's
-# birth eagerly at the emitting step's resolve (like a return value), not lazily
-# at routing. xfail(strict) so it flips green the moment that lands.
+# send_event from INSIDE a fan-out batch into a same-level typed collect. A
+# send_event member's birth is counted eagerly at the emitting step's resolve
+# (like a returned event), so the batch can't close on the eager returns before
+# the send_event member is registered. A collect that buffers a member under a
+# batch also fires when that batch closes, even when no static return type bound
+# it. (Previously the member was dropped, or the run hung.)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="send_event member born too late: batch closes on eager returns before "
-    "the lazily-counted send_event member is registered; member dropped/hangs",
-    strict=True,
-)
 async def test_send_event_extra_member_into_batch_join_not_lost() -> None:
     """A branch that returns one member AND send_events another keeps both."""
 
@@ -472,11 +463,6 @@ async def test_send_event_extra_member_into_batch_join_not_lost() -> None:
     assert result == [0, 1, 2, 99], result
 
 
-@pytest.mark.xfail(
-    reason="pure send_event from inside a batch into a typed collect: the collect "
-    "is neither statically bound nor flushed (it carries a batch stack), so it hangs",
-    strict=True,
-)
 async def test_send_event_only_into_batch_join_fires() -> None:
     """Members produced solely via send_event from a batch branch still join."""
 

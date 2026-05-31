@@ -73,6 +73,7 @@ from workflows.runtime.types.results import (
     DeleteCollectedEvent,
     DeleteWaiter,
     RetryAttempt,
+    SentEvent,
     StepWorkerFailed,
     StepWorkerResult,
     StepWorkerState,
@@ -1135,6 +1136,11 @@ def _process_step_result_tick(
                 item = next(filter(lambda w: w.waiter_id == to_remove, waiters), None)
                 if item is not None:
                     waiters.remove(item)
+        elif isinstance(result, SentEvent):
+            # Batched send_event birth: counted below as a same-level successor
+            # of this work item. The event itself routes via its own TickAddEvent
+            # (batch_counted=True); nothing to do in this per-result loop.
+            pass
         else:
             raise ValueError(f"Unknown result type: {type(result)}")
 
@@ -1160,6 +1166,23 @@ def _process_step_result_tick(
         not did_complete_step or scheduled_retry or failing_run or terminal_run
     )
 
+    # Eager live-set birth for batched ``ctx.send_event`` emissions (L2). Each
+    # SentEvent inherits the emitting work item's trigger stack, so it is a
+    # same-level successor in the SAME enclosing batch. Counting it here — at the
+    # producing step's resolve — keeps the batch open until the member is
+    # registered; the member's own TickAddEvent arrives batch_counted=True and is
+    # not re-counted at routing. A targeted send is one work item; an untargeted
+    # send is one per accepting step.
+    sent_successors = 0
+    if not skip_accounting:
+        for sent in tick.result:
+            if not isinstance(sent, SentEvent):
+                continue
+            if sent.step_name is not None:
+                sent_successors += 1
+            else:
+                sent_successors += _count_accepting_steps(state, type(sent.event))
+
     if not skip_accounting and is_fan_out and fan_out_batch_id is not None:
         # (a) Fan-out descent. Open the child batch B'. Its live set is seeded
         # with one work item per emitted member per accepting step. The enclosing
@@ -1177,17 +1200,26 @@ def _process_step_result_tick(
             bound_collects=bound_collects,
             live=seed,
         )
-        commands.extend(_apply_live_delta(state, enclosing, len(bound_collects) - 1))
+        # The producer's work item is replaced by collect placeholders; any
+        # batched send_event it emitted lands in the enclosing batch as well.
+        commands.extend(
+            _apply_live_delta(
+                state, enclosing, len(bound_collects) - 1 + sent_successors
+            )
+        )
         if seed == 0:
             commands.extend(_close_batch(state, fan_out_batch_id))
     elif not skip_accounting:
         # (b) Same-level resolution (1:1 step, or a collect step firing its
         # summary). Remove this work item and add its same-level successors: one
-        # work item per accepting step per emitted event. A step that returns
-        # None / sends nothing adds zero successors and simply leaves the set.
+        # work item per accepting step per emitted event (returned or
+        # batched-send_evented). A step that returns None / sends nothing adds
+        # zero successors and simply leaves the set.
         same_level = [ev for ev in emitted_events if not isinstance(ev, StopEvent)]
         successors = sum(_count_accepting_steps(state, type(ev)) for ev in same_level)
-        commands.extend(_apply_live_delta(state, enclosing, successors - 1))
+        commands.extend(
+            _apply_live_delta(state, enclosing, successors + sent_successors - 1)
+        )
 
     is_completed = len([x for x in commands if indicates_exit(x)]) > 0
     if step_no_longer_in_progress:
@@ -1317,19 +1349,12 @@ def _process_add_event_tick(
                 )
                 commands.extend(subcommands)
 
-    # Live-set birth for ctx.send_event events. Reducer-emitted events (1:1
-    # outputs, fan-out members, retries, catch_error routing) already had their
-    # work items counted at the producing step's resolve (batch_counted=True). A
-    # send_event arrives uncounted, so register its work items here — one per
-    # accepting step against its batch — matching the resolve-time pre-count. The
-    # collect-delivery and step-resolve removals below balance it back out.
-    batch_top = tick.batch_stack[-1] if tick.batch_stack else None
-    if not tick.batch_counted and batch_top in state.batches:
-        commands.extend(
-            _apply_live_delta(
-                state, batch_top, _count_accepting_steps(state, type(tick.event))
-            )
-        )
+    # Live-set birth for batched events is now counted eagerly at the producing
+    # step's resolve: reducer-emitted events (1:1 outputs, fan-out members,
+    # retries, catch_error routing) and batched ``ctx.send_event`` emissions all
+    # arrive batch_counted=True, so there is nothing to register here. An
+    # unbatched send_event (empty batch_stack) has no enclosing batch and is
+    # handled by the idle-flush path instead.
 
     # Then route to accepting steps, skipping any that were already woken
     # via waiter resolution above.
@@ -1605,7 +1630,22 @@ def _process_batch_closed_tick(
     """
     state = init.deepcopy()
     commands: list[WorkflowCommand] = []
-    for step_name in state.config.fan_in_bindings.get(tick.step_name, ()):
+    bound = state.config.fan_in_bindings.get(tick.step_name, ())
+    # Statically-bound collects fire on close EVEN with an empty buffer (an
+    # all-dropped batch still summarizes up). Plus any collect that actually
+    # received a member tagged with this batch — a type produced only via
+    # ctx.send_event from inside the batch has no static return-producer, so it
+    # is not in fan_in_bindings, yet its buffered members must still join. Such a
+    # runtime-discovered collect fires only because it has members; respect
+    # batch_fired so neither set double-fires.
+    runtime = tuple(
+        name
+        for name, ws in state.workers.items()
+        if name not in bound
+        and ws.config.batch_collect_param is not None
+        and ws.batch_buffers.get(tick.batch_id)
+    )
+    for step_name in (*bound, *runtime):
         worker_state = state.workers.get(step_name)
         if worker_state is None or worker_state.config.batch_collect_param is None:
             continue
