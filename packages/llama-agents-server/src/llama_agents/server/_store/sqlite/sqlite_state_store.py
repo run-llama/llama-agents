@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import json
 import logging
 import sqlite3
 import uuid
@@ -19,12 +18,11 @@ from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import (
     DictState,
     create_cleared_state,
+    decode_seed_state,
     decode_state,
-    deserialize_state_from_dict,
-    encode_state,
+    encode_state_to_str,
     get_by_path,
     merge_state,
-    parse_in_memory_state,
     set_by_path,
 )
 
@@ -83,7 +81,7 @@ class SqliteStateStore(Generic[MODEL_T]):
 
     def _write_in_memory_state(self, serialized_state: dict[str, Any]) -> None:
         """Migrate InMemory-format state into the database."""
-        state = deserialize_state_from_dict(serialized_state, self._serializer)
+        state = decode_seed_state(serialized_state, self._serializer)
         self._save_state(state)  # type: ignore[arg-type]
 
     def _seed_from_serialized(
@@ -119,15 +117,6 @@ class SqliteStateStore(Generic[MODEL_T]):
         finally:
             conn.close()
 
-    def _deserialize_state(
-        self,
-        state_json: str,
-        state_type_name: str | None,
-        state_module: str | None,
-    ) -> MODEL_T:
-        """Deserialize state from JSON string."""
-        return decode_state(state_json, state_type_name, state_module, self._serializer)  # type: ignore[return-value]
-
     def _create_default_state(self) -> MODEL_T:
         return self.state_type()
 
@@ -146,7 +135,7 @@ class SqliteStateStore(Generic[MODEL_T]):
                 self._save_state(state, conn)
                 conn.commit()
                 return state
-            return self._deserialize_state(row[0], row[1], row[2])
+            return decode_state(row[0], row[1], row[2], self._serializer)  # type: ignore[return-value]
         finally:
             conn.close()
 
@@ -159,11 +148,8 @@ class SqliteStateStore(Generic[MODEL_T]):
             conn = self._connect()
         try:
             now = _utc_now().isoformat()
-            state_data, state_type_name, state_module = encode_state(
+            state_json, state_type_name, state_module = encode_state_to_str(
                 state, self._serializer
-            )
-            state_json = (
-                state_data if isinstance(state_data, str) else json.dumps(state_data)
             )
             conn.execute(
                 """
@@ -211,7 +197,7 @@ class SqliteStateStore(Generic[MODEL_T]):
                 conn.commit()
                 return
 
-            current_state = self._deserialize_state(row[0], row[1], row[2])
+            current_state = decode_state(row[0], row[1], row[2], self._serializer)
             merged = merge_state(current_state, state)
             self._save_state(merged, conn)  # type: ignore[arg-type]
             conn.commit()
@@ -280,8 +266,6 @@ class SqliteStateStore(Generic[MODEL_T]):
             )
 
         # InMemory format — migrate data to DB immediately
-        parse_in_memory_state(serialized_state)
-
         effective_run_id = run_id or str(uuid.uuid4())
         if db_path is None:
             raise ValueError("db_path is required for SqliteStateStore.from_dict()")

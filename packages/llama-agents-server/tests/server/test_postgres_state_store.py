@@ -248,7 +248,6 @@ async def test_from_dict_in_memory_format_migrates(pool: asyncpg.Pool) -> None:
         run_id="run-migrate",
         schema=SCHEMA,
     )
-    await store._write_in_memory_state(payload)
     value = await store.get("migrated_key")
     assert value == "migrated_value"
 

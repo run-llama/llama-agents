@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import json
 import logging
 import uuid
 from contextlib import asynccontextmanager
@@ -19,12 +18,11 @@ from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import (
     DictState,
     create_cleared_state,
+    decode_seed_state,
     decode_state,
-    deserialize_state_from_dict,
-    encode_state,
+    encode_state_to_str,
     get_by_path,
     merge_state,
-    parse_in_memory_state,
     set_by_path,
 )
 
@@ -83,21 +81,12 @@ class PostgresStateStore(Generic[MODEL_T]):
         """Lazy lock initialization for Python 3.14+ compatibility."""
         return asyncio.Lock()
 
-    def _deserialize_state(
-        self,
-        state_json: str,
-        state_type_name: str | None,
-        state_module: str | None,
-    ) -> MODEL_T:
-        """Deserialize state from JSON string."""
-        return decode_state(state_json, state_type_name, state_module, self._serializer)  # type: ignore[return-value]
-
     def _create_default_state(self) -> MODEL_T:
         return self.state_type()
 
     async def _write_in_memory_state(self, serialized_state: dict[str, Any]) -> None:
         """Migrate InMemory-format state into the database."""
-        state = deserialize_state_from_dict(serialized_state, self._serializer)
+        state = decode_seed_state(serialized_state, self._serializer)
         await self._save_state(state)  # type: ignore[arg-type]
 
     async def _flush_pending_seed(self) -> None:
@@ -154,9 +143,12 @@ class PostgresStateStore(Generic[MODEL_T]):
                 state = self._create_default_state()
                 await self._save_state(state, conn)
                 return state
-            return self._deserialize_state(
-                row["state_json"], row["state_type"], row["state_module"]
-            )
+            return decode_state(
+                row["state_json"],
+                row["state_type"],
+                row["state_module"],
+                self._serializer,
+            )  # type: ignore[return-value]
         finally:
             if should_release:
                 await self._pool.release(conn)  # type: ignore[arg-type]
@@ -172,11 +164,8 @@ class PostgresStateStore(Generic[MODEL_T]):
             conn = await self._pool.acquire()  # type: ignore[assignment]
         try:
             now = _utc_now()
-            state_data, state_type_name, state_module = encode_state(
+            state_json, state_type_name, state_module = encode_state_to_str(
                 state, self._serializer
-            )
-            state_json = (
-                state_data if isinstance(state_data, str) else json.dumps(state_data)
             )
             await conn.execute(  # type: ignore[union-attr]
                 f"""
@@ -215,8 +204,11 @@ class PostgresStateStore(Generic[MODEL_T]):
                 await self._save_state(state, conn)
                 return
 
-            current_state = self._deserialize_state(
-                row["state_json"], row["state_type"], row["state_module"]
+            current_state = decode_state(
+                row["state_json"],
+                row["state_type"],
+                row["state_module"],
+                self._serializer,
             )
             merged = merge_state(current_state, state)
             await self._save_state(merged, conn)  # type: ignore[arg-type]
@@ -284,9 +276,7 @@ class PostgresStateStore(Generic[MODEL_T]):
                 schema=schema,
             )
 
-        # InMemory format — will need async migration
-        parse_in_memory_state(serialized_state)
-
+        # InMemory format — migrate on first DB access
         effective_run_id = run_id or str(uuid.uuid4())
         store = cls(
             pool=pool,
@@ -295,6 +285,5 @@ class PostgresStateStore(Generic[MODEL_T]):
             serializer=serializer,
             schema=schema,
         )
-        # Note: caller must await store._write_in_memory_state(serialized_state)
-        # since from_dict is synchronous but migration requires async DB access
+        store._pending_seed = (serialized_state, serializer)
         return store

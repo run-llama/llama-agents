@@ -120,9 +120,9 @@ def _resolve_state_type(
     state_type_name: str | None,
     state_module: str | None,
     serializer: BaseSerializer,
-) -> type[BaseModel]:
+) -> type[BaseModel] | None:
     if not state_type_name or not state_module:
-        return DictState
+        return None
 
     qualified_name = f"{state_module}.{state_type_name}"
     validate_qualified_name = getattr(serializer, "_validate_qualified_name", None)
@@ -132,11 +132,11 @@ def _resolve_state_type(
     try:
         resolved = import_module_from_qualified_name(qualified_name)
     except Exception:
-        return DictState
+        return None
 
     if isinstance(resolved, type) and issubclass(resolved, BaseModel):
         return resolved
-    return DictState
+    return None
 
 
 def encode_state(
@@ -155,6 +155,20 @@ def encode_state(
     return state_data, type(state).__name__, type(state).__module__
 
 
+def encode_state_to_str(
+    state: BaseModel,
+    serializer: BaseSerializer,
+    known_unserializable_keys: tuple[str, ...] = KNOWN_UNSERIALIZABLE_KEYS,
+) -> tuple[str, str, str]:
+    """Encode state for durable stores that persist a single string column."""
+    state_data, state_type_name, state_module = encode_state(
+        state, serializer, known_unserializable_keys
+    )
+    if not isinstance(state_data, str):
+        state_data = json.dumps(state_data)
+    return state_data, state_type_name, state_module
+
+
 def decode_state(
     state_data: Any,
     state_type_name: str | None,
@@ -164,14 +178,25 @@ def decode_state(
     """Decode a state model using the persisted type metadata."""
     state_type = _resolve_state_type(state_type_name, state_module, serializer)
 
-    if issubclass(state_type, DictState):
+    if state_type is not None and issubclass(state_type, DictState):
         if isinstance(state_data, str):
             state_data = json.loads(state_data)
         if not isinstance(state_data, dict):
             state_data = {}
         return deserialize_dict_state_data(state_data, serializer)
 
-    return serializer.deserialize(state_data)
+    if state_type is not None:
+        return serializer.deserialize(state_data)
+
+    if isinstance(state_data, str):
+        deserialized = serializer.deserialize(state_data)
+        if isinstance(deserialized, BaseModel):
+            return deserialized
+        state_data = deserialized
+
+    if not isinstance(state_data, dict):
+        state_data = {}
+    return deserialize_dict_state_data(state_data, serializer)
 
 
 def create_in_memory_payload(
@@ -579,10 +604,7 @@ class InMemoryStateStore(Generic[MODEL_T]):
         if not serialized_state:
             return cls(DictState())  # type: ignore[arg-type]
 
-        # Validate it's in_memory format (raises ValueError if not)
-        parse_in_memory_state(serialized_state)
-
-        state_instance = deserialize_state_from_dict(serialized_state, serializer)
+        state_instance = decode_seed_state(serialized_state, serializer)
         return cls(state_instance)  # type: ignore[arg-type]
 
     @asynccontextmanager
@@ -695,6 +717,15 @@ def deserialize_state_from_dict(
         serialized_state.get("state_module"),
         serializer,
     )
+
+
+def decode_seed_state(
+    serialized_state: dict[str, Any],
+    serializer: "BaseSerializer",
+) -> BaseModel:
+    """Validate and decode an in-memory serialized state seed."""
+    parse_in_memory_state(serialized_state)
+    return deserialize_state_from_dict(serialized_state, serializer)
 
 
 def infer_state_type(workflow: "Workflow") -> type[BaseModel]:

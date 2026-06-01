@@ -58,7 +58,6 @@ from typing_extensions import Unpack
 from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import (
     StateStore,
-    deserialize_state_from_dict,
     infer_state_type,
 )
 from workflows.events import Event, StartEvent, StopEvent
@@ -557,9 +556,8 @@ class DBOSRuntime(Runtime):
             workflow: The workflow to run.
             init_state: Initial broker state for the control loop.
             start_event: Optional start event to kick off the workflow.
-            serialized_state: Optional pre-populated state from InMemoryStateStore.to_dict().
-                If provided, this state is written to the database before the workflow
-                starts, allowing workflows to begin with pre-set initial values.
+            serialized_state: Optional state snapshot or durable state handle.
+                If provided, this state is seeded before the workflow starts.
             serializer: Serializer for state data. Defaults to JsonSerializer.
             adapter_state: Optional adapter state (unused for DBOS).
         """
@@ -581,30 +579,13 @@ class DBOSRuntime(Runtime):
             with SetWorkflowID(run_id):
                 # Write initial state to DB before starting workflow (non-blocking to caller)
                 if serialized_state:
-                    if self._dsn is not None:
-                        pool = await self._ensure_pool()
-                        store: StateStore[Any] = PostgresStateStore(
-                            pool=pool,
-                            run_id=run_id,
-                            state_type=infer_state_type(workflow),
-                            serializer=active_serializer,
-                            schema=self._schema,
-                        )
-                    elif self._db_path is not None:
-                        store = SqliteStateStore(
-                            db_path=self._db_path,
-                            run_id=run_id,
-                            state_type=infer_state_type(workflow),
-                            serializer=active_serializer,
-                        )
-                    else:
-                        raise RuntimeError("No pool or db_path configured.")
-                    # Deserialize and save the initial state
-                    state = deserialize_state_from_dict(
+                    store = self.create_workflow_store().create_state_store(
+                        run_id,
+                        infer_state_type(workflow),
                         serialized_state,
                         active_serializer,
                     )
-                    await store.set_state(state)
+                    await store.get_state()
 
                 try:
                     return await DBOS.start_workflow_async(

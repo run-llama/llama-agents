@@ -782,26 +782,32 @@ def test_decode_state_respects_json_serializer_allowed_types() -> None:
         decode_state(state_data, state_type, state_module, restricted_serializer)
 
 
-def test_decode_state_missing_metadata_falls_back_to_dict_state() -> None:
+def test_decode_state_uses_embedded_type_when_metadata_is_stale() -> None:
+    serializer = JsonSerializer()
+    state = TypedTestState(counter=7, name="typed")
+    state_data, _, _ = encode_state(state, serializer)
+
+    result = decode_state(state_data, "MovedState", "missing.module", serializer)
+
+    assert isinstance(result, TypedTestState)
+    assert result.counter == 7
+    assert result.name == "typed"
+
+
+@pytest.mark.parametrize(
+    ("state_type_name", "state_module"),
+    [
+        (None, None),
+        ("MissingState", None),
+    ],
+)
+def test_decode_state_missing_metadata_falls_back_to_dict_state(
+    state_type_name: str | None, state_module: str | None
+) -> None:
     serializer = JsonSerializer()
     state_data = {"_data": {"answer": serializer.serialize(42)}}
 
-    result = decode_state(state_data, None, None, serializer)
-
-    assert isinstance(result, DictState)
-    assert result["answer"] == 42
-
-
-def test_decode_state_null_metadata_falls_back_to_dict_state() -> None:
-    serializer = JsonSerializer()
-    state_data = {"_data": {"answer": serializer.serialize(42)}}
-
-    result = decode_state(
-        state_data,
-        state_type_name=None,
-        state_module=None,
-        serializer=serializer,
-    )
+    result = decode_state(state_data, state_type_name, state_module, serializer)
 
     assert isinstance(result, DictState)
     assert result["answer"] == 42

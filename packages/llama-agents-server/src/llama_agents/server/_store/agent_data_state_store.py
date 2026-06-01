@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import json
 import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Generic, Literal
@@ -17,12 +16,11 @@ from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import (
     DictState,
     create_cleared_state,
+    decode_seed_state,
     decode_state,
-    deserialize_state_from_dict,
-    encode_state,
+    encode_state_to_str,
     get_by_path,
     merge_state,
-    parse_in_memory_state,
     set_by_path,
 )
 
@@ -41,8 +39,8 @@ class _StoredStateRecord(BaseModel):
 
     run_id: str
     data: str
-    state_type: str | None = "DictState"
-    state_module: str | None = "workflows.context.state_store"
+    state_type: str | None = None
+    state_module: str | None = None
 
 
 class AgentDataSerializedState(BaseModel):
@@ -94,14 +92,6 @@ class AgentDataStateStore(Generic[MODEL_T]):
     # State serialization
     # ------------------------------------------------------------------
 
-    def _deserialize_state(
-        self,
-        state_json: str,
-        state_type_name: str | None,
-        state_module: str | None,
-    ) -> MODEL_T:
-        return decode_state(state_json, state_type_name, state_module, self._serializer)  # type: ignore[return-value]
-
     def _create_default_state(self) -> MODEL_T:
         return self.state_type()
 
@@ -144,45 +134,41 @@ class AgentDataStateStore(Generic[MODEL_T]):
             await self._save_state(state)
             return
 
-        parse_in_memory_state(serialized_state)
-        state = deserialize_state_from_dict(serialized_state, serializer)
+        state = decode_seed_state(serialized_state, serializer)
         await self._save_state(state)
+
+    async def _load_existing_state(self) -> MODEL_T | None:
+        if self._cached_state is not None:
+            return self._cached_state.model_copy()
+        record = await self._load_record()
+        if record is None:
+            return None
+        state = decode_state(
+            record.data, record.state_type, record.state_module, self._serializer
+        )  # type: ignore[return-value]
+        self._cached_state = state
+        return state.model_copy()
 
     async def _load_state(self) -> MODEL_T:
         await self._flush_pending_seed()
-        if self._cached_state is not None:
-            return self._cached_state.model_copy()
-        record = await self._load_record()
-        if record is not None:
-            state = self._deserialize_state(
-                record.data, record.state_type, record.state_module
-            )
-            self._cached_state = state
-            return state.model_copy()
-        state = self._create_default_state()
-        await self._save_state(state)
-        return state.model_copy()
+        state = await self._load_existing_state()
+        if state is not None:
+            return state
+        default_state = self._create_default_state()
+        await self._save_state(default_state)
+        return default_state.model_copy()
 
     async def _load_state_or_none(self) -> MODEL_T | None:
         await self._flush_pending_seed()
-        if self._cached_state is not None:
-            return self._cached_state.model_copy()
-        record = await self._load_record()
-        if record is not None:
-            state = self._deserialize_state(
-                record.data, record.state_type, record.state_module
-            )
-            self._cached_state = state
-            return state.model_copy()
-        return None
+        return await self._load_existing_state()
 
     async def _save_state(self, state: BaseModel) -> None:
-        state_data, state_type_name, state_module = encode_state(
+        state_json, state_type_name, state_module = encode_state_to_str(
             state, self._serializer
         )
         record = _StoredStateRecord(
             run_id=self._run_id,
-            data=state_data if isinstance(state_data, str) else json.dumps(state_data),
+            data=state_json,
             state_type=state_type_name,
             state_module=state_module,
         )

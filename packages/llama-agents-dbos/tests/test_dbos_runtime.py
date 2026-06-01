@@ -12,7 +12,7 @@ import asyncio
 from contextlib import suppress
 from types import SimpleNamespace
 from typing import Any, Generator, cast
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import asyncpg
 import pytest
@@ -26,9 +26,13 @@ from llama_agents.server._store.postgres_state_store import PostgresStateStore
 from pydantic import Field
 from sqlalchemy.engine import Engine
 from workflows.context import Context
+from workflows.context.serializers import JsonSerializer
+from workflows.context.state_store import DictState, StateStore
 from workflows.decorators import step
 from workflows.events import Event, StartEvent, StopEvent
+from workflows.runtime.types.internal_state import BrokerState
 from workflows.runtime.types.named_task import WorkerTask
+from workflows.runtime.types.plugin import RegisteredWorkflow
 from workflows.testing import WorkflowTestRunner
 from workflows.workflow import Workflow
 
@@ -286,6 +290,80 @@ async def test_run_workflow_does_not_create_store(dbos_runtime: DBOSRuntime) -> 
         await handler
 
     assert len(call_log) == 1, "run_workflow should be called exactly once"
+
+
+@pytest.mark.asyncio
+async def test_run_workflow_seeds_state_store_from_durable_handle() -> None:
+    class RecordingStateStore:
+        state_type = DictState
+
+        def __init__(self) -> None:
+            self.get_state_called = False
+
+        async def get_state(self) -> DictState:
+            self.get_state_called = True
+            return DictState()
+
+    class RecordingWorkflowStore:
+        def __init__(self) -> None:
+            self.state_store = RecordingStateStore()
+            self.create_state_store_calls: list[tuple[Any, ...]] = []
+
+        def create_state_store(
+            self,
+            run_id: str,
+            state_type: type[Any] | None = None,
+            serialized_state: dict[str, Any] | None = None,
+            serializer: Any = None,
+        ) -> StateStore[Any]:
+            self.create_state_store_calls.append(
+                (run_id, state_type, serialized_state, serializer)
+            )
+            return self.state_store  # type: ignore[return-value]
+
+    class SimpleWf(Workflow):
+        @step
+        async def do_it(self, ev: StartEvent) -> StopEvent:
+            return StopEvent(result="done")
+
+    async def workflow_run_fn(*_: Any) -> None:
+        return None
+
+    runtime = DBOSRuntime(polling_interval_sec=0.01)
+    runtime._dbos_launched = True
+    workflow = SimpleWf()
+    workflow_store = RecordingWorkflowStore()
+    serialized_state = {"store_type": "sqlite", "run_id": "old-run"}
+    serializer = JsonSerializer()
+    fake_handle = AsyncMock()
+
+    with (
+        patch.object(runtime, "create_workflow_store", return_value=workflow_store),
+        patch.object(
+            runtime,
+            "get_registered",
+            return_value=RegisteredWorkflow(
+                workflow=workflow, workflow_run_fn=workflow_run_fn, steps={}
+            ),
+        ),
+        patch(
+            "llama_agents.dbos.runtime.DBOS.start_workflow_async",
+            new=AsyncMock(return_value=fake_handle),
+        ),
+    ):
+        adapter = runtime.run_workflow(
+            "run-1",
+            workflow,
+            BrokerState.from_workflow(workflow),
+            serialized_state=serialized_state,
+            serializer=serializer,
+        )
+        await adapter._ensure_workflow_started()  # type: ignore[attr-defined]
+
+    assert workflow_store.state_store.get_state_called
+    assert workflow_store.create_state_store_calls == [
+        ("run-1", DictState, serialized_state, serializer)
+    ]
 
 
 @pytest.mark.asyncio

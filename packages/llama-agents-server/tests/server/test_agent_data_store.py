@@ -21,6 +21,7 @@ from llama_agents_integration_tests.fake_agent_data import (
     FakeAgentDataBackend,
     create_agent_data_store,
 )
+from pydantic import BaseModel
 from server_test_fixtures import wait_for_passing  # type: ignore[import]
 from workflows.context.serializers import JsonSerializer
 from workflows.context.state_store import DictState, InMemoryStateStore
@@ -29,6 +30,11 @@ from workflows.events import Event, StopEvent
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+class AgentDataCounterState(BaseModel):
+    count: int = 0
+    label: str = "default"
 
 
 @pytest.fixture()
@@ -544,6 +550,38 @@ async def test_create_state_store_reconnects_agent_data_handle_collection(
     )
 
     assert await restored_state.get("token") == "persisted"
+
+
+@pytest.mark.asyncio
+async def test_legacy_agent_data_typed_state_decodes_without_metadata(
+    backend: FakeAgentDataBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    serializer = JsonSerializer()
+    store = create_agent_data_store_with_collection(
+        backend, monkeypatch, collection="handlers"
+    )
+    backend.create(
+        "test-deploy",
+        "handlers_state",
+        {
+            "run_id": "run-legacy-typed",
+            "data": serializer.serialize(
+                AgentDataCounterState(count=7, label="legacy")
+            ),
+        },
+    )
+
+    state_store = store.create_state_store(
+        "run-legacy-typed",
+        state_type=AgentDataCounterState,
+        serializer=serializer,
+    )
+
+    state = await state_store.get_state()
+    assert isinstance(state, AgentDataCounterState)
+    assert state.count == 7
+    assert state.label == "legacy"
 
 
 # ---------------------------------------------------------------------------
