@@ -57,7 +57,7 @@ class InMemorySerializedState(BaseModel):
         return data
 
 
-class StoredStateRecord(BaseModel):
+class _StateRecord(BaseModel):
     """Raw state record loaded and saved by a storage backend."""
 
     data: Any
@@ -66,14 +66,14 @@ class StoredStateRecord(BaseModel):
 
 
 @runtime_checkable
-class StateStorage(Protocol):
+class _StateStorage(Protocol):
     """Internal persistence boundary for workflow state."""
 
-    async def load(self) -> StoredStateRecord | None:
+    async def load(self) -> _StateRecord | None:
         """Load a raw state record, or None when no state exists yet."""
         ...
 
-    async def save(self, record: StoredStateRecord) -> None:
+    async def save(self, record: _StateRecord) -> None:
         """Persist a raw state record."""
         ...
 
@@ -82,32 +82,32 @@ class StateStorage(Protocol):
         ...
 
 
-def record_from_state(
+def _record_from_state(
     state: BaseModel,
     serializer: BaseSerializer,
     known_unserializable_keys: tuple[str, ...] = KNOWN_UNSERIALIZABLE_KEYS,
-) -> StoredStateRecord:
+) -> _StateRecord:
     """Encode a state model into a raw storage record."""
     state_data, state_type_name, state_module = encode_state(
         state, serializer, known_unserializable_keys
     )
-    return StoredStateRecord(
+    return _StateRecord(
         data=state_data,
         state_type=state_type_name,
         state_module=state_module,
     )
 
 
-def string_record_from_state(
+def _string_record_from_state(
     state: BaseModel,
     serializer: BaseSerializer,
     known_unserializable_keys: tuple[str, ...] = KNOWN_UNSERIALIZABLE_KEYS,
-) -> StoredStateRecord:
+) -> _StateRecord:
     """Encode a state model into a storage record with string data."""
     state_data, state_type_name, state_module = encode_state_to_str(
         state, serializer, known_unserializable_keys
     )
-    return StoredStateRecord(
+    return _StateRecord(
         data=state_data,
         state_type=state_type_name,
         state_module=state_module,
@@ -490,20 +490,15 @@ MODEL_T = TypeVar("MODEL_T", bound=BaseModel, default=DictState)  # type: ignore
 
 @runtime_checkable
 class StateStore(Protocol[MODEL_T]):
-    """Protocol defining the async state store interface.
+    """Protocol defining the public async state store interface.
 
     State stores hold a single Pydantic model instance representing global
     workflow state. Implementations must be async-safe and support both
     atomic operations and transactional edits.
 
-    This protocol enables runtime plugins to provide custom state store
-    implementations (e.g., backed by databases, Redis, or external services)
-    while maintaining API compatibility with the default
+    Runtime plugins can provide custom implementations while maintaining API
+    compatibility with the default
     [InMemoryStateStore][workflows.context.state_store.InMemoryStateStore].
-
-    For remote state stores, `to_dict`/`from_dict` should serialize non-secret
-    connection info (e.g., URL, table name) rather than the full state contents,
-    since the actual state lives in the external service.
 
     See Also:
         - [InMemoryStateStore][workflows.context.state_store.InMemoryStateStore]
@@ -537,26 +532,18 @@ class StateStore(Protocol[MODEL_T]):
         ...
 
     def to_dict(self, serializer: "BaseSerializer") -> dict[str, Any]:
-        """Serialize state for persistence."""
-        ...
-
-    async def snapshot(self, serializer: "BaseSerializer") -> dict[str, Any]:
-        """Serialize portable state data."""
-        ...
-
-    def handle(self) -> dict[str, Any]:
-        """Serialize reconnect metadata for durable storage."""
+        """Serialize state for legacy persistence."""
         ...
 
 
-class TypedStateStore(Generic[MODEL_T]):
-    """Typed public StateStore facade over raw storage."""
+class _TypedStateStore(Generic[MODEL_T]):
+    """Typed StateStore facade over raw storage."""
 
     state_type: type[MODEL_T]
 
     def __init__(
         self,
-        storage: StateStorage,
+        storage: _StateStorage,
         state_type: type[MODEL_T],
         serializer: BaseSerializer,
         *,
@@ -598,7 +585,7 @@ class TypedStateStore(Generic[MODEL_T]):
         return state
 
     async def _save_state(self, state: BaseModel) -> None:
-        await self._storage.save(record_from_state(state, self._serializer))
+        await self._storage.save(_record_from_state(state, self._serializer))
 
     async def get_state(self) -> MODEL_T:
         """Return a copy of the current state model."""
@@ -656,23 +643,23 @@ class TypedStateStore(Generic[MODEL_T]):
             state_data=record.data,
         ).model_dump()
 
-    def _sync_snapshot_record(self) -> StoredStateRecord:
+    def _sync_snapshot_record(self) -> _StateRecord:
         raise NotImplementedError("Use await snapshot(serializer) for async storage")
 
 
-class InMemoryStateStorage:
+class _InMemoryStateStorage:
     """Raw in-process storage for workflow state."""
 
-    def __init__(self, record: StoredStateRecord | None = None) -> None:
+    def __init__(self, record: _StateRecord | None = None) -> None:
         self._record = record
 
-    async def load(self) -> StoredStateRecord | None:
+    async def load(self) -> _StateRecord | None:
         return self._record.model_copy(deep=True) if self._record is not None else None
 
-    async def save(self, record: StoredStateRecord) -> None:
+    async def save(self, record: _StateRecord) -> None:
         self._record = record.model_copy(deep=True)
 
-    def load_sync(self) -> StoredStateRecord | None:
+    def load_sync(self) -> _StateRecord | None:
         return self._record.model_copy(deep=True) if self._record is not None else None
 
     def to_handle(self) -> dict[str, Any]:
@@ -686,7 +673,7 @@ class InMemoryStateStorage:
         ).model_dump()
 
 
-class InMemoryStateStore(TypedStateStore[MODEL_T]):
+class InMemoryStateStore(_TypedStateStore[MODEL_T]):
     """
     Default in-memory implementation of the [StateStore][workflows.context.state_store.StateStore] protocol.
 
@@ -731,8 +718,8 @@ class InMemoryStateStore(TypedStateStore[MODEL_T]):
     state_type: type[MODEL_T]
 
     def __init__(self, initial_state: MODEL_T):
-        self._memory_storage = InMemoryStateStorage(
-            StoredStateRecord(
+        self._memory_storage = _InMemoryStateStorage(
+            _StateRecord(
                 data=initial_state,
                 state_type=type(initial_state).__name__,
                 state_module=type(initial_state).__module__,
@@ -770,11 +757,11 @@ class InMemoryStateStore(TypedStateStore[MODEL_T]):
         payload = create_in_memory_payload(state, serializer)
         return payload.model_dump()
 
-    def _sync_snapshot_record(self) -> StoredStateRecord:
+    def _sync_snapshot_record(self) -> _StateRecord:
         record = self._memory_storage.load_sync()
         if record is None:
             state = self.state_type()
-            record = StoredStateRecord(
+            record = _StateRecord(
                 data=state,
                 state_type=type(state).__name__,
                 state_module=type(state).__module__,
@@ -784,7 +771,7 @@ class InMemoryStateStore(TypedStateStore[MODEL_T]):
 
     async def _save_state(self, state: BaseModel) -> None:
         await self._memory_storage.save(
-            StoredStateRecord(
+            _StateRecord(
                 data=state,
                 state_type=type(state).__name__,
                 state_module=type(state).__module__,
@@ -811,7 +798,7 @@ class InMemoryStateStore(TypedStateStore[MODEL_T]):
         if not serialized_state:
             return cls(DictState())  # type: ignore[arg-type]
 
-        state_instance = decode_seed_state(serialized_state, serializer)
+        state_instance = _decode_seed_state(serialized_state, serializer)
         return cls(state_instance)  # type: ignore[arg-type]
 
 
@@ -869,7 +856,7 @@ def deserialize_state_from_dict(
     )
 
 
-def decode_seed_state(
+def _decode_seed_state(
     serialized_state: dict[str, Any],
     serializer: "BaseSerializer",
 ) -> BaseModel:

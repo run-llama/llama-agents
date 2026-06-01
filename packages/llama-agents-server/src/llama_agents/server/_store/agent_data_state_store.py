@@ -10,10 +10,10 @@ from typing import Any, Generic, Literal
 from pydantic import BaseModel
 from typing_extensions import TypeVar
 from workflows.context.serializers import BaseSerializer, JsonSerializer
-from workflows.context.state_store import (
-    DictState,
-    StoredStateRecord,
-    TypedStateStore,
+from workflows.context.state_store import DictState
+from workflows.context.state_store_integration import (
+    StateRecord,
+    StateStoreFacade,
     decode_seed_state,
     string_record_from_state,
 )
@@ -28,7 +28,7 @@ _FIELD_RUN_ID = "run_id"
 _FIELD_DATA = "data"
 
 
-class _StoredStateRecord(BaseModel):
+class _AgentDataStateRecord(BaseModel):
     """Validates the shape persisted in the Agent Data API."""
 
     run_id: str
@@ -45,7 +45,7 @@ class AgentDataSerializedState(BaseModel):
     collection: str = "workflow_state"
 
 
-class AgentDataStateStorage:
+class _AgentDataStateStorage:
     """Raw state storage backed by the LlamaCloud Agent Data API.
 
     Uses a single item in a ``workflow_state`` collection, keyed by ``run_id``.
@@ -62,7 +62,7 @@ class AgentDataStateStorage:
         self._run_id = run_id
         self._collection = collection
         self._item_id: str | None = None
-        self._cached_record: StoredStateRecord | None = None
+        self._cached_record: StateRecord | None = None
 
     @property
     def run_id(self) -> str:
@@ -72,7 +72,7 @@ class AgentDataStateStorage:
     # Load / save through API
     # ------------------------------------------------------------------
 
-    async def _load_record(self) -> _StoredStateRecord | None:
+    async def _load_record(self) -> _AgentDataStateRecord | None:
         items = await self._client.search(
             self._collection,
             {_FIELD_RUN_ID: {"eq": self._run_id}},
@@ -81,24 +81,24 @@ class AgentDataStateStorage:
         if not items:
             return None
         self._item_id = items[0]["id"]
-        return _StoredStateRecord.model_validate(items[0]["data"])
+        return _AgentDataStateRecord.model_validate(items[0]["data"])
 
-    async def load(self) -> StoredStateRecord | None:
+    async def load(self) -> StateRecord | None:
         if self._cached_record is not None:
             return self._cached_record.model_copy(deep=True)
         record = await self._load_record()
         if record is None:
             return None
-        self._cached_record = StoredStateRecord(
+        self._cached_record = StateRecord(
             data=record.data,
             state_type=record.state_type,
             state_module=record.state_module,
         )
         return self._cached_record.model_copy(deep=True)
 
-    async def save(self, record: StoredStateRecord) -> None:
+    async def save(self, record: StateRecord) -> None:
         data = record.data if isinstance(record.data, str) else str(record.data)
-        stored = _StoredStateRecord(
+        stored = _AgentDataStateRecord(
             run_id=self._run_id,
             data=data,
             state_type=record.state_type,
@@ -120,7 +120,7 @@ class AgentDataStateStorage:
             else:
                 result = await self._client.create(self._collection, payload)
                 self._item_id = result["id"]
-        self._cached_record = StoredStateRecord(
+        self._cached_record = StateRecord(
             data=stored.data,
             state_type=stored.state_type,
             state_module=stored.state_module,
@@ -133,7 +133,7 @@ class AgentDataStateStorage:
         return payload.model_dump()
 
 
-class AgentDataStateStore(TypedStateStore[MODEL_T], Generic[MODEL_T]):
+class AgentDataStateStore(StateStoreFacade[MODEL_T], Generic[MODEL_T]):
     """Compatibility StateStore facade backed by Agent Data storage."""
 
     def __init__(
@@ -145,7 +145,7 @@ class AgentDataStateStore(TypedStateStore[MODEL_T], Generic[MODEL_T]):
         collection: str = "workflow_state",
         serializer: BaseSerializer | None = None,
     ) -> None:
-        self._agent_data_storage = AgentDataStateStorage(
+        self._agent_data_storage = _AgentDataStateStorage(
             client=client,
             run_id=run_id,
             collection=collection,
@@ -178,7 +178,7 @@ class AgentDataStateStore(TypedStateStore[MODEL_T], Generic[MODEL_T]):
                 and parsed.run_id == self.run_id
             ):
                 return
-            source = AgentDataStateStorage(
+            source = _AgentDataStateStorage(
                 client=self._agent_data_storage._client,
                 run_id=parsed.run_id,
                 collection=parsed.collection,

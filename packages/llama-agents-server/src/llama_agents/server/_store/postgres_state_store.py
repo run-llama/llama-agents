@@ -12,10 +12,10 @@ import asyncpg
 from pydantic import BaseModel
 from typing_extensions import TypeVar
 from workflows.context.serializers import BaseSerializer, JsonSerializer
-from workflows.context.state_store import (
-    DictState,
-    StoredStateRecord,
-    TypedStateStore,
+from workflows.context.state_store import DictState
+from workflows.context.state_store_integration import (
+    StateRecord,
+    StateStoreFacade,
     decode_seed_state,
     string_record_from_state,
 )
@@ -36,7 +36,7 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class PostgresStateStorage:
+class _PostgresStateStorage:
     """Asyncpg-backed raw state storage."""
 
     def __init__(
@@ -83,7 +83,7 @@ class PostgresStateStorage:
     async def load(
         self,
         conn: asyncpg.Connection | None = None,
-    ) -> StoredStateRecord | None:
+    ) -> StateRecord | None:
         """Load raw state from database."""
         should_release = conn is None
         if conn is None:
@@ -95,7 +95,7 @@ class PostgresStateStorage:
             )
             if row is None:
                 return None
-            return StoredStateRecord(
+            return StateRecord(
                 data=row["state_json"],
                 state_type=row["state_type"],
                 state_module=row["state_module"],
@@ -104,12 +104,12 @@ class PostgresStateStorage:
             if should_release:
                 await self._pool.release(conn)  # type: ignore[arg-type]
 
-    async def save(self, record: StoredStateRecord) -> None:
+    async def save(self, record: StateRecord) -> None:
         await self._save_record(record)
 
     async def _save_record(
         self,
-        record: StoredStateRecord,
+        record: StateRecord,
         conn: asyncpg.Connection | asyncpg.pool.PoolConnectionProxy | None = None,
     ) -> None:
         """Save raw state to database via upsert."""
@@ -145,7 +145,7 @@ class PostgresStateStorage:
         return payload.model_dump()
 
 
-class PostgresStateStore(TypedStateStore[MODEL_T], Generic[MODEL_T]):
+class PostgresStateStore(StateStoreFacade[MODEL_T], Generic[MODEL_T]):
     """Compatibility StateStore facade backed by postgres storage."""
 
     def __init__(
@@ -157,7 +157,7 @@ class PostgresStateStore(TypedStateStore[MODEL_T], Generic[MODEL_T]):
         schema: str | None = None,
     ) -> None:
         self._pool = pool
-        self._postgres_storage = PostgresStateStorage(pool, run_id, schema)
+        self._postgres_storage = _PostgresStateStorage(pool, run_id, schema)
         self._pending_seed: tuple[dict[str, Any], BaseSerializer] | None = None
         super().__init__(
             self._postgres_storage,

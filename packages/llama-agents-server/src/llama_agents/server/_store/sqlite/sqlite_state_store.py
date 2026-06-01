@@ -12,10 +12,10 @@ from typing import Any, Generic, Literal
 from pydantic import BaseModel
 from typing_extensions import TypeVar
 from workflows.context.serializers import BaseSerializer, JsonSerializer
-from workflows.context.state_store import (
-    DictState,
-    StoredStateRecord,
-    TypedStateStore,
+from workflows.context.state_store import DictState
+from workflows.context.state_store_integration import (
+    StateRecord,
+    StateStoreFacade,
     decode_seed_state,
     string_record_from_state,
 )
@@ -36,7 +36,7 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class SqliteStateStorage:
+class _SqliteStateStorage:
     """Sqlite-backed raw state storage."""
 
     def __init__(
@@ -75,7 +75,7 @@ class SqliteStateStorage:
         finally:
             conn.close()
 
-    async def load(self) -> StoredStateRecord | None:
+    async def load(self) -> StateRecord | None:
         """Load raw state from database."""
         conn = self._connect()
         try:
@@ -87,18 +87,16 @@ class SqliteStateStorage:
             row = cursor.fetchone()
             if row is None:
                 return None
-            return StoredStateRecord(
-                data=row[0], state_type=row[1], state_module=row[2]
-            )
+            return StateRecord(data=row[0], state_type=row[1], state_module=row[2])
         finally:
             conn.close()
 
-    async def save(self, record: StoredStateRecord) -> None:
+    async def save(self, record: StateRecord) -> None:
         """Save raw state to database."""
         self._save_record(record)
 
     def _save_record(
-        self, record: StoredStateRecord, conn: sqlite3.Connection | None = None
+        self, record: StateRecord, conn: sqlite3.Connection | None = None
     ) -> None:
         should_close = conn is None
         if conn is None:
@@ -136,7 +134,7 @@ class SqliteStateStorage:
         return payload.model_dump()
 
 
-class SqliteStateStore(TypedStateStore[MODEL_T], Generic[MODEL_T]):
+class SqliteStateStore(StateStoreFacade[MODEL_T], Generic[MODEL_T]):
     """Compatibility StateStore facade backed by sqlite storage."""
 
     def __init__(
@@ -148,7 +146,7 @@ class SqliteStateStore(TypedStateStore[MODEL_T], Generic[MODEL_T]):
         connection: sqlite3.Connection | None = None,
     ) -> None:
         self._db_path = db_path
-        self._sqlite_storage = SqliteStateStorage(db_path, run_id, connection)
+        self._sqlite_storage = _SqliteStateStorage(db_path, run_id, connection)
         super().__init__(
             self._sqlite_storage,
             state_type or DictState,  # type: ignore[arg-type]

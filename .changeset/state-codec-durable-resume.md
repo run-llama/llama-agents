@@ -5,4 +5,4 @@
 "llama-agents-appserver": patch
 ---
 
-Decode persisted workflow state from stored metadata instead of constructor type.
+Clarify state-store serialization and decode persisted state from stored metadata.
