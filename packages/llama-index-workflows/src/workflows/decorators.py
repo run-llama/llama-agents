@@ -66,13 +66,12 @@ class StepConfig:
     # when the step declares a single ``list[E]`` parameter. The element types are
     # a tuple — ``list[Done]`` -> ``(Done,)``; a union flat list ``list[A | B]`` ->
     # ``(A, B)`` (every member routes to the step). The step buffers incoming
-    # members by innermost stream id and releases per ``collection_collect``.
-    collection_collect_param: tuple[str, tuple[Any, ...]] | None = None
-    # The resolved ``Collect`` marker for the collection collect parameter,
-    # carrying the release cardinality (``All`` / ``Take``). A bare
-    # ``list[E]`` parameter resolves to ``Collect()`` (``All``). None when the
-    # step is not a collection collect.
-    collection_collect: Collect | None = None
+    # members by innermost stream id and releases per ``collection_policy``.
+    collection_param: tuple[str, tuple[Any, ...]] | None = None
+    # The resolved ``Collect`` marker for the collection parameter. A bare
+    # ``list[E]`` parameter resolves to ``Collect()`` (``All``). None for steps
+    # without a collection parameter.
+    collection_policy: Collect | None = None
     role: StepRole = "step"
     # Only meaningful when role == "catch_error".
     # None means wildcard — covers any step not claimed by a scoped handler.
@@ -220,7 +219,7 @@ def make_step_function(
     # Collect-mode (heterogeneous fan-in): more than one event parameter. The
     # step accepts every declared event type for routing, and collects one of
     # each (in declaration order) before firing once. ``event_name`` keeps the
-    # first parameter for compatibility with single-event call paths.
+    # first parameter, which is still the carrier event passed into the wrapper.
     collect_params: list[tuple[str, Any]] | None = None
     if len(spec.accepted_events) > 1:
         collect_params = [
@@ -241,8 +240,8 @@ def make_step_function(
         skip_graph_checks=skip_graph_checks or [],
         collect_params=collect_params,
         is_fan_out=spec.is_fan_out,
-        collection_collect_param=spec.collection_collect_param,
-        collection_collect=spec.collection_collect,
+        collection_param=spec.collection_param,
+        collection_policy=spec.collection_policy,
     )
 
     return casted

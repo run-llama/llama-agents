@@ -192,8 +192,8 @@ def as_step_worker_function(
             config = workflow._get_steps()[step_name]._step_config
             collected_binding: dict[str, Event] | None = None
             collection_binding: dict[str, list[Event]] | None = None
-            if config.collection_collect_param is not None:
-                param_name, _ = config.collection_collect_param
+            if config.collection_param is not None:
+                param_name, _ = config.collection_param
                 payload = state.collection_release_payload
                 collection_binding = {
                     param_name: list(payload.events if payload is not None else [])

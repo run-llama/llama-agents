@@ -353,9 +353,9 @@ def _binding_id(
 def _compute_collection_bindings(workflow: Workflow) -> dict[str, CollectionBinding]:
     steps = {name: fn._step_config for name, fn in workflow._get_steps().items()}
     collects: dict[str, tuple[Any, ...]] = {
-        name: cfg.collection_collect_param[1]
+        name: cfg.collection_param[1]
         for name, cfg in steps.items()
-        if cfg.collection_collect_param is not None
+        if cfg.collection_param is not None
     }
 
     def same_level_types(seed_types: Any, guard: frozenset[str]) -> set[type[Event]]:
@@ -369,7 +369,7 @@ def _compute_collection_bindings(workflow: Workflow) -> dict[str, CollectionBind
             for name, cfg in steps.items():
                 if t not in cfg.accepted_events:
                     continue
-                if cfg.collection_collect_param is not None:
+                if cfg.collection_param is not None:
                     continue
                 if cfg.is_fan_out:
                     if name in guard:
@@ -391,7 +391,7 @@ def _compute_collection_bindings(workflow: Workflow) -> dict[str, CollectionBind
             item_types = tuple(_event_types(collect_types))
             if not any(et in level_types for et in item_types):
                 continue
-            policy = steps[target_step].collection_collect
+            policy = steps[target_step].collection_policy
             if policy is None:
                 continue
             binding = CollectionBinding(

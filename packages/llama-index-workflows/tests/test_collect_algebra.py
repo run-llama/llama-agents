@@ -97,9 +97,9 @@ def test_bare_list_infers_collect_all() -> None:
         return join
 
     cfg = _config_for(build)
-    assert cfg.collection_collect_param == ("events", (Done,))
-    assert cfg.collection_collect is not None
-    assert isinstance(cfg.collection_collect.cardinality, All)
+    assert cfg.collection_param == ("events", (Done,))
+    assert cfg.collection_policy is not None
+    assert isinstance(cfg.collection_policy.cardinality, All)
 
 
 def test_annotated_collect_is_synonym_for_bare_list() -> None:
@@ -111,9 +111,9 @@ def test_annotated_collect_is_synonym_for_bare_list() -> None:
         return join
 
     cfg = _config_for(build)
-    assert cfg.collection_collect_param == ("events", (Done,))
-    assert cfg.collection_collect is not None
-    assert isinstance(cfg.collection_collect.cardinality, All)
+    assert cfg.collection_param == ("events", (Done,))
+    assert cfg.collection_policy is not None
+    assert isinstance(cfg.collection_policy.cardinality, All)
 
 
 def test_annotated_take_cardinality_inferred() -> None:
@@ -125,8 +125,8 @@ def test_annotated_take_cardinality_inferred() -> None:
         return join
 
     cfg = _config_for(build)
-    assert cfg.collection_collect is not None
-    assert cfg.collection_collect.cardinality == Take(2)
+    assert cfg.collection_policy is not None
+    assert cfg.collection_policy.cardinality == Take(2)
 
 
 def test_union_flat_list_infers_all_member_types() -> None:
@@ -138,13 +138,13 @@ def test_union_flat_list_infers_all_member_types() -> None:
         return report
 
     cfg = _config_for(build)
-    assert cfg.collection_collect_param is not None
-    assert cfg.collection_collect_param[1] == (Done, Skipped)
+    assert cfg.collection_param is not None
+    assert cfg.collection_param[1] == (Done, Skipped)
     assert Done in cfg.accepted_events
     assert Skipped in cfg.accepted_events
 
 
-def test_single_event_param_is_not_collection_collect() -> None:
+def test_single_event_param_is_not_collection_param() -> None:
     def build(w: type[Workflow]) -> StepFunction:
         @free_step(workflow=w)
         async def work(ev: Task) -> Done:  # type: ignore[unused-ignore]
@@ -153,8 +153,8 @@ def test_single_event_param_is_not_collection_collect() -> None:
         return work
 
     cfg = _config_for(build)
-    assert cfg.collection_collect_param is None
-    assert cfg.collection_collect is None
+    assert cfg.collection_param is None
+    assert cfg.collection_policy is None
 
 
 # --------------------------------------------------------------------------- #
@@ -214,7 +214,7 @@ def test_two_list_params_rejected_as_multi_slot() -> None:
     class _W(Workflow):
         pass
 
-    with pytest.raises(WorkflowValidationError, match="at most one collection"):
+    with pytest.raises(WorkflowValidationError, match=r"at most one list\[E\]"):
 
         @free_step(workflow=_W)
         async def merge(a: list[Done], b: list[Skipped]) -> StopEvent:  # type: ignore[unused-ignore]

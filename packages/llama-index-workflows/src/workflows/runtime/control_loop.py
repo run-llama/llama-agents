@@ -863,8 +863,7 @@ def _process_step_result_tick(
                 for worker in state.workers.values():
                     worker.collected_events.clear()
                     worker.collected_waiters.clear()
-                # Drop all stream lineage: the run is over, so no stream can close
-                # and no collect can fire. Leaving it would leak into a snapshot.
+                # Drop open collection state; no release can fire after the run ends.
                 _clear_collection_state(state)
                 commands.append(CommandCompleteRun(result=result.result))
             elif isinstance(result.result, Event):
@@ -1099,9 +1098,6 @@ def _process_step_result_tick(
     )
 
     if not skip_accounting and is_fan_out and fan_out_stream_id is not None:
-        # Fan-out descent. The enclosing stream trades this source work item for
-        # one placeholder per collect bound to the child stream; the placeholder
-        # resolves when that collect emits its summary back to the parent scope.
         bindings = state.config.bindings_for_source(tick.step_name)
         accepting_binding_ids = tuple(binding.id for binding in bindings)
         seed = sum(_count_accepting_steps(state, type(m)) for m in emitted_non_stop)
@@ -1115,14 +1111,14 @@ def _process_step_result_tick(
             open_work_items=seed,
             closed_to_new_items=True,
         )
-        # The source work item is replaced by collect placeholders.
+        # The parent work item now waits for each child collection release.
         commands.extend(
             _apply_stream_work_delta(state, enclosing, len(accepting_binding_ids) - 1)
         )
         if seed == 0:
             commands.extend(_close_collection_stream(state, fan_out_stream_id))
     elif not skip_accounting:
-        # (b) Same-level resolution (1:1 step, or a collect step firing its
+        # Same-level resolution (1:1 step, or a collect step firing its
         # summary). Remove this work item and add its same-level successors: one
         # work item per accepting step per emitted event. A step that returns
         # None adds zero successors and simply leaves the set.
@@ -1271,7 +1267,7 @@ def _process_add_event_tick(
         if is_accepted and (tick.step_name is None or tick.step_name == step_name):
             handled = True
             worker_state = state.workers[step_name]
-            if worker_state.config.collection_collect_param is not None:
+            if worker_state.config.collection_param is not None:
                 if not tick.scope_path:
                     continue
                 stream_id = tick.scope_path[-1]
@@ -1482,7 +1478,7 @@ def _process_collection_stream_closed_tick(
     bindings = state.config.bindings_for_source(tick.source_step)
     for binding in bindings:
         worker_state = state.workers.get(binding.target_step)
-        if worker_state is None or worker_state.config.collection_collect_param is None:
+        if worker_state is None or worker_state.config.collection_param is None:
             continue
         key = _release_state_key(tick.stream_id, binding.id)
         release_state = state.collection_release_states.pop(

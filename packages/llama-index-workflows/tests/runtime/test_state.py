@@ -61,7 +61,7 @@ def test_from_dict_auto_migrates_v1_in_progress_strings() -> None:
     attempt = worker.in_progress[0]
     assert attempt.event == event
     assert attempt.attempts == 0
-    # New lineage fields fall back to empty defaults.
+    # New stream fields fall back to empty defaults.
     assert attempt.scope_path == []
     assert result.stream_seq == 0
     assert result.streams == {}

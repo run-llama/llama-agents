@@ -89,7 +89,7 @@ class StepWorkerState:
 
 @dataclass(frozen=True)
 class CollectionReleasePayload:
-    """List payload supplied to a collection collect step invocation."""
+    """List payload supplied to a collection step invocation."""
 
     binding_id: str
     stream_id: str

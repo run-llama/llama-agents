@@ -47,11 +47,11 @@ class StepSignatureSpec(BaseModel):
     # the step declares a single ``list[E]`` collect parameter, else None. The
     # element types are a tuple — ``list[Done]`` -> ``(Done,)``; a union flat list
     # ``list[A | B]`` -> ``(A, B)``.
-    collection_collect_param: tuple[str, tuple[Any, ...]] | None = None
-    # The resolved ``Collect`` marker for the collection collect parameter. A bare
-    # ``list[E]`` parameter resolves to ``Collect()`` (``All`` cardinality). None
-    # when the step is not a collection collect.
-    collection_collect: Any | None = None
+    collection_param: tuple[str, tuple[Any, ...]] | None = None
+    # The resolved ``Collect`` marker for the collection parameter. A bare
+    # ``list[E]`` parameter resolves to ``Collect()`` (``All`` cardinality).
+    # None for steps without a collection parameter.
+    collection_policy: Any | None = None
     # Fan-out producer: True when the return annotation is ``list[E]``.
     is_fan_out: bool = False
 
@@ -86,8 +86,8 @@ def inspect_signature(
     context_parameter = None
     context_state_type = None
     resources = []
-    collection_collect_param: tuple[str, tuple[Any, ...]] | None = None
-    collection_collect: Collect | None = None
+    collection_param: tuple[str, tuple[Any, ...]] | None = None
+    collection_policy: Collect | None = None
 
     # Inspect function parameters
     for name, t in sig.parameters.items():
@@ -150,15 +150,15 @@ def inspect_signature(
         if element_types is not None:
             marker = collect_marker if collect_marker is not None else Collect()
             _validate_collect_marker(marker, name)
-            if collection_collect_param is not None:
+            if collection_param is not None:
                 msg = (
-                    "A step may declare at most one collection (list[E]) collect "
-                    f"parameter, but found both {collection_collect_param[0]!r} and "
-                    f"{name!r}. Multi-slot collects are not supported."
+                    "A step may declare at most one list[E] collection parameter, "
+                    f"but found both {collection_param[0]!r} and {name!r}. "
+                    "Multi-slot collects are not supported."
                 )
                 raise WorkflowValidationError(msg)
-            collection_collect_param = (name, tuple(element_types))
-            collection_collect = marker
+            collection_param = (name, tuple(element_types))
+            collection_policy = marker
             accepted_events[name] = list(element_types)
             continue
         if collect_marker is not None:
@@ -185,8 +185,8 @@ def inspect_signature(
         context_parameter=context_parameter,
         context_state_type=context_state_type,
         resources=resources,
-        collection_collect_param=collection_collect_param,
-        collection_collect=collection_collect,
+        collection_param=collection_param,
+        collection_policy=collection_policy,
         is_fan_out=_is_fan_out_return(fn, localns=localns),
     )
 
@@ -270,11 +270,11 @@ def validate_step_signature(spec: StepSignatureSpec) -> None:
     if num_of_events == 0:
         msg = "Step signature must have at least one parameter annotated as type Event"
         raise WorkflowValidationError(msg)
-    if spec.collection_collect_param is not None and num_of_events > 1:
-        # A collection (list[E]) collect parameter alongside other event params is a
+    if spec.collection_param is not None and num_of_events > 1:
+        # A list[E] collection parameter alongside other event params is a
         # multi-slot collect, which this contract does not support.
         msg = (
-            "A collection (list[E]) collect parameter cannot be combined with other "
+            "A list[E] collection parameter cannot be combined with other "
             "event parameters. Use a single list[E] parameter, or multiple "
             "single-event parameters for a heterogeneous join."
         )

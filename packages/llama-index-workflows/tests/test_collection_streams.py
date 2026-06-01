@@ -226,7 +226,7 @@ async def _run_recording_ticks(
     The in-memory runtime records every tick it reduces via ``on_tick`` and
     exposes them through the run adapter's ``replay()``. That recorded stream is
     exactly what persistence stores, so re-feeding it through
-    ``replay_ticks_stream`` must rebuild identical stream lineage.
+    ``replay_ticks_stream`` must rebuild identical stream scopes.
     """
     handler = wf.run()
     async for _ in handler.stream_events():

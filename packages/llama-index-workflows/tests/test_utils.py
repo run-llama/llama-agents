@@ -324,16 +324,15 @@ def test_validate_step_signature_accepts_list_return() -> None:
 
 
 def test_validate_step_signature_rejects_stream_param_with_other_events() -> None:
-    # A list[E] collection collect parameter cannot be combined with additional event
-    # params.
+    # A list[E] collection parameter cannot be combined with additional event params.
     spec = StepSignatureSpec(
         accepted_events={"a": [StartEvent], "b": [StopEvent]},
         return_types=[StopEvent],
         context_parameter=None,
         context_state_type=None,
         resources=[],
-        collection_collect_param=("a", (StartEvent,)),
-        collection_collect=None,
+        collection_param=("a", (StartEvent,)),
+        collection_policy=None,
         is_fan_out=False,
     )
     with pytest.raises(WorkflowValidationError, match="cannot be combined with other"):

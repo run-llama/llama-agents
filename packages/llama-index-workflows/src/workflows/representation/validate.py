@@ -632,9 +632,9 @@ def _stream_level_types_by_producer(
     """Return event types produced inside each returned-list stream level."""
 
     collects: dict[str, tuple[Any, ...]] = {
-        name: cfg.collection_collect_param[1]
+        name: cfg.collection_param[1]
         for name, cfg in steps.items()
-        if cfg.collection_collect_param is not None
+        if cfg.collection_param is not None
     }
 
     def same_level_types(
@@ -650,7 +650,7 @@ def _stream_level_types_by_producer(
             for name, cfg in steps.items():
                 if event_type not in cfg.accepted_events:
                     continue
-                if cfg.collection_collect_param is not None:
+                if cfg.collection_param is not None:
                     continue
                 if cfg.is_fan_out:
                     if name in guard:
@@ -672,15 +672,15 @@ def _stream_level_types_by_producer(
     }
 
 
-def _validate_collection_collect_bindings(steps: dict[str, StepConfig]) -> None:
+def _validate_collection_bindings(steps: dict[str, StepConfig]) -> None:
     """Require list[E] fan-in to bind to a static returned-list producer."""
 
     level_types_by_producer = _stream_level_types_by_producer(steps)
     errors: list[str] = []
     for step_name, cfg in steps.items():
-        if cfg.collection_collect_param is None:
+        if cfg.collection_param is None:
             continue
-        param_name, element_types = cfg.collection_collect_param
+        param_name, element_types = cfg.collection_param
         missing = [
             event_type
             for event_type in _event_types(element_types)
@@ -728,7 +728,7 @@ def _validate_workflow(
     stop_event_class = _ensure_stop_event_class(steps, workflow_cls_name)
 
     _validate_collect_param_slots(steps)
-    _validate_collection_collect_bindings(steps)
+    _validate_collection_bindings(steps)
 
     uses_hitl = _validate_event_connectivity(steps, start_event_class)
 

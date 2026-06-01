@@ -110,7 +110,7 @@ async def test_event_routed_to_step_and_join_keeps_full_stream() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_retried_stream_member_keeps_lineage() -> None:
+async def test_retried_stream_member_keeps_scope() -> None:
     """A member that fails once and succeeds on retry still closes the stream."""
     attempts = {"n2": 0}
 
@@ -164,8 +164,8 @@ async def test_catch_error_recovery_closes_stream() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Closed-collection collects use the normal worker capacity path. Overlapping closes
-# must queue instead of aliasing in-progress state.
+# Collection releases use the normal worker capacity path. Overlapping releases
+# must queue distinct payloads instead of aliasing in-progress state.
 # ---------------------------------------------------------------------------
 
 
@@ -282,7 +282,7 @@ async def test_nested_all_inner_dropped_terminates() -> None:
 
 # ---------------------------------------------------------------------------
 # Persistence: a snapshot taken mid-fan-out can resume without losing stream ids
-# or in-progress member lineage.
+# or in-progress member scope.
 # ---------------------------------------------------------------------------
 
 
@@ -457,7 +457,7 @@ async def test_send_event_extra_member_inside_stream_is_not_joined() -> None:
     assert result == [0, 1, 2], result
 
 
-async def test_send_event_only_inside_collection_collect_rejected() -> None:
+async def test_send_event_only_inside_collection_param_rejected() -> None:
     """A list[E] collect needs a returned-list producer binding."""
 
     class WF(Workflow):

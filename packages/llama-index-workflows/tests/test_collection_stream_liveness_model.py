@@ -2,12 +2,11 @@
 # Copyright (c) 2026 LlamaIndex Inc.
 """Model test for the fan-out/fan-in stream liveness rule.
 
-Drives a synthetic live set ``L(B)`` through the transitions the reducer applies
-— seed at open, same-level emission, collect delivery, fan-out placeholder, and
-close-on-empty — directly against the pure helpers, so the core accounting is
-verifiable without spinning a full workflow. The behavioral end-to-end coverage
-lives in ``test_stream_lineage_regressions.py``; this pins the invariant itself:
-**a stream closes exactly when its live work set empties, never before.**
+Drives a synthetic stream through the transitions the reducer applies: seed at
+open, same-scope emission, collect delivery, nested fan-out, and close-on-empty.
+End-to-end coverage lives in
+``test_collection_stream_regressions.py``; this pins the invariant itself:
+**a stream closes exactly when its open work set empties, never before.**
 """
 
 from __future__ import annotations
@@ -99,7 +98,7 @@ def test_close_fires_exactly_when_live_empties() -> None:
 def test_full_two_collect_stream_drains_to_close() -> None:
     """Walk #1's accounting: 3 Tasks, each work emits Done to two collects.
 
-    Seed L(B) = sum of accepting-step counts per member. Each work resolves
+    Seed open work = sum of accepting-step counts per member. Each work resolves
     (-1 + 2 successors); each of the 6 collect deliveries resolves (-1). The
     stream closes precisely on the last delivery, never earlier.
     """
