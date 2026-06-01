@@ -101,9 +101,8 @@ class BrokerState:
     """
     Complete state of the workflow broker at a given point in time.
 
-    This is the primary state object passed through the control loop's reducer
-    pattern. Each tick processes this state and returns an updated copy along
-    with commands to execute.
+    This is the primary state object passed through the control loop's reducer pattern.
+    Each tick processes this state and returns an updated copy along with commands to execute.
 
     Attributes:
         config: Immutable configuration for the workflow and all steps
@@ -128,7 +127,7 @@ class BrokerState:
         """
         return BrokerState(
             is_running=self.is_running,
-            config=self.config,
+            config=self.config,  # immutable
             workers={
                 name: worker_state._deepcopy()
                 for name, worker_state in self.workers.items()
@@ -173,22 +172,25 @@ class BrokerState:
 
     def rehydrate_with_ticks(self) -> list[WorkflowTick]:
         """
-        Rehydrates non-serializable state by re-running commands.
+        Rehydrates non-serializable state by re-running commands
         """
-        ticks: list[WorkflowTick] = []
+        commands: list[WorkflowTick] = []
         for step_name, worker_state in sorted(self.workers.items(), key=lambda x: x[0]):
             for waiter in sorted(
                 worker_state.collected_waiters, key=lambda x: x.waiter_id
             ):
                 if waiter.has_requirements and not waiter.requirements:
-                    ticks.append(TickAddEvent(event=waiter.event, step_name=step_name))
-        return ticks
+                    commands.append(
+                        TickAddEvent(event=waiter.event, step_name=step_name)
+                    )
+        return commands
 
     def to_serialized(self, serializer: BaseSerializer) -> SerializedContext:
         """Serialize the broker state to a SerializedContext."""
+
         workers_dict = {}
         for step_name, worker_state in self.workers.items():
-            # Serialize queue with retry and stream scope info.
+            # Serialize queue with retry and stream scope info
             queue = [
                 SerializedEventAttempt(
                     event=serializer.serialize(attempt.event),
@@ -204,7 +206,7 @@ class BrokerState:
                 )
                 for attempt in worker_state.queue
             ]
-            # Serialize in-progress events so they can be re-queued on resume.
+            # Serialize in-progress events so they can be re-queued on resume
             in_progress = [
                 SerializedEventAttempt(
                     event=serializer.serialize(ip.event),
@@ -220,12 +222,14 @@ class BrokerState:
                 )
                 for ip in worker_state.in_progress
             ]
-            # Serialize collected events.
+
+            # Serialize collected events
             collected_events = {
                 buffer_id: [serializer.serialize(ev) for ev in events]
                 for buffer_id, events in worker_state.collected_events.items()
             }
-            # Serialize waiters.
+
+            # Serialize waiters
             waiters = [
                 SerializedWaiter(
                     waiter_id=waiter.waiter_id,
@@ -239,6 +243,7 @@ class BrokerState:
                 )
                 for waiter in worker_state.collected_waiters
             ]
+
             workers_dict[step_name] = SerializedStepWorkerState(
                 queue=queue,
                 in_progress=in_progress,
@@ -248,7 +253,7 @@ class BrokerState:
 
         return SerializedContext(
             version=CURRENT_SERIALIZED_VERSION,
-            state={},  # State is filled separately by the state store.
+            state={},  # State is filled separately by the state store
             is_running=self.is_running,
             workers=workers_dict,
             stream_seq=self.stream_seq,
@@ -284,11 +289,13 @@ class BrokerState:
         serializer: BaseSerializer,
     ) -> BrokerState:
         """Deserialize a SerializedContext into a BrokerState."""
+
         serializer = serializer or JsonSerializer()
-        # Start with a base state from the workflow.
+
+        # Start with a base state from the workflow
         base_state = BrokerState.from_workflow(workflow)
-        # Preserve this so the workflow knows whether to construct a StartEvent
-        # from kwargs when it resumes.
+        # Unfortunately, important to preserve this state, since the workflow needs to know this to decide
+        # whether to create a start_event from kwargs (it only constructs and passes a start event if not already running)
         base_state.is_running = serialized.is_running
         base_state.stream_seq = serialized.stream_seq
         base_state.streams = {
@@ -315,13 +322,15 @@ class BrokerState:
             for key, release in serialized.collection_release_states.items()
         }
 
-        # Restore worker state even when not running so resume can pick up the
-        # persisted queues, collected events, and waiters.
+        # Restore worker state (queues, collected events, waiters)
+        # We do this regardless of is_running state so workflows can resume from where they left off
         for step_name, worker_data in serialized.workers.items():
             if step_name not in base_state.workers:
                 continue
+
             worker = base_state.workers[step_name]
-            # Restore queue with retry and stream scope info.
+
+            # Restore queue with retry and stream scope info
             worker.queue = [
                 EventAttempt(
                     event=serializer.deserialize(attempt.event),
@@ -337,7 +346,9 @@ class BrokerState:
                 )
                 for attempt in worker_data.queue
             ]
-            # In-progress events are moved back to the queue on deserialization.
+
+            # in_progress events are moved to the queue on deserialization
+            # They will be restarted when the workflow runs
             for attempt in worker_data.in_progress:
                 worker.queue.append(
                     EventAttempt(
@@ -353,14 +364,17 @@ class BrokerState:
                         ),
                     )
                 )
-            # Restore collected events.
+
+            # Restore collected events
             worker.collected_events = {
                 buffer_id: [serializer.deserialize(ev) for ev in events]
                 for buffer_id, events in worker_data.collected_events.items()
             }
-            # Restore waiters.
+
+            # Restore waiters
             worker.collected_waiters = []
             for waiter_data in worker_data.collected_waiters:
+                # Import the event type
                 worker.collected_waiters.append(
                     StepWorkerWaiter(
                         waiter_id=waiter_data.waiter_id,
@@ -377,6 +391,7 @@ class BrokerState:
                         else None,
                     )
                 )
+
         return base_state
 
 
@@ -385,8 +400,11 @@ def _import_event_type(qualified_name: str) -> type[Event]:
     parts = qualified_name.rsplit(".", 1)
     if len(parts) != 2:
         raise ValueError(f"Invalid qualified name: {qualified_name}")
+
     module_name, class_name = parts
-    return getattr(importlib.import_module(module_name), class_name)
+
+    module = importlib.import_module(module_name)
+    return getattr(module, class_name)
 
 
 def _event_types(types: Any) -> list[type[Event]]:
@@ -481,10 +499,9 @@ def _compute_collection_bindings(workflow: Workflow) -> dict[str, CollectionBind
 @dataclass(frozen=True)
 class BrokerConfig:
     """
-    Configuration for a workflow run.
+    configuration for a workflow run.
 
-    This contains all the static configuration that doesn't change during
-    workflow execution.
+    This contains all the static configuration that doesn't change during workflow execution.
 
     Attributes:
         steps: Configuration for each step indexed by step name
@@ -605,15 +622,15 @@ class InProgressState:
     Represents a single worker execution that is currently in progress.
 
     Each worker gets a snapshot of the step's shared state at the time it starts.
-    This enables optimistic execution: if the shared state changes during execution
-    (e.g. new collected events arrive), the control loop can detect this and retry
+    This enables optimistic execution - if the shared state changes during execution
+    (e.g., new collected events arrive), the control loop can detect this and retry
     the worker with the updated state.
 
     Attributes:
         event: The event being processed by this worker
         worker_id: Numeric ID (0 to num_workers-1) identifying this worker slot
         shared_state: Snapshot of collected_events and collected_waiters at worker start time
-        attempts: Number of times this event has been attempted, including current attempt
+        attempts: Number of times this event has been attempted (including current attempt)
         first_attempt_at: Unix timestamp when this event was first attempted
         last_exception: Most recent exception from the prior attempt, or None if this is the first attempt.
         last_failed_at: Unix timestamp of the most recent failure, or None.
