@@ -840,6 +840,17 @@ async def test_deserialize_state_from_dict_with_dict_state() -> None:
     assert result["name"] == "test-value"
 
 
+@pytest.mark.asyncio
+async def test_in_memory_get_preserves_mutable_value_identity() -> None:
+    store = InMemoryStateStore(DictState())
+    await store.set("state", {"items": []})
+
+    state = await store.get("state")
+    state["items"].append("persisted")
+
+    assert await store.get("state.items") == ["persisted"]
+
+
 def test_deserialize_state_from_dict_with_typed_state() -> None:
     """Test deserializing typed Pydantic model from to_dict() format."""
     serializer = JsonSerializer()
@@ -871,6 +882,28 @@ def test_deserialize_state_from_dict_empty_dict_state() -> None:
 
     assert isinstance(result, DictState)
     assert len(list(result.items())) == 0
+
+
+def test_deserialize_state_from_dict_with_raw_dict_state_values() -> None:
+    serializer = JsonSerializer()
+    serialized = {
+        "state_data": {
+            "_data": {
+                "count": 5,
+                "state": {"nested": True},
+                "name": "raw",
+            }
+        },
+        "state_type": "DictState",
+        "state_module": "workflows.context.state_store",
+    }
+
+    result = deserialize_state_from_dict(serialized, serializer)
+
+    assert isinstance(result, DictState)
+    assert result["count"] == 5
+    assert result["state"] == {"nested": True}
+    assert result["name"] == "raw"
 
 
 # ============================================================================

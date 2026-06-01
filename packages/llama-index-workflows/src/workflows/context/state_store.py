@@ -654,13 +654,13 @@ class _InMemoryStateStorage:
         self._record = record
 
     async def load(self) -> _StateRecord | None:
-        return self._record.model_copy(deep=True) if self._record is not None else None
+        return self._record.model_copy() if self._record is not None else None
 
     async def save(self, record: _StateRecord) -> None:
-        self._record = record.model_copy(deep=True)
+        self._record = record.model_copy()
 
     def load_sync(self) -> _StateRecord | None:
-        return self._record.model_copy(deep=True) if self._record is not None else None
+        return self._record.model_copy() if self._record is not None else None
 
     def to_handle(self) -> dict[str, Any]:
         record = self.load_sync()
@@ -822,7 +822,16 @@ def deserialize_dict_state_data(
     deserialized_data = {}
     for key, value in _data_serialized.items():
         try:
-            deserialized_data[key] = serializer.deserialize(value)
+            if isinstance(value, str):
+                try:
+                    deserialized_data[key] = serializer.deserialize(value)
+                except (TypeError, ValueError):
+                    deserialized_data[key] = value
+            else:
+                deserialize_value = getattr(serializer, "deserialize_value", None)
+                deserialized_data[key] = (
+                    deserialize_value(value) if callable(deserialize_value) else value
+                )
         except Exception as e:
             raise ValueError(f"Failed to deserialize state value for key {key}: {e}")
     return DictState(_data=deserialized_data)
