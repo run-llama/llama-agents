@@ -80,6 +80,14 @@ class CollectionReleaseState:
 
 @dataclass()
 class BrokerState:
+    """
+    Complete state of the workflow broker at a given point in time.
+
+    This is the primary state object passed through the control loop's reducer
+    pattern. Each tick processes this state and returns an updated copy along
+    with commands to execute.
+    """
+
     is_running: bool
     config: BrokerConfig
     workers: dict[str, InternalStepWorkerState]
@@ -90,6 +98,9 @@ class BrokerState:
     )
 
     def deepcopy(self) -> BrokerState:
+        """
+        Deep-ish copy. Copies fields that are considered mutable during updates.
+        """
         return BrokerState(
             is_running=self.is_running,
             config=self.config,
@@ -136,6 +147,9 @@ class BrokerState:
         )
 
     def rehydrate_with_ticks(self) -> list[WorkflowTick]:
+        """
+        Rehydrates non-serializable state by re-running commands.
+        """
         ticks: list[WorkflowTick] = []
         for step_name, worker_state in sorted(self.workers.items(), key=lambda x: x[0]):
             for waiter in sorted(
@@ -146,8 +160,10 @@ class BrokerState:
         return ticks
 
     def to_serialized(self, serializer: BaseSerializer) -> SerializedContext:
+        """Serialize the broker state to a SerializedContext."""
         workers_dict = {}
         for step_name, worker_state in self.workers.items():
+            # Serialize queue with retry and stream scope info.
             queue = [
                 SerializedEventAttempt(
                     event=serializer.serialize(attempt.event),
@@ -163,6 +179,7 @@ class BrokerState:
                 )
                 for attempt in worker_state.queue
             ]
+            # Serialize in-progress events so they can be re-queued on resume.
             in_progress = [
                 SerializedEventAttempt(
                     event=serializer.serialize(ip.event),
@@ -178,10 +195,12 @@ class BrokerState:
                 )
                 for ip in worker_state.in_progress
             ]
+            # Serialize collected events.
             collected_events = {
                 buffer_id: [serializer.serialize(ev) for ev in events]
                 for buffer_id, events in worker_state.collected_events.items()
             }
+            # Serialize waiters.
             waiters = [
                 SerializedWaiter(
                     waiter_id=waiter.waiter_id,
@@ -204,7 +223,7 @@ class BrokerState:
 
         return SerializedContext(
             version=CURRENT_SERIALIZED_VERSION,
-            state={},
+            state={},  # State is filled separately by the state store.
             is_running=self.is_running,
             workers=workers_dict,
             stream_seq=self.stream_seq,
@@ -239,8 +258,12 @@ class BrokerState:
         workflow: Workflow,
         serializer: BaseSerializer,
     ) -> BrokerState:
+        """Deserialize a SerializedContext into a BrokerState."""
         serializer = serializer or JsonSerializer()
+        # Start with a base state from the workflow.
         base_state = BrokerState.from_workflow(workflow)
+        # Preserve this so the workflow knows whether to construct a StartEvent
+        # from kwargs when it resumes.
         base_state.is_running = serialized.is_running
         base_state.stream_seq = serialized.stream_seq
         base_state.streams = {
@@ -267,10 +290,13 @@ class BrokerState:
             for key, release in serialized.collection_release_states.items()
         }
 
+        # Restore worker state even when not running so resume can pick up the
+        # persisted queues, collected events, and waiters.
         for step_name, worker_data in serialized.workers.items():
             if step_name not in base_state.workers:
                 continue
             worker = base_state.workers[step_name]
+            # Restore queue with retry and stream scope info.
             worker.queue = [
                 EventAttempt(
                     event=serializer.deserialize(attempt.event),
@@ -286,6 +312,7 @@ class BrokerState:
                 )
                 for attempt in worker_data.queue
             ]
+            # In-progress events are moved back to the queue on deserialization.
             for attempt in worker_data.in_progress:
                 worker.queue.append(
                     EventAttempt(
@@ -301,10 +328,12 @@ class BrokerState:
                         ),
                     )
                 )
+            # Restore collected events.
             worker.collected_events = {
                 buffer_id: [serializer.deserialize(ev) for ev in events]
                 for buffer_id, events in worker_data.collected_events.items()
             }
+            # Restore waiters.
             worker.collected_waiters = []
             for waiter_data in worker_data.collected_waiters:
                 worker.collected_waiters.append(
@@ -327,6 +356,7 @@ class BrokerState:
 
 
 def _import_event_type(qualified_name: str) -> type[Event]:
+    """Import an event type from a fully qualified name like 'mymodule.MyEvent'."""
     parts = qualified_name.rsplit(".", 1)
     if len(parts) != 2:
         raise ValueError(f"Invalid qualified name: {qualified_name}")
