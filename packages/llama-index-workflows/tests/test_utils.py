@@ -339,6 +339,14 @@ def test_validate_step_signature_rejects_stream_param_with_other_events() -> Non
         validate_step_signature(spec)
 
 
+def test_step_rejects_stream_param_with_other_event_params() -> None:
+    with pytest.raises(WorkflowValidationError, match="cannot be combined with other"):
+
+        @step
+        async def f(events: list[_EventA], ev: _EventB) -> StopEvent:  # type: ignore[unused-ignore]
+            return StopEvent(result="x")
+
+
 def test_event_list_element_types_union_without_event_members_returns_none() -> None:
     # A list[Union[...]] whose members are not Event subclasses is not an event-list.
     assert _event_list_element_types(list[int | str]) is None

@@ -216,10 +216,10 @@ def make_step_function(
 
     event_name, accepted_events = next(iter(spec.accepted_events.items()))
 
-    # Collect-mode (heterogeneous fan-in): more than one event parameter. The
-    # step accepts every declared event type for routing, and collects one of
-    # each (in declaration order) before firing once. ``event_name`` keeps the
-    # first parameter, which is still the carrier event passed into the wrapper.
+    # Collect-mode (multi-slot fan-in): more than one event parameter. The step
+    # accepts every declared event type for routing, then collects by
+    # declaration order before firing once. ``event_name`` keeps the first
+    # parameter, which is still the carrier event passed into the wrapper.
     collect_params: list[tuple[str, Any]] | None = None
     if len(spec.accepted_events) > 1:
         collect_params = [

@@ -276,15 +276,14 @@ def validate_step_signature(spec: StepSignatureSpec) -> None:
         msg = (
             "A list[E] collection parameter cannot be combined with other "
             "event parameters. Use a single list[E] parameter, or multiple "
-            "single-event parameters for a heterogeneous join."
+            "single-event parameters for a multi-slot join."
         )
         raise WorkflowValidationError(msg)
     if num_of_events > 1:
-        # Collect-mode (heterogeneous fan-in): a step with more than one
-        # event-shaped parameter fires once when one event of each declared
-        # type has arrived. Each such parameter must name exactly one
-        # concrete event type; union-typed collect parameters (e.g.
-        # ``x: A | B``) are rejected.
+        # Collect-mode (multi-slot fan-in): a step with more than one
+        # event-shaped parameter fires once every declared slot is filled. Each
+        # parameter must name exactly one concrete event type; union-typed
+        # collect parameters (e.g. ``x: A | B``) are rejected.
         for name, param_types in spec.accepted_events.items():
             if len(param_types) != 1:
                 msg = (

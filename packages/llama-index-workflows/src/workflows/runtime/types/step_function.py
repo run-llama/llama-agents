@@ -126,7 +126,7 @@ async def partial(
     if collection_events is not None:
         kwargs.update(collection_events)
     elif collected_events is not None:
-        # Collect-mode (heterogeneous fan-in): bind each declared event
+        # Collect-mode (multi-slot fan-in): bind each declared event
         # parameter to its collected event instead of a single trigger event.
         kwargs.update(collected_events)
     else:
