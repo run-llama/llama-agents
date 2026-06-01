@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LlamaIndex Inc.
-"""Batch-lineage fan-out / fan-in (Phase L2).
+"""Batch-lineage fan-out / fan-in.
 
 Covers the terse ``join(events: list[Done])`` form for static ``list[E]``
 producers, multi-level fan-out, replay equality of batch ids and grouping,
-empty batches, and branch death. Async-iterator (streaming) producers are a
-follow-up and are rejected at decoration.
+empty batches, and branch death. Async-iterator producers are rejected at
+decoration because this path only supports finite returned-list batches.
 """
 
 from __future__ import annotations
@@ -90,7 +90,7 @@ async def test_static_list_producer_join_fires_once_with_all() -> None:
 
 
 def test_async_generator_producer_rejected_at_decoration() -> None:
-    """Async-iterator (streaming) fan-out is deferred; declaring one errors."""
+    """Async-iterator fan-out is outside the returned-list batch contract."""
 
     with pytest.raises(WorkflowValidationError, match="Async-iterator fan-out"):
 
@@ -250,7 +250,7 @@ def _done_batch_ids(ticks: list[WorkflowTick]) -> list[str]:
 async def test_replay_reproduces_identical_batch_ids_and_grouping() -> None:
     """Record a real fan-out run's tick stream, replay it, and assert identical
     batch ids and grouping. Replay determinism lives in the reducer: batch ids
-    are a pure function of run_id + producing step + per-run sequence."""
+    are a pure function of the producer path and batch sequence."""
 
     wf = _ReplayFanOut()
     result, ticks = await _run_recording_ticks(wf)

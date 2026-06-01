@@ -754,10 +754,9 @@ def _mint_batch_id(
     tree-path), the producing ``step_name``, and a monotonic sequence number kept
     in broker state. Because the reducer is pure and replayed tick-by-tick (see
     ``replay_ticks_stream``), the same fan-out reproduces the same sequence value,
-    hence the same id, on replay — and crucially with NO ``run_id`` in the digest,
-    a replay (``run_id=None``) and the live run produce identical ids, so a
-    snapshot taken mid-fan-out resumes onto the same lineage. NO uuid / random /
-    wall-clock / id() — those would corrupt replayed lineage.
+    hence the same id, on replay. The digest does not include ``run_id``, so a
+    replay (``run_id=None``) and the live run produce identical ids and a
+    snapshot taken mid-fan-out resumes onto the same lineage.
     """
     seq = state.batch_seq
     state.batch_seq = seq + 1

@@ -2,17 +2,10 @@
 # Copyright (c) 2026 LlamaIndex Inc.
 """Regression tests for the typed ``list[E]`` fan-out/fan-in batch accounting.
 
-Each case below is a minimal, user-facing reproduction of a batch-lineage
-defect found while de-risking the feature: silent data loss (a join fires with
-a truncated batch) or an indefinite hang (a batch never closes, the join never
-fires). All assertions are on observable behavior (the run completes / the join
-sees the full batch), not on internal reducer state, so they remain valid
-across a control-loop rewrite and flip to green when the accounting is fixed.
-
-Known-broken cases are marked ``xfail(strict=True)``: they keep CI green today
-and fail loudly the moment the underlying bug is fixed, which is the signal to
-delete the marker. Every run is wrapped in ``asyncio.wait_for`` so a hang fails
-the test instead of stalling the suite.
+Each case below is a minimal reproduction for a bug class that can silently
+truncate a joined batch or leave it waiting forever. Assertions stay on
+observable behavior: the run completes, the join sees the expected batch, and
+capacity limits are honored.
 """
 
 from __future__ import annotations
@@ -41,8 +34,8 @@ async def _run(wf: Workflow, timeout: float = 6.0) -> object:
 
 
 # ---------------------------------------------------------------------------
-# Member accounting: batch_pending is decremented per (member x consumer)
-# instead of per delivered member, so batches close early and drop members.
+# Member accounting: an event accepted by two steps is two work items. The join
+# must still see the full batch.
 # ---------------------------------------------------------------------------
 
 
@@ -113,8 +106,7 @@ async def test_event_routed_to_step_and_join_keeps_full_batch() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Error paths drop batch_stack from the re-queued event, so the recovered /
-# retried member never decrements its batch and the join hangs forever.
+# Error paths keep the work item's batch stack across retry and recovery.
 # ---------------------------------------------------------------------------
 
 
@@ -172,8 +164,8 @@ async def test_catch_error_recovery_closes_batch() -> None:
 
 
 # ---------------------------------------------------------------------------
-# num_workers=1 collect: when two batches' closes overlap, the worker-id-0
-# fallback aliases their in-progress state and one batch's result is lost.
+# Closed-batch collects use the normal worker capacity path. Overlapping closes
+# must queue instead of aliasing in-progress state.
 # ---------------------------------------------------------------------------
 
 
@@ -227,8 +219,7 @@ async def test_num_workers_1_collect_overlapping_batches() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Nested fan-out: the empty-batch firing gate stops one level too early, so a
-# middle batch that closes empty never fires its join and the run hangs.
+# Nested fan-out still summarizes when inner joins drop some or all branches.
 # ---------------------------------------------------------------------------
 
 
@@ -276,7 +267,7 @@ def _nested_workflow(per_inner_drops: Callable[[int], bool]) -> type[Workflow]:
 
 
 async def test_nested_partial_inner_drop_sees_subset() -> None:
-    """Cleared behavior: one inner join drops, the outer join sees the survivors."""
+    """One inner join drops, the outer join sees the survivors."""
     wf = _nested_workflow(lambda outer: outer == 1)
     result = await _run(wf(timeout=8))
     assert result == [(0, 2), (2, 2)], result
@@ -290,9 +281,8 @@ async def test_nested_all_inner_dropped_terminates() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Persistence: a workflow snapshotted mid-fan-out cannot resume (batch ids are
-# re-minted under run_id=None and in_progress lineage is dropped), so the
-# resumed run hangs. This is the durable/server resume path.
+# Persistence: a snapshot taken mid-fan-out can resume without losing batch ids
+# or in-progress member lineage.
 # ---------------------------------------------------------------------------
 
 
@@ -347,8 +337,8 @@ async def test_resume_mid_open_batch_completes() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Signature validation: unsatisfiable joins are accepted then deadlock, and an
-# Optional list collect param is rejected with a misleading generic error.
+# Signature validation rejects shapes that would otherwise hang or fail with a
+# misleading generic error.
 # ---------------------------------------------------------------------------
 
 
@@ -395,8 +385,8 @@ def test_optional_list_collect_param_not_generic_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Old/new API boundary: ctx.send_event is ordinary dispatch, not batch
-# membership. list[E] fan-in is only for returned-list producer batches.
+# ctx.send_event is ordinary dispatch, not batch membership. list[E] fan-in is
+# only for returned-list producer batches.
 # ---------------------------------------------------------------------------
 
 

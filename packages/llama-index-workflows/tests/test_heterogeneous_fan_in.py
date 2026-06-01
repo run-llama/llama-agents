@@ -105,7 +105,7 @@ def test_union_collect_param_rejected() -> None:
 
 
 def test_list_event_param_accepted_as_batch_collect() -> None:
-    """A single ``list[E]`` parameter is now a batch-collect step (Phase L2)."""
+    """A single ``list[E]`` parameter is a batch-collect step."""
 
     class _ListWorkflow(Workflow):
         pass
@@ -123,7 +123,7 @@ def test_list_event_param_accepted_as_batch_collect() -> None:
 
 
 def test_list_union_event_param_accepted_as_flat_batch() -> None:
-    """A ``list[A | B]`` collect parameter is a flat heterogeneous batch (L3)."""
+    """A ``list[A | B]`` collect parameter is a flat heterogeneous batch."""
 
     class _ListUnionWorkflow(Workflow):
         pass

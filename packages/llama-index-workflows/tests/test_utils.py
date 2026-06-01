@@ -143,7 +143,7 @@ def test_validate_step_signature_multiple_single_event_params_is_collect_mode() 
 
 def test_validate_step_signature_union_collect_param_rejected() -> None:
     # A union-typed parameter alongside another event parameter is rejected:
-    # collect-mode parameters must each name a single event type for now.
+    # collect-mode parameters must each name a single event type.
     def f(ev: OneTestEvent, foo: AnotherTestEvent | OneTestEvent) -> StopEvent:
         return StopEvent()
 
@@ -325,7 +325,7 @@ def test_validate_step_signature_accepts_list_return() -> None:
 
 def test_validate_step_signature_rejects_batch_param_with_other_events() -> None:
     # A list[E] batch collect parameter cannot be combined with additional event
-    # params; that is a multi-slot collect deferred to a later phase.
+    # params.
     spec = StepSignatureSpec(
         accepted_events={"a": [StartEvent], "b": [StopEvent]},
         return_types=[StopEvent],

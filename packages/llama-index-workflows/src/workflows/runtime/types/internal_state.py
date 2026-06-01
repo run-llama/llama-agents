@@ -86,8 +86,8 @@ class BrokerState:
     # Monotonic counter used to mint deterministic batch ids. Incremented in the
     # reducer when a fan-out batch is opened. Because the reducer is pure and
     # replayed tick-by-tick, the same fan-out reproduces the same counter value,
-    # hence the same batch id, on replay. The id derivation contains NO run_id,
-    # so a replay (run_id=None) and the live run produce identical ids.
+    # hence the same batch id, on replay. The id derivation omits run_id so a
+    # replay (run_id=None) and the live run produce identical ids.
     batch_seq: int = 0
     # Open fan-out batches keyed by batch id. A ``Batch`` models its lifecycle as
     # an explicit live set of work items (see ``Batch.live``). A batch closes

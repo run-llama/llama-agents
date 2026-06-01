@@ -201,11 +201,9 @@ def as_step_worker_function(
             if config.batch_collect_param is not None:
                 param_name, _ = config.batch_collect_param
                 batch_binding = {param_name: list(state.batch_input or [])}
-            # Heterogeneous fan-in (collect-mode): a step with more than one
-            # event parameter collects one event of each declared type, then
-            # fires once with each parameter bound to its event. This desugars
-            # onto the existing collect_events buffer and is lineage-blind
-            # (assumes a single batch in flight) until batch lineage lands.
+            # Heterogeneous fan-in: multiple event parameters collect one event
+            # of each declared type via the existing collect_events buffer. This
+            # path is separate from list[E] batch fan-in.
             elif config.collect_params is not None:
                 expected_types = [event_type for _, event_type in config.collect_params]
                 collected = internal_context.collect_events(event, expected_types)

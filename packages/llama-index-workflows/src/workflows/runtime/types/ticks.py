@@ -110,11 +110,11 @@ class TickWaiterTimeout(BaseModel):
 
 
 class TickIdleCheck(BaseModel):
-    """Scheduled after state appears idle, to re-check after async events drain.
+    """Scheduled after state appears idle, to re-check after async sends run.
 
     Appended to tick_buffer when the reducer sees quiescent state. Processed
     on the next loop iteration after asyncio.sleep(0), giving in-flight
-    ctx.send_event() calls a chance to deliver via the pull task.
+    ctx.send_event() calls a chance to deliver.
     """
 
     model_config = ConfigDict(frozen=True)

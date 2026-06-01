@@ -1,17 +1,13 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LlamaIndex Inc.
-"""Collect selection algebra (Phase L3).
+"""Collect selection algebra.
 
 Covers the public ``Collect`` / ``Cardinality`` API, signature inference for
 batch fan-in parameters (bare ``list[E]``, the ``Annotated[..., Collect()]``
 synonym, union flat lists, and the ``Take(n)`` marker), the validation errors
-that keep mode determination legible, and ``Take(n)`` runtime release.
-``AtLeast`` is v2 (it's a silent alias of ``Take`` without v2 re-fire /
-cancellation), so it is intentionally not exported.
-
-The cross-level (``at=``) and provenance (``from_=``) knobs and multi-slot joins
-are declared-but-deferred; their tests assert the clear validation error and
-xfail the end-to-end examples.
+that keep mode determination legible, and ``Take(n)`` runtime release. Other
+cardinalities and the cross-level/provenance/predicate knobs are reserved and
+raise validation errors when declared.
 """
 
 from __future__ import annotations
@@ -66,7 +62,7 @@ def test_cardinality_hierarchy() -> None:
 
 
 def test_atleast_is_not_exported() -> None:
-    """AtLeast is deferred to v2; it must not be importable from the package."""
+    """AtLeast is outside the supported cardinality set."""
     import workflows
 
     assert not hasattr(workflows, "AtLeast")
@@ -162,7 +158,7 @@ def test_single_event_param_is_not_batch_collect() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Validation: legible mode determination, deferred knobs
+# Validation: legible mode determination, reserved knobs
 # --------------------------------------------------------------------------- #
 
 

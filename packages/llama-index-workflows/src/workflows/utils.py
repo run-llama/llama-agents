@@ -154,7 +154,7 @@ def inspect_signature(
                 msg = (
                     "A step may declare at most one batch (list[E]) collect "
                     f"parameter, but found both {batch_collect_param[0]!r} and "
-                    f"{name!r}. Multi-slot collects are not supported yet."
+                    f"{name!r}. Multi-slot collects are not supported."
                 )
                 raise WorkflowValidationError(msg)
             batch_collect_param = (name, tuple(element_types))
@@ -233,17 +233,10 @@ def _event_list_element_types(annotation: Any) -> list[Any] | None:
 
 
 def _validate_collect_marker(marker: Collect, name: str) -> None:
-    """Reject Collect knobs that are accepted on the marker but not yet wired.
-
-    ``at`` (cross-level scope promotion), ``from_`` (provenance restriction), and
-    ``where`` (predicate narrowing) are part of the declared API but not
-    implemented in this phase. Only the v1 cardinalities ``All`` / ``Take`` are
-    supported (``AtLeast`` / ``Buffer`` / ``Window`` are v2).
-    """
+    """Reject Collect knobs outside the supported finite-batch contract."""
     if marker.where is not None:
         raise WorkflowValidationError(
-            f"Collect(where=...) on {name!r}: predicate narrowing is not "
-            "supported yet (planned for v2)."
+            f"Collect(where=...) on {name!r}: predicate narrowing is not supported."
         )
     if marker.at is not None:
         raise WorkflowValidationError(
@@ -258,7 +251,7 @@ def _validate_collect_marker(marker: Collect, name: str) -> None:
     if not isinstance(marker.cardinality, (All, Take)):
         raise WorkflowValidationError(
             f"Collect cardinality on {name!r} must be All() or Take(n). "
-            "AtLeast/Buffer/Window are deferred to v2."
+            "Other cardinalities are not supported."
         )
 
 
@@ -279,26 +272,26 @@ def validate_step_signature(spec: StepSignatureSpec) -> None:
         raise WorkflowValidationError(msg)
     if spec.batch_collect_param is not None and num_of_events > 1:
         # A batch (list[E]) collect parameter alongside other event params is a
-        # multi-slot collect — deferred to a later phase.
+        # multi-slot collect, which this contract does not support.
         msg = (
             "A batch (list[E]) collect parameter cannot be combined with other "
-            "event parameters yet. Use a single list[E] parameter, or multiple "
+            "event parameters. Use a single list[E] parameter, or multiple "
             "single-event parameters for a heterogeneous join."
         )
         raise WorkflowValidationError(msg)
     if num_of_events > 1:
         # Collect-mode (heterogeneous fan-in): a step with more than one
         # event-shaped parameter fires once when one event of each declared
-        # type has arrived. For now each such parameter must name exactly one
+        # type has arrived. Each such parameter must name exactly one
         # concrete event type; union-typed collect parameters (e.g.
-        # ``x: A | B``) are deferred to a later phase.
+        # ``x: A | B``) are rejected.
         for name, param_types in spec.accepted_events.items():
             if len(param_types) != 1:
                 msg = (
                     "Collect-mode steps (more than one event parameter) require "
                     f"each event parameter to declare a single event type, but "
                     f"parameter {name!r} declares {len(param_types)}. Union-typed "
-                    "collect parameters are not supported yet."
+                    "collect parameters are not supported."
                 )
                 raise WorkflowValidationError(msg)
 
@@ -378,13 +371,11 @@ def _get_param_types(param: inspect.Parameter, type_hints: dict) -> list[Any]:
 
 # Return-annotation origins whose single element type describes emitted events.
 # A step that returns ``list[E]`` declares produced events for validation and
-# graph representation. Async-iterator fan-out (``AsyncIterator[E]`` etc.) is a
-# separate follow-up; such returns are rejected at decoration (see
-# ``_reject_async_iterator_return``).
+# graph representation. Async-iterator returns are rejected at decoration.
 _COLLECTION_RETURN_ORIGINS = (list,)
 
 # Async-iterator return origins, rejected at decoration with a pointer to
-# ``list[E]``. Streaming fan-out is deferred to a follow-up change.
+# ``list[E]``.
 _ASYNC_ITERATOR_RETURN_ORIGINS = (
     cabc.AsyncIterator,
     cabc.AsyncIterable,
@@ -449,14 +440,14 @@ def _get_return_types(
 
 
 def _reject_async_iterator_return(func: Callable, return_hint: Any) -> None:
-    """Reject async-iterator fan-out returns until streaming lands.
+    """Reject async-iterator fan-out returns.
 
     A step that is an async generator, or annotates its return as
     ``AsyncIterator[E]`` / ``AsyncIterable[E]`` / ``AsyncGenerator[E, None]``,
-    today buffers every yield and dispatches the whole batch at step completion —
-    no real-time streaming. Rather than ship a type that implies streaming the
-    engine does not do, async-iterator fan-out is deferred to a follow-up.
-    Producers should return ``list[E]`` (static batch) or use ``ctx.send_event``.
+    The supported fan-out contract is a finite ``list[E]`` return. Async
+    iterators imply streaming member delivery, which the runtime does not model.
+    Producers should return ``list[E]`` or use ``ctx.send_event`` for ordinary
+    dispatch.
     """
     is_async_gen = inspect.isasyncgenfunction(
         getattr(func, "__func__", func)
@@ -465,7 +456,7 @@ def _reject_async_iterator_return(func: Callable, return_hint: Any) -> None:
     if is_async_gen or origin in _ASYNC_ITERATOR_RETURN_ORIGINS:
         raise WorkflowValidationError(
             "Async-iterator fan-out (AsyncIterator[E] / AsyncGenerator[E, None] / "
-            "async generator steps) is not supported yet. Return list[E] for a "
+            "async generator steps) is not supported. Return list[E] for a "
             "static batch, or emit incrementally with ctx.send_event."
         )
 

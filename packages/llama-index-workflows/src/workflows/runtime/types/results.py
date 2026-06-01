@@ -39,8 +39,8 @@ class RetryAttempt:
     is 0-based (0 = first run, 1 = first retry). ``last_exception`` /
     ``last_failed_at`` are ``None`` on the first attempt. ``recovery_counts``
     carries the per-``@catch_error``-handler invocation counts on the running
-    event's lineage so ``ctx.send_event`` can tag emitted events and nested
-    failures route to the same handlers.
+    event's lineage so nested failures and ``ctx.send_event`` emissions route to
+    the same handlers.
     """
 
     retry_number: int = 0
@@ -75,8 +75,8 @@ class StepWorkerState:
     # Batch-lineage fan-in: the fully buffered batch handed to a
     # ``list[E]`` collect step when its batch closes. None for non-collect runs.
     batch_input: list[Event] | None = None
-    # Batch lineage stack of the executing work item, so ``ctx.send_event`` can
-    # stamp emitted events with the branch's stack (keeping them in-batch).
+    # Batch lineage stack of the executing work item. Returned events inherit
+    # this stack; ctx.send_event remains ordinary dispatch.
     batch_stack: tuple[str, ...] = ()
 
     def _deepcopy(self) -> StepWorkerState:

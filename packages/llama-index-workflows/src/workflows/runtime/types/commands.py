@@ -91,7 +91,7 @@ class CommandScheduleIdleCheck:
     Returned by the reducer when state looks quiescent after processing a tick.
     The runner appends a TickIdleCheck to tick_buffer so that idle is confirmed
     on the next loop iteration, after an asyncio.sleep(0) yield gives in-flight
-    ctx.send_event() calls a chance to drain.
+    ctx.send_event() calls a chance to deliver.
     """
 
     pass

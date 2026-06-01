@@ -14,13 +14,9 @@ A bare ``list[E]`` parameter is exactly equivalent to ``Collect(All())`` — fir
 once when the batch closes with every collected event. ``Annotated[list[E],
 Collect()]`` is an explicit, grep-able synonym for the same default.
 
-Only the v1 cardinalities (``All`` / ``Take``) are implemented. ``AtLeast`` is
-deferred to v2: its only difference from ``Take`` ("continue accepting" the
-siblings that arrive after release) is unobservable without v2 re-fire
-(``Buffer`` / ``Window``) or a cancellation primitive, so in v1 it would be a
-silent alias of ``Take``. ``Buffer`` / ``Window`` (streaming aggregation) are
-also v2. The ``at`` / ``from_`` / ``where`` knobs are accepted on the marker but
-not yet wired into the runtime — declaring them raises a clear validation error.
+Only ``All`` and ``Take`` are supported. Other cardinalities and the ``at`` /
+``from_`` / ``where`` knobs are reserved; declaring them raises a validation
+error instead of silently picking the wrong semantics.
 """
 
 from __future__ import annotations
@@ -53,9 +49,9 @@ class All(Cardinality):
 class Take(Cardinality):
     """Fire once on the ``n``-th arrival with the first ``n`` events.
 
-    The remaining siblings are dropped — they keep running (cancellation is a
-    separate, future feature) but never reach this step. If the batch closes
-    before ``n`` members arrive, the step fires once with whatever did arrive.
+    The remaining siblings keep running but never reach this step. If the batch
+    closes before ``n`` members arrive, the step fires once with whatever did
+    arrive.
     """
 
     n: int
@@ -80,8 +76,8 @@ class Collect:
             one. Not yet implemented (declaring it raises a validation error).
         from_: Restrict provenance to events produced by this step. Not yet
             implemented (declaring it raises a validation error).
-        where: Narrowing predicate over members. Deferred to v2 (declaring it
-            raises a validation error).
+        where: Narrowing predicate over members. Reserved; declaring it raises
+            a validation error.
     """
 
     cardinality: Cardinality = field(default_factory=All)
