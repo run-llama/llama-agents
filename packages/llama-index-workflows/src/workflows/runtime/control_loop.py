@@ -543,6 +543,7 @@ async def control_loop(
     """
     The main async control loop for a workflow run.
     """
+    logger.debug("starting workflow control loop for run %s", run_id)
     # Consume the RunContext immediately so the container's strong reference
     # to the workflow graph is dropped before any step gets a chance to schedule
     # an asyncio handle whose Context snapshot would otherwise pin it.
