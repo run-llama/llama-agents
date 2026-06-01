@@ -27,7 +27,7 @@ from pydantic import Field
 from sqlalchemy.engine import Engine
 from workflows.context import Context
 from workflows.context.serializers import JsonSerializer
-from workflows.context.state_store import DictState, StateStore
+from workflows.context.state_store import DictState, InMemoryStateStore, StateStore
 from workflows.decorators import step
 from workflows.events import Event, StartEvent, StopEvent
 from workflows.runtime.types.internal_state import BrokerState
@@ -294,15 +294,14 @@ async def test_run_workflow_does_not_create_store(dbos_runtime: DBOSRuntime) -> 
 
 @pytest.mark.asyncio
 async def test_run_workflow_seeds_state_store_from_durable_handle() -> None:
-    class RecordingStateStore:
-        state_type = DictState
-
+    class RecordingStateStore(InMemoryStateStore[DictState]):
         def __init__(self) -> None:
+            super().__init__(DictState())
             self.get_state_called = False
 
         async def get_state(self) -> DictState:
             self.get_state_called = True
-            return DictState()
+            return await super().get_state()
 
     class RecordingWorkflowStore:
         def __init__(self) -> None:
@@ -319,15 +318,19 @@ async def test_run_workflow_seeds_state_store_from_durable_handle() -> None:
             self.create_state_store_calls.append(
                 (run_id, state_type, serialized_state, serializer)
             )
-            return self.state_store  # type: ignore[return-value]
+            return self.state_store
 
     class SimpleWf(Workflow):
         @step
         async def do_it(self, ev: StartEvent) -> StopEvent:
             return StopEvent(result="done")
 
-    async def workflow_run_fn(*_: Any) -> None:
-        return None
+    async def workflow_run_fn(
+        init_state: BrokerState,
+        start_event: StartEvent | None = None,
+        tags: dict[str, Any] | None = None,
+    ) -> StopEvent:
+        return StopEvent(result="done")
 
     runtime = DBOSRuntime(polling_interval_sec=0.01)
     runtime._dbos_launched = True
@@ -358,7 +361,7 @@ async def test_run_workflow_seeds_state_store_from_durable_handle() -> None:
             serialized_state=serialized_state,
             serializer=serializer,
         )
-        await adapter._ensure_workflow_started()  # type: ignore[attr-defined]
+        await cast(Any, adapter)._ensure_workflow_started()
 
     assert workflow_store.state_store.get_state_called
     assert workflow_store.create_state_store_calls == [

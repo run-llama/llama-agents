@@ -10,7 +10,7 @@ import sqlite3
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, AsyncGenerator, Generic, Literal
+from typing import Any, AsyncGenerator, Generic, Literal, cast
 
 from pydantic import BaseModel
 from typing_extensions import TypeVar
@@ -135,7 +135,7 @@ class SqliteStateStore(Generic[MODEL_T]):
                 self._save_state(state, conn)
                 conn.commit()
                 return state
-            return decode_state(row[0], row[1], row[2], self._serializer)  # type: ignore[return-value]
+            return cast(MODEL_T, decode_state(row[0], row[1], row[2], self._serializer))
         finally:
             conn.close()
 

@@ -9,7 +9,7 @@ import logging
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, AsyncGenerator, Generic, Literal
+from typing import Any, AsyncGenerator, Generic, Literal, cast
 
 import asyncpg
 from pydantic import BaseModel
@@ -143,12 +143,15 @@ class PostgresStateStore(Generic[MODEL_T]):
                 state = self._create_default_state()
                 await self._save_state(state, conn)
                 return state
-            return decode_state(
-                row["state_json"],
-                row["state_type"],
-                row["state_module"],
-                self._serializer,
-            )  # type: ignore[return-value]
+            return cast(
+                MODEL_T,
+                decode_state(
+                    row["state_json"],
+                    row["state_type"],
+                    row["state_module"],
+                    self._serializer,
+                ),
+            )
         finally:
             if should_release:
                 await self._pool.release(conn)  # type: ignore[arg-type]

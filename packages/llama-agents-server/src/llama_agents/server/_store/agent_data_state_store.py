@@ -8,7 +8,7 @@ import asyncio
 import functools
 import logging
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Generic, Literal
+from typing import Any, AsyncGenerator, Generic, Literal, cast
 
 from pydantic import BaseModel
 from typing_extensions import TypeVar
@@ -143,9 +143,12 @@ class AgentDataStateStore(Generic[MODEL_T]):
         record = await self._load_record()
         if record is None:
             return None
-        state = decode_state(
-            record.data, record.state_type, record.state_module, self._serializer
-        )  # type: ignore[return-value]
+        state = cast(
+            MODEL_T,
+            decode_state(
+                record.data, record.state_type, record.state_module, self._serializer
+            ),
+        )
         self._cached_state = state
         return state.model_copy()
 

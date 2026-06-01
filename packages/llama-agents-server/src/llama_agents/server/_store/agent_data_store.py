@@ -510,13 +510,12 @@ class AgentDataStore(AbstractWorkflowStore):
         cached = self._state_stores.get(run_id)
         if cached is not None:
             return cached
-        reconnecting = (
+        if (
             serialized_state is not None
             and serializer is not None
             and serialized_state.get("store_type") == "agent_data"
             and serialized_state.get("run_id") == run_id
-        )
-        if reconnecting:
+        ):
             store = AgentDataStateStore.from_dict(
                 serialized_state,
                 serializer,

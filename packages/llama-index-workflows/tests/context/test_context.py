@@ -750,7 +750,9 @@ def test_encode_decode_state_handles_dict_state() -> None:
 
 def test_encode_decode_state_handles_dict_state_subclass() -> None:
     serializer = JsonSerializer()
-    state = CustomDictState(answer=42, name="subclass")
+    state = CustomDictState()
+    state["answer"] = 42
+    state["name"] = "subclass"
 
     state_data, state_type, state_module = encode_state(state, serializer)
     result = decode_state(state_data, state_type, state_module, serializer)
