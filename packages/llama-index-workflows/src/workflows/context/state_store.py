@@ -16,6 +16,7 @@ from typing import (
     Generic,
     Literal,
     Protocol,
+    cast,
     runtime_checkable,
 )
 
@@ -25,7 +26,7 @@ from typing_extensions import TypeVar
 from workflows.decorators import StepConfig
 from workflows.events import DictLikeModel
 
-from .serializers import BaseSerializer
+from .serializers import BaseSerializer, JsonSerializer
 from .utils import import_module_from_qualified_name
 
 if TYPE_CHECKING:
@@ -54,6 +55,63 @@ class InMemorySerializedState(BaseModel):
         if isinstance(data, dict) and "store_type" not in data:
             data = {**data, "store_type": "in_memory"}
         return data
+
+
+class StoredStateRecord(BaseModel):
+    """Raw state record loaded and saved by a storage backend."""
+
+    data: Any
+    state_type: str | None = None
+    state_module: str | None = None
+
+
+@runtime_checkable
+class StateStorage(Protocol):
+    """Internal persistence boundary for workflow state."""
+
+    async def load(self) -> StoredStateRecord | None:
+        """Load a raw state record, or None when no state exists yet."""
+        ...
+
+    async def save(self, record: StoredStateRecord) -> None:
+        """Persist a raw state record."""
+        ...
+
+    def to_handle(self) -> dict[str, Any]:
+        """Return backend-specific reconnect metadata."""
+        ...
+
+
+def record_from_state(
+    state: BaseModel,
+    serializer: BaseSerializer,
+    known_unserializable_keys: tuple[str, ...] = KNOWN_UNSERIALIZABLE_KEYS,
+) -> StoredStateRecord:
+    """Encode a state model into a raw storage record."""
+    state_data, state_type_name, state_module = encode_state(
+        state, serializer, known_unserializable_keys
+    )
+    return StoredStateRecord(
+        data=state_data,
+        state_type=state_type_name,
+        state_module=state_module,
+    )
+
+
+def string_record_from_state(
+    state: BaseModel,
+    serializer: BaseSerializer,
+    known_unserializable_keys: tuple[str, ...] = KNOWN_UNSERIALIZABLE_KEYS,
+) -> StoredStateRecord:
+    """Encode a state model into a storage record with string data."""
+    state_data, state_type_name, state_module = encode_state_to_str(
+        state, serializer, known_unserializable_keys
+    )
+    return StoredStateRecord(
+        data=state_data,
+        state_type=state_type_name,
+        state_module=state_module,
+    )
 
 
 def parse_in_memory_state(
@@ -176,6 +234,9 @@ def decode_state(
     serializer: BaseSerializer,
 ) -> BaseModel:
     """Decode a state model using the persisted type metadata."""
+    if isinstance(state_data, BaseModel):
+        return state_data
+
     state_type = _resolve_state_type(state_type_name, state_module, serializer)
 
     if state_type is not None and issubclass(state_type, DictState):
@@ -479,8 +540,153 @@ class StateStore(Protocol[MODEL_T]):
         """Serialize state for persistence."""
         ...
 
+    async def snapshot(self, serializer: "BaseSerializer") -> dict[str, Any]:
+        """Serialize portable state data."""
+        ...
 
-class InMemoryStateStore(Generic[MODEL_T]):
+    def handle(self) -> dict[str, Any]:
+        """Serialize reconnect metadata for durable storage."""
+        ...
+
+
+class TypedStateStore(Generic[MODEL_T]):
+    """Typed public StateStore facade over raw storage."""
+
+    state_type: type[MODEL_T]
+
+    def __init__(
+        self,
+        storage: StateStorage,
+        state_type: type[MODEL_T],
+        serializer: BaseSerializer,
+        *,
+        to_dict_mode: Literal["snapshot", "handle"] = "snapshot",
+    ) -> None:
+        self._storage = storage
+        self.state_type = state_type
+        self._serializer = serializer
+        self._to_dict_mode = to_dict_mode
+
+    @functools.cached_property
+    def _lock(self) -> asyncio.Lock:
+        """Lazy lock initialization for Python 3.14+ compatibility."""
+        return asyncio.Lock()
+
+    def _create_default_state(self) -> MODEL_T:
+        return create_cleared_state(self.state_type)
+
+    async def _load_state_or_none(self) -> MODEL_T | None:
+        record = await self._storage.load()
+        if record is None:
+            return None
+        return cast(
+            MODEL_T,
+            decode_state(
+                record.data,
+                record.state_type,
+                record.state_module,
+                self._serializer,
+            ),
+        )
+
+    async def _load_state(self) -> MODEL_T:
+        state = await self._load_state_or_none()
+        if state is not None:
+            return state
+        state = self._create_default_state()
+        await self._save_state(state)
+        return state
+
+    async def _save_state(self, state: BaseModel) -> None:
+        await self._storage.save(record_from_state(state, self._serializer))
+
+    async def get_state(self) -> MODEL_T:
+        """Return a copy of the current state model."""
+        state = await self._load_state()
+        return state.model_copy()
+
+    async def set_state(self, state: MODEL_T) -> None:
+        """Replace or merge into the current state model."""
+        async with self._lock:
+            current = await self._load_state_or_none()
+            merged: BaseModel = (
+                state if current is None else merge_state(current, state)
+            )
+            await self._save_state(merged)
+
+    async def get(self, path: str, default: Any = Ellipsis) -> Any:
+        """Get a nested value using dot-separated paths."""
+        async with self._lock:
+            return get_by_path(await self._load_state(), path, default)
+
+    async def set(self, path: str, value: Any) -> None:
+        """Set a nested value using dot-separated paths."""
+        async with self.edit_state() as state:
+            set_by_path(state, path, value)
+
+    async def clear(self) -> None:
+        """Reset the state to its type defaults."""
+        await self.set_state(create_cleared_state(self.state_type))
+
+    @asynccontextmanager
+    async def edit_state(self) -> AsyncGenerator[MODEL_T, None]:
+        """Edit state transactionally under a lock."""
+        async with self._lock:
+            state = await self._load_state()
+            yield state
+            await self._save_state(state)
+
+    async def snapshot(self, serializer: BaseSerializer) -> dict[str, Any]:
+        """Serialize portable state data."""
+        state = await self._load_state()
+        return create_in_memory_payload(state, serializer).model_dump()
+
+    def handle(self) -> dict[str, Any]:
+        """Serialize reconnect metadata for durable storage."""
+        return self._storage.to_handle()
+
+    def to_dict(self, serializer: BaseSerializer) -> dict[str, Any]:
+        """Serialize state for legacy callers."""
+        if self._to_dict_mode == "handle":
+            return self.handle()
+        record = self._sync_snapshot_record()
+        return InMemorySerializedState(
+            state_type=record.state_type or "DictState",
+            state_module=record.state_module or "workflows.context.state_store",
+            state_data=record.data,
+        ).model_dump()
+
+    def _sync_snapshot_record(self) -> StoredStateRecord:
+        raise NotImplementedError("Use await snapshot(serializer) for async storage")
+
+
+class InMemoryStateStorage:
+    """Raw in-process storage for workflow state."""
+
+    def __init__(self, record: StoredStateRecord | None = None) -> None:
+        self._record = record
+
+    async def load(self) -> StoredStateRecord | None:
+        return self._record.model_copy(deep=True) if self._record is not None else None
+
+    async def save(self, record: StoredStateRecord) -> None:
+        self._record = record.model_copy(deep=True)
+
+    def load_sync(self) -> StoredStateRecord | None:
+        return self._record.model_copy(deep=True) if self._record is not None else None
+
+    def to_handle(self) -> dict[str, Any]:
+        record = self.load_sync()
+        if record is None:
+            return InMemorySerializedState().model_dump()
+        return InMemorySerializedState(
+            state_type=record.state_type or "DictState",
+            state_module=record.state_module or "workflows.context.state_store",
+            state_data=record.data,
+        ).model_dump()
+
+
+class InMemoryStateStore(TypedStateStore[MODEL_T]):
     """
     Default in-memory implementation of the [StateStore][workflows.context.state_store.StateStore] protocol.
 
@@ -525,46 +731,19 @@ class InMemoryStateStore(Generic[MODEL_T]):
     state_type: type[MODEL_T]
 
     def __init__(self, initial_state: MODEL_T):
-        self._state = initial_state
-        self.state_type = type(initial_state)
-
-    @functools.cached_property
-    def _lock(self) -> asyncio.Lock:
-        """Lazy lock initialization for Python 3.14+ compatibility.
-
-        asyncio.Lock() requires a running event loop in Python 3.14+.
-        Using cached_property defers creation to first use in async context.
-        """
-        return asyncio.Lock()
-
-    async def get_state(self) -> MODEL_T:
-        """Return a shallow copy of the current state model.
-
-        Returns:
-            MODEL_T: A `.model_copy()` of the internal Pydantic model.
-        """
-        return self._state.model_copy()
-
-    async def set_state(self, state: MODEL_T) -> None:
-        """Replace or merge into the current state model.
-
-        If the provided state is the exact type of the current state, it replaces
-        the state entirely. If the provided state is a parent type (i.e., the
-        current state type is a subclass of the provided state type), the fields
-        from the parent are merged onto the current state, preserving any child
-        fields that aren't present in the parent.
-
-        This enables workflow inheritance where a base workflow step can call
-        set_state with a base state type without obliterating child state fields.
-
-        Args:
-            state (MODEL_T): New state, either the same type or a parent type.
-
-        Raises:
-            ValueError: If the types are not compatible (neither same nor parent).
-        """
-        async with self._lock:
-            self._state = merge_state(self._state, state)
+        self._memory_storage = InMemoryStateStorage(
+            StoredStateRecord(
+                data=initial_state,
+                state_type=type(initial_state).__name__,
+                state_module=type(initial_state).__module__,
+            )
+        )
+        super().__init__(
+            self._memory_storage,
+            type(initial_state),
+            JsonSerializer(),
+            to_dict_mode="snapshot",
+        )
 
     def to_dict(self, serializer: "BaseSerializer") -> dict[str, Any]:
         """Serialize the state and model metadata for persistence.
@@ -581,8 +760,36 @@ class InMemoryStateStore(Generic[MODEL_T]):
             dict[str, Any]: A payload suitable for
             [from_dict][workflows.context.state_store.InMemoryStateStore.from_dict].
         """
-        payload = create_in_memory_payload(self._state, serializer)
+        record = self._sync_snapshot_record()
+        state = decode_state(
+            record.data,
+            record.state_type,
+            record.state_module,
+            JsonSerializer(),
+        )
+        payload = create_in_memory_payload(state, serializer)
         return payload.model_dump()
+
+    def _sync_snapshot_record(self) -> StoredStateRecord:
+        record = self._memory_storage.load_sync()
+        if record is None:
+            state = self.state_type()
+            record = StoredStateRecord(
+                data=state,
+                state_type=type(state).__name__,
+                state_module=type(state).__module__,
+            )
+            self._memory_storage._record = record
+        return record
+
+    async def _save_state(self, state: BaseModel) -> None:
+        await self._memory_storage.save(
+            StoredStateRecord(
+                data=state,
+                state_type=type(state).__name__,
+                state_module=type(state).__module__,
+            )
+        )
 
     @classmethod
     def from_dict(
@@ -606,63 +813,6 @@ class InMemoryStateStore(Generic[MODEL_T]):
 
         state_instance = decode_seed_state(serialized_state, serializer)
         return cls(state_instance)  # type: ignore[arg-type]
-
-    @asynccontextmanager
-    async def edit_state(self) -> AsyncGenerator[MODEL_T, None]:
-        """Edit state transactionally under a lock.
-
-        Yields the mutable model and writes it back on exit. This pattern avoids
-        read-modify-write races and keeps updates atomic.
-
-        Yields:
-            MODEL_T: The current state model for in-place mutation.
-        """
-        async with self._lock:
-            state = self._state
-
-            yield state
-
-            self._state = state
-
-    async def get(self, path: str, default: Any = Ellipsis) -> Any:
-        """Get a nested value using dot-separated paths.
-
-        Args:
-            path (str): Dot-separated path, e.g. "user.profile.name".
-            default (Any): If provided, return this when the path does not
-                exist; otherwise, raise `ValueError`.
-
-        Returns:
-            Any: The resolved value.
-
-        Raises:
-            ValueError: If the path is invalid and no default is provided or if
-                the path depth exceeds limits.
-        """
-        async with self._lock:
-            return get_by_path(self._state, path, default)
-
-    async def set(self, path: str, value: Any) -> None:
-        """Set a nested value using dot-separated paths.
-
-        Args:
-            path (str): Dot-separated path to write.
-            value (Any): Value to assign.
-
-        Raises:
-            ValueError: If the path is empty or exceeds the maximum depth.
-        """
-        async with self._lock:
-            set_by_path(self._state, path, value)
-
-    async def clear(self) -> None:
-        """Reset the state to its type defaults.
-
-        Raises:
-            ValueError: If the model type cannot be instantiated from defaults
-                (i.e., fields missing default values).
-        """
-        await self.set_state(create_cleared_state(self._state.__class__))
 
 
 def deserialize_dict_state_data(

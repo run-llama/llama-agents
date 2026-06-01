@@ -275,15 +275,14 @@ class _WorkflowService:
             return None
 
         try:
-            serializer = JsonSerializer()
             old_state_store = self._store.create_state_store(handler.run_id)
-            state_dict = old_state_store.to_dict(serializer)
+            state_dict = old_state_store.handle()
             if not state_dict:
                 return None
             return Context.from_dict(
                 workflow=workflow,
                 data={"version": 1, "state": state_dict},
-                serializer=serializer,
+                serializer=JsonSerializer(),
             )
         except Exception:
             logger.warning(

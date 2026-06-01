@@ -4,24 +4,18 @@
 
 from __future__ import annotations
 
-import asyncio
-import functools
 import logging
-from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Generic, Literal, cast
+from typing import Any, Generic, Literal
 
 from pydantic import BaseModel
 from typing_extensions import TypeVar
 from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import (
     DictState,
-    create_cleared_state,
+    StoredStateRecord,
+    TypedStateStore,
     decode_seed_state,
-    decode_state,
-    encode_state_to_str,
-    get_by_path,
-    merge_state,
-    set_by_path,
+    string_record_from_state,
 )
 
 from .agent_data_client import AgentDataClient
@@ -51,49 +45,28 @@ class AgentDataSerializedState(BaseModel):
     collection: str = "workflow_state"
 
 
-class AgentDataStateStore(Generic[MODEL_T]):
-    """StateStore backed by the LlamaCloud Agent Data API.
+class AgentDataStateStorage:
+    """Raw state storage backed by the LlamaCloud Agent Data API.
 
     Uses a single item in a ``workflow_state`` collection, keyed by ``run_id``.
     """
-
-    state_type: type[MODEL_T]
 
     def __init__(
         self,
         *,
         client: AgentDataClient,
         run_id: str,
-        state_type: type[MODEL_T] | None = None,
         collection: str = "workflow_state",
-        serializer: BaseSerializer | None = None,
     ) -> None:
         self._client = client
         self._run_id = run_id
-        self.state_type = state_type or DictState  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
         self._collection = collection
-        self._serializer = serializer or JsonSerializer()
-        # Cache the agent data item ID once found
         self._item_id: str | None = None
-        # Write-through state cache — avoids HTTP searches when state is
-        # already known from a previous load or save.
-        self._cached_state: MODEL_T | None = None
-        self._pending_seed: tuple[dict[str, Any], BaseSerializer] | None = None
+        self._cached_record: StoredStateRecord | None = None
 
     @property
     def run_id(self) -> str:
         return self._run_id
-
-    @functools.cached_property
-    def _lock(self) -> asyncio.Lock:
-        return asyncio.Lock()
-
-    # ------------------------------------------------------------------
-    # State serialization
-    # ------------------------------------------------------------------
-
-    def _create_default_state(self) -> MODEL_T:
-        return self.state_type()
 
     # ------------------------------------------------------------------
     # Load / save through API
@@ -110,72 +83,28 @@ class AgentDataStateStore(Generic[MODEL_T]):
         self._item_id = items[0]["id"]
         return _StoredStateRecord.model_validate(items[0]["data"])
 
-    async def _flush_pending_seed(self) -> None:
-        if self._pending_seed is None:
-            return
-
-        serialized_state, serializer = self._pending_seed
-        self._pending_seed = None
-        self._serializer = serializer
-        store_type = serialized_state.get("store_type")
-
-        if store_type == "agent_data":
-            parsed = AgentDataSerializedState.model_validate(serialized_state)
-            if parsed.collection == self._collection and parsed.run_id == self._run_id:
-                return
-            source = AgentDataStateStore(
-                client=self._client,
-                run_id=parsed.run_id,
-                state_type=self.state_type,
-                collection=parsed.collection,
-                serializer=serializer,
-            )
-            state = await source._load_state()
-            await self._save_state(state)
-            return
-
-        state = decode_seed_state(serialized_state, serializer)
-        await self._save_state(state)
-
-    async def _load_existing_state(self) -> MODEL_T | None:
-        if self._cached_state is not None:
-            return self._cached_state.model_copy()
+    async def load(self) -> StoredStateRecord | None:
+        if self._cached_record is not None:
+            return self._cached_record.model_copy(deep=True)
         record = await self._load_record()
         if record is None:
             return None
-        state = cast(
-            MODEL_T,
-            decode_state(
-                record.data, record.state_type, record.state_module, self._serializer
-            ),
+        self._cached_record = StoredStateRecord(
+            data=record.data,
+            state_type=record.state_type,
+            state_module=record.state_module,
         )
-        self._cached_state = state
-        return state.model_copy()
+        return self._cached_record.model_copy(deep=True)
 
-    async def _load_state(self) -> MODEL_T:
-        await self._flush_pending_seed()
-        state = await self._load_existing_state()
-        if state is not None:
-            return state
-        default_state = self._create_default_state()
-        await self._save_state(default_state)
-        return default_state.model_copy()
-
-    async def _load_state_or_none(self) -> MODEL_T | None:
-        await self._flush_pending_seed()
-        return await self._load_existing_state()
-
-    async def _save_state(self, state: BaseModel) -> None:
-        state_json, state_type_name, state_module = encode_state_to_str(
-            state, self._serializer
-        )
-        record = _StoredStateRecord(
+    async def save(self, record: StoredStateRecord) -> None:
+        data = record.data if isinstance(record.data, str) else str(record.data)
+        stored = _StoredStateRecord(
             run_id=self._run_id,
-            data=state_json,
-            state_type=state_type_name,
-            state_module=state_module,
+            data=data,
+            state_type=record.state_type,
+            state_module=record.state_module,
         )
-        payload = record.model_dump()
+        payload = stored.model_dump()
         if self._item_id is not None:
             await self._client.update_item(self._item_id, payload)
         else:
@@ -191,47 +120,85 @@ class AgentDataStateStore(Generic[MODEL_T]):
             else:
                 result = await self._client.create(self._collection, payload)
                 self._item_id = result["id"]
-        self._cached_state = state.model_copy()  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
+        self._cached_record = StoredStateRecord(
+            data=stored.data,
+            state_type=stored.state_type,
+            state_module=stored.state_module,
+        )
 
-    # ------------------------------------------------------------------
-    # StateStore protocol
-    # ------------------------------------------------------------------
-
-    async def get_state(self) -> MODEL_T:
-        return await self._load_state()
-
-    async def set_state(self, state: MODEL_T) -> None:
-        current = await self._load_state_or_none()
-        if current is None:
-            await self._save_state(state)
-            return
-        merged = merge_state(current, state)
-        await self._save_state(merged)
-
-    async def get(self, path: str, default: Any = ...) -> Any:
-        state = await self._load_state()
-        return get_by_path(state, path, default)
-
-    async def set(self, path: str, value: Any) -> None:
-        async with self.edit_state() as state:
-            set_by_path(state, path, value)
-
-    async def clear(self) -> None:
-        cleared = create_cleared_state(self.state_type)
-        await self._save_state(cleared)
-
-    @asynccontextmanager
-    async def edit_state(self) -> AsyncGenerator[MODEL_T, None]:
-        async with self._lock:
-            state = await self._load_state()
-            yield state
-            await self._save_state(state)
-
-    def to_dict(self, serializer: BaseSerializer) -> dict[str, Any]:
+    def to_handle(self) -> dict[str, Any]:
         payload = AgentDataSerializedState(
             run_id=self._run_id, collection=self._collection
         )
         return payload.model_dump()
+
+
+class AgentDataStateStore(TypedStateStore[MODEL_T], Generic[MODEL_T]):
+    """Compatibility StateStore facade backed by Agent Data storage."""
+
+    def __init__(
+        self,
+        *,
+        client: AgentDataClient,
+        run_id: str,
+        state_type: type[MODEL_T] | None = None,
+        collection: str = "workflow_state",
+        serializer: BaseSerializer | None = None,
+    ) -> None:
+        self._agent_data_storage = AgentDataStateStorage(
+            client=client,
+            run_id=run_id,
+            collection=collection,
+        )
+        self._pending_seed: tuple[dict[str, Any], BaseSerializer] | None = None
+        super().__init__(
+            self._agent_data_storage,
+            state_type or DictState,  # type: ignore[arg-type]
+            serializer or JsonSerializer(),
+            to_dict_mode="handle",
+        )
+
+    @property
+    def run_id(self) -> str:
+        return self._agent_data_storage.run_id
+
+    async def _flush_pending_seed(self) -> None:
+        if self._pending_seed is None:
+            return
+
+        serialized_state, serializer = self._pending_seed
+        self._pending_seed = None
+        self._serializer = serializer
+        store_type = serialized_state.get("store_type")
+
+        if store_type == "agent_data":
+            parsed = AgentDataSerializedState.model_validate(serialized_state)
+            if (
+                parsed.collection == self._agent_data_storage._collection
+                and parsed.run_id == self.run_id
+            ):
+                return
+            source = AgentDataStateStorage(
+                client=self._agent_data_storage._client,
+                run_id=parsed.run_id,
+                collection=parsed.collection,
+            )
+            record = await source.load()
+            if record is not None:
+                await self._agent_data_storage.save(record)
+            return
+
+        state = decode_seed_state(serialized_state, serializer)
+        await self._save_state(state)
+
+    async def _load_state_or_none(self) -> MODEL_T | None:
+        await self._flush_pending_seed()
+        return await super()._load_state_or_none()
+
+    async def _save_state(self, state: BaseModel) -> None:
+        await self._agent_data_storage.save(
+            string_record_from_state(state, self._serializer)
+        )
 
     @classmethod
     def from_dict(

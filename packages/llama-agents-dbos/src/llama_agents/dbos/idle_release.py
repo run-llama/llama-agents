@@ -324,7 +324,7 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
                 old_state_store = self._store.create_state_store(
                     run_id, state_type=state_type
                 )
-                serialized_state = old_state_store.to_dict(serializer)
+                serialized_state = old_state_store.handle()
             except Exception:
                 logger.warning(
                     f"Failed to carry over state from run {run_id}", exc_info=True
