@@ -239,6 +239,30 @@ async def test_typed_state_persists_across_instances(db_path: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_typed_state_decodes_from_row_metadata_when_store_type_changes(
+    db_path: str,
+) -> None:
+    store1: SqliteStateStore[CounterState] = SqliteStateStore(
+        db_path=db_path,
+        run_id="run-typed-metadata",
+        state_type=CounterState,
+    )
+    await store1.set_state(CounterState(count=7, label="typed-row"))
+
+    store2: SqliteStateStore[DictState] = SqliteStateStore(
+        db_path=db_path,
+        run_id="run-typed-metadata",
+        state_type=DictState,
+    )
+
+    state = await store2.get_state()
+
+    assert isinstance(state, CounterState)
+    assert state.count == 7
+    assert state.label == "typed-row"
+
+
+@pytest.mark.asyncio
 async def test_different_run_ids_are_isolated(db_path: str) -> None:
     store_a: SqliteStateStore[DictState] = SqliteStateStore(
         db_path=db_path, run_id="run-a"

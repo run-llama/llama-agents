@@ -19,12 +19,12 @@ from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import (
     DictState,
     create_cleared_state,
-    deserialize_dict_state_data,
+    decode_state,
     deserialize_state_from_dict,
+    encode_state,
     get_by_path,
     merge_state,
     parse_in_memory_state,
-    serialize_dict_state_data,
     set_by_path,
 )
 
@@ -83,18 +83,14 @@ class PostgresStateStore(Generic[MODEL_T]):
         """Lazy lock initialization for Python 3.14+ compatibility."""
         return asyncio.Lock()
 
-    def _serialize_state(self, state: MODEL_T) -> str:
-        """Serialize state model to JSON string."""
-        if isinstance(state, DictState):
-            return json.dumps(serialize_dict_state_data(state, self._serializer))
-        return self._serializer.serialize(state)
-
-    def _deserialize_state(self, state_json: str) -> MODEL_T:
+    def _deserialize_state(
+        self,
+        state_json: str,
+        state_type_name: str | None,
+        state_module: str | None,
+    ) -> MODEL_T:
         """Deserialize state from JSON string."""
-        if issubclass(self.state_type, DictState):
-            data = json.loads(state_json)
-            return deserialize_dict_state_data(data, self._serializer)  # type: ignore[return-value]  # ty: ignore[invalid-return-type]
-        return self._serializer.deserialize(state_json)
+        return decode_state(state_json, state_type_name, state_module, self._serializer)  # type: ignore[return-value]
 
     def _create_default_state(self) -> MODEL_T:
         return self.state_type()
@@ -110,6 +106,7 @@ class PostgresStateStore(Generic[MODEL_T]):
             return
         serialized_state, serializer = self._pending_seed
         self._pending_seed = None
+        self._serializer = serializer
         store_type = serialized_state.get("store_type")
         if store_type == "postgres":
             source_run_id = serialized_state.get("run_id")
@@ -150,14 +147,16 @@ class PostgresStateStore(Generic[MODEL_T]):
             conn = await self._pool.acquire()  # type: ignore[assignment]
         try:
             row = await conn.fetchrow(  # type: ignore[union-attr]
-                f"SELECT state_json FROM {self._table_ref} WHERE run_id = $1",
+                f"SELECT state_json, state_type, state_module FROM {self._table_ref} WHERE run_id = $1",
                 self._run_id,
             )
             if row is None:
                 state = self._create_default_state()
                 await self._save_state(state, conn)
                 return state
-            return self._deserialize_state(row["state_json"])
+            return self._deserialize_state(
+                row["state_json"], row["state_type"], row["state_module"]
+            )
         finally:
             if should_release:
                 await self._pool.release(conn)  # type: ignore[arg-type]
@@ -173,7 +172,12 @@ class PostgresStateStore(Generic[MODEL_T]):
             conn = await self._pool.acquire()  # type: ignore[assignment]
         try:
             now = _utc_now()
-            state_json = self._serialize_state(state)
+            state_data, state_type_name, state_module = encode_state(
+                state, self._serializer
+            )
+            state_json = (
+                state_data if isinstance(state_data, str) else json.dumps(state_data)
+            )
             await conn.execute(  # type: ignore[union-attr]
                 f"""
                 INSERT INTO {self._table_ref} (run_id, state_json, state_type, state_module, created_at, updated_at)
@@ -186,8 +190,8 @@ class PostgresStateStore(Generic[MODEL_T]):
                 """,
                 self._run_id,
                 state_json,
-                type(state).__name__,
-                type(state).__module__,
+                state_type_name,
+                state_module,
                 now,
                 now,
             )
@@ -204,14 +208,16 @@ class PostgresStateStore(Generic[MODEL_T]):
         """Replace or merge into the current state model."""
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                f"SELECT state_json FROM {self._table_ref} WHERE run_id = $1",
+                f"SELECT state_json, state_type, state_module FROM {self._table_ref} WHERE run_id = $1",
                 self._run_id,
             )
             if row is None:
                 await self._save_state(state, conn)
                 return
 
-            current_state = self._deserialize_state(row["state_json"])
+            current_state = self._deserialize_state(
+                row["state_json"], row["state_type"], row["state_module"]
+            )
             merged = merge_state(current_state, state)
             await self._save_state(merged, conn)  # type: ignore[arg-type]
 

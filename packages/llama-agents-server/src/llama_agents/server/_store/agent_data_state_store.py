@@ -17,10 +17,12 @@ from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import (
     DictState,
     create_cleared_state,
-    deserialize_dict_state_data,
+    decode_state,
+    deserialize_state_from_dict,
+    encode_state,
     get_by_path,
     merge_state,
-    serialize_dict_state_data,
+    parse_in_memory_state,
     set_by_path,
 )
 
@@ -39,6 +41,8 @@ class _StoredStateRecord(BaseModel):
 
     run_id: str
     data: str
+    state_type: str | None = "DictState"
+    state_module: str | None = "workflows.context.state_store"
 
 
 class AgentDataSerializedState(BaseModel):
@@ -76,6 +80,7 @@ class AgentDataStateStore(Generic[MODEL_T]):
         # Write-through state cache — avoids HTTP searches when state is
         # already known from a previous load or save.
         self._cached_state: MODEL_T | None = None
+        self._pending_seed: tuple[dict[str, Any], BaseSerializer] | None = None
 
     @property
     def run_id(self) -> str:
@@ -89,16 +94,13 @@ class AgentDataStateStore(Generic[MODEL_T]):
     # State serialization
     # ------------------------------------------------------------------
 
-    def _serialize_state(self, state: MODEL_T) -> str:
-        if isinstance(state, DictState):
-            return json.dumps(serialize_dict_state_data(state, self._serializer))
-        return self._serializer.serialize(state)
-
-    def _deserialize_state(self, state_json: str) -> MODEL_T:
-        if issubclass(self.state_type, DictState):
-            data = json.loads(state_json)
-            return deserialize_dict_state_data(data, self._serializer)  # type: ignore[return-value]  # ty: ignore[invalid-return-type]
-        return self._serializer.deserialize(state_json)
+    def _deserialize_state(
+        self,
+        state_json: str,
+        state_type_name: str | None,
+        state_module: str | None,
+    ) -> MODEL_T:
+        return decode_state(state_json, state_type_name, state_module, self._serializer)  # type: ignore[return-value]
 
     def _create_default_state(self) -> MODEL_T:
         return self.state_type()
@@ -118,12 +120,43 @@ class AgentDataStateStore(Generic[MODEL_T]):
         self._item_id = items[0]["id"]
         return _StoredStateRecord.model_validate(items[0]["data"])
 
+    async def _flush_pending_seed(self) -> None:
+        if self._pending_seed is None:
+            return
+
+        serialized_state, serializer = self._pending_seed
+        self._pending_seed = None
+        self._serializer = serializer
+        store_type = serialized_state.get("store_type")
+
+        if store_type == "agent_data":
+            parsed = AgentDataSerializedState.model_validate(serialized_state)
+            if parsed.collection == self._collection and parsed.run_id == self._run_id:
+                return
+            source = AgentDataStateStore(
+                client=self._client,
+                run_id=parsed.run_id,
+                state_type=self.state_type,
+                collection=parsed.collection,
+                serializer=serializer,
+            )
+            state = await source._load_state()
+            await self._save_state(state)
+            return
+
+        parse_in_memory_state(serialized_state)
+        state = deserialize_state_from_dict(serialized_state, serializer)
+        await self._save_state(state)
+
     async def _load_state(self) -> MODEL_T:
+        await self._flush_pending_seed()
         if self._cached_state is not None:
             return self._cached_state.model_copy()
         record = await self._load_record()
         if record is not None:
-            state = self._deserialize_state(record.data)
+            state = self._deserialize_state(
+                record.data, record.state_type, record.state_module
+            )
             self._cached_state = state
             return state.model_copy()
         state = self._create_default_state()
@@ -131,19 +164,27 @@ class AgentDataStateStore(Generic[MODEL_T]):
         return state.model_copy()
 
     async def _load_state_or_none(self) -> MODEL_T | None:
+        await self._flush_pending_seed()
         if self._cached_state is not None:
             return self._cached_state.model_copy()
         record = await self._load_record()
         if record is not None:
-            state = self._deserialize_state(record.data)
+            state = self._deserialize_state(
+                record.data, record.state_type, record.state_module
+            )
             self._cached_state = state
             return state.model_copy()
         return None
 
     async def _save_state(self, state: BaseModel) -> None:
+        state_data, state_type_name, state_module = encode_state(
+            state, self._serializer
+        )
         record = _StoredStateRecord(
             run_id=self._run_id,
-            data=self._serialize_state(state),  # type: ignore[arg-type]
+            data=state_data if isinstance(state_data, str) else json.dumps(state_data),
+            state_type=state_type_name,
+            state_module=state_module,
         )
         payload = record.model_dump()
         if self._item_id is not None:

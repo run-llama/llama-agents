@@ -19,12 +19,12 @@ from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import (
     DictState,
     create_cleared_state,
-    deserialize_dict_state_data,
+    decode_state,
     deserialize_state_from_dict,
+    encode_state,
     get_by_path,
     merge_state,
     parse_in_memory_state,
-    serialize_dict_state_data,
     set_by_path,
 )
 
@@ -93,6 +93,7 @@ class SqliteStateStore(Generic[MODEL_T]):
 
         Handles both sqlite references (SQL-level copy) and InMemory format.
         """
+        self._serializer = serializer
         store_type = serialized_state.get("store_type")
         if store_type == "sqlite":
             source_run_id = serialized_state.get("run_id")
@@ -118,18 +119,14 @@ class SqliteStateStore(Generic[MODEL_T]):
         finally:
             conn.close()
 
-    def _serialize_state(self, state: MODEL_T) -> str:
-        """Serialize state model to JSON string."""
-        if isinstance(state, DictState):
-            return json.dumps(serialize_dict_state_data(state, self._serializer))
-        return self._serializer.serialize(state)
-
-    def _deserialize_state(self, state_json: str) -> MODEL_T:
+    def _deserialize_state(
+        self,
+        state_json: str,
+        state_type_name: str | None,
+        state_module: str | None,
+    ) -> MODEL_T:
         """Deserialize state from JSON string."""
-        if issubclass(self.state_type, DictState):
-            data = json.loads(state_json)
-            return deserialize_dict_state_data(data, self._serializer)  # type: ignore[return-value]  # ty: ignore[invalid-return-type]
-        return self._serializer.deserialize(state_json)
+        return decode_state(state_json, state_type_name, state_module, self._serializer)  # type: ignore[return-value]
 
     def _create_default_state(self) -> MODEL_T:
         return self.state_type()
@@ -140,7 +137,7 @@ class SqliteStateStore(Generic[MODEL_T]):
         try:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT state_json FROM workflow_state WHERE run_id = ?",
+                "SELECT state_json, state_type, state_module FROM workflow_state WHERE run_id = ?",
                 (self._run_id,),
             )
             row = cursor.fetchone()
@@ -149,7 +146,7 @@ class SqliteStateStore(Generic[MODEL_T]):
                 self._save_state(state, conn)
                 conn.commit()
                 return state
-            return self._deserialize_state(row[0])
+            return self._deserialize_state(row[0], row[1], row[2])
         finally:
             conn.close()
 
@@ -162,7 +159,12 @@ class SqliteStateStore(Generic[MODEL_T]):
             conn = self._connect()
         try:
             now = _utc_now().isoformat()
-            state_json = self._serialize_state(state)
+            state_data, state_type_name, state_module = encode_state(
+                state, self._serializer
+            )
+            state_json = (
+                state_data if isinstance(state_data, str) else json.dumps(state_data)
+            )
             conn.execute(
                 """
                 INSERT INTO workflow_state (run_id, state_json, state_type, state_module, created_at, updated_at)
@@ -176,8 +178,8 @@ class SqliteStateStore(Generic[MODEL_T]):
                 (
                     self._run_id,
                     state_json,
-                    type(state).__name__,
-                    type(state).__module__,
+                    state_type_name,
+                    state_module,
                     now,
                     now,
                 ),
@@ -199,7 +201,7 @@ class SqliteStateStore(Generic[MODEL_T]):
         try:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT state_json FROM workflow_state WHERE run_id = ?",
+                "SELECT state_json, state_type, state_module FROM workflow_state WHERE run_id = ?",
                 (self._run_id,),
             )
             row = cursor.fetchone()
@@ -209,7 +211,7 @@ class SqliteStateStore(Generic[MODEL_T]):
                 conn.commit()
                 return
 
-            current_state = self._deserialize_state(row[0])
+            current_state = self._deserialize_state(row[0], row[1], row[2])
             merged = merge_state(current_state, state)
             self._save_state(merged, conn)  # type: ignore[arg-type]
             conn.commit()

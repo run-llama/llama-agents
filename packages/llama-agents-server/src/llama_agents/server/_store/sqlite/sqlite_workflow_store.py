@@ -82,6 +82,7 @@ class SqliteWorkflowStore(AbstractWorkflowStore):
             db_path=self.db_path,
             run_id=run_id,
             state_type=state_type,
+            serializer=serializer,
             connection=self._persistent_conn,
         )
         if serialized_state is not None and serializer is not None:

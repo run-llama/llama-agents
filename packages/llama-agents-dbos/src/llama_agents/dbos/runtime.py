@@ -603,7 +603,6 @@ class DBOSRuntime(Runtime):
                     state = deserialize_state_from_dict(
                         serialized_state,
                         active_serializer,
-                        state_type=infer_state_type(workflow),
                     )
                     await store.set_state(state)
 

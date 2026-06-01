@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import inspect
 import json
 import weakref
 from typing import cast
@@ -24,7 +25,9 @@ from workflows.context.serializers import JsonSerializer
 from workflows.context.state_store import (
     DictState,
     InMemoryStateStore,
+    decode_state,
     deserialize_state_from_dict,
+    encode_state,
 )
 from workflows.decorators import step
 from workflows.errors import ContextStateError, WorkflowRuntimeError
@@ -727,6 +730,87 @@ class TypedTestState(BaseModel):
 
     counter: int = 0
     name: str = "default"
+
+
+class CustomDictState(DictState):
+    """DictState subclass for codec dispatch testing."""
+
+
+def test_encode_decode_state_handles_dict_state() -> None:
+    serializer = JsonSerializer()
+    state = DictState(answer=42, name="dict")
+
+    state_data, state_type, state_module = encode_state(state, serializer)
+    result = decode_state(state_data, state_type, state_module, serializer)
+
+    assert isinstance(result, DictState)
+    assert result["answer"] == 42
+    assert result["name"] == "dict"
+
+
+def test_encode_decode_state_handles_dict_state_subclass() -> None:
+    serializer = JsonSerializer()
+    state = CustomDictState(answer=42, name="subclass")
+
+    state_data, state_type, state_module = encode_state(state, serializer)
+    result = decode_state(state_data, state_type, state_module, serializer)
+
+    assert isinstance(result, DictState)
+    assert result["answer"] == 42
+    assert result["name"] == "subclass"
+
+
+def test_encode_decode_state_handles_typed_state() -> None:
+    serializer = JsonSerializer()
+    state = TypedTestState(counter=7, name="typed")
+
+    state_data, state_type, state_module = encode_state(state, serializer)
+    result = decode_state(state_data, state_type, state_module, serializer)
+
+    assert isinstance(result, TypedTestState)
+    assert result.counter == 7
+    assert result.name == "typed"
+
+
+def test_decode_state_respects_json_serializer_allowed_types() -> None:
+    serializer = JsonSerializer()
+    state = TypedTestState(counter=7, name="typed")
+    state_data, state_type, state_module = encode_state(state, serializer)
+    restricted_serializer = JsonSerializer(allowed_types=[DictState])
+
+    with pytest.raises(ValueError, match="Refusing to import disallowed"):
+        decode_state(state_data, state_type, state_module, restricted_serializer)
+
+
+def test_decode_state_missing_metadata_falls_back_to_dict_state() -> None:
+    serializer = JsonSerializer()
+    state_data = {"_data": {"answer": serializer.serialize(42)}}
+
+    result = decode_state(state_data, None, None, serializer)
+
+    assert isinstance(result, DictState)
+    assert result["answer"] == 42
+
+
+def test_decode_state_null_metadata_falls_back_to_dict_state() -> None:
+    serializer = JsonSerializer()
+    state_data = {"_data": {"answer": serializer.serialize(42)}}
+
+    result = decode_state(
+        state_data,
+        state_type_name=None,
+        state_module=None,
+        serializer=serializer,
+    )
+
+    assert isinstance(result, DictState)
+    assert result["answer"] == 42
+
+
+def test_deserialize_state_from_dict_has_no_state_type_override() -> None:
+    signature = inspect.signature(deserialize_state_from_dict)
+
+    assert "state_type" not in signature.parameters
 
 
 @pytest.mark.asyncio

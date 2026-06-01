@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import warnings
 from contextlib import asynccontextmanager
 from typing import (
@@ -25,6 +26,7 @@ from workflows.decorators import StepConfig
 from workflows.events import DictLikeModel
 
 from .serializers import BaseSerializer
+from .utils import import_module_from_qualified_name
 
 if TYPE_CHECKING:
     from workflows.workflow import Workflow
@@ -114,6 +116,64 @@ def serialize_dict_state_data(
     return {"_data": serialized_data}
 
 
+def _resolve_state_type(
+    state_type_name: str | None,
+    state_module: str | None,
+    serializer: BaseSerializer,
+) -> type[BaseModel]:
+    if not state_type_name or not state_module:
+        return DictState
+
+    qualified_name = f"{state_module}.{state_type_name}"
+    validate_qualified_name = getattr(serializer, "_validate_qualified_name", None)
+    if callable(validate_qualified_name):
+        validate_qualified_name(qualified_name)
+
+    try:
+        resolved = import_module_from_qualified_name(qualified_name)
+    except Exception:
+        return DictState
+
+    if isinstance(resolved, type) and issubclass(resolved, BaseModel):
+        return resolved
+    return DictState
+
+
+def encode_state(
+    state: BaseModel,
+    serializer: BaseSerializer,
+    known_unserializable_keys: tuple[str, ...] = KNOWN_UNSERIALIZABLE_KEYS,
+) -> tuple[Any, str, str]:
+    """Encode a state model and its self-describing metadata."""
+    if isinstance(state, DictState):
+        state_data = serialize_dict_state_data(
+            state, serializer, known_unserializable_keys
+        )
+    else:
+        state_data = serializer.serialize(state)
+
+    return state_data, type(state).__name__, type(state).__module__
+
+
+def decode_state(
+    state_data: Any,
+    state_type_name: str | None,
+    state_module: str | None,
+    serializer: BaseSerializer,
+) -> BaseModel:
+    """Decode a state model using the persisted type metadata."""
+    state_type = _resolve_state_type(state_type_name, state_module, serializer)
+
+    if issubclass(state_type, DictState):
+        if isinstance(state_data, str):
+            state_data = json.loads(state_data)
+        if not isinstance(state_data, dict):
+            state_data = {}
+        return deserialize_dict_state_data(state_data, serializer)
+
+    return serializer.deserialize(state_data)
+
+
 def create_in_memory_payload(
     state: BaseModel,
     serializer: BaseSerializer,
@@ -129,16 +189,13 @@ def create_in_memory_payload(
     Returns:
         InMemorySerializedState containing the serialized data.
     """
-    if isinstance(state, DictState):
-        state_data = serialize_dict_state_data(
-            state, serializer, known_unserializable_keys
-        )
-    else:
-        state_data = serializer.serialize(state)
+    state_data, state_type_name, state_module = encode_state(
+        state, serializer, known_unserializable_keys
+    )
 
     return InMemorySerializedState(
-        state_type=type(state).__name__,
-        state_module=type(state).__module__,
+        state_type=state_type_name,
+        state_module=state_module,
         state_data=state_data,
     )
 
@@ -615,7 +672,6 @@ def deserialize_dict_state_data(
 def deserialize_state_from_dict(
     serialized_state: dict[str, Any],
     serializer: "BaseSerializer",
-    state_type: type[BaseModel] | None = None,
 ) -> BaseModel:
     """Deserialize state from a serialized payload.
 
@@ -626,9 +682,6 @@ def deserialize_state_from_dict(
         serialized_state: The payload from to_dict(), containing state_data,
             state_type, and state_module.
         serializer: Strategy to decode stored values.
-        state_type: Optional explicit state type. When provided, uses
-            issubclass to determine if it's DictState. When omitted, falls
-            back to reading state_type from the dict.
 
     Returns:
         The deserialized state model instance.
@@ -636,22 +689,12 @@ def deserialize_state_from_dict(
     Raises:
         ValueError: If deserialization fails for any key.
     """
-    state_data = serialized_state.get("state_data", {})
-    state_type_name = serialized_state.get("state_type", "DictState")
-
-    if state_type_name == "DictState":
-        _data_serialized = state_data.get("_data", {})
-        deserialized_data = {}
-        for key, value in _data_serialized.items():
-            try:
-                deserialized_data[key] = serializer.deserialize(value)
-            except Exception as e:
-                raise ValueError(
-                    f"Failed to deserialize state value for key {key}: {e}"
-                )
-        return DictState(_data=deserialized_data)
-    else:
-        return serializer.deserialize(state_data)
+    return decode_state(
+        serialized_state.get("state_data", {}),
+        serialized_state.get("state_type"),
+        serialized_state.get("state_module"),
+        serializer,
+    )
 
 
 def infer_state_type(workflow: "Workflow") -> type[BaseModel]:

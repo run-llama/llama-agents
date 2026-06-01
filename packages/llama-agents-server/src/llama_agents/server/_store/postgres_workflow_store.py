@@ -285,6 +285,7 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
             pool=self._pool,
             run_id=run_id,
             state_type=state_type,
+            serializer=serializer,
             schema=self._schema,
         )
         if serialized_state is not None and serializer is not None:
