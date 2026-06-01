@@ -61,19 +61,26 @@ def build_step_graph(
     InputRequiredEvent).
     """
     outgoing: dict[GraphNode, list[GraphNode]] = {}
-    event_types: set[type] = set()
+    event_types: set[type] = {start_event_class} if steps else set()
     step_names: set[str] = set()
 
     for name, cfg in steps.items():
         step_names.add(name)
-        for ev in cfg.accepted_events:
-            event_types.add(ev)
-            outgoing.setdefault(ev, []).append(name)
         for rt in cfg.return_types:
             if rt is type(None):
                 continue
             event_types.add(rt)
             outgoing.setdefault(name, []).append(rt)
+        for ev in cfg.accepted_events:
+            event_types.add(ev)
+
+    # Build event→step edges using subclass-aware matching.
+    # If a produced event is a subclass of an accepted event, add an edge.
+    for ev_type in event_types:
+        for name, cfg in steps.items():
+            for accepted in cfg.accepted_events:
+                if issubclass(ev_type, accepted):
+                    outgoing.setdefault(ev_type, []).append(name)
 
     # Forward DFS from StartEvent + HumanResponseEvent subclasses +
     # catch_error handler step names (their sub-graphs are reachable via
@@ -471,11 +478,12 @@ def _validate_event_connectivity(
 
     unconsumed_events = {
         x
-        for x in consumed_events - produced_events
+        for x in consumed_events
         if not issubclass(
             x,
             (InputRequiredEvent, HumanResponseEvent, StopEvent, StepFailedEvent),
         )
+        and not any(issubclass(p, x) for p in produced_events)
     }
     if unconsumed_events:
         names = ", ".join(ev.__name__ for ev in unconsumed_events)
@@ -485,8 +493,9 @@ def _validate_event_connectivity(
 
     unused_events = {
         x
-        for x in produced_events - consumed_events
+        for x in produced_events
         if not issubclass(x, (InputRequiredEvent, HumanResponseEvent, StopEvent))
+        and not any(issubclass(x, c) for c in consumed_events)
     }
     if unused_events:
         names = ", ".join(ev.__name__ for ev in unused_events)
@@ -494,8 +503,8 @@ def _validate_event_connectivity(
             f"The following events are produced but never consumed: {names}"
         )
 
-    return (
-        InputRequiredEvent in produced_events or HumanResponseEvent in consumed_events
+    return any(issubclass(p, InputRequiredEvent) for p in produced_events) or any(
+        issubclass(c, HumanResponseEvent) for c in consumed_events
     )
 
 

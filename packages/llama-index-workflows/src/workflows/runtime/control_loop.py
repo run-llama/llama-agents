@@ -1071,7 +1071,7 @@ def _process_add_event_tick(
     for step_name, step_config in state.config.steps.items():
         wait_conditions = state.workers[step_name].collected_waiters
         for wait_condition in wait_conditions:
-            is_match = type(tick.event) is wait_condition.waiting_for_event
+            is_match = isinstance(tick.event, wait_condition.waiting_for_event)
             is_match = is_match and all(
                 getattr(tick.event, k, None) == v
                 for k, v in wait_condition.requirements.items()
@@ -1093,7 +1093,10 @@ def _process_add_event_tick(
     for step_name, step_config in state.config.steps.items():
         if step_name in waiter_resolved_steps:
             continue
-        is_accepted = type(tick.event) in step_config.accepted_events
+        is_accepted = any(
+            isinstance(tick.event, accepted_type)
+            for accepted_type in step_config.accepted_events
+        )
         if is_accepted and (tick.step_name is None or tick.step_name == step_name):
             handled = True
             subcommands = _add_or_enqueue_event(
