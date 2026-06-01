@@ -37,7 +37,13 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class CollectionBinding:
-    """Static typed stream binding from a finite list source to a collect step."""
+    """
+    Static typed stream binding from a finite list source to a collect step.
+
+    Bindings are computed once from step signatures and stored in BrokerConfig.
+    At runtime, each CollectionStreamInstance records the binding ids that may
+    accept events produced inside that stream.
+    """
 
     id: str
     source_step: str
@@ -49,7 +55,13 @@ class CollectionBinding:
 
 @dataclass()
 class CollectionStreamInstance:
-    """One execution of a collection-producing step."""
+    """
+    One execution of a collection-producing step.
+
+    A returned ``list[E]`` opens one stream instance. Work emitted inside that
+    stream carries ``scope_path`` so downstream completions can decrement the
+    right open-work counter and close the nearest enclosing stream.
+    """
 
     stream_id: str
     source_step: str
@@ -66,7 +78,13 @@ class CollectionStreamInstance:
 
 @dataclass()
 class CollectionReleaseState:
-    """Release state for one binding within one stream instance."""
+    """
+    Release state for one binding within one stream instance.
+
+    ``buffer`` stores member events until the binding's Collect policy releases
+    them. ``cursor`` tracks Take(n) progress; ``released`` prevents All() from
+    firing more than once when a stream closes.
+    """
 
     binding_id: str
     stream_id: str
@@ -86,6 +104,13 @@ class BrokerState:
     This is the primary state object passed through the control loop's reducer
     pattern. Each tick processes this state and returns an updated copy along
     with commands to execute.
+
+    Attributes:
+        config: Immutable configuration for the workflow and all steps
+        workers: Mutable state for each step's worker pool, queues, and in-progress executions
+        stream_seq: Monotonic counter used to mint deterministic collection stream ids
+        streams: Open collection streams keyed by stream id
+        collection_release_states: Per-binding release buffers keyed by stream and binding
     """
 
     is_running: bool
@@ -365,6 +390,7 @@ def _import_event_type(qualified_name: str) -> type[Event]:
 
 
 def _event_types(types: Any) -> list[type[Event]]:
+    """Filter a type sequence down to concrete Event subclasses."""
     return [t for t in types if isinstance(t, type) and issubclass(t, Event)]
 
 
@@ -374,6 +400,7 @@ def _binding_id(
     item_types: tuple[type[Event], ...],
     policy: Collect,
 ) -> str:
+    """Build a stable id for one static source-to-collect-step binding."""
     type_names = ",".join(f"{t.__module__}.{t.__qualname__}" for t in item_types)
     card = policy.cardinality
     card_repr = f"Take({card.n})" if isinstance(card, Take) else type(card).__name__
@@ -381,6 +408,15 @@ def _binding_id(
 
 
 def _compute_collection_bindings(workflow: Workflow) -> dict[str, CollectionBinding]:
+    """
+    Compute static list[E] stream bindings from the workflow graph.
+
+    A fan-out source binds to a collection step when the collection step's item
+    type appears at the same stream level reachable from the source. Nested
+    fan-out is treated as a child stream level; if that child stream feeds a
+    collection step, the parent traversal continues through the collection
+    step's return types so downstream same-level joins remain discoverable.
+    """
     steps = {name: fn._step_config for name, fn in workflow._get_steps().items()}
     collects: dict[str, tuple[Any, ...]] = {
         name: cfg.collection_param[1]
@@ -389,6 +425,13 @@ def _compute_collection_bindings(workflow: Workflow) -> dict[str, CollectionBind
     }
 
     def same_level_types(seed_types: Any, guard: frozenset[str]) -> set[type[Event]]:
+        """
+        Return event types reachable without crossing into another stream level.
+
+        The guard prevents recursive fan-out producers from looping forever while
+        still allowing collection steps to collapse child stream outputs back
+        into the current level.
+        """
         seen: set[type[Event]] = set()
         frontier: list[type[Event]] = list(_event_types(seed_types))
         while frontier:
@@ -437,6 +480,20 @@ def _compute_collection_bindings(workflow: Workflow) -> dict[str, CollectionBind
 
 @dataclass(frozen=True)
 class BrokerConfig:
+    """
+    Configuration for a workflow run.
+
+    This contains all the static configuration that doesn't change during
+    workflow execution.
+
+    Attributes:
+        steps: Configuration for each step indexed by step name
+        timeout: Maximum seconds before the workflow times out, or None for no timeout
+        catch_error_handlers: handler step name -> CatchErrorHandler descriptor
+        handler_for_step: step name -> handler step name that owns it
+        collection_bindings: Static list[E] stream bindings keyed by binding id
+    """
+
     steps: dict[str, InternalStepConfig]
     timeout: float | None
     catch_error_handlers: dict[str, CatchErrorHandler] = field(default_factory=dict)
@@ -468,6 +525,15 @@ class BrokerConfig:
 
 @dataclass()
 class InternalStepConfig:
+    """
+    Configuration for a single step in the workflow.
+
+    Attributes:
+        accepted_events: List of Event type classes this step can handle
+        retry_policy: Policy for retrying failed executions, or None for no retries
+        num_workers: Maximum number of concurrent executions of this step
+    """
+
     accepted_events: list[Any]
     retry_policy: RetryPolicy | None
     num_workers: int
@@ -475,6 +541,22 @@ class InternalStepConfig:
 
 @dataclass()
 class EventAttempt:
+    """
+    Represents an event that is being or will be processed by a step.
+
+    Tracks retry information for events that have failed and are being retried.
+
+    Attributes:
+        event: The event to process
+        attempts: Number of times this event has been attempted (0 for first attempt), or None if not yet attempted
+        first_attempt_at: Unix timestamp of first attempt, or None if not yet attempted
+        last_exception: Most recent exception, if this attempt is a retry.
+        last_failed_at: Unix timestamp of the most recent failure, or None.
+        recovery_counts: Per-handler recovery counts on this event's lineage.
+        scope_path: Collection stream scope path, innermost stream id last.
+        collection_release_payload: Explicit payload for queued list[E] collect invocations.
+    """
+
     event: Event
     attempts: int | None = None
     first_attempt_at: float | None = None
@@ -487,6 +569,20 @@ class EventAttempt:
 
 @dataclass()
 class InternalStepWorkerState:
+    """
+    Runtime state for a single step's worker pool.
+
+    This manages the queue of pending events, currently executing workers, and any
+    state needed for ctx.collect_events() and ctx.wait_for_event() operations.
+
+    Attributes:
+        queue: Events waiting to be processed by this step
+        config: Step configuration (includes retry policy, num_workers, etc.)
+        in_progress: Currently executing workers for this step
+        collected_events: Events being collected via ctx.collect_events(), keyed by buffer_id
+        collected_waiters: Active waiters created by ctx.wait_for_event()
+    """
+
     queue: list[EventAttempt]
     config: StepConfig
     in_progress: list[InProgressState]
@@ -505,6 +601,26 @@ class InternalStepWorkerState:
 
 @dataclass()
 class InProgressState:
+    """
+    Represents a single worker execution that is currently in progress.
+
+    Each worker gets a snapshot of the step's shared state at the time it starts.
+    This enables optimistic execution: if the shared state changes during execution
+    (e.g. new collected events arrive), the control loop can detect this and retry
+    the worker with the updated state.
+
+    Attributes:
+        event: The event being processed by this worker
+        worker_id: Numeric ID (0 to num_workers-1) identifying this worker slot
+        shared_state: Snapshot of collected_events and collected_waiters at worker start time
+        attempts: Number of times this event has been attempted, including current attempt
+        first_attempt_at: Unix timestamp when this event was first attempted
+        last_exception: Most recent exception from the prior attempt, or None if this is the first attempt.
+        last_failed_at: Unix timestamp of the most recent failure, or None.
+        recovery_counts: Per-handler recovery counts on this event's lineage.
+        scope_path: Collection stream scope path for the worker's current event.
+    """
+
     event: Event
     worker_id: int
     shared_state: StepWorkerState
@@ -532,6 +648,7 @@ class InProgressState:
 def _serialize_release_payload(
     payload: CollectionReleasePayload | None, serializer: BaseSerializer
 ) -> SerializedCollectionReleasePayload | None:
+    """Serialize a queued list[E] collect invocation payload."""
     if payload is None:
         return None
     return SerializedCollectionReleasePayload(
@@ -545,6 +662,7 @@ def _serialize_release_payload(
 def _deserialize_release_payload(
     payload: SerializedCollectionReleasePayload | None, serializer: BaseSerializer
 ) -> CollectionReleasePayload | None:
+    """Deserialize a queued list[E] collect invocation payload."""
     if payload is None:
         return None
     return CollectionReleasePayload(
