@@ -95,6 +95,7 @@ jobs:
         uses: coverallsapp/github-action@v2
         with:
           file: ${{ matrix.package_dir }}/coverage.xml
+          base-path: ${{ matrix.package_dir }}/src
           flag-name: ${{ matrix.package }}
           parallel: true
         env:
