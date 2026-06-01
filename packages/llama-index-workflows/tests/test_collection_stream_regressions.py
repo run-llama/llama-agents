@@ -337,12 +337,12 @@ async def test_resume_mid_open_stream_completes() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Signature validation rejects shapes that would otherwise hang or fail with a
-# misleading generic error.
+# Signature validation rejects unsupported shapes with useful errors, while
+# supported multi-slot joins must consume one event per slot without hanging.
 # ---------------------------------------------------------------------------
 
 
-async def test_same_type_multi_slot_join_rejected() -> None:
+async def test_same_type_multi_slot_join_consumes_one_event_per_slot() -> None:
     class A(Event):
         value: str
 
@@ -350,19 +350,14 @@ async def test_same_type_multi_slot_join_rejected() -> None:
         @step
         async def emit(self, ctx: Context, ev: StartEvent) -> A | None:
             ctx.send_event(A(value="one"))
+            ctx.send_event(A(value="two"))
             return None
 
         @step
         async def join(self, a: A, b: A) -> StopEvent:
             return StopEvent(result=f"{a.value}+{b.value}")
 
-    try:
-        await asyncio.wait_for(WF(timeout=3).run(), timeout=3)
-    except WorkflowValidationError:
-        return  # correct: rejected before it can deadlock
-    except asyncio.TimeoutError:
-        pytest.fail("join(a: A, b: A) was accepted then deadlocked")
-    pytest.fail("workflow completed unexpectedly")
+    assert await _run(WF(timeout=3), timeout=3) == "one+two"
 
 
 def test_optional_list_collect_param_not_generic_error() -> None:
