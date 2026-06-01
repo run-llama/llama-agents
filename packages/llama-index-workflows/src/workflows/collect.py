@@ -3,7 +3,7 @@
 """Collect selection algebra.
 
 The ``Collect`` marker and ``Cardinality`` hierarchy let a step declare *how* a
-batch fan-in parameter is released. They are used inside ``Annotated`` on a
+collection fan-in parameter is released. They are used inside ``Annotated`` on a
 ``list[E]`` parameter::
 
     async def fastest(
@@ -11,7 +11,7 @@ batch fan-in parameter is released. They are used inside ``Annotated`` on a
     ) -> StopEvent: ...
 
 A bare ``list[E]`` parameter is exactly equivalent to ``Collect(All())`` — fire
-once when the batch closes with every collected event. ``Annotated[list[E],
+once when the stream closes with every collected event. ``Annotated[list[E],
 Collect()]`` is an explicit, grep-able synonym for the same default.
 
 Only ``All`` and ``Take`` are supported. Other cardinalities and the ``at`` /
@@ -32,7 +32,7 @@ StepRef = str | Callable[..., Any]
 
 @dataclass(frozen=True)
 class Cardinality:
-    """Base class for a batch-collect release strategy.
+    """Base class for a collection-collect release strategy.
 
     Subclasses describe *when* a collect-mode step fires and *which* members it
     receives. Instantiate one of ``All`` / ``Take`` — the base class itself is
@@ -42,14 +42,14 @@ class Cardinality:
 
 @dataclass(frozen=True)
 class All(Cardinality):
-    """Fire once when the batch closes, with every collected event (default)."""
+    """Fire once when the stream closes, with every collected event (default)."""
 
 
 @dataclass(frozen=True)
 class Take(Cardinality):
     """Fire once on the ``n``-th arrival with the first ``n`` events.
 
-    The remaining siblings keep running but never reach this step. If the batch
+    The remaining siblings keep running but never reach this step. If the stream
     closes before ``n`` members arrive, the step fires once with whatever did
     arrive.
     """
@@ -63,7 +63,7 @@ class Take(Cardinality):
 
 @dataclass(frozen=True)
 class Collect:
-    """Marker for a batch fan-in parameter's selection behavior.
+    """Marker for a collection fan-in parameter's selection behavior.
 
     Wrap it around a ``list[E]`` parameter via ``Annotated``::
 
@@ -71,8 +71,8 @@ class Collect:
 
     Attributes:
         cardinality: When to release and which members to deliver. Defaults to
-            ``All()`` (fire on batch close with everything).
-        at: Promote scope to this step's batch instead of the nearest enclosing
+            ``All()`` (fire on stream close with everything).
+        at: Promote scope to this step's stream instead of the nearest enclosing
             one. Not yet implemented (declaring it raises a validation error).
         from_: Restrict provenance to events produced by this step. Not yet
             implemented (declaring it raises a validation error).

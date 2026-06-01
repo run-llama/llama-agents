@@ -72,22 +72,36 @@ class StepWorkerState:
     step_name: str
     collected_events: dict[str, list[Event]]
     collected_waiters: list[StepWorkerWaiter]
-    # Batch-lineage fan-in: the fully buffered batch handed to a
-    # ``list[E]`` collect step when its batch closes. None for non-collect runs.
-    batch_input: list[Event] | None = None
-    # Batch lineage stack of the executing work item. Returned events inherit
-    # this stack; ctx.send_event remains ordinary dispatch.
-    batch_stack: tuple[str, ...] = ()
+    collection_release_payload: CollectionReleasePayload | None = None
+    scope_path: tuple[str, ...] = ()
 
     def _deepcopy(self) -> StepWorkerState:
         return StepWorkerState(
             step_name=self.step_name,
             collected_events={k: list(v) for k, v in self.collected_events.items()},
             collected_waiters=[dataclasses.replace(x) for x in self.collected_waiters],
-            batch_input=list(self.batch_input)
-            if self.batch_input is not None
+            collection_release_payload=self.collection_release_payload._copy()
+            if self.collection_release_payload is not None
             else None,
-            batch_stack=self.batch_stack,
+            scope_path=self.scope_path,
+        )
+
+
+@dataclass(frozen=True)
+class CollectionReleasePayload:
+    """List payload supplied to a collection collect step invocation."""
+
+    binding_id: str
+    stream_id: str
+    events: list[Event]
+    output_scope_path: tuple[str, ...]
+
+    def _copy(self) -> CollectionReleasePayload:
+        return CollectionReleasePayload(
+            binding_id=self.binding_id,
+            stream_id=self.stream_id,
+            events=list(self.events),
+            output_scope_path=self.output_scope_path,
         )
 
 

@@ -120,13 +120,11 @@ async def partial(
     context: Context,
     workflow: Workflow,
     collected_events: dict[str, Event] | None = None,
-    batch_events: dict[str, list[Event]] | None = None,
+    collection_events: dict[str, list[Event]] | None = None,
 ) -> Callable[[], Any]:
     kwargs: dict[str, Any] = {}
-    if batch_events is not None:
-        # Batch-lineage fan-in: bind the ``list[E]`` parameter to the full
-        # closed batch. The trigger ``event`` is a carrier and is ignored.
-        kwargs.update(batch_events)
+    if collection_events is not None:
+        kwargs.update(collection_events)
     elif collected_events is not None:
         # Collect-mode (heterogeneous fan-in): bind each declared event
         # parameter to its collected event instead of a single trigger event.
@@ -192,18 +190,17 @@ def as_step_worker_function(
 
         try:
             config = workflow._get_steps()[step_name]._step_config
-            # Batch-lineage fan-in: a step with a single ``list[E]``
-            # parameter is launched once per closed batch by the reducer, with
-            # the full buffered list riding on ``state.batch_input``. Bind that
-            # list to the collect parameter.
             collected_binding: dict[str, Event] | None = None
-            batch_binding: dict[str, list[Event]] | None = None
-            if config.batch_collect_param is not None:
-                param_name, _ = config.batch_collect_param
-                batch_binding = {param_name: list(state.batch_input or [])}
+            collection_binding: dict[str, list[Event]] | None = None
+            if config.collection_collect_param is not None:
+                param_name, _ = config.collection_collect_param
+                payload = state.collection_release_payload
+                collection_binding = {
+                    param_name: list(payload.events if payload is not None else [])
+                }
             # Heterogeneous fan-in: multiple event parameters collect one event
             # of each declared type via the existing collect_events buffer. This
-            # path is separate from list[E] batch fan-in.
+            # path is separate from list[E] collection fan-in.
             elif config.collect_params is not None:
                 expected_types = [event_type for _, event_type in config.collect_params]
                 collected = internal_context.collect_events(event, expected_types)
@@ -285,7 +282,7 @@ def as_step_worker_function(
                 context=internal_context,
                 workflow=workflow,
                 collected_events=collected_binding,
-                batch_events=batch_binding,
+                collection_events=collection_binding,
             )
 
             try:

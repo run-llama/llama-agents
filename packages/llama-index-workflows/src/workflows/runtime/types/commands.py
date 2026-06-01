@@ -38,22 +38,14 @@ class CommandQueueEvent:
     last_exception: Exception | None = None
     last_failed_at: float | None = None
     recovery_counts: dict[str, int] = field(default_factory=dict)
-    # Batch lineage stack to stamp onto the resulting TickAddEvent.
-    batch_stack: tuple[str, ...] = field(default_factory=tuple)
+    scope_path: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
-class CommandCloseBatch:
-    """Emitted by the runtime to mark a fan-out batch as closed.
-
-    The runner turns this into a ``TickBatchClosed`` buffered tick so collect
-    steps fire. Kept as a command (not a direct tick append) so it flows through
-    the same persistence/replay path as every other reducer output.
-    """
-
-    batch_id: str
-    step_name: str
-    batch_stack: tuple[str, ...] = field(default_factory=tuple)
+class CommandCloseCollectionStream:
+    stream_id: str
+    source_step: str
+    scope_path: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -100,7 +92,7 @@ class CommandScheduleIdleCheck:
 WorkflowCommand = (
     CommandRunWorker
     | CommandQueueEvent
-    | CommandCloseBatch
+    | CommandCloseCollectionStream
     | CommandHalt
     | CommandCompleteRun
     | CommandFailWorkflow

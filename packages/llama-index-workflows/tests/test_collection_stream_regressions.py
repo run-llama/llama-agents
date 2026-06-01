@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LlamaIndex Inc.
-"""Regression tests for the typed ``list[E]`` fan-out/fan-in batch accounting.
+"""Regression tests for the typed ``list[E]`` fan-out/fan-in stream accounting.
 
 Each case below is a minimal reproduction for a bug class that can silently
-truncate a joined batch or leave it waiting forever. Assertions stay on
-observable behavior: the run completes, the join sees the expected batch, and
+truncate a joined stream or leave it waiting forever. Assertions stay on
+observable behavior: the run completes, the join sees the expected stream, and
 capacity limits are honored.
 """
 
@@ -29,18 +29,18 @@ class Done(Event):
 
 
 async def _run(wf: Workflow, timeout: float = 6.0) -> object:
-    """Run to completion, failing loudly (not hanging) if a batch never closes."""
+    """Run to completion, failing loudly (not hanging) if a stream never closes."""
     return await asyncio.wait_for(wf.run(), timeout=timeout)
 
 
 # ---------------------------------------------------------------------------
 # Member accounting: an event accepted by two steps is two work items. The join
-# must still see the full batch.
+# must still see the full stream.
 # ---------------------------------------------------------------------------
 
 
-async def test_two_collects_same_type_see_full_batch() -> None:
-    """Two `list[Done]` joins on the same element type each see the whole batch."""
+async def test_two_collects_same_type_see_full_stream() -> None:
+    """Two `list[Done]` joins on the same element type each see the whole stream."""
     a_calls: list[list[int]] = []
     b_calls: list[list[int]] = []
 
@@ -68,7 +68,7 @@ async def test_two_collects_same_type_see_full_batch() -> None:
     assert b_calls == [[0, 1, 2]], b_calls
 
 
-async def test_event_routed_to_step_and_join_keeps_full_batch() -> None:
+async def test_event_routed_to_step_and_join_keeps_full_stream() -> None:
     """A fanned-out event consumed by both a 1:1 step and a join loses no members."""
 
     class Echo(Event):
@@ -106,12 +106,12 @@ async def test_event_routed_to_step_and_join_keeps_full_batch() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Error paths keep the work item's batch stack across retry and recovery.
+# Error paths keep the work item's stream stack across retry and recovery.
 # ---------------------------------------------------------------------------
 
 
-async def test_retried_batch_member_keeps_lineage() -> None:
-    """A member that fails once and succeeds on retry still closes the batch."""
+async def test_retried_stream_member_keeps_lineage() -> None:
+    """A member that fails once and succeeds on retry still closes the stream."""
     attempts = {"n2": 0}
 
     class WF(Workflow):
@@ -136,8 +136,8 @@ async def test_retried_batch_member_keeps_lineage() -> None:
     assert result == [0, 1, 2, 3, 4], result
 
 
-async def test_catch_error_recovery_closes_batch() -> None:
-    """A member recovered by @catch_error must still let the batch close."""
+async def test_catch_error_recovery_closes_stream() -> None:
+    """A member recovered by @catch_error must still let the stream close."""
 
     class WF(Workflow):
         @step
@@ -164,12 +164,12 @@ async def test_catch_error_recovery_closes_batch() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Closed-batch collects use the normal worker capacity path. Overlapping closes
+# Closed-collection collects use the normal worker capacity path. Overlapping closes
 # must queue instead of aliasing in-progress state.
 # ---------------------------------------------------------------------------
 
 
-async def test_num_workers_1_collect_overlapping_batches() -> None:
+async def test_num_workers_1_collect_overlapping_streams() -> None:
     class Seed(Event):
         gid: int
 
@@ -195,14 +195,14 @@ async def test_num_workers_1_collect_overlapping_batches() -> None:
             return [Leaf(gid=ev.gid, k=k) for k in range(3)]
 
         @step(num_workers=1)
-        async def collect(self, batch: list[Leaf]) -> Collected:
+        async def collect(self, stream: list[Leaf]) -> Collected:
             nonlocal active_collects, max_active_collects
             active_collects += 1
             max_active_collects = max(max_active_collects, active_collects)
             await asyncio.sleep(0.2)
             try:
-                gid = next(iter({b.gid for b in batch}))
-                return Collected(gid=gid, n=len(batch))
+                gid = next(iter({b.gid for b in stream}))
+                return Collected(gid=gid, n=len(stream))
             finally:
                 active_collects -= 1
 
@@ -281,7 +281,7 @@ async def test_nested_all_inner_dropped_terminates() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Persistence: a snapshot taken mid-fan-out can resume without losing batch ids
+# Persistence: a snapshot taken mid-fan-out can resume without losing stream ids
 # or in-progress member lineage.
 # ---------------------------------------------------------------------------
 
@@ -299,7 +299,7 @@ def _gated_fan_out_workflow() -> type[Workflow]:
         @step(num_workers=8)
         async def work(self, ev: Task) -> Done:
             _RESUME_SEEN.append(ev.n)
-            await _RESUME_GATE.wait()  # hold the batch open at snapshot time
+            await _RESUME_GATE.wait()  # hold the stream open at snapshot time
             return Done(n=ev.n)
 
         @step
@@ -309,7 +309,7 @@ def _gated_fan_out_workflow() -> type[Workflow]:
     return FanOut
 
 
-async def test_resume_mid_open_batch_completes() -> None:
+async def test_resume_mid_open_stream_completes() -> None:
     _RESUME_GATE.clear()
     _RESUME_SEEN.clear()
 
@@ -320,7 +320,7 @@ async def test_resume_mid_open_batch_completes() -> None:
             break
         await asyncio.sleep(0.02)
     assert _RESUME_SEEN, "workers never started"
-    await asyncio.sleep(0.2)  # let the rest of the batch settle into the queue
+    await asyncio.sleep(0.2)  # let the rest of the stream settle into the queue
 
     snapshot = handler.ctx.to_dict()
     await handler.cancel_run()
@@ -385,8 +385,8 @@ def test_optional_list_collect_param_not_generic_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ctx.send_event is ordinary dispatch, not batch membership. list[E] fan-in is
-# only for returned-list producer batches.
+# ctx.send_event is ordinary dispatch, not stream membership. list[E] fan-in is
+# only for returned-list producer streams.
 # ---------------------------------------------------------------------------
 
 
@@ -395,7 +395,7 @@ class Item(Event):
 
 
 async def test_send_event_into_take_collect_rejected() -> None:
-    """Unbatched send_event flows must use ctx.collect_events, not list[E]."""
+    """Unstreamed send_event flows must use ctx.collect_events, not list[E]."""
 
     class WF(Workflow):
         @step
@@ -431,12 +431,12 @@ async def test_send_event_into_all_collect_rejected() -> None:
 
 
 # ---------------------------------------------------------------------------
-# send_event from INSIDE a fan-out branch remains outside batch membership.
+# send_event from INSIDE a fan-out branch remains outside stream membership.
 # ---------------------------------------------------------------------------
 
 
-async def test_send_event_extra_member_inside_batch_is_not_joined() -> None:
-    """A sent event from a branch does not become a member of the return batch."""
+async def test_send_event_extra_member_inside_stream_is_not_joined() -> None:
+    """A sent event from a branch does not become a member of the return stream."""
 
     class WF(Workflow):
         @step
@@ -457,7 +457,7 @@ async def test_send_event_extra_member_inside_batch_is_not_joined() -> None:
     assert result == [0, 1, 2], result
 
 
-async def test_send_event_only_inside_batch_collect_rejected() -> None:
+async def test_send_event_only_inside_collection_collect_rejected() -> None:
     """A list[E] collect needs a returned-list producer binding."""
 
     class WF(Workflow):
@@ -479,9 +479,9 @@ async def test_send_event_only_inside_batch_collect_rejected() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Resume mid-batch with a member retrying. Combines the persist/resume path with
-# an in-flight retry: the snapshot must preserve both the open batch's live count
-# and the retrying member's batch_stack, and the resumed run must not double- or
+# Resume mid-stream with a member retrying. Combines the persist/resume path with
+# an in-flight retry: the snapshot must preserve both the open stream's live count
+# and the retrying member's scope_path, and the resumed run must not double- or
 # under-count the member when it re-runs.
 # ---------------------------------------------------------------------------
 
@@ -508,7 +508,7 @@ def _gated_retry_fan_out_workflow() -> type[Workflow]:
             if ev.n == 3 and not _RETRY_RESUME_FAILED.get(3):
                 _RETRY_RESUME_FAILED[3] = True
                 raise RuntimeError("transient on member 3")
-            await _RETRY_RESUME_GATE.wait()  # hold the batch open at snapshot time
+            await _RETRY_RESUME_GATE.wait()  # hold the stream open at snapshot time
             return Done(n=ev.n)
 
         @step
@@ -518,7 +518,7 @@ def _gated_retry_fan_out_workflow() -> type[Workflow]:
     return FanOut
 
 
-async def test_resume_mid_batch_with_retry_in_flight_completes() -> None:
+async def test_resume_mid_stream_with_retry_in_flight_completes() -> None:
     _RETRY_RESUME_GATE.clear()
     _RETRY_RESUME_SEEN.clear()
     _RETRY_RESUME_FAILED.clear()
@@ -531,7 +531,7 @@ async def test_resume_mid_batch_with_retry_in_flight_completes() -> None:
             break
         await asyncio.sleep(0.02)
     assert _RETRY_RESUME_FAILED.get(3), "member 3 never failed"
-    await asyncio.sleep(0.2)  # let the batch settle with the retry pending
+    await asyncio.sleep(0.2)  # let the stream settle with the retry pending
 
     snapshot = handler.ctx.to_dict()
     await handler.cancel_run()

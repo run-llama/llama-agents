@@ -3,7 +3,7 @@
 """Collect selection algebra.
 
 Covers the public ``Collect`` / ``Cardinality`` API, signature inference for
-batch fan-in parameters (bare ``list[E]``, the ``Annotated[..., Collect()]``
+collection fan-in parameters (bare ``list[E]``, the ``Annotated[..., Collect()]``
 synonym, union flat lists, and the ``Take(n)`` marker), the validation errors
 that keep mode determination legible, and ``Take(n)`` runtime release. Other
 cardinalities and the cross-level/provenance/predicate knobs are reserved and
@@ -97,9 +97,9 @@ def test_bare_list_infers_collect_all() -> None:
         return join
 
     cfg = _config_for(build)
-    assert cfg.batch_collect_param == ("events", (Done,))
-    assert cfg.batch_collect is not None
-    assert isinstance(cfg.batch_collect.cardinality, All)
+    assert cfg.collection_collect_param == ("events", (Done,))
+    assert cfg.collection_collect is not None
+    assert isinstance(cfg.collection_collect.cardinality, All)
 
 
 def test_annotated_collect_is_synonym_for_bare_list() -> None:
@@ -111,9 +111,9 @@ def test_annotated_collect_is_synonym_for_bare_list() -> None:
         return join
 
     cfg = _config_for(build)
-    assert cfg.batch_collect_param == ("events", (Done,))
-    assert cfg.batch_collect is not None
-    assert isinstance(cfg.batch_collect.cardinality, All)
+    assert cfg.collection_collect_param == ("events", (Done,))
+    assert cfg.collection_collect is not None
+    assert isinstance(cfg.collection_collect.cardinality, All)
 
 
 def test_annotated_take_cardinality_inferred() -> None:
@@ -125,8 +125,8 @@ def test_annotated_take_cardinality_inferred() -> None:
         return join
 
     cfg = _config_for(build)
-    assert cfg.batch_collect is not None
-    assert cfg.batch_collect.cardinality == Take(2)
+    assert cfg.collection_collect is not None
+    assert cfg.collection_collect.cardinality == Take(2)
 
 
 def test_union_flat_list_infers_all_member_types() -> None:
@@ -138,13 +138,13 @@ def test_union_flat_list_infers_all_member_types() -> None:
         return report
 
     cfg = _config_for(build)
-    assert cfg.batch_collect_param is not None
-    assert cfg.batch_collect_param[1] == (Done, Skipped)
+    assert cfg.collection_collect_param is not None
+    assert cfg.collection_collect_param[1] == (Done, Skipped)
     assert Done in cfg.accepted_events
     assert Skipped in cfg.accepted_events
 
 
-def test_single_event_param_is_not_batch_collect() -> None:
+def test_single_event_param_is_not_collection_collect() -> None:
     def build(w: type[Workflow]) -> StepFunction:
         @free_step(workflow=w)
         async def work(ev: Task) -> Done:  # type: ignore[unused-ignore]
@@ -153,8 +153,8 @@ def test_single_event_param_is_not_batch_collect() -> None:
         return work
 
     cfg = _config_for(build)
-    assert cfg.batch_collect_param is None
-    assert cfg.batch_collect is None
+    assert cfg.collection_collect_param is None
+    assert cfg.collection_collect is None
 
 
 # --------------------------------------------------------------------------- #
@@ -203,7 +203,7 @@ def test_collect_marker_on_non_list_param_raises() -> None:
     class _W(Workflow):
         pass
 
-    with pytest.raises(WorkflowValidationError, match="only to batch fan-in"):
+    with pytest.raises(WorkflowValidationError, match="only to collection fan-in"):
 
         @free_step(workflow=_W)
         async def join(ev: Annotated[Done, Collect()]) -> StopEvent:  # type: ignore[unused-ignore]
@@ -214,7 +214,7 @@ def test_two_list_params_rejected_as_multi_slot() -> None:
     class _W(Workflow):
         pass
 
-    with pytest.raises(WorkflowValidationError, match="at most one batch"):
+    with pytest.raises(WorkflowValidationError, match="at most one collection"):
 
         @free_step(workflow=_W)
         async def merge(a: list[Done], b: list[Skipped]) -> StopEvent:  # type: ignore[unused-ignore]
@@ -320,7 +320,7 @@ async def test_take_covers_quorum() -> None:
 
 
 async def test_take_below_threshold_fires_on_close() -> None:
-    """`Take(n)` with fewer than n members fires on batch close, not early."""
+    """`Take(n)` with fewer than n members fires on stream close, not early."""
 
     class FanOut(Workflow):
         @step
@@ -341,9 +341,9 @@ async def test_take_below_threshold_fires_on_close() -> None:
     assert result == [0, 1, 2]
 
 
-async def test_take_inside_nested_batch_releases_per_inner_level() -> None:
-    """`Take(n)` on an inner join releases early within each inner batch and the
-    outer join still sees one summary per inner batch."""
+async def test_take_inside_nested_stream_releases_per_inner_level() -> None:
+    """`Take(n)` on an inner join releases early within each inner stream and the
+    outer join still sees one summary per inner stream."""
 
     class InnerTask(Event):
         outer: int
@@ -381,12 +381,12 @@ async def test_take_inside_nested_batch_releases_per_inner_level() -> None:
             return StopEvent(result=sorted((s.outer, s.count) for s in events))
 
     result = await _run(FanOut(timeout=10))
-    # Each inner batch releases exactly 2 (Take(2)); one summary per outer.
+    # Each inner stream releases exactly 2 (Take(2)); one summary per outer.
     assert result == [(0, 2), (1, 2)], result
 
 
 async def test_union_flat_list_collects_all_member_types() -> None:
-    """`list[Done | Skipped]` collects both member types into one closed batch."""
+    """`list[Done | Skipped]` collects both member types into one closed stream."""
 
     class FanOut(Workflow):
         @step

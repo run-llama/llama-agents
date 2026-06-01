@@ -104,8 +104,8 @@ def test_union_collect_param_rejected() -> None:
             return StopEvent(result="x")
 
 
-def test_list_event_param_accepted_as_batch_collect() -> None:
-    """A single ``list[E]`` parameter is a batch-collect step."""
+def test_list_event_param_accepted_as_collection_collect() -> None:
+    """A single ``list[E]`` parameter is a collection-collect step."""
 
     class _ListWorkflow(Workflow):
         pass
@@ -115,15 +115,15 @@ def test_list_event_param_accepted_as_batch_collect() -> None:
         return StopEvent(result="x")
 
     cfg = collect._step_config
-    assert cfg.batch_collect_param is not None
-    assert cfg.batch_collect_param[0] == "events"
-    assert cfg.batch_collect_param[1] == (Header,)
+    assert cfg.collection_collect_param is not None
+    assert cfg.collection_collect_param[0] == "events"
+    assert cfg.collection_collect_param[1] == (Header,)
     # The step routes on the element event type.
     assert Header in cfg.accepted_events
 
 
-def test_list_union_event_param_accepted_as_flat_batch() -> None:
-    """A ``list[A | B]`` collect parameter is a flat heterogeneous batch."""
+def test_list_union_event_param_accepted_as_flat_stream() -> None:
+    """A ``list[A | B]`` collect parameter is a flat heterogeneous stream."""
 
     class _ListUnionWorkflow(Workflow):
         pass
@@ -133,8 +133,8 @@ def test_list_union_event_param_accepted_as_flat_batch() -> None:
         return StopEvent(result="x")
 
     cfg = collect._step_config
-    assert cfg.batch_collect_param is not None
-    assert cfg.batch_collect_param[1] == (Header, Body)
+    assert cfg.collection_collect_param is not None
+    assert cfg.collection_collect_param[1] == (Header, Body)
     # Both member types route to the step.
     assert Header in cfg.accepted_events
     assert Body in cfg.accepted_events

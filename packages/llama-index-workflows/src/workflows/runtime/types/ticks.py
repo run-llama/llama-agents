@@ -45,29 +45,15 @@ class TickAddEvent(BaseModel):
     last_exception: SerializableOptionalException = None
     last_failed_at: float | None = None
     recovery_counts: dict[str, int] = Field(default_factory=dict)
-    # Batch lineage stack (innermost batch id last). Empty for events outside any
-    # fan-out batch. This is hidden wrapper-layer metadata, not user payload — the
-    # ``Event`` model itself stays pure. A fan-out step pushes a fresh id; a
-    # collect step pops the targeted id. 1:1 steps inherit their trigger's stack
-    # verbatim. (Isomorphic to OpenTelemetry trace/span/parent-span nesting.)
-    batch_stack: tuple[str, ...] = Field(default_factory=tuple)
+    scope_path: tuple[str, ...] = Field(default_factory=tuple)
 
 
-class TickBatchClosed(BaseModel):
-    """Marks a fan-out batch as fully emitted.
-
-    Emitted after a fan-out step (``list[E]`` return) exhausts its emissions.
-    Collect-mode steps keyed on ``batch_id`` fire once
-    when they observe this tick. ``batch_stack`` is the *trigger* stack of the
-    fan-out step (i.e. the stack the closing batch id was pushed onto), so a
-    collect step's outputs inherit it after popping the closed id.
-    """
-
+class TickCollectionStreamClosed(BaseModel):
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
-    type: Literal["batch_closed"] = "batch_closed"
-    batch_id: str
-    step_name: str
-    batch_stack: tuple[str, ...] = Field(default_factory=tuple)
+    type: Literal["collection_stream_closed"] = "collection_stream_closed"
+    stream_id: str
+    source_step: str
+    scope_path: tuple[str, ...] = Field(default_factory=tuple)
 
 
 class TickCancelRun(BaseModel):
@@ -124,7 +110,7 @@ class TickIdleCheck(BaseModel):
 WorkflowTick = Annotated[
     TickStepResult
     | TickAddEvent
-    | TickBatchClosed
+    | TickCollectionStreamClosed
     | TickCancelRun
     | TickPublishEvent
     | TickTimeout

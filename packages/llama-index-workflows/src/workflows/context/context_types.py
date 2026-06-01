@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 from typing import Any
 
@@ -13,10 +15,8 @@ MODEL_T = TypeVar("MODEL_T", bound=BaseModel, default=DictState)  # type: ignore
 # Serialization format version.
 #   v0: legacy nested-JSON-string format (SerializedContextV0).
 #   v1: structured format; per-worker ``in_progress`` was a list of event strings.
-#   v2: ``in_progress`` carries full SerializedEventAttempt entries (retry +
-#       batch_stack), plus batch-lineage fields (batch_seq, batches,
-#       batch_buffers, batch_fired). Required for fan-out/fan-in to resume
-#       without dropping a member's batch lineage.
+#   v2: collection stream state: attempts carry ``scope_path`` and collect
+#       invocations carry explicit release payloads.
 CURRENT_SERIALIZED_VERSION = 2
 
 
@@ -88,11 +88,20 @@ class SerializedEventAttempt(BaseModel):
     # Per-handler recovery counts on this event's lineage. Maps catch_error
     # handler step name -> invocations so far. Empty on the main graph.
     recovery_counts: dict[str, int] = Field(default_factory=dict)
-    # Batch lineage stack (innermost id last). Empty outside any fan-out batch.
-    batch_stack: list[str] = Field(default_factory=list)
-    # Closed-batch collect payload, serialized only for queued/in-progress
+    # Collection stream scope path (innermost stream id last).
+    scope_path: list[str] = Field(default_factory=list)
+    # Explicit collect invocation payload, serialized only for queued/in-progress
     # list[E] collect executions.
-    batch_input: list[str] | None = None
+    collection_release_payload: SerializedCollectionReleasePayload | None = None
+
+
+class SerializedCollectionReleasePayload(BaseModel):
+    """Serialized list-collect invocation payload."""
+
+    binding_id: str
+    stream_id: str
+    events: list[str] = Field(default_factory=list)
+    output_scope_path: list[str] = Field(default_factory=list)
 
 
 class SerializedWaiter(BaseModel):
@@ -127,29 +136,37 @@ class SerializedStepWorkerState(BaseModel):
 
     # Queue of events waiting to be processed (with retry info)
     queue: list[SerializedEventAttempt] = Field(default_factory=list)
-    # Events currently being processed. Serialized with full retry + batch lineage
-    # so a resumed run re-queues them WITHOUT losing their batch_stack — a member
-    # restored without its lineage can't close its batch.
+    # Events currently being processed. Serialized with full retry + stream scope
+    # so a resumed run re-queues them without losing collection liveness.
     in_progress: list[SerializedEventAttempt] = Field(default_factory=list)
     # Collected events for ctx.collect_events(), keyed by buffer_id -> [event, ...]
     # Events are serialized strings
     collected_events: dict[str, list[str]] = Field(default_factory=dict)
     # Active waiters created by ctx.wait_for_event()
     collected_waiters: list[SerializedWaiter] = Field(default_factory=list)
-    # Batch-lineage fan-in buffers, keyed by batch id -> [serialized event, ...]
-    batch_buffers: dict[str, list[str]] = Field(default_factory=dict)
-    # Batch ids released early via a Take cardinality.
-    batch_fired: list[str] = Field(default_factory=list)
 
 
-class SerializedBatch(BaseModel):
-    """Serialized representation of an open fan-out batch."""
+class SerializedCollectionStreamInstance(BaseModel):
+    """Serialized representation of an open collection stream."""
 
-    batch_id: str
-    producer: str
-    origin_stack: list[str] = Field(default_factory=list)
-    bound_collects: list[str] = Field(default_factory=list)
-    live: int = 0
+    stream_id: str
+    source_step: str
+    source_execution_id: str
+    parent_stream_id: str | None = None
+    scope_path: list[str] = Field(default_factory=list)
+    open_work_items: int = 0
+    accepting_binding_ids: list[str] = Field(default_factory=list)
+    closed_to_new_items: bool = True
+
+
+class SerializedCollectionReleaseState(BaseModel):
+    """Serialized release state for one binding inside one stream."""
+
+    binding_id: str
+    stream_id: str
+    buffer: list[str] = Field(default_factory=list)
+    released: bool = False
+    cursor: int = 0
 
 
 class SerializedContext(BaseModel):
@@ -171,13 +188,13 @@ class SerializedContext(BaseModel):
     # Maps step_name -> SerializedStepWorkerState
     workers: dict[str, SerializedStepWorkerState] = Field(default_factory=dict)
 
-    # Monotonic batch-id counter. Persisted so a resumed run keeps minting
-    # unique, deterministic batch ids.
-    batch_seq: int = Field(default=0)
-    # Open fan-out batches, keyed by batch id. Each carries its producer,
-    # origin stack, statically-bound collect steps, and the live-set cardinality
-    # used to decide closure.
-    batches: dict[str, SerializedBatch] = Field(default_factory=dict)
+    # Monotonic stream-id counter. Persisted so a resumed run keeps minting
+    # unique, deterministic stream ids.
+    stream_seq: int = Field(default=0)
+    streams: dict[str, SerializedCollectionStreamInstance] = Field(default_factory=dict)
+    collection_release_states: dict[str, SerializedCollectionReleaseState] = Field(
+        default_factory=dict
+    )
 
     @staticmethod
     def from_v0(v0: SerializedContextV0) -> "SerializedContext":
@@ -253,9 +270,7 @@ class SerializedContext(BaseModel):
 
         v1 serialized each worker's ``in_progress`` as a list of event strings.
         v2 serializes them as full SerializedEventAttempt entries so a resumed
-        run keeps retry counts and batch lineage. The other v2 fields (batch_seq,
-        batches, per-worker batch_buffers/batch_fired, per-attempt batch_stack)
-        are absent in v1 and fall back to their defaults.
+        run keeps retry counts and stream scope.
         """
         migrated = dict(data)
         migrated["version"] = CURRENT_SERIALIZED_VERSION

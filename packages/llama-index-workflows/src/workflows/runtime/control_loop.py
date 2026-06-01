@@ -36,7 +36,7 @@ from workflows.events import (
     WorkflowTimedOutEvent,
 )
 from workflows.runtime.types.commands import (
-    CommandCloseBatch,
+    CommandCloseCollectionStream,
     CommandCompleteRun,
     CommandFailWorkflow,
     CommandHalt,
@@ -49,8 +49,10 @@ from workflows.runtime.types.commands import (
     indicates_exit,
 )
 from workflows.runtime.types.internal_state import (
-    Batch,
     BrokerState,
+    CollectionBinding,
+    CollectionReleaseState,
+    CollectionStreamInstance,
     EventAttempt,
     InProgressState,
     InternalStepWorkerState,
@@ -70,6 +72,7 @@ from workflows.runtime.types.plugin import (
 from workflows.runtime.types.results import (
     AddCollectedEvent,
     AddWaiter,
+    CollectionReleasePayload,
     DeleteCollectedEvent,
     DeleteWaiter,
     RetryAttempt,
@@ -80,8 +83,8 @@ from workflows.runtime.types.results import (
 )
 from workflows.runtime.types.ticks import (
     TickAddEvent,
-    TickBatchClosed,
     TickCancelRun,
+    TickCollectionStreamClosed,
     TickIdleCheck,
     TickIdleRelease,
     TickPublishEvent,
@@ -119,12 +122,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class _EmptyBatchTrigger(Event):
-    """Internal carrier event for firing a batch-collect step on an empty batch.
-
-    Never routed or persisted as user data — it only occupies the ``event`` slot
-    of a worker invocation whose real payload is the (empty) ``batch_input``.
-    """
+class _EmptyCollectionTrigger(Event):
+    """Internal carrier event for an empty collection release."""
 
 
 class _ControlLoopRunner:
@@ -274,7 +273,7 @@ class _ControlLoopRunner:
                 last_exception=command.last_exception,
                 last_failed_at=command.last_failed_at,
                 recovery_counts=dict(command.recovery_counts),
-                batch_stack=command.batch_stack,
+                scope_path=command.scope_path,
             )
             if command.delay is not None and command.delay > 0:
                 now = await self.adapter.get_now()
@@ -282,12 +281,12 @@ class _ControlLoopRunner:
             else:
                 self.tick_buffer.append(event)
             return None
-        elif isinstance(command, CommandCloseBatch):
+        elif isinstance(command, CommandCloseCollectionStream):
             self.tick_buffer.append(
-                TickBatchClosed(
-                    batch_id=command.batch_id,
-                    step_name=command.step_name,
-                    batch_stack=command.batch_stack,
+                TickCollectionStreamClosed(
+                    stream_id=command.stream_id,
+                    source_step=command.source_step,
+                    scope_path=command.scope_path,
                 )
             )
             return None
@@ -666,8 +665,10 @@ def _reduce_tick(
         state, commands = _process_step_result_tick(tick, init, now_seconds, run_id)
     elif isinstance(tick, TickAddEvent):
         state, commands = _process_add_event_tick(tick, init, now_seconds)
-    elif isinstance(tick, TickBatchClosed):
-        state, commands = _process_batch_closed_tick(tick, init, now_seconds)
+    elif isinstance(tick, TickCollectionStreamClosed):
+        state, commands = _process_collection_stream_closed_tick(
+            tick, init, now_seconds
+        )
     elif isinstance(tick, TickCancelRun):
         state, commands = _process_cancel_run_tick(tick, init)
     elif isinstance(tick, TickIdleRelease):
@@ -712,7 +713,8 @@ def rewind_in_progress(
                     last_exception=in_progress.last_exception,
                     last_failed_at=in_progress.last_failed_at,
                     recovery_counts=dict(in_progress.recovery_counts),
-                    batch_stack=in_progress.batch_stack,
+                    scope_path=in_progress.scope_path,
+                    collection_release_payload=in_progress.shared_state.collection_release_payload,
                 ),
             )
         step_state.in_progress = []
@@ -745,98 +747,63 @@ def _check_idle_state(state: BrokerState) -> bool:
     return True
 
 
-def _mint_batch_id(
-    state: BrokerState, origin_stack: tuple[str, ...], step_name: str
+def _mint_stream_id(
+    state: BrokerState, scope_path: tuple[str, ...], step_name: str
 ) -> str:
-    """Mint a deterministic, run-id-free batch id and advance the counter.
-
-    The id is a pure function of the parent ``origin_stack`` (the producer's
-    tree-path), the producing ``step_name``, and a monotonic sequence number kept
-    in broker state. Because the reducer is pure and replayed tick-by-tick (see
-    ``replay_ticks_stream``), the same fan-out reproduces the same sequence value,
-    hence the same id, on replay. The digest does not include ``run_id``, so a
-    replay (``run_id=None``) and the live run produce identical ids and a
-    snapshot taken mid-fan-out resumes onto the same lineage.
-    """
-    seq = state.batch_seq
-    state.batch_seq = seq + 1
-    path = ">".join(origin_stack)
+    seq = state.stream_seq
+    state.stream_seq = seq + 1
+    path = ">".join(scope_path)
     digest = hashlib.sha256(f"{path}:{step_name}:{seq}".encode()).hexdigest()
-    return f"batch-{digest[:16]}"
+    return f"stream-{digest[:16]}"
 
 
-def _clear_batch_state(state: BrokerState) -> None:
-    """Drop all open-batch lineage on a terminal path.
-
-    Called on every workflow exit (StopEvent, cancel, timeout). After the run
-    ends no batch can close and no collect can fire, so the open batches and
-    per-step fan-in buffers are dead weight that must not survive into a
-    serialized snapshot.
-    """
-    state.batches.clear()
-    for worker in state.workers.values():
-        worker.batch_buffers.clear()
-        worker.batch_fired.clear()
+def _clear_collection_state(state: BrokerState) -> None:
+    state.streams.clear()
+    state.collection_release_states.clear()
 
 
 def _count_accepting_steps(state: BrokerState, event_type: type) -> int:
     """Number of steps that accept ``event_type`` — the work-item fan-out factor.
 
-    An event routed at a batch level becomes one work item per accepting step
+    An event routed at a stream level becomes one work item per accepting step
     (1:1 *and* collect steps count). This is the per-emission birth count for the
-    live set: a single emitted event accepted by N steps is N work items.
+    open_work_items set: a single emitted event accepted by N steps is N work items.
     """
     return sum(
         1 for cfg in state.config.steps.values() if event_type in cfg.accepted_events
     )
 
 
-def _apply_live_delta(
-    state: BrokerState, batch_id: str | None, delta: int
+def _apply_stream_work_delta(
+    state: BrokerState, stream_id: str | None, delta: int
 ) -> list[WorkflowCommand]:
-    """Adjust an open batch's live-set cardinality and close it on empty.
-
-    ``batch_id`` may be ``None`` (no enclosing batch) or unknown (already closed)
-    — both are no-ops. Closing pops the batch and emits a single
-    ``CommandCloseBatch`` so its bound collects fire.
-    """
-    if batch_id is None:
+    if stream_id is None:
         return []
-    batch = state.batches.get(batch_id)
-    if batch is None:
+    stream = state.streams.get(stream_id)
+    if stream is None:
         return []
-    batch.live += delta
-    if batch.live <= 0:
-        return _close_batch(state, batch_id)
+    stream.open_work_items += delta
+    if stream.closed_to_new_items and stream.open_work_items <= 0:
+        return _close_collection_stream(state, stream_id)
     return []
 
 
-def _close_batch(state: BrokerState, batch_id: str) -> list[WorkflowCommand]:
-    """Emit a CommandCloseBatch for ``batch_id`` and remove its record.
-
-    ``batch_stack`` on the command is the batch's origin (producer trigger)
-    stack, so a collect step's outputs inherit the stack with the closed id
-    already popped. The producer step rides on the command so downstream binding
-    is resolved from the producer, never from whichever path closed the batch.
-    """
-    batch = state.batches.pop(batch_id, None)
-    if batch is None:
+def _close_collection_stream(
+    state: BrokerState, stream_id: str
+) -> list[WorkflowCommand]:
+    stream = state.streams.pop(stream_id, None)
+    if stream is None:
         return []
     return [
-        CommandCloseBatch(
-            batch_id=batch_id,
-            step_name=batch.producer,
-            batch_stack=batch.origin_stack,
+        CommandCloseCollectionStream(
+            stream_id=stream_id,
+            source_step=stream.source_step,
+            scope_path=stream.scope_path,
         )
     ]
 
 
-def _cardinality_threshold(collect: Collect | None) -> int | None:
-    """Member count that triggers an early release, or None for fire-on-close.
-
-    ``Take(n)`` releases as soon as ``n`` members have arrived; ``All`` (and an
-    absent marker) fires only when the batch closes.
-    """
+def _take_threshold(collect: Collect | None) -> int | None:
     if collect is None:
         return None
     card = collect.cardinality
@@ -869,17 +836,17 @@ def _process_step_result_tick(
     did_complete_step = any(isinstance(x, StepWorkerResult) for x in tick.result)
     step_no_longer_in_progress = True
 
-    # Batch lineage. The trigger stack is carried on the in-progress state.
-    # A fan-out step (list[E] return) mints ONE fresh batch id for this completed
-    # execution and stamps every event it emits, then closes the batch. A 1:1
+    # Collection stream scope. The trigger path is carried on the in-progress state.
+    # A fan-out step (list[E] return) mints ONE fresh stream id for this completed
+    # execution and stamps every event it emits, then closes the stream. A 1:1
     # step's outputs inherit the trigger stack verbatim.
-    trigger_stack = this_execution.batch_stack
+    trigger_stack = this_execution.scope_path
     is_fan_out = worker_state.config.is_fan_out
-    fan_out_batch_id: str | None = None
+    fan_out_stream_id: str | None = None
     if is_fan_out and did_complete_step:
-        fan_out_batch_id = _mint_batch_id(state, trigger_stack, tick.step_name)
-    if fan_out_batch_id is not None:
-        emit_stack: tuple[str, ...] = trigger_stack + (fan_out_batch_id,)
+        fan_out_stream_id = _mint_stream_id(state, trigger_stack, tick.step_name)
+    if fan_out_stream_id is not None:
+        emit_stack: tuple[str, ...] = trigger_stack + (fan_out_stream_id,)
     else:
         emit_stack = trigger_stack
 
@@ -896,9 +863,9 @@ def _process_step_result_tick(
                 for worker in state.workers.values():
                     worker.collected_events.clear()
                     worker.collected_waiters.clear()
-                # Drop all batch lineage: the run is over, so no batch can close
+                # Drop all stream lineage: the run is over, so no stream can close
                 # and no collect can fire. Leaving it would leak into a snapshot.
-                _clear_batch_state(state)
+                _clear_collection_state(state)
                 commands.append(CommandCompleteRun(result=result.result))
             elif isinstance(result.result, Event):
                 # queue any subsequent events
@@ -909,7 +876,7 @@ def _process_step_result_tick(
                     CommandQueueEvent(
                         event=result.result,
                         recovery_counts=dict(this_execution.recovery_counts),
-                        batch_stack=emit_stack,
+                        scope_path=emit_stack,
                     )
                 )
             elif result.result is None:
@@ -954,10 +921,10 @@ def _process_step_result_tick(
                         last_exception=result.exception,
                         last_failed_at=result.failed_at,
                         recovery_counts=dict(this_execution.recovery_counts),
-                        # A retry re-runs the SAME work item: keep its batch_stack
-                        # so it still closes its batch, and mark it counted so
-                        # re-queuing does not mint a second live-set member.
-                        batch_stack=trigger_stack,
+                        # A retry re-runs the SAME work item: keep its scope_path
+                        # so it still closes its stream, and mark it counted so
+                        # re-queuing does not mint a second open_work_items-set member.
+                        scope_path=trigger_stack,
                     )
                 )
             else:
@@ -1001,12 +968,12 @@ def _process_step_result_tick(
                                 **this_execution.recovery_counts,
                                 handler.step_name: new_count,
                             },
-                            # The recovered branch continues at the same batch
+                            # The recovered branch continues at the same stream
                             # level: carry the failing work item's stack so the
-                            # handler's output stays in-batch and the batch can
+                            # handler's output stays in-stream and the stream can
                             # still close. The handler event is this work item's
                             # same-level successor, pre-counted below.
-                            batch_stack=trigger_stack,
+                            scope_path=trigger_stack,
                         )
                     )
                 else:
@@ -1109,11 +1076,9 @@ def _process_step_result_tick(
         else:
             raise ValueError(f"Unknown result type: {type(result)}")
 
-    # ---- Batch lineage bookkeeping: resolve one work item ----
-    # This execution IS one live work item in its enclosing batch
-    # (``trigger_stack[-1]``). Resolving it removes it from the live set and adds
-    # its same-level successors. There is exactly one resolve rule, applied below;
-    # closure is "live set empty", never a counter heuristic.
+    # Resolve this work item in its enclosing stream. Completion removes this
+    # item and adds same-scope successors. Stream close is driven only by
+    # source exhaustion plus ``open_work_items == 0``.
     emitted_non_stop = [
         x.result
         for x in tick.result
@@ -1133,26 +1098,29 @@ def _process_step_result_tick(
         not did_complete_step or scheduled_retry or failing_run or terminal_run
     )
 
-    if not skip_accounting and is_fan_out and fan_out_batch_id is not None:
-        # (a) Fan-out descent. Open the child batch B'. Its live set is seeded
-        # with one work item per emitted member per accepting step. The enclosing
-        # batch trades this producer's work item for one PLACEHOLDER per collect
-        # bound to B' — each resolves when that collect fires its summary back at
-        # the enclosing level (so nesting is represented, not counted). A child
-        # with no members closes immediately (its bound collects fire empty).
-        bound_collects = state.config.fan_in_bindings.get(tick.step_name, ())
+    if not skip_accounting and is_fan_out and fan_out_stream_id is not None:
+        # Fan-out descent. The enclosing stream trades this source work item for
+        # one placeholder per collect bound to the child stream; the placeholder
+        # resolves when that collect emits its summary back to the parent scope.
+        bindings = state.config.bindings_for_source(tick.step_name)
+        accepting_binding_ids = tuple(binding.id for binding in bindings)
         seed = sum(_count_accepting_steps(state, type(m)) for m in emitted_non_stop)
-        state.batches[fan_out_batch_id] = Batch(
-            batch_id=fan_out_batch_id,
-            producer=tick.step_name,
-            origin_stack=trigger_stack,
-            bound_collects=bound_collects,
-            live=seed,
+        state.streams[fan_out_stream_id] = CollectionStreamInstance(
+            stream_id=fan_out_stream_id,
+            source_step=tick.step_name,
+            source_execution_id=f"{tick.step_name}:{tick.worker_id}:{state.stream_seq - 1}",
+            parent_stream_id=enclosing,
+            scope_path=trigger_stack,
+            accepting_binding_ids=accepting_binding_ids,
+            open_work_items=seed,
+            closed_to_new_items=True,
         )
-        # The producer's work item is replaced by collect placeholders.
-        commands.extend(_apply_live_delta(state, enclosing, len(bound_collects) - 1))
+        # The source work item is replaced by collect placeholders.
+        commands.extend(
+            _apply_stream_work_delta(state, enclosing, len(accepting_binding_ids) - 1)
+        )
         if seed == 0:
-            commands.extend(_close_batch(state, fan_out_batch_id))
+            commands.extend(_close_collection_stream(state, fan_out_stream_id))
     elif not skip_accounting:
         # (b) Same-level resolution (1:1 step, or a collect step firing its
         # summary). Remove this work item and add its same-level successors: one
@@ -1161,7 +1129,7 @@ def _process_step_result_tick(
         successors = sum(
             _count_accepting_steps(state, type(ev)) for ev in emitted_non_stop
         )
-        commands.extend(_apply_live_delta(state, enclosing, successors - 1))
+        commands.extend(_apply_stream_work_delta(state, enclosing, successors - 1))
 
     is_completed = any(indicates_exit(c) for c in commands)
     if step_no_longer_in_progress:
@@ -1216,10 +1184,10 @@ def _add_or_enqueue_event(
             step_name=step_name,
             collected_events=state_copy.collected_events,
             collected_waiters=state_copy.collected_waiters,
-            batch_input=list(event.batch_input)
-            if event.batch_input is not None
+            collection_release_payload=event.collection_release_payload._copy()
+            if event.collection_release_payload is not None
             else None,
-            batch_stack=event.batch_stack,
+            scope_path=event.scope_path,
         )
         state.in_progress.append(
             InProgressState(
@@ -1231,7 +1199,7 @@ def _add_or_enqueue_event(
                 last_exception=event.last_exception,
                 last_failed_at=event.last_failed_at,
                 recovery_counts=dict(event.recovery_counts),
-                batch_stack=event.batch_stack,
+                scope_path=event.scope_path,
             )
         )
         commands.append(CommandRunWorker(step_name=step_name, event=event.event, id=id))
@@ -1303,50 +1271,31 @@ def _process_add_event_tick(
         if is_accepted and (tick.step_name is None or tick.step_name == step_name):
             handled = True
             worker_state = state.workers[step_name]
-            if worker_state.config.batch_collect_param is not None:
-                # Batch-lineage fan-in: buffer only events that belong to an
-                # explicit returned-list batch. Unbatched sends do not have a
-                # close signal, so they cannot participate in list[E] fan-in.
-                if not tick.batch_stack:
+            if worker_state.config.collection_collect_param is not None:
+                if not tick.scope_path:
                     continue
-                batch_id = tick.batch_stack[-1]
-                already_fired = batch_id in worker_state.batch_fired
-                if not already_fired:
-                    buf = worker_state.batch_buffers.setdefault(batch_id, [])
-                    buf.append(tick.event)
-                    # Cardinality release: Take(n) fires as soon
-                    # as ``n`` members arrive, with the first ``n``, instead of
-                    # waiting for the batch to close. All() has no threshold and
-                    # fires only on TickBatchClosed (the batch-closed path below). The
-                    # output stack is the trigger stack with this batch id popped
-                    # — i.e. the enclosing stack.
-                    threshold = _cardinality_threshold(
-                        worker_state.config.batch_collect
-                    )
-                    if threshold is not None and len(buf) >= threshold:
-                        released = list(buf[:threshold])
-                        output_stack = (
-                            tuple(tick.batch_stack[:-1]) if tick.batch_stack else ()
-                        )
-                        worker_state.batch_fired.add(batch_id)
-                        worker_state.batch_buffers.pop(batch_id, None)
+                stream_id = tick.scope_path[-1]
+                binding = state.config.binding_for_target(
+                    stream_id, step_name, state.streams
+                )
+                if binding is None:
+                    continue
+                release_state = _release_state_for(state, stream_id, binding)
+                if not release_state.released:
+                    release_state.buffer.append(tick.event)
+                    release = _release_on_item(binding, release_state)
+                    if release is not None:
                         commands.extend(
-                            _fire_batch_collect(
-                                step_name,
+                            _fire_collection_release(
+                                binding,
+                                stream_id,
                                 worker_state,
-                                released,
-                                output_stack,
+                                release,
+                                tuple(tick.scope_path[:-1]),
                                 now_seconds,
                             )
                         )
-                # Collect delivery: this member's work item resolves to ZERO
-                # same-level successors, so it simply leaves the live set. Counted
-                # ONCE per work item (per accepting collect step), never per
-                # consumer of the emitted event — so two collects of the same type
-                # each see the full batch instead of racing one decrement. Runs
-                # even after an early release so the last member still closes the
-                # batch.
-                commands.extend(_apply_live_delta(state, batch_id, -1))
+                commands.extend(_apply_stream_work_delta(state, stream_id, -1))
                 continue
             subcommands = _add_or_enqueue_event(
                 EventAttempt(
@@ -1356,7 +1305,7 @@ def _process_add_event_tick(
                     last_exception=tick.last_exception,
                     last_failed_at=tick.last_failed_at,
                     recovery_counts=dict(tick.recovery_counts),
-                    batch_stack=tuple(tick.batch_stack),
+                    scope_path=tuple(tick.scope_path),
                 ),
                 step_name,
                 state.workers[step_name],
@@ -1405,7 +1354,7 @@ def _process_timeout_tick(
 ) -> tuple[BrokerState, list[WorkflowCommand]]:
     state = init.deepcopy()
     state.is_running = False
-    _clear_batch_state(state)
+    _clear_collection_state(state)
     active_steps = [
         step_name
         for step_name, worker_state in init.workers.items()
@@ -1457,72 +1406,102 @@ def _process_waiter_timeout_tick(
     return state, commands
 
 
-def _fire_batch_collect(
-    step_name: str,
+def _release_state_key(stream_id: str, binding_id: str) -> str:
+    return f"{stream_id}:{binding_id}"
+
+
+def _release_state_for(
+    state: BrokerState, stream_id: str, binding: CollectionBinding
+) -> CollectionReleaseState:
+    key = _release_state_key(stream_id, binding.id)
+    release_state = state.collection_release_states.get(key)
+    if release_state is None:
+        release_state = CollectionReleaseState(
+            binding_id=binding.id,
+            stream_id=stream_id,
+        )
+        state.collection_release_states[key] = release_state
+    return release_state
+
+
+def _release_on_item(
+    binding: CollectionBinding, release_state: CollectionReleaseState
+) -> list[Event] | None:
+    threshold = _take_threshold(binding.policy)
+    if threshold is None or len(release_state.buffer) < threshold:
+        return None
+    release_state.released = True
+    release_state.cursor = threshold
+    return list(release_state.buffer[:threshold])
+
+
+def _release_on_close(
+    binding: CollectionBinding, release_state: CollectionReleaseState
+) -> list[Event] | None:
+    if release_state.released:
+        return None
+    release_state.released = True
+    threshold = _take_threshold(binding.policy)
+    if threshold is not None:
+        release_state.cursor = min(threshold, len(release_state.buffer))
+        return list(release_state.buffer[:threshold])
+    return list(release_state.buffer)
+
+
+def _fire_collection_release(
+    binding: CollectionBinding,
+    stream_id: str,
     worker_state: InternalStepWorkerState,
-    batch: list[Event],
+    events: list[Event],
     output_stack: tuple[str, ...],
     now_seconds: float,
 ) -> list[WorkflowCommand]:
-    """Launch a batch-collect step once with the full buffered ``batch``.
-
-    The buffered list rides on the worker snapshot's ``batch_input``; the worker
-    wrapper binds it to the step's ``list[E]`` parameter. ``output_stack`` is the
-    trigger stack the collect step's own outputs should inherit (the closed
-    batch id already popped). A representative carrier event occupies the
-    ``event`` slot but is ignored by the wrapper.
-    """
-    # Carrier event: the wrapper ignores it and binds the list from batch_input.
-    carrier: Event = batch[0] if batch else _EmptyBatchTrigger()
+    carrier: Event = events[0] if events else _EmptyCollectionTrigger()
     return _add_or_enqueue_event(
         EventAttempt(
             event=carrier,
-            batch_stack=output_stack,
-            batch_input=list(batch),
+            scope_path=output_stack,
+            collection_release_payload=CollectionReleasePayload(
+                binding_id=binding.id,
+                stream_id=stream_id,
+                events=list(events),
+                output_scope_path=output_stack,
+            ),
         ),
-        step_name,
+        binding.target_step,
         worker_state,
         now_seconds,
     )
 
 
-def _process_batch_closed_tick(
-    tick: TickBatchClosed, init: BrokerState, now_seconds: float
+def _process_collection_stream_closed_tick(
+    tick: TickCollectionStreamClosed, init: BrokerState, now_seconds: float
 ) -> tuple[BrokerState, list[WorkflowCommand]]:
-    """Fire the collect step(s) statically bound to this batch, once each.
-
-    The bound collects come from the build-time ``fan_in_bindings`` keyed on the
-    batch's producer (carried on the close tick as ``step_name``) — no runtime
-    graph walk. Each bound collect fires exactly once with its buffered list,
-    EVEN when empty (every branch died / the batch was empty), which is what lets
-    a middle batch that closes empty still summarize up to its parent. A collect
-    already released early via a ``Take`` cardinality is not re-fired.
-
-    The fired collect step's outputs inherit ``tick.batch_stack`` (the producer's
-    trigger stack), i.e. the closed id is popped — implemented by stamping the
-    in-progress state with that stack.
-    """
     state = init.deepcopy()
     commands: list[WorkflowCommand] = []
-    bound = state.config.fan_in_bindings.get(tick.step_name, ())
-    # Statically-bound collects fire on close EVEN with an empty buffer.
-    for step_name in bound:
-        worker_state = state.workers.get(step_name)
-        if worker_state is None or worker_state.config.batch_collect_param is None:
+    bindings = state.config.bindings_for_source(tick.source_step)
+    for binding in bindings:
+        worker_state = state.workers.get(binding.target_step)
+        if worker_state is None or worker_state.config.collection_collect_param is None:
             continue
-        if tick.batch_id in worker_state.batch_fired:
-            # Already released early via a Take cardinality. Don't re-fire; just
-            # clear the per-batch tracking now that it's closed.
-            worker_state.batch_fired.discard(tick.batch_id)
-            worker_state.batch_buffers.pop(tick.batch_id, None)
+        key = _release_state_key(tick.stream_id, binding.id)
+        release_state = state.collection_release_states.pop(
+            key,
+            CollectionReleaseState(
+                binding_id=binding.id,
+                stream_id=tick.stream_id,
+            ),
+        )
+        release = _release_on_close(binding, release_state)
+        if release is None:
             continue
-        batch = worker_state.batch_buffers.pop(tick.batch_id, [])
         commands.extend(
-            _fire_batch_collect(
-                step_name,
+            _fire_collection_release(
+                binding,
+                tick.stream_id,
                 worker_state,
-                batch,
-                tuple(tick.batch_stack),
+                release,
+                tuple(tick.scope_path),
                 now_seconds,
             )
         )

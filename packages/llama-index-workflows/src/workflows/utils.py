@@ -43,15 +43,15 @@ class StepSignatureSpec(BaseModel):
     context_parameter: str | None
     context_state_type: Any | None
     resources: list[Any]
-    # Batch-lineage fan-in: ``(parameter_name, element_event_types)`` when
+    # Collection-stream fan-in: ``(parameter_name, element_event_types)`` when
     # the step declares a single ``list[E]`` collect parameter, else None. The
     # element types are a tuple — ``list[Done]`` -> ``(Done,)``; a union flat list
     # ``list[A | B]`` -> ``(A, B)``.
-    batch_collect_param: tuple[str, tuple[Any, ...]] | None = None
-    # The resolved ``Collect`` marker for the batch collect parameter. A bare
+    collection_collect_param: tuple[str, tuple[Any, ...]] | None = None
+    # The resolved ``Collect`` marker for the collection collect parameter. A bare
     # ``list[E]`` parameter resolves to ``Collect()`` (``All`` cardinality). None
-    # when the step is not a batch collect.
-    batch_collect: Any | None = None
+    # when the step is not a collection collect.
+    collection_collect: Any | None = None
     # Fan-out producer: True when the return annotation is ``list[E]``.
     is_fan_out: bool = False
 
@@ -86,8 +86,8 @@ def inspect_signature(
     context_parameter = None
     context_state_type = None
     resources = []
-    batch_collect_param: tuple[str, tuple[Any, ...]] | None = None
-    batch_collect: Collect | None = None
+    collection_collect_param: tuple[str, tuple[Any, ...]] | None = None
+    collection_collect: Collect | None = None
 
     # Inspect function parameters
     for name, t in sig.parameters.items():
@@ -112,7 +112,7 @@ def inspect_signature(
 
         # Handle Annotated types: resource descriptors and Collect markers. A
         # ``Collect`` marker unwraps to the inner ``list[E]`` annotation and is
-        # carried forward to the batch-collect handling below; everything else
+        # carried forward to the collection-collect handling below; everything else
         # (unknown metadata) is ignored.
         collect_marker: Collect | None = None
         if get_origin(annotation) is Annotated:
@@ -141,31 +141,31 @@ def inspect_signature(
             context_parameter = name
             continue
 
-        # Batch-lineage fan-in: a ``list[E]`` parameter (e.g.
+        # Collection-stream fan-in: a ``list[E]`` parameter (e.g.
         # ``events: list[Done]``) is a collect step. It buffers incoming ``E`` by
-        # batch id and releases per its ``Collect`` cardinality. ``E`` may be a
+        # stream id and releases per its ``Collect`` cardinality. ``E`` may be a
         # union (``list[A | B]``) — every member type routes to the step. A bare
         # ``list[E]`` is exactly ``Annotated[list[E], Collect(All())]``.
         element_types = _event_list_element_types(annotation)
         if element_types is not None:
             marker = collect_marker if collect_marker is not None else Collect()
             _validate_collect_marker(marker, name)
-            if batch_collect_param is not None:
+            if collection_collect_param is not None:
                 msg = (
-                    "A step may declare at most one batch (list[E]) collect "
-                    f"parameter, but found both {batch_collect_param[0]!r} and "
+                    "A step may declare at most one collection (list[E]) collect "
+                    f"parameter, but found both {collection_collect_param[0]!r} and "
                     f"{name!r}. Multi-slot collects are not supported."
                 )
                 raise WorkflowValidationError(msg)
-            batch_collect_param = (name, tuple(element_types))
-            batch_collect = marker
+            collection_collect_param = (name, tuple(element_types))
+            collection_collect = marker
             accepted_events[name] = list(element_types)
             continue
         if collect_marker is not None:
             msg = (
                 f"Parameter {name!r} carries a Collect marker but is not annotated "
                 "as list[E] of an Event subclass. Collect markers apply only to "
-                "batch fan-in (list[Event]) parameters."
+                "collection fan-in (list[Event]) parameters."
             )
             raise WorkflowValidationError(msg)
 
@@ -185,8 +185,8 @@ def inspect_signature(
         context_parameter=context_parameter,
         context_state_type=context_state_type,
         resources=resources,
-        batch_collect_param=batch_collect_param,
-        batch_collect=batch_collect,
+        collection_collect_param=collection_collect_param,
+        collection_collect=collection_collect,
         is_fan_out=_is_fan_out_return(fn, localns=localns),
     )
 
@@ -233,7 +233,7 @@ def _event_list_element_types(annotation: Any) -> list[Any] | None:
 
 
 def _validate_collect_marker(marker: Collect, name: str) -> None:
-    """Reject Collect knobs outside the supported finite-batch contract."""
+    """Reject Collect knobs outside the supported finite collection contract."""
     if marker.where is not None:
         raise WorkflowValidationError(
             f"Collect(where=...) on {name!r}: predicate narrowing is not supported."
@@ -270,11 +270,11 @@ def validate_step_signature(spec: StepSignatureSpec) -> None:
     if num_of_events == 0:
         msg = "Step signature must have at least one parameter annotated as type Event"
         raise WorkflowValidationError(msg)
-    if spec.batch_collect_param is not None and num_of_events > 1:
-        # A batch (list[E]) collect parameter alongside other event params is a
+    if spec.collection_collect_param is not None and num_of_events > 1:
+        # A collection (list[E]) collect parameter alongside other event params is a
         # multi-slot collect, which this contract does not support.
         msg = (
-            "A batch (list[E]) collect parameter cannot be combined with other "
+            "A collection (list[E]) collect parameter cannot be combined with other "
             "event parameters. Use a single list[E] parameter, or multiple "
             "single-event parameters for a heterogeneous join."
         )
@@ -457,15 +457,15 @@ def _reject_async_iterator_return(func: Callable, return_hint: Any) -> None:
         raise WorkflowValidationError(
             "Async-iterator fan-out (AsyncIterator[E] / AsyncGenerator[E, None] / "
             "async generator steps) is not supported. Return list[E] for a "
-            "static batch, or emit incrementally with ctx.send_event."
+            "static collection, or emit incrementally with ctx.send_event."
         )
 
 
 def _is_fan_out_return(func: Callable, localns: dict[str, Any] | None = None) -> bool:
-    """True if the return annotation is a batch-emission collection.
+    """True if the return annotation emits a finite collection stream.
 
     A fan-out producer returns ``list[E]``. ``Optional[list[E]]``
-    (``list[E] | None``) also counts — it may emit a batch or nothing. A plain
+    (``list[E] | None``) also counts — it may emit a stream or nothing. A plain
     single-event or union-of-single-events return is NOT fan-out.
     """
     type_hints = _resolve_type_hints(func, localns=localns)

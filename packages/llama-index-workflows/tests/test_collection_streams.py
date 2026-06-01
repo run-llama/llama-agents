@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LlamaIndex Inc.
-"""Batch-lineage fan-out / fan-in.
+"""Collection-stream fan-out / fan-in.
 
 Covers the terse ``join(events: list[Done])`` form for static ``list[E]``
-producers, multi-level fan-out, replay equality of batch ids and grouping,
-empty batches, and branch death. Async-iterator producers are rejected at
-decoration because this path only supports finite returned-list batches.
+producers, multi-level fan-out, replay equality of stream ids and grouping,
+empty streams, and branch death. Async-iterator producers are rejected at
+decoration because this path only supports finite returned-list streams.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from workflows.runtime.types.internal_state import BrokerState
 from workflows.runtime.types.plugin import as_snapshottable_adapter
 from workflows.runtime.types.ticks import (
     TickAddEvent,
-    TickBatchClosed,
+    TickCollectionStreamClosed,
     WorkflowTick,
 )
 
@@ -70,7 +70,7 @@ async def _run(wf: Workflow) -> object:
 
 
 async def test_static_list_producer_join_fires_once_with_all() -> None:
-    """`join(events: list[Done])` fires once with the full batch, no ctx.store."""
+    """`join(events: list[Done])` fires once with the full stream, no ctx.store."""
 
     class FanOut(Workflow):
         @step
@@ -90,7 +90,7 @@ async def test_static_list_producer_join_fires_once_with_all() -> None:
 
 
 def test_async_generator_producer_rejected_at_decoration() -> None:
-    """Async-iterator fan-out is outside the returned-list batch contract."""
+    """Async-iterator fan-out is outside the returned-list stream contract."""
 
     with pytest.raises(WorkflowValidationError, match="Async-iterator fan-out"):
 
@@ -106,7 +106,7 @@ def test_async_generator_producer_rejected_at_decoration() -> None:
 
 
 async def test_join_fires_exactly_once() -> None:
-    """The join body executes exactly once per batch."""
+    """The join body executes exactly once per stream."""
 
     calls: list[int] = []
 
@@ -129,8 +129,8 @@ async def test_join_fires_exactly_once() -> None:
     assert calls == [3]
 
 
-async def test_empty_batch_fires_join_once_with_empty_list() -> None:
-    """`return []` still closes the batch; the join fires once with `[]`."""
+async def test_empty_stream_fires_join_once_with_empty_list() -> None:
+    """`return []` still closes the stream; the join fires once with `[]`."""
 
     class FanOut(Workflow):
         @step
@@ -198,7 +198,7 @@ async def test_multi_level_fan_out_joins_at_innermost_level() -> None:
             return StopEvent(result=sorted((s.outer, s.total) for s in events))
 
     result = await _run(FanOut(timeout=10))
-    # Three outer tasks, each producing a 2-member inner batch.
+    # Three outer tasks, each producing a 2-member inner stream.
     assert result == [(0, 2), (1, 2), (2, 2)]
 
 
@@ -226,7 +226,7 @@ async def _run_recording_ticks(
     The in-memory runtime records every tick it reduces via ``on_tick`` and
     exposes them through the run adapter's ``replay()``. That recorded stream is
     exactly what persistence stores, so re-feeding it through
-    ``replay_ticks_stream`` must rebuild identical batch lineage.
+    ``replay_ticks_stream`` must rebuild identical stream lineage.
     """
     handler = wf.run()
     async for _ in handler.stream_events():
@@ -239,51 +239,53 @@ async def _run_recording_ticks(
     return result, ticks
 
 
-def _done_batch_ids(ticks: list[WorkflowTick]) -> list[str]:
+def _done_stream_ids(ticks: list[WorkflowTick]) -> list[str]:
     return [
-        t.batch_stack[-1]
+        t.scope_path[-1]
         for t in ticks
-        if isinstance(t, TickAddEvent) and isinstance(t.event, Done) and t.batch_stack
+        if isinstance(t, TickAddEvent) and isinstance(t.event, Done) and t.scope_path
     ]
 
 
-async def test_replay_reproduces_identical_batch_ids_and_grouping() -> None:
+async def test_replay_reproduces_identical_stream_ids_and_grouping() -> None:
     """Record a real fan-out run's tick stream, replay it, and assert identical
-    batch ids and grouping. Replay determinism lives in the reducer: batch ids
-    are a pure function of the producer path and batch sequence."""
+    stream ids and grouping. Replay determinism lives in the reducer: stream ids
+    are a pure function of the producer path and stream sequence."""
 
     wf = _ReplayFanOut()
     result, ticks = await _run_recording_ticks(wf)
     assert result == [0, 1, 2, 3]
     assert ticks, "expected a recorded tick stream"
 
-    # The Done events all carry one batch id (single fan-out level).
-    done_ids = _done_batch_ids(ticks)
+    # The Done events all carry one stream id (single fan-out level).
+    done_ids = _done_stream_ids(ticks)
     assert len(done_ids) == 4, done_ids
     assert len(set(done_ids)) == 1, done_ids
-    the_batch = done_ids[0]
+    the_stream = done_ids[0]
 
-    # Exactly one close tick for that batch.
+    # Exactly one close tick for that stream.
     closes = [
-        t for t in ticks if isinstance(t, TickBatchClosed) and t.batch_id == the_batch
+        t
+        for t in ticks
+        if isinstance(t, TickCollectionStreamClosed) and t.stream_id == the_stream
     ]
     assert len(closes) == 1, closes
 
     # Replay the exact stream twice; both reproduce the same final state
-    # deterministically (the batch-id counter is a pure function of the stream).
+    # deterministically (the stream-id counter is a pure function of the stream).
     replay1 = await replay_ticks_stream(BrokerState.from_workflow(wf), _stream(ticks))
     replay2 = await replay_ticks_stream(BrokerState.from_workflow(wf), _stream(ticks))
-    assert replay1.state.batch_seq == replay2.state.batch_seq
-    assert replay1.state.batch_seq >= 1  # at least one batch was minted
+    assert replay1.state.stream_seq == replay2.state.stream_seq
+    assert replay1.state.stream_seq >= 1  # at least one stream was minted
 
     rebuilt = await rebuild_state_from_ticks_stream(
         BrokerState.from_workflow(wf), _stream(ticks)
     )
-    assert rebuilt.batch_seq == replay1.state.batch_seq
+    assert rebuilt.stream_seq == replay1.state.stream_seq
 
 
-async def test_no_batch_state_remains_after_completion() -> None:
-    """A completed fan-out leaves no open batches or fan-in buffers in state."""
+async def test_no_stream_state_remains_after_completion() -> None:
+    """A completed fan-out leaves no open streams or fan-in buffers in state."""
 
     class FanOut(Workflow):
         @step
@@ -305,10 +307,10 @@ async def test_no_batch_state_remains_after_completion() -> None:
     await handler
 
     serialized = handler.ctx.to_dict()
-    assert serialized.get("batches", {}) == {}, serialized.get("batches")
+    assert serialized.get("streams", {}) == {}, serialized.get("streams")
     for step_name, worker in serialized.get("workers", {}).items():
-        assert not worker.get("batch_buffers"), (step_name, worker)
-        assert not worker.get("batch_fired"), (step_name, worker)
+        assert not worker.get("collection_release_states"), (step_name, worker)
+        assert not worker.get("collection_released"), (step_name, worker)
 
 
 async def test_no_ctx_store_threading_needed() -> None:

@@ -58,21 +58,21 @@ class StepConfig:
     # ordinary single-event-trigger model.
     collect_params: list[tuple[str, Any]] | None = None
     # Fan-out producer: True when the return annotation is ``list[E]``. Such
-    # a step mints a fresh batch id per execution and stamps every emitted event
-    # with it, then closes the batch. Computed at decoration time from the return
+    # a step mints a fresh stream id per execution and stamps every emitted event
+    # with it, then closes the stream. Computed at decoration time from the return
     # annotation.
     is_fan_out: bool = False
-    # Batch-lineage fan-in: set to ``(parameter_name, element_event_types)``
+    # Collection-stream fan-in: set to ``(parameter_name, element_event_types)``
     # when the step declares a single ``list[E]`` parameter. The element types are
     # a tuple — ``list[Done]`` -> ``(Done,)``; a union flat list ``list[A | B]`` ->
     # ``(A, B)`` (every member routes to the step). The step buffers incoming
-    # members by innermost batch id and releases per ``batch_collect``.
-    batch_collect_param: tuple[str, tuple[Any, ...]] | None = None
-    # The resolved ``Collect`` marker for the batch collect parameter,
+    # members by innermost stream id and releases per ``collection_collect``.
+    collection_collect_param: tuple[str, tuple[Any, ...]] | None = None
+    # The resolved ``Collect`` marker for the collection collect parameter,
     # carrying the release cardinality (``All`` / ``Take``). A bare
     # ``list[E]`` parameter resolves to ``Collect()`` (``All``). None when the
-    # step is not a batch collect.
-    batch_collect: Collect | None = None
+    # step is not a collection collect.
+    collection_collect: Collect | None = None
     role: StepRole = "step"
     # Only meaningful when role == "catch_error".
     # None means wildcard — covers any step not claimed by a scoped handler.
@@ -241,8 +241,8 @@ def make_step_function(
         skip_graph_checks=skip_graph_checks or [],
         collect_params=collect_params,
         is_fan_out=spec.is_fan_out,
-        batch_collect_param=spec.batch_collect_param,
-        batch_collect=spec.batch_collect,
+        collection_collect_param=spec.collection_collect_param,
+        collection_collect=spec.collection_collect,
     )
 
     return casted

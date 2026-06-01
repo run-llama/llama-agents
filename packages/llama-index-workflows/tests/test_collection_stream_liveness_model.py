@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LlamaIndex Inc.
-"""Model test for the fan-out/fan-in live-set closure rule.
+"""Model test for the fan-out/fan-in stream liveness rule.
 
 Drives a synthetic live set ``L(B)`` through the transitions the reducer applies
 — seed at open, same-level emission, collect delivery, fan-out placeholder, and
 close-on-empty — directly against the pure helpers, so the core accounting is
 verifiable without spinning a full workflow. The behavioral end-to-end coverage
-lives in ``test_batch_lineage_regressions.py``; this pins the invariant itself:
-**a batch closes exactly when its live set empties, never before.**
+lives in ``test_stream_lineage_regressions.py``; this pins the invariant itself:
+**a stream closes exactly when its live work set empties, never before.**
 """
 
 from __future__ import annotations
@@ -15,12 +15,15 @@ from __future__ import annotations
 from workflows import Workflow, step
 from workflows.events import Event, StartEvent, StopEvent
 from workflows.runtime.control_loop import (
-    _apply_live_delta,
-    _close_batch,
+    _apply_stream_work_delta,
+    _close_collection_stream,
     _count_accepting_steps,
 )
-from workflows.runtime.types.commands import CommandCloseBatch, WorkflowCommand
-from workflows.runtime.types.internal_state import Batch, BrokerState
+from workflows.runtime.types.commands import (
+    CommandCloseCollectionStream,
+    WorkflowCommand,
+)
+from workflows.runtime.types.internal_state import BrokerState, CollectionStreamInstance
 
 
 class Task(Event):
@@ -53,16 +56,20 @@ def _state() -> BrokerState:
     return BrokerState.from_workflow(_WF())
 
 
-def _open_batch(state: BrokerState, live: int) -> Batch:
-    batch = Batch(
-        batch_id="batch-test",
-        producer="fan_out",
-        origin_stack=(),
-        bound_collects=("collect_a", "collect_b"),
-        live=live,
+def _open_stream(state: BrokerState, open_work_items: int) -> CollectionStreamInstance:
+    stream = CollectionStreamInstance(
+        stream_id="stream-test",
+        source_step="fan_out",
+        source_execution_id="fan_out:0:0",
+        parent_stream_id=None,
+        scope_path=(),
+        accepting_binding_ids=tuple(
+            binding.id for binding in state.config.bindings_for_source("fan_out")
+        ),
+        open_work_items=open_work_items,
     )
-    state.batches[batch.batch_id] = batch
-    return batch
+    state.streams[stream.stream_id] = stream
+    return stream
 
 
 def test_count_accepting_steps_is_work_item_fan_out_factor() -> None:
@@ -74,55 +81,55 @@ def test_count_accepting_steps_is_work_item_fan_out_factor() -> None:
 
 def test_close_fires_exactly_when_live_empties() -> None:
     state = _state()
-    _open_batch(state, live=1)
+    _open_stream(state, open_work_items=1)
     # A positive/neutral delta never closes.
-    assert _apply_live_delta(state, "batch-test", +2) == []
-    assert state.batches["batch-test"].live == 3
-    assert _apply_live_delta(state, "batch-test", -2) == []
-    assert state.batches["batch-test"].live == 1
+    assert _apply_stream_work_delta(state, "stream-test", +2) == []
+    assert state.streams["stream-test"].open_work_items == 3
+    assert _apply_stream_work_delta(state, "stream-test", -2) == []
+    assert state.streams["stream-test"].open_work_items == 1
     # Reaching zero closes exactly once and removes the record.
-    commands = _apply_live_delta(state, "batch-test", -1)
+    commands = _apply_stream_work_delta(state, "stream-test", -1)
     assert len(commands) == 1
-    assert isinstance(commands[0], CommandCloseBatch)
-    assert commands[0].batch_id == "batch-test"
-    assert commands[0].step_name == "fan_out"  # producer, not a collect
-    assert "batch-test" not in state.batches
+    assert isinstance(commands[0], CommandCloseCollectionStream)
+    assert commands[0].stream_id == "stream-test"
+    assert commands[0].source_step == "fan_out"
+    assert "stream-test" not in state.streams
 
 
-def test_full_two_collect_batch_drains_to_close() -> None:
+def test_full_two_collect_stream_drains_to_close() -> None:
     """Walk #1's accounting: 3 Tasks, each work emits Done to two collects.
 
     Seed L(B) = sum of accepting-step counts per member. Each work resolves
     (-1 + 2 successors); each of the 6 collect deliveries resolves (-1). The
-    batch closes precisely on the last delivery, never earlier.
+    stream closes precisely on the last delivery, never earlier.
     """
     state = _state()
     members = [Task(n=i) for i in range(3)]
     seed = sum(_count_accepting_steps(state, type(m)) for m in members)
-    _open_batch(state, live=seed)
+    _open_stream(state, open_work_items=seed)
     assert seed == 3
 
     # Three 1:1 work resolutions: -1 (death) + 2 (Done accepted by two collects).
     for _ in range(3):
         assert (
-            _apply_live_delta(
-                state, "batch-test", _count_accepting_steps(state, Done) - 1
+            _apply_stream_work_delta(
+                state, "stream-test", _count_accepting_steps(state, Done) - 1
             )
             == []
         )
-    assert state.batches["batch-test"].live == 6
+    assert state.streams["stream-test"].open_work_items == 6
 
     # Six collect deliveries (3 Done x 2 collects), each -1. Only the last closes.
     closed: list[WorkflowCommand] = []
     for _ in range(6):
-        closed.extend(_apply_live_delta(state, "batch-test", -1))
+        closed.extend(_apply_stream_work_delta(state, "stream-test", -1))
     assert len(closed) == 1
-    assert isinstance(closed[0], CommandCloseBatch)
-    assert "batch-test" not in state.batches
+    assert isinstance(closed[0], CommandCloseCollectionStream)
+    assert "stream-test" not in state.streams
 
 
-def test_apply_delta_is_noop_for_missing_or_none_batch() -> None:
+def test_apply_delta_is_noop_for_missing_or_none_stream() -> None:
     state = _state()
-    assert _apply_live_delta(state, None, -1) == []
-    assert _apply_live_delta(state, "nonexistent", -1) == []
-    assert _close_batch(state, "nonexistent") == []
+    assert _apply_stream_work_delta(state, None, -1) == []
+    assert _apply_stream_work_delta(state, "nonexistent", -1) == []
+    assert _close_collection_stream(state, "nonexistent") == []
