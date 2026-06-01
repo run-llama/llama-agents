@@ -129,6 +129,12 @@ class DBOSWorkflowStore(AbstractWorkflowStore):
             self._inner = self._factory()
         return self._inner
 
+    async def start(self) -> None:
+        inner = self._resolve()
+        start = getattr(inner, "start", None)
+        if start is not None:
+            await start()
+
     @property
     def poll_interval(self) -> float:  # type: ignore[override]
         return self._resolve().poll_interval
@@ -579,7 +585,10 @@ class DBOSRuntime(Runtime):
             with SetWorkflowID(run_id):
                 # Write initial state to DB before starting workflow (non-blocking to caller)
                 if serialized_state:
-                    store = self.create_workflow_store().create_state_store(
+                    workflow_store = self.create_workflow_store()
+                    if isinstance(workflow_store, DBOSWorkflowStore):
+                        await workflow_store.start()
+                    store = workflow_store.create_state_store(
                         run_id,
                         infer_state_type(workflow),
                         serialized_state,
