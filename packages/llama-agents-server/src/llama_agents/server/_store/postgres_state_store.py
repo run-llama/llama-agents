@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -44,10 +45,13 @@ class _PostgresStateStorage:
         pool: asyncpg.Pool,
         run_id: str,
         schema: str | None = None,
+        pending_seed: tuple[dict[str, Any], BaseSerializer] | None = None,
     ) -> None:
         self._pool = pool
         self._run_id = run_id
         self._schema = schema
+        self._pending_seed = pending_seed
+        self._seed_lock = asyncio.Lock()
 
     @property
     def run_id(self) -> str:
@@ -58,6 +62,23 @@ class _PostgresStateStorage:
         if self._schema:
             return f"{self._schema}.workflow_state"
         return "workflow_state"
+
+    async def ensure_seeded(self) -> None:
+        if self._pending_seed is None:
+            return
+        async with self._seed_lock:
+            if self._pending_seed is None:
+                return
+            serialized_state, serializer = self._pending_seed
+            self._pending_seed = None
+            store_type = serialized_state.get("store_type")
+            if store_type == "postgres":
+                source_run_id = serialized_state.get("run_id")
+                if source_run_id and source_run_id != self._run_id:
+                    await self._copy_state_from_run(source_run_id)
+                return
+            state = decode_seed_state(serialized_state, serializer)
+            await self._save_record(string_record_from_state(state, serializer))
 
     async def _copy_state_from_run(self, source_run_id: str) -> None:
         """Copy state from another run_id using SQL INSERT...SELECT."""
@@ -85,6 +106,13 @@ class _PostgresStateStorage:
         conn: asyncpg.Connection | None = None,
     ) -> StateRecord | None:
         """Load raw state from database."""
+        await self.ensure_seeded()
+        return await self._load_without_seed(conn)
+
+    async def _load_without_seed(
+        self,
+        conn: asyncpg.Connection | None = None,
+    ) -> StateRecord | None:
         should_release = conn is None
         if conn is None:
             conn = await self._pool.acquire()  # type: ignore[assignment]
@@ -105,6 +133,7 @@ class _PostgresStateStorage:
                 await self._pool.release(conn)  # type: ignore[arg-type]
 
     async def save(self, record: StateRecord) -> None:
+        await self.ensure_seeded()
         await self._save_record(record)
 
     async def _save_record(
@@ -155,10 +184,12 @@ class PostgresStateStore(StateStoreFacade[MODEL_T], Generic[MODEL_T]):
         state_type: type[MODEL_T] | None = None,
         serializer: BaseSerializer | None = None,
         schema: str | None = None,
+        pending_seed: tuple[dict[str, Any], BaseSerializer] | None = None,
     ) -> None:
         self._pool = pool
-        self._postgres_storage = _PostgresStateStorage(pool, run_id, schema)
-        self._pending_seed: tuple[dict[str, Any], BaseSerializer] | None = None
+        self._postgres_storage = _PostgresStateStorage(
+            pool, run_id, schema, pending_seed
+        )
         super().__init__(
             self._postgres_storage,
             state_type or DictState,  # type: ignore[arg-type]
@@ -170,32 +201,8 @@ class PostgresStateStore(StateStoreFacade[MODEL_T], Generic[MODEL_T]):
     def run_id(self) -> str:
         return self._postgres_storage.run_id
 
-    async def _flush_pending_seed(self) -> None:
-        """Flush pending seed data to the database if present."""
-        if self._pending_seed is None:
-            return
-        serialized_state, serializer = self._pending_seed
-        self._pending_seed = None
-        self._serializer = serializer
-        store_type = serialized_state.get("store_type")
-        if store_type == "postgres":
-            source_run_id = serialized_state.get("run_id")
-            if source_run_id and source_run_id != self.run_id:
-                await self._postgres_storage._copy_state_from_run(source_run_id)
-            return
-        await self._write_in_memory_state(serialized_state)
-
-    async def _write_in_memory_state(self, serialized_state: dict[str, Any]) -> None:
-        state = decode_seed_state(serialized_state, self._serializer)
-        await self._postgres_storage.save(
-            string_record_from_state(state, self._serializer)
-        )
-
-    async def _load_state_or_none(self) -> MODEL_T | None:
-        await self._flush_pending_seed()
-        return await super()._load_state_or_none()
-
     async def _save_state(self, state: BaseModel) -> None:
+        await self.ensure_seeded()
         await self._postgres_storage.save(
             string_record_from_state(state, self._serializer)
         )
@@ -231,16 +238,25 @@ class PostgresStateStore(StateStoreFacade[MODEL_T], Generic[MODEL_T]):
                 state_type=state_type,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
                 serializer=serializer,
                 schema=schema,
+                pending_seed=(
+                    (serialized_state, serializer)
+                    if parsed.run_id != effective_run_id
+                    else None
+                ),
+            )
+
+        if store_type not in (None, "in_memory"):
+            raise ValueError(
+                f"Cannot restore store_type '{store_type}' with PostgresStateStore.from_dict()"
             )
 
         # InMemory format — migrate on first DB access
         effective_run_id = run_id or str(uuid.uuid4())
-        store = cls(
+        return cls(
             pool=pool,
             run_id=effective_run_id,
             state_type=state_type,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
             serializer=serializer,
             schema=schema,
+            pending_seed=(serialized_state, serializer),
         )
-        store._pending_seed = (serialized_state, serializer)
-        return store

@@ -14,6 +14,7 @@ from llama_agents.server._store.postgres_state_store import (
 from pydantic import BaseModel
 from workflows.context.serializers import JsonSerializer
 from workflows.context.state_store import DictState, InMemoryStateStore
+from workflows.context.state_store_integration import state_store_handoff
 
 SCHEMA = "test_pg_state"
 
@@ -235,6 +236,60 @@ async def test_from_dict_postgres_format(pool: asyncpg.Pool) -> None:
 
 
 @pytest.mark.docker
+async def test_from_dict_postgres_format_with_new_run_copies_state(
+    pool: asyncpg.Pool,
+) -> None:
+    store1: PostgresStateStore[DictState] = PostgresStateStore(
+        pool=pool, run_id="run-fromdict-source", schema=SCHEMA
+    )
+    await store1.set("saved", True)
+
+    serializer = JsonSerializer()
+    payload = store1.to_dict(serializer)
+
+    store2 = PostgresStateStore.from_dict(
+        payload,
+        serializer,
+        pool=pool,
+        state_type=DictState,
+        run_id="run-fromdict-target",
+        schema=SCHEMA,
+    )
+    value = await store2.get("saved")
+    assert value is True
+
+
+@pytest.mark.docker
+async def test_handoff_materializes_new_run_copy(pool: asyncpg.Pool) -> None:
+    store1: PostgresStateStore[DictState] = PostgresStateStore(
+        pool=pool, run_id="run-handoff-source", schema=SCHEMA
+    )
+    await store1.set("saved", True)
+
+    serializer = JsonSerializer()
+    store2 = PostgresStateStore.from_dict(
+        store1.to_dict(serializer),
+        serializer,
+        pool=pool,
+        state_type=DictState,
+        run_id="run-handoff-target",
+        schema=SCHEMA,
+    )
+
+    payload = await state_store_handoff(store2, serializer)
+
+    assert payload["store_type"] == "postgres"
+    assert payload["run_id"] == "run-handoff-target"
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"SELECT state_json FROM {SCHEMA}.workflow_state WHERE run_id = $1",
+            "run-handoff-target",
+        )
+    assert row is not None
+    assert '"saved": "true"' in row["state_json"]
+
+
+@pytest.mark.docker
 async def test_from_dict_in_memory_format_migrates(pool: asyncpg.Pool) -> None:
     serializer = JsonSerializer()
     in_memory_store = InMemoryStateStore(DictState(migrated_key="migrated_value"))
@@ -250,6 +305,17 @@ async def test_from_dict_in_memory_format_migrates(pool: asyncpg.Pool) -> None:
     )
     value = await store.get("migrated_key")
     assert value == "migrated_value"
+
+
+@pytest.mark.docker
+async def test_from_dict_rejects_wrong_provider_handle(pool: asyncpg.Pool) -> None:
+    with pytest.raises(ValueError, match="Cannot restore store_type 'agent_data'"):
+        PostgresStateStore.from_dict(
+            {"store_type": "agent_data", "run_id": "run-1"},
+            JsonSerializer(),
+            pool=pool,
+            schema=SCHEMA,
+        )
 
 
 async def test_from_dict_empty_raises() -> None:

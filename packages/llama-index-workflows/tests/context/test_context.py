@@ -30,7 +30,7 @@ from workflows.context.state_store import (
     encode_state,
 )
 from workflows.decorators import step
-from workflows.errors import ContextStateError, WorkflowRuntimeError
+from workflows.errors import ContextSerdeError, ContextStateError, WorkflowRuntimeError
 from workflows.events import (
     Event,
     HumanResponseEvent,
@@ -1141,3 +1141,29 @@ def test_in_memory_state_store_from_dict_rejects_sql_format() -> None:
 
     with pytest.raises(ValueError, match="Cannot parse store_type 'sql'"):
         InMemoryStateStore.from_dict(sql_format, serializer)
+
+
+def test_pre_run_store_access_rejects_durable_state_handle(workflow: Workflow) -> None:
+    ctx = Context.from_dict(
+        workflow,
+        {"version": 1, "state": {"store_type": "sqlite", "run_id": "run-1"}},
+    )
+
+    with pytest.raises(ContextSerdeError, match="durable state store 'sqlite'"):
+        _ = ctx.store
+
+
+def test_basic_runtime_rejects_durable_state_handle(workflow: Workflow) -> None:
+    runtime = BasicRuntime()
+
+    with pytest.raises(
+        WorkflowRuntimeError,
+        match="BasicRuntime cannot restore durable state store 'postgres'",
+    ):
+        runtime.run_workflow(
+            "run-durable",
+            workflow,
+            BrokerState.from_workflow(workflow),
+            serialized_state={"store_type": "postgres", "run_id": "run-1"},
+            serializer=JsonSerializer(),
+        )

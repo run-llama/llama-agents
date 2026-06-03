@@ -120,8 +120,9 @@ class AbstractWorkflowStore(ABC):
     ) -> StateStore[Any]:
         """Create a persistent state store for the given run.
 
-        If *serialized_state* and *serializer* are provided, the store is
-        seeded from the serialized data during construction.
+        If *serialized_state* and *serializer* are provided, the returned store
+        restores from the serialized data. Implementations may materialize that
+        seed lazily on first async state access or handoff.
         """
 
     @abstractmethod

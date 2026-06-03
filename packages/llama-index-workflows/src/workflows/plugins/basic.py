@@ -21,6 +21,7 @@ from workflows.context.state_store import (
     InMemoryStateStore,
     StateStore,
     infer_state_type,
+    is_durable_serialized_state,
 )
 from workflows.errors import WorkflowRuntimeError
 from workflows.events import Event, StartEvent, StopEvent
@@ -278,6 +279,12 @@ class BasicRuntime(Runtime):
         # Create state store from serialized state or infer type from workflow
         active_serializer = serializer or JsonSerializer()
         if serialized_state:
+            if is_durable_serialized_state(serialized_state):
+                store_type = serialized_state.get("store_type")
+                raise WorkflowRuntimeError(
+                    f"BasicRuntime cannot restore durable state store '{store_type}'. "
+                    "Use the matching durable runtime or pass an in-memory context snapshot."
+                )
             state_store = InMemoryStateStore.from_dict(
                 serialized_state, active_serializer
             )

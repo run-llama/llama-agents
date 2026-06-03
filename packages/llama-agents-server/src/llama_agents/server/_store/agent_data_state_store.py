@@ -4,7 +4,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import uuid
 from typing import Any, Generic, Literal
 
 from pydantic import BaseModel
@@ -57,10 +59,13 @@ class _AgentDataStateStorage:
         client: AgentDataClient,
         run_id: str,
         collection: str = "workflow_state",
+        pending_seed: tuple[dict[str, Any], BaseSerializer] | None = None,
     ) -> None:
         self._client = client
         self._run_id = run_id
         self._collection = collection
+        self._pending_seed = pending_seed
+        self._seed_lock = asyncio.Lock()
         self._item_id: str | None = None
         self._cached_record: StateRecord | None = None
 
@@ -71,6 +76,36 @@ class _AgentDataStateStorage:
     # ------------------------------------------------------------------
     # Load / save through API
     # ------------------------------------------------------------------
+
+    async def ensure_seeded(self) -> None:
+        if self._pending_seed is None:
+            return
+        async with self._seed_lock:
+            if self._pending_seed is None:
+                return
+            serialized_state, serializer = self._pending_seed
+            self._pending_seed = None
+            store_type = serialized_state.get("store_type")
+
+            if store_type == "agent_data":
+                parsed = AgentDataSerializedState.model_validate(serialized_state)
+                if (
+                    parsed.collection == self._collection
+                    and parsed.run_id == self._run_id
+                ):
+                    return
+                source = _AgentDataStateStorage(
+                    client=self._client,
+                    run_id=parsed.run_id,
+                    collection=parsed.collection,
+                )
+                record = await source._load_without_seed()
+                if record is not None:
+                    await self._save_without_seed(record)
+                return
+
+            state = decode_seed_state(serialized_state, serializer)
+            await self._save_without_seed(string_record_from_state(state, serializer))
 
     async def _load_record(self) -> _AgentDataStateRecord | None:
         items = await self._client.search(
@@ -84,6 +119,10 @@ class _AgentDataStateStorage:
         return _AgentDataStateRecord.model_validate(items[0]["data"])
 
     async def load(self) -> StateRecord | None:
+        await self.ensure_seeded()
+        return await self._load_without_seed()
+
+    async def _load_without_seed(self) -> StateRecord | None:
         if self._cached_record is not None:
             return self._cached_record.model_copy(deep=True)
         record = await self._load_record()
@@ -97,6 +136,10 @@ class _AgentDataStateStorage:
         return self._cached_record.model_copy(deep=True)
 
     async def save(self, record: StateRecord) -> None:
+        await self.ensure_seeded()
+        await self._save_without_seed(record)
+
+    async def _save_without_seed(self, record: StateRecord) -> None:
         data = record.data if isinstance(record.data, str) else str(record.data)
         stored = _AgentDataStateRecord(
             run_id=self._run_id,
@@ -144,13 +187,14 @@ class AgentDataStateStore(StateStoreFacade[MODEL_T], Generic[MODEL_T]):
         state_type: type[MODEL_T] | None = None,
         collection: str = "workflow_state",
         serializer: BaseSerializer | None = None,
+        pending_seed: tuple[dict[str, Any], BaseSerializer] | None = None,
     ) -> None:
         self._agent_data_storage = _AgentDataStateStorage(
             client=client,
             run_id=run_id,
             collection=collection,
+            pending_seed=pending_seed,
         )
-        self._pending_seed: tuple[dict[str, Any], BaseSerializer] | None = None
         super().__init__(
             self._agent_data_storage,
             state_type or DictState,  # type: ignore[arg-type]
@@ -162,40 +206,8 @@ class AgentDataStateStore(StateStoreFacade[MODEL_T], Generic[MODEL_T]):
     def run_id(self) -> str:
         return self._agent_data_storage.run_id
 
-    async def _flush_pending_seed(self) -> None:
-        if self._pending_seed is None:
-            return
-
-        serialized_state, serializer = self._pending_seed
-        self._pending_seed = None
-        self._serializer = serializer
-        store_type = serialized_state.get("store_type")
-
-        if store_type == "agent_data":
-            parsed = AgentDataSerializedState.model_validate(serialized_state)
-            if (
-                parsed.collection == self._agent_data_storage._collection
-                and parsed.run_id == self.run_id
-            ):
-                return
-            source = _AgentDataStateStorage(
-                client=self._agent_data_storage._client,
-                run_id=parsed.run_id,
-                collection=parsed.collection,
-            )
-            record = await source.load()
-            if record is not None:
-                await self._agent_data_storage.save(record)
-            return
-
-        state = decode_seed_state(serialized_state, serializer)
-        await self._save_state(state)
-
-    async def _load_state_or_none(self) -> MODEL_T | None:
-        await self._flush_pending_seed()
-        return await super()._load_state_or_none()
-
     async def _save_state(self, state: BaseModel) -> None:
+        await self.ensure_seeded()
         await self._agent_data_storage.save(
             string_record_from_state(state, self._serializer)
         )
@@ -209,15 +221,43 @@ class AgentDataStateStore(StateStoreFacade[MODEL_T], Generic[MODEL_T]):
         client: AgentDataClient,
         state_type: type[BaseModel] | None = None,
         run_id: str | None = None,
+        collection: str | None = None,
     ) -> AgentDataStateStore[Any]:
         if not serialized_state:
             raise ValueError("Cannot restore AgentDataStateStore from empty dict")
-        parsed = AgentDataSerializedState.model_validate(serialized_state)
-        effective_run_id = run_id or parsed.run_id
+        store_type = serialized_state.get("store_type")
+
+        if store_type == "agent_data":
+            parsed = AgentDataSerializedState.model_validate(serialized_state)
+            effective_run_id = run_id or parsed.run_id
+            effective_collection = collection or parsed.collection
+            return cls(
+                client=client,
+                run_id=effective_run_id,
+                state_type=state_type,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+                collection=effective_collection,
+                serializer=serializer,
+                pending_seed=(
+                    (serialized_state, serializer)
+                    if (
+                        parsed.run_id != effective_run_id
+                        or parsed.collection != effective_collection
+                    )
+                    else None
+                ),
+            )
+
+        if store_type not in (None, "in_memory"):
+            raise ValueError(
+                f"Cannot restore store_type '{store_type}' with AgentDataStateStore.from_dict()"
+            )
+
+        effective_run_id = run_id or str(uuid.uuid4())
         return cls(
             client=client,
             run_id=effective_run_id,
             state_type=state_type,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
-            collection=parsed.collection,
+            collection=collection or "workflow_state",
             serializer=serializer,
+            pending_seed=(serialized_state, serializer),
         )

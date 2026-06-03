@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from typing import Any, AsyncGenerator, cast
 
 import pytest
 from llama_agents.server import (
@@ -20,6 +22,38 @@ from server_test_fixtures import (  # type: ignore[import]
     wait_for_requested_external_event,
 )
 from workflows import Workflow
+from workflows.context.serializers import BaseSerializer
+from workflows.context.state_store import DictState, InMemoryStateStore
+
+
+class ToDictOnlyStateStore:
+    state_type = DictState
+
+    def __init__(self) -> None:
+        self._inner = InMemoryStateStore(DictState(count=7))
+
+    async def get_state(self) -> DictState:
+        return await self._inner.get_state()
+
+    async def set_state(self, state: DictState) -> None:
+        await self._inner.set_state(state)
+
+    async def get(self, path: str, default: Any = ...) -> Any:
+        return await self._inner.get(path, default)
+
+    async def set(self, path: str, value: Any) -> None:
+        await self._inner.set(path, value)
+
+    async def clear(self) -> None:
+        await self._inner.clear()
+
+    @asynccontextmanager
+    async def edit_state(self) -> AsyncGenerator[DictState, None]:
+        async with self._inner.edit_state() as state:
+            yield state
+
+    def to_dict(self, serializer: BaseSerializer) -> dict[str, Any]:
+        return self._inner.to_dict(serializer)
 
 
 @pytest.mark.asyncio
@@ -275,3 +309,30 @@ async def test_cancel_terminal_handler_without_purge(
         )
         assert len(persisted) == 1
         assert persisted[0].status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_context_from_handler_id_falls_back_to_legacy_state_snapshot(
+    memory_store: MemoryWorkflowStore, simple_test_workflow: Workflow
+) -> None:
+    server = WorkflowServer(workflow_store=memory_store, idle_timeout=0.01)
+    server.add_workflow("simple", simple_test_workflow)
+    await memory_store.update(
+        PersistentHandler(
+            handler_id="completed-with-plugin-state",
+            workflow_name="simple",
+            status="completed",
+            run_id="plugin-run",
+            started_at=datetime.now(timezone.utc),
+        )
+    )
+    state_stores = cast(dict[str, Any], memory_store.state_stores)
+    state_stores["plugin-run"] = ToDictOnlyStateStore()
+
+    async with server.contextmanager():
+        ctx = await server._service._context_from_handler_id(
+            simple_test_workflow, "completed-with-plugin-state"
+        )
+
+    assert ctx is not None
+    assert await ctx.store.get("count") == 7

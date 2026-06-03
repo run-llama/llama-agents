@@ -23,7 +23,7 @@ from llama_agents.server._runtime.server_runtime import ServerRuntimeDecorator
 from llama_index_instrumentation.dispatcher import instrument_tags
 from workflows import Context
 from workflows.context.serializers import JsonSerializer
-from workflows.context.state_store_integration import StateStoreHandleProvider
+from workflows.context.state_store_integration import state_store_handoff
 from workflows.events import Event, StartEvent
 from workflows.handler import WorkflowHandler
 from workflows.utils import _nanoid as nanoid
@@ -277,9 +277,7 @@ class _WorkflowService:
 
         try:
             old_state_store = self._store.create_state_store(handler.run_id)
-            if not isinstance(old_state_store, StateStoreHandleProvider):
-                return None
-            state_dict = old_state_store.handle()
+            state_dict = await state_store_handoff(old_state_store, JsonSerializer())
             if not state_dict:
                 return None
             return Context.from_dict(

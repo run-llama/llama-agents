@@ -281,16 +281,22 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
             raise RuntimeError(
                 "PostgresWorkflowStore pool not initialized. Call start() first."
             )
-        store = PostgresStateStore(
+        if serialized_state is not None and serializer is not None:
+            return PostgresStateStore.from_dict(
+                serialized_state,
+                serializer,
+                pool=self._pool,
+                state_type=state_type,
+                run_id=run_id,
+                schema=self._schema,
+            )
+        return PostgresStateStore(
             pool=self._pool,
             run_id=run_id,
             state_type=state_type,
             serializer=serializer,
             schema=self._schema,
         )
-        if serialized_state is not None and serializer is not None:
-            store._pending_seed = (serialized_state, serializer)
-        return store
 
     # ── Migrations ──────────────────────────────────────────────────────
 

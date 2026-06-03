@@ -5,4 +5,4 @@
 "llama-agents-appserver": patch
 ---
 
-Clarify state-store serialization and decode persisted state from stored metadata.
+Clarify state-store serialization, typed state metadata, and integration handoff APIs.

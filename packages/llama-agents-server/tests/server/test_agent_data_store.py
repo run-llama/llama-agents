@@ -25,6 +25,7 @@ from pydantic import BaseModel
 from server_test_fixtures import wait_for_passing  # type: ignore[import]
 from workflows.context.serializers import JsonSerializer
 from workflows.context.state_store import DictState, InMemoryStateStore
+from workflows.context.state_store_integration import state_store_handoff
 from workflows.events import Event, StopEvent
 
 # ---------------------------------------------------------------------------
@@ -528,6 +529,24 @@ async def test_create_state_store_seeds_from_in_memory_serialized_state(
 
 
 @pytest.mark.asyncio
+async def test_create_state_store_cached_run_applies_serialized_restore(
+    store: AgentDataStore,
+) -> None:
+    serializer = JsonSerializer()
+    seed = InMemoryStateStore(DictState(token="restored"))
+    cached = store.create_state_store("run-cached-restore")
+    await cached.set("token", "cached")
+
+    restored = store.create_state_store(
+        "run-cached-restore",
+        serialized_state=seed.to_dict(serializer),
+        serializer=serializer,
+    )
+
+    assert await restored.get("token") == "restored"
+
+
+@pytest.mark.asyncio
 async def test_create_state_store_reconnects_agent_data_handle_collection(
     backend: FakeAgentDataBackend,
     monkeypatch: pytest.MonkeyPatch,
@@ -550,6 +569,60 @@ async def test_create_state_store_reconnects_agent_data_handle_collection(
     )
 
     assert await restored_state.get("token") == "persisted"
+
+
+@pytest.mark.asyncio
+async def test_agent_data_handoff_materializes_new_run_copy(
+    store: AgentDataStore,
+) -> None:
+    serializer = JsonSerializer()
+    source = store.create_state_store("run-handoff-source")
+    await source.set("token", "persisted")
+    target = AgentDataStateStore.from_dict(
+        source.to_dict(serializer),
+        serializer,
+        client=store._client,
+        run_id="run-handoff-target",
+    )
+
+    target_handle = await state_store_handoff(target, serializer)
+    reconnected = AgentDataStateStore.from_dict(
+        target_handle,
+        serializer,
+        client=store._client,
+        run_id="run-handoff-target",
+    )
+
+    assert await reconnected.get("token") == "persisted"
+
+
+@pytest.mark.asyncio
+async def test_agent_data_from_dict_accepts_in_memory_snapshot(
+    store: AgentDataStore,
+) -> None:
+    serializer = JsonSerializer()
+    seed = InMemoryStateStore(DictState(token="portable"))
+
+    restored = AgentDataStateStore.from_dict(
+        seed.to_dict(serializer),
+        serializer,
+        client=store._client,
+        run_id="run-in-memory-snapshot",
+        collection="handlers_state",
+    )
+
+    assert await restored.get("token") == "portable"
+
+
+def test_agent_data_from_dict_rejects_wrong_provider_handle(
+    store: AgentDataStore,
+) -> None:
+    with pytest.raises(ValueError, match="Cannot restore store_type 'postgres'"):
+        AgentDataStateStore.from_dict(
+            {"store_type": "postgres", "run_id": "run-1"},
+            JsonSerializer(),
+            client=store._client,
+        )
 
 
 @pytest.mark.asyncio
@@ -674,6 +747,25 @@ async def test_state_store_from_dict_preserves_collection(
     )
 
     # Should be able to read data written by the original store
+    val = await restored.get("key")
+    assert val == "hello"
+
+
+@pytest.mark.asyncio
+async def test_state_store_from_dict_with_new_run_copies_state(
+    store: AgentDataStore,
+) -> None:
+    state_store = store.create_state_store("run-source")
+    await state_store.set(path="key", value="hello")
+
+    serialized = state_store.to_dict(JsonSerializer())
+    restored = AgentDataStateStore.from_dict(
+        serialized,
+        JsonSerializer(),
+        client=store._client,
+        run_id="run-target",
+    )
+
     val = await restored.get("key")
     assert val == "hello"
 

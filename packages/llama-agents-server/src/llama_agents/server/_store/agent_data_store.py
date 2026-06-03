@@ -508,24 +508,23 @@ class AgentDataStore(AbstractWorkflowStore):
         serializer: BaseSerializer | None = None,
     ) -> StateStore[Any]:
         cached = self._state_stores.get(run_id)
-        if cached is not None:
+        if cached is not None and serialized_state is None:
             return cached
-        if (
-            serialized_state is not None
-            and serializer is not None
-            and serialized_state.get("store_type") == "agent_data"
-            and serialized_state.get("run_id") == run_id
-        ):
+        if serialized_state is not None and serializer is not None:
+            collection = (
+                None
+                if serialized_state.get("store_type") == "agent_data"
+                else f"{self._collection}_state"
+            )
             store = AgentDataStateStore.from_dict(
                 serialized_state,
                 serializer,
                 client=self._client,
                 state_type=state_type,
                 run_id=run_id,
+                collection=collection,
             )
         else:
             store = self._create_agent_data_state_store(run_id, state_type, serializer)
-            if serialized_state is not None and serializer is not None:
-                store._pending_seed = (serialized_state, serializer)
         self._state_stores[run_id] = store
         return store

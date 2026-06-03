@@ -57,7 +57,16 @@ class SqliteWorkflowStore(AbstractWorkflowStore):
         lock calls.  Safe when the database is only accessed by a single
         process (e.g. AgentCore session storage).
         """
-        return sqlite3.connect(f"file:{db_path}?vfs=unix-none", uri=True)
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?vfs=unix-none", uri=True)
+            conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+            return conn
+        except sqlite3.OperationalError:
+            if conn is not None:
+                with contextlib.suppress(Exception):
+                    conn.close()
+            return sqlite3.connect(db_path, timeout=30.0)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:

@@ -8,7 +8,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from llama_agents.server import SqliteWorkflowStore
+from llama_agents.server import HandlerQuery, SqliteWorkflowStore
 from llama_agents.server._store.sqlite.migrate import run_migrations
 from llama_agents.server._store.sqlite.sqlite_state_store import (
     SqliteStateStore,
@@ -311,6 +311,29 @@ async def test_from_dict_sqlite_format(db_path: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_from_dict_sqlite_format_with_new_run_copies_state(
+    db_path: str,
+) -> None:
+    store1: SqliteStateStore[DictState] = SqliteStateStore(
+        db_path=db_path, run_id="run-fromdict-source"
+    )
+    await store1.set("saved", True)
+
+    serializer = JsonSerializer()
+    payload = store1.to_dict(serializer)
+
+    store2 = SqliteStateStore.from_dict(
+        payload,
+        serializer,
+        db_path=db_path,
+        state_type=DictState,
+        run_id="run-fromdict-target",
+    )
+    value = await store2.get("saved")
+    assert value is True
+
+
+@pytest.mark.asyncio
 async def test_from_dict_in_memory_format_migrates(db_path: str) -> None:
     """from_dict with InMemorySerializedState format stores data on first DB access."""
     serializer = JsonSerializer()
@@ -351,3 +374,36 @@ async def test_migration_applies_on_existing_db(tmp_path: Path) -> None:
     await store.set("coexist", True)
     value = await store.get("coexist")
     assert value is True
+
+
+@pytest.mark.asyncio
+async def test_sqlite_workflow_store_single_connection_keeps_state_connection_open(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "single-connection.db")
+    workflow_store = SqliteWorkflowStore(db_path, single_connection=True)
+    state_store = workflow_store.create_state_store("run-single")
+
+    await state_store.set("x", 1)
+    assert await state_store.get("x") == 1
+
+    await workflow_store.query(HandlerQuery())
+
+
+@pytest.mark.asyncio
+async def test_sqlite_workflow_store_single_connection_opens_existing_regular_db(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "existing-regular.db")
+    conn = sqlite3.connect(db_path)
+    try:
+        run_migrations(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    workflow_store = SqliteWorkflowStore(db_path, single_connection=True)
+    state_store = workflow_store.create_state_store("run-existing-single")
+
+    await state_store.set("x", 1)
+    assert await state_store.get("x") == 1

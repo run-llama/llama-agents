@@ -82,6 +82,22 @@ class _StateStorage(Protocol):
         ...
 
 
+@runtime_checkable
+class _SeededStateStorage(Protocol):
+    """Internal storage lifecycle hook for lazy seed materialization."""
+
+    async def ensure_seeded(self) -> None:
+        """Materialize any deferred seed before observable storage operations."""
+        ...
+
+
+def is_durable_serialized_state(data: dict[str, Any] | None) -> bool:
+    """Return whether a serialized state payload is a durable provider handle."""
+    if not data:
+        return False
+    return data.get("store_type", "in_memory") != "in_memory"
+
+
 def _record_from_state(
     state: BaseModel,
     serializer: BaseSerializer,
@@ -532,7 +548,11 @@ class StateStore(Protocol[MODEL_T]):
         ...
 
     def to_dict(self, serializer: "BaseSerializer") -> dict[str, Any]:
-        """Serialize state for legacy persistence."""
+        """Serialize state for legacy persistence.
+
+        Runtime integrations should prefer
+        `workflows.context.state_store_integration.state_store_handoff`.
+        """
         ...
 
 
@@ -562,7 +582,13 @@ class _TypedStateStore(Generic[MODEL_T]):
     def _create_default_state(self) -> MODEL_T:
         return create_cleared_state(self.state_type)
 
+    async def ensure_seeded(self) -> None:
+        """Materialize any deferred storage seed."""
+        if isinstance(self._storage, _SeededStateStorage):
+            await self._storage.ensure_seeded()
+
     async def _load_state_or_none(self) -> MODEL_T | None:
+        await self.ensure_seeded()
         record = await self._storage.load()
         if record is None:
             return None
@@ -585,6 +611,7 @@ class _TypedStateStore(Generic[MODEL_T]):
         return state
 
     async def _save_state(self, state: BaseModel) -> None:
+        await self.ensure_seeded()
         await self._storage.save(_record_from_state(state, self._serializer))
 
     async def get_state(self) -> MODEL_T:

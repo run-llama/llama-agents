@@ -6,6 +6,8 @@ from __future__ import annotations
 import logging
 import sqlite3
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Generic, Literal
 
@@ -53,15 +55,20 @@ class _SqliteStateStorage:
     def run_id(self) -> str:
         return self._run_id
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         if self._shared_conn is not None:
-            return self._shared_conn
-        return sqlite3.connect(self._db_path, timeout=30.0)
+            yield self._shared_conn
+            return
+        conn = sqlite3.connect(self._db_path, timeout=30.0)
+        try:
+            yield conn
+        finally:
+            conn.close()
 
     def _copy_state_from_run(self, source_run_id: str) -> None:
         """Copy state from another run_id using SQL INSERT...SELECT."""
-        conn = self._connect()
-        try:
+        with self._connect() as conn:
             now = _utc_now().isoformat()
             conn.execute(
                 """
@@ -72,13 +79,10 @@ class _SqliteStateStorage:
                 (self._run_id, now, now, source_run_id),
             )
             conn.commit()
-        finally:
-            conn.close()
 
     async def load(self) -> StateRecord | None:
         """Load raw state from database."""
-        conn = self._connect()
-        try:
+        with self._connect() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT state_json, state_type, state_module FROM workflow_state WHERE run_id = ?",
@@ -88,8 +92,6 @@ class _SqliteStateStorage:
             if row is None:
                 return None
             return StateRecord(data=row[0], state_type=row[1], state_module=row[2])
-        finally:
-            conn.close()
 
     async def save(self, record: StateRecord) -> None:
         """Save raw state to database."""
@@ -98,9 +100,12 @@ class _SqliteStateStorage:
     def _save_record(
         self, record: StateRecord, conn: sqlite3.Connection | None = None
     ) -> None:
-        should_close = conn is None
+        should_commit = conn is None
         if conn is None:
-            conn = self._connect()
+            context = self._connect()
+            conn = context.__enter__()
+        else:
+            context = None
         try:
             now = _utc_now().isoformat()
             data = record.data if isinstance(record.data, str) else str(record.data)
@@ -123,11 +128,11 @@ class _SqliteStateStorage:
                     now,
                 ),
             )
-            if should_close:
+            if should_commit:
                 conn.commit()
         finally:
-            if should_close:
-                conn.close()
+            if context is not None:
+                context.__exit__(None, None, None)
 
     def to_handle(self) -> dict[str, Any]:
         payload = SqliteSerializedState(run_id=self._run_id)
@@ -207,12 +212,15 @@ class SqliteStateStore(StateStoreFacade[MODEL_T], Generic[MODEL_T]):
             effective_run_id = run_id or parsed.run_id
             if db_path is None:
                 raise ValueError("db_path is required for SqliteStateStore.from_dict()")
-            return cls(
+            store = cls(
                 db_path=db_path,
                 run_id=effective_run_id,
                 state_type=state_type,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
                 serializer=serializer,
             )
+            if parsed.run_id != effective_run_id:
+                store._seed_from_serialized(serialized_state, serializer)
+            return store
 
         # InMemory format — migrate data to DB immediately
         effective_run_id = run_id or str(uuid.uuid4())
