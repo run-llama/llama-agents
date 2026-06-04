@@ -1,5 +1,5 @@
 ---
-"llama-index-workflows": major
+"llama-index-workflows": minor
 ---
 
-Support subclass-aware workflow event routing and validation
+Support opt-in subclass event routing via the step decorator parameter `accept_event_subclasses`
