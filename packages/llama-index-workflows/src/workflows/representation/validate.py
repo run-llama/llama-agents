@@ -74,12 +74,16 @@ def build_step_graph(
         for ev in cfg.accepted_events:
             event_types.add(ev)
 
-    # Build event→step edges using subclass-aware matching.
+    # Build event→step edges using subclass-aware matching if opted in.
     # If a produced event is a subclass of an accepted event, add an edge.
     for ev_type in event_types:
         for name, cfg in steps.items():
             for accepted in cfg.accepted_events:
-                if issubclass(ev_type, accepted):
+                if cfg.accept_event_subclasses:
+                    match = issubclass(ev_type, accepted)
+                else:
+                    match = ev_type is accepted
+                if match:
                     outgoing.setdefault(ev_type, []).append(name)
 
     # Forward DFS from StartEvent + HumanResponseEvent subclasses +
@@ -476,27 +480,51 @@ def _validate_event_connectivity(
             "Use a different Event type instead."
         )
 
-    unconsumed_events = {
-        x
-        for x in consumed_events
-        if not issubclass(
-            x,
-            (InputRequiredEvent, HumanResponseEvent, StopEvent, StepFailedEvent),
-        )
-        and not any(issubclass(p, x) for p in produced_events)
-    }
+    unconsumed_events = set()
+    for name, cfg in steps.items():
+        for event_type in cfg.accepted_events:
+            if issubclass(
+                event_type,
+                (InputRequiredEvent, HumanResponseEvent, StopEvent, StepFailedEvent),
+            ):
+                continue
+
+            if cfg.accept_event_subclasses:
+                satisfied = any(issubclass(p, event_type) for p in produced_events)
+            else:
+                satisfied = event_type in produced_events
+
+            if not satisfied:
+                unconsumed_events.add(event_type)
+
     if unconsumed_events:
         names = ", ".join(ev.__name__ for ev in unconsumed_events)
         raise WorkflowValidationError(
             f"The following events are consumed but never produced: {names}"
         )
 
-    unused_events = {
-        x
-        for x in produced_events
-        if not issubclass(x, (InputRequiredEvent, HumanResponseEvent, StopEvent))
-        and not any(issubclass(x, c) for c in consumed_events)
-    }
+    unused_events = set()
+    for x in produced_events:
+        if issubclass(x, (InputRequiredEvent, HumanResponseEvent, StopEvent)):
+            continue
+
+        consumed = False
+        for name, cfg in steps.items():
+            for accepted in cfg.accepted_events:
+                if cfg.accept_event_subclasses:
+                    if issubclass(x, accepted):
+                        consumed = True
+                        break
+                else:
+                    if x is accepted:
+                        consumed = True
+                        break
+            if consumed:
+                break
+
+        if not consumed:
+            unused_events.add(x)
+
     if unused_events:
         names = ", ".join(ev.__name__ for ev in unused_events)
         raise WorkflowValidationError(

@@ -187,10 +187,15 @@ class Workflow(metaclass=WorkflowMeta):
 
         step_func = self._get_steps()[step]
         step_config = step_func._step_config
-        if not any(
-            isinstance(message, accepted_type)
-            for accepted_type in step_config.accepted_events
-        ):
+        if step_config.accept_event_subclasses:
+            is_accepted = any(
+                isinstance(message, accepted_type)
+                for accepted_type in step_config.accepted_events
+            )
+        else:
+            is_accepted = type(message) in step_config.accepted_events
+
+        if not is_accepted:
             raise WorkflowRuntimeError(
                 f"Step {step} does not accept event of type {type(message)}"
             )
