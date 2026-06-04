@@ -359,6 +359,66 @@ async def test_wait_for_event_in_workflow_serialization() -> None:
     assert total_waiters == 0
 
 
+class ApprovalRequiredEvent(InputRequiredEvent):
+    prefix: str
+
+
+class ApprovalResponseEvent(HumanResponseEvent):
+    response: str
+    waiter_id: str | None = None
+
+
+@pytest.mark.asyncio
+async def test_waiter_requirements_rehydrate_even_if_serialized_flag_is_false() -> None:
+    class ApprovalWorkflow(Workflow):
+        @step
+        async def review(self, ctx: Context, ev: StartEvent) -> StopEvent:
+            result = await ctx.wait_for_event(
+                ApprovalResponseEvent,
+                waiter_event=ApprovalRequiredEvent(prefix="approval"),
+                requirements={"waiter_id": "waiter_one"},
+            )
+            return StopEvent(result=result.response)
+
+    workflow = ApprovalWorkflow()
+    handler = workflow.run()
+    ctx_dict = None
+
+    async for ev in handler.stream_events():
+        if isinstance(ev, InputRequiredEvent):
+            ctx_dict = handler.ctx.to_dict()
+            await handler.cancel_run()
+            break
+
+    assert ctx_dict is not None
+    waiters = [
+        waiter
+        for worker in ctx_dict["workers"].values()
+        for waiter in worker["collected_waiters"]
+    ]
+    assert len(waiters) == 1
+    assert waiters[0]["has_requirements"] is True
+    assert not waiters[0]["waiter_id"].endswith("_{}")
+
+    # Simulate a stale or tampered context snapshot that clears the serialized
+    # rehydration flag. The original requirements are intentionally not stored
+    # in the snapshot, so restore falls back to the default waiter id's embedded
+    # requirements signal and reconstructs them by replaying the waiting step.
+    waiters[0]["has_requirements"] = False
+
+    new_handler = workflow.run(ctx=Context.from_dict(workflow, ctx_dict))
+    new_handler.ctx.send_event(ApprovalResponseEvent(response="unbound"))
+
+    task = asyncio.ensure_future(new_handler)
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(task), timeout=0.2)
+
+    new_handler.ctx.send_event(
+        ApprovalResponseEvent(response="bound", waiter_id="waiter_one")
+    )
+    assert await task == "bound"
+
+
 class Waiter1(Event):
     msg: str
 
