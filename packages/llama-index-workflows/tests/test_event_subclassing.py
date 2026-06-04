@@ -6,6 +6,11 @@ from __future__ import annotations
 import pytest
 from workflows.context import Context
 from workflows.decorators import step
+from workflows.errors import (
+    WorkflowRuntimeError,
+    WorkflowTimeoutError,
+    WorkflowValidationError,
+)
 from workflows.events import Event, StartEvent, StopEvent
 from workflows.representation.validate import build_step_graph
 from workflows.workflow import Workflow
@@ -21,50 +26,126 @@ class ChildEvent(ParentEvent):
     pass
 
 
-# ── Shared workflow: step_a emits ChildEvent, step_b expects ParentEvent ──
+# ── Test 1: Default step rejects subclass event (Strict validation & timeout) ─
 
 
-class SubclassRoutingWorkflow(Workflow):
-    @step
-    async def step_a(self, ev: StartEvent) -> ChildEvent:
-        return ChildEvent(value="subclass works")
+def test_default_step_validation_rejects_subclass_event() -> None:
+    """Without accept_event_subclasses=True, validation detects ParentEvent as unproduced."""
 
-    @step
-    async def step_b(self, ev: ParentEvent) -> StopEvent:
-        return StopEvent(result=ev.value)
+    class DefaultExactWorkflow(Workflow):
+        @step
+        async def step_a(self, ev: StartEvent) -> ChildEvent:
+            return ChildEvent(value="x")
+
+        @step
+        async def step_b(self, ev: ParentEvent) -> StopEvent:
+            return StopEvent(result=ev.value)
+
+    workflow = DefaultExactWorkflow(timeout=1)
+    with pytest.raises(WorkflowValidationError) as excinfo:
+        workflow._validate()
+    assert "consumed but never produced: ParentEvent" in str(excinfo.value)
 
 
 @pytest.mark.asyncio
-async def test_subclass_event_routes_to_step_accepting_parent_event() -> None:
-    """Validation should recognize ChildEvent satisfies ParentEvent consumption."""
-    workflow = SubclassRoutingWorkflow(timeout=1)
+async def test_default_step_runtime_ignores_subclass_event() -> None:
+    """Without accept_event_subclasses=True, runtime routing ignores ChildEvent and times out."""
+
+    class DefaultExactWorkflow(Workflow):
+        @step
+        async def step_a(self, ev: StartEvent) -> ChildEvent:
+            return ChildEvent(value="x")
+
+        @step
+        async def step_b(self, ev: ParentEvent) -> StopEvent:
+            return StopEvent(result=ev.value)
+
+    workflow = DefaultExactWorkflow(timeout=1, disable_validation=True)
+    with pytest.raises(WorkflowTimeoutError):
+        await workflow.run()
+
+
+# ── Test 2: Opt-in step accepts subclass event ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_opt_in_step_accepts_subclass_event() -> None:
+    """With accept_event_subclasses=True, workflow successfully routes ChildEvent."""
+
+    class OptInSubclassWorkflow(Workflow):
+        @step
+        async def step_a(self, ev: StartEvent) -> ChildEvent:
+            return ChildEvent(value="subclass works")
+
+        @step(accept_event_subclasses=True)
+        async def step_b(self, ev: ParentEvent) -> StopEvent:
+            return StopEvent(result=ev.value)
+
+    workflow = OptInSubclassWorkflow(timeout=2)
     result = await workflow.run()
     assert result == "subclass works"
 
 
-@pytest.mark.asyncio
-async def test_subclass_runtime_routing() -> None:
-    """Runtime should deliver ChildEvent to a step accepting ParentEvent."""
-    workflow = SubclassRoutingWorkflow(timeout=2, disable_validation=True)
-    result = await workflow.run()
-    assert result == "subclass works"
+# ── Test 3: Graph edges follow opt-in subclass matching ──────────────────────
 
 
-def test_subclass_targeted_step_validation_accepts_child() -> None:
-    """_validate_valid_step_message should accept ChildEvent for ParentEvent step."""
-    workflow = SubclassRoutingWorkflow(disable_validation=True)
-    workflow._validate_valid_step_message("step_b", ChildEvent(value="test"))
+def test_graph_edges_follow_opt_in_subclass_matching() -> None:
+    """build_step_graph only builds subclass edges for steps that opt-in."""
 
+    class MixedWorkflow(Workflow):
+        @step
+        async def step_a(self, ev: StartEvent) -> ChildEvent:
+            return ChildEvent(value="x")
 
-def test_subclass_graph_edges_connect_child_to_parent_step() -> None:
-    """build_step_graph should create edges from ChildEvent to steps accepting ParentEvent."""
-    workflow = SubclassRoutingWorkflow(disable_validation=True)
+        @step
+        async def step_b(self, ev: ParentEvent) -> StopEvent:
+            return StopEvent(result=ev.value)
+
+        @step(accept_event_subclasses=True)
+        async def step_c(self, ev: ParentEvent) -> StopEvent:
+            return StopEvent(result=ev.value)
+
+    workflow = MixedWorkflow(disable_validation=True)
     steps = {name: func._step_config for name, func in workflow._get_steps().items()}
     graph = build_step_graph(steps, StartEvent)
+
     child_event_targets = graph.outgoing.get(ChildEvent, [])
-    assert "step_b" in child_event_targets, (
-        f"ChildEvent should connect to step_b, got: {child_event_targets}"
-    )
+    # Should connect to step_c (opt-in) but NOT to step_b (default)
+    assert "step_c" in child_event_targets
+    assert "step_b" not in child_event_targets
+
+
+# ── Test 4: Targeted step validation respects opt-in subclass matching ────────
+
+
+def test_targeted_step_validation_respects_opt_in_subclass_matching() -> None:
+    """_validate_valid_step_message rejects subclass event by default, accepts on opt-in."""
+
+    class MixedWorkflow(Workflow):
+        @step
+        async def step_a(self, ev: StartEvent) -> ChildEvent:
+            return ChildEvent(value="x")
+
+        @step
+        async def step_b(self, ev: ParentEvent) -> StopEvent:
+            return StopEvent(result=ev.value)
+
+        @step(accept_event_subclasses=True)
+        async def step_c(self, ev: ParentEvent) -> StopEvent:
+            return StopEvent(result=ev.value)
+
+    workflow = MixedWorkflow(disable_validation=True)
+
+    # Default step_b rejects ChildEvent
+    with pytest.raises(WorkflowRuntimeError) as excinfo:
+        workflow._validate_valid_step_message("step_b", ChildEvent(value="x"))
+    assert "does not accept event of type" in str(excinfo.value)
+
+    # Opt-in step_c accepts ChildEvent without error
+    workflow._validate_valid_step_message("step_c", ChildEvent(value="x"))
+
+
+# ── Test 5: Exact-type event routing still works (Regression Guard) ──────────
 
 
 @pytest.mark.asyncio
@@ -85,18 +166,38 @@ async def test_exact_type_event_routing_still_works() -> None:
     assert result == "exact match"
 
 
-@pytest.mark.asyncio
-async def test_subclass_waiter_accepts_child_event_for_parent_wait() -> None:
-    """A waiter waiting for a ParentEvent should be resolved by a ChildEvent."""
+# ── Test 6: Waiter respects opt-in subclass matching ──────────────────────────
 
-    class WaiterWorkflow(Workflow):
+
+@pytest.mark.asyncio
+async def test_waiter_respects_opt_in_subclass_matching_default_ignores() -> None:
+    """A waiter created inside a default step ignores subclass event and times out."""
+
+    class WaiterDefaultWorkflow(Workflow):
         @step
         async def step_a(self, ev: StartEvent, ctx: Context) -> StopEvent:
             waiter = ctx.wait_for_event(ParentEvent)
-            ctx.send_event(ChildEvent(value="waiter works"))
+            ctx.send_event(ChildEvent(value="waiter default"))
             result = await waiter
             return StopEvent(result=result.value)
 
-    workflow = WaiterWorkflow(timeout=2, disable_validation=True)
+    workflow = WaiterDefaultWorkflow(timeout=1, disable_validation=True)
+    with pytest.raises(WorkflowTimeoutError):
+        await workflow.run()
+
+
+@pytest.mark.asyncio
+async def test_waiter_respects_opt_in_subclass_matching_opt_in_resolves() -> None:
+    """A waiter created inside an opted-in step resolves with subclass event."""
+
+    class WaiterOptInWorkflow(Workflow):
+        @step(accept_event_subclasses=True)
+        async def step_a(self, ev: StartEvent, ctx: Context) -> StopEvent:
+            waiter = ctx.wait_for_event(ParentEvent)
+            ctx.send_event(ChildEvent(value="waiter opt-in"))
+            result = await waiter
+            return StopEvent(result=result.value)
+
+    workflow = WaiterOptInWorkflow(timeout=2, disable_validation=True)
     result = await workflow.run()
-    assert result == "waiter works"
+    assert result == "waiter opt-in"
