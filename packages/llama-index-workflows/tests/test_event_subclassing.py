@@ -15,6 +15,7 @@ from workflows.events import Event, StartEvent, StopEvent
 from workflows.representation.validate import build_step_graph
 from workflows.workflow import Workflow
 
+
 # ── Shared event hierarchy ──────────────────────────────────────────────────
 
 
@@ -26,21 +27,48 @@ class ChildEvent(ParentEvent):
     pass
 
 
+# ── Shared workflows for testing subclass-aware routing ───────────────────────
+
+
+class DefaultExactWorkflow(Workflow):
+    @step
+    async def step_a(self, ev: StartEvent) -> ChildEvent:
+        return ChildEvent(value="x")
+
+    @step
+    async def step_b(self, ev: ParentEvent) -> StopEvent:
+        return StopEvent(result=ev.value)
+
+
+class OptInSubclassWorkflow(Workflow):
+    @step
+    async def step_a(self, ev: StartEvent) -> ChildEvent:
+        return ChildEvent(value="subclass works")
+
+    @step(accept_event_subclasses=True)
+    async def step_b(self, ev: ParentEvent) -> StopEvent:
+        return StopEvent(result=ev.value)
+
+
+class MixedWorkflow(Workflow):
+    @step
+    async def step_a(self, ev: StartEvent) -> ChildEvent:
+        return ChildEvent(value="x")
+
+    @step
+    async def step_b(self, ev: ParentEvent) -> StopEvent:
+        return StopEvent(result=ev.value)
+
+    @step(accept_event_subclasses=True)
+    async def step_c(self, ev: ParentEvent) -> StopEvent:
+        return StopEvent(result=ev.value)
+
+
 # ── Test 1: Default step rejects subclass event (Strict validation & timeout) ─
 
 
 def test_default_step_validation_rejects_subclass_event() -> None:
     """Without accept_event_subclasses=True, validation detects ParentEvent as unproduced."""
-
-    class DefaultExactWorkflow(Workflow):
-        @step
-        async def step_a(self, ev: StartEvent) -> ChildEvent:
-            return ChildEvent(value="x")
-
-        @step
-        async def step_b(self, ev: ParentEvent) -> StopEvent:
-            return StopEvent(result=ev.value)
-
     workflow = DefaultExactWorkflow(timeout=1)
     with pytest.raises(WorkflowValidationError) as excinfo:
         workflow._validate()
@@ -50,16 +78,6 @@ def test_default_step_validation_rejects_subclass_event() -> None:
 @pytest.mark.asyncio
 async def test_default_step_runtime_ignores_subclass_event() -> None:
     """Without accept_event_subclasses=True, runtime routing ignores ChildEvent and times out."""
-
-    class DefaultExactWorkflow(Workflow):
-        @step
-        async def step_a(self, ev: StartEvent) -> ChildEvent:
-            return ChildEvent(value="x")
-
-        @step
-        async def step_b(self, ev: ParentEvent) -> StopEvent:
-            return StopEvent(result=ev.value)
-
     workflow = DefaultExactWorkflow(timeout=1, disable_validation=True)
     with pytest.raises(WorkflowTimeoutError):
         await workflow.run()
@@ -71,16 +89,6 @@ async def test_default_step_runtime_ignores_subclass_event() -> None:
 @pytest.mark.asyncio
 async def test_opt_in_step_accepts_subclass_event() -> None:
     """With accept_event_subclasses=True, workflow successfully routes ChildEvent."""
-
-    class OptInSubclassWorkflow(Workflow):
-        @step
-        async def step_a(self, ev: StartEvent) -> ChildEvent:
-            return ChildEvent(value="subclass works")
-
-        @step(accept_event_subclasses=True)
-        async def step_b(self, ev: ParentEvent) -> StopEvent:
-            return StopEvent(result=ev.value)
-
     workflow = OptInSubclassWorkflow(timeout=2)
     result = await workflow.run()
     assert result == "subclass works"
@@ -91,20 +99,6 @@ async def test_opt_in_step_accepts_subclass_event() -> None:
 
 def test_graph_edges_follow_opt_in_subclass_matching() -> None:
     """build_step_graph only builds subclass edges for steps that opt-in."""
-
-    class MixedWorkflow(Workflow):
-        @step
-        async def step_a(self, ev: StartEvent) -> ChildEvent:
-            return ChildEvent(value="x")
-
-        @step
-        async def step_b(self, ev: ParentEvent) -> StopEvent:
-            return StopEvent(result=ev.value)
-
-        @step(accept_event_subclasses=True)
-        async def step_c(self, ev: ParentEvent) -> StopEvent:
-            return StopEvent(result=ev.value)
-
     workflow = MixedWorkflow(disable_validation=True)
     steps = {name: func._step_config for name, func in workflow._get_steps().items()}
     graph = build_step_graph(steps, StartEvent)
@@ -120,20 +114,6 @@ def test_graph_edges_follow_opt_in_subclass_matching() -> None:
 
 def test_targeted_step_validation_respects_opt_in_subclass_matching() -> None:
     """_validate_valid_step_message rejects subclass event by default, accepts on opt-in."""
-
-    class MixedWorkflow(Workflow):
-        @step
-        async def step_a(self, ev: StartEvent) -> ChildEvent:
-            return ChildEvent(value="x")
-
-        @step
-        async def step_b(self, ev: ParentEvent) -> StopEvent:
-            return StopEvent(result=ev.value)
-
-        @step(accept_event_subclasses=True)
-        async def step_c(self, ev: ParentEvent) -> StopEvent:
-            return StopEvent(result=ev.value)
-
     workflow = MixedWorkflow(disable_validation=True)
 
     # Default step_b rejects ChildEvent
