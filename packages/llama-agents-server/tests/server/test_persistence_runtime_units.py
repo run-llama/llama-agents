@@ -29,6 +29,9 @@ from server_test_fixtures import (  # type: ignore[import]
     SimpleTestWorkflow,
     wait_for_passing,
 )
+
+# Suppress test_durable_runtime imports being needed; we use the persistence helper directly.
+from test_durable_runtime import _get_persistence  # type: ignore[import]
 from workflows import Workflow, step
 from workflows.context.context_types import SerializedContext
 from workflows.errors import WorkflowCancelledByUser
@@ -39,10 +42,6 @@ from workflows.runtime.types.commands import (
     CommandFailWorkflow,
     CommandHalt,
 )
-
-# Suppress test_durable_runtime imports being needed; we use the persistence helper directly.
-from test_durable_runtime import _get_persistence  # type: ignore[import]
-
 
 # --- Helpers / fake stores --------------------------------------------------
 
@@ -175,9 +174,7 @@ async def test_on_tick_store_failure_is_logged_and_swallowed(
 
     # Both prove the swallow path: store.append_tick was called (and raised), and
     # the persistence_runtime logger captured the exception message.
-    assert any(
-        "Failed to persist tick for run" in r.message for r in caplog.records
-    )
+    assert any("Failed to persist tick for run" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio

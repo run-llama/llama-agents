@@ -222,9 +222,7 @@ async def test_run_workflow_nowait_wraps_serialize_failure(
 
 @pytest.mark.asyncio
 async def test_send_event_wraps_serialize_failure(client: WorkflowClient) -> None:
-    with pytest.raises(
-        ValueError, match="Error while serializing the provided event:"
-    ):
+    with pytest.raises(ValueError, match="Error while serializing the provided event:"):
         await client.send_event(handler_id="h", event=UnserializableEvent())
 
 
