@@ -369,7 +369,7 @@ class ApprovalResponseEvent(HumanResponseEvent):
 
 
 @pytest.mark.asyncio
-async def test_waiter_requirements_rehydrate_even_if_serialized_flag_is_false() -> None:
+async def test_waiter_requirements_rehydrate_from_legacy_snapshot() -> None:
     class ApprovalWorkflow(Workflow):
         @step
         async def review(self, ctx: Context, ev: StartEvent) -> StopEvent:
@@ -400,11 +400,12 @@ async def test_waiter_requirements_rehydrate_even_if_serialized_flag_is_false() 
     assert waiters[0]["has_requirements"] is True
     assert not waiters[0]["waiter_id"].endswith("_{}")
 
-    # Simulate a stale or tampered context snapshot that clears the serialized
-    # rehydration flag. The original requirements are intentionally not stored
-    # in the snapshot, so restore falls back to the default waiter id's embedded
-    # requirements signal and reconstructs them by replaying the waiting step.
-    waiters[0]["has_requirements"] = False
+    # Simulate a legacy context snapshot written before waiter requirement
+    # metadata was persisted. The original requirements are intentionally not
+    # stored in the snapshot, so restore falls back to the default waiter id's
+    # embedded requirements signal and reconstructs them by replaying the
+    # waiting step.
+    waiters[0].pop("has_requirements")
 
     new_handler = workflow.run(ctx=Context.from_dict(workflow, ctx_dict))
     new_handler.ctx.send_event(ApprovalResponseEvent(response="unbound"))
