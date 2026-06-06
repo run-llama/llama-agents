@@ -20,6 +20,7 @@ from workflows.context.context import (
 )
 from workflows.context.external_context import ExternalContext
 from workflows.context.internal_context import InternalContext
+from workflows.context.pre_context import PreContext
 from workflows.context.serializers import JsonSerializer
 from workflows.context.state_store import (
     DictState,
@@ -405,7 +406,14 @@ async def test_waiter_requirements_rehydrate_from_legacy_snapshot() -> None:
     # legacy waiters to reconstruct any requirements they owned.
     waiters[0].pop("has_requirements")
 
-    new_handler = workflow.run(ctx=Context.from_dict(workflow, ctx_dict))
+    legacy_ctx = Context.from_dict(workflow, ctx_dict)
+    assert isinstance(legacy_ctx._face, PreContext)
+    legacy_state = BrokerState.from_serialized(
+        legacy_ctx._face.init_snapshot, workflow, JsonSerializer()
+    )
+    assert len(legacy_state.rehydrate_with_ticks()) == 1
+
+    new_handler = workflow.run(ctx=legacy_ctx)
     new_handler.ctx.send_event(ApprovalResponseEvent(response="unbound"))
 
     task = asyncio.ensure_future(new_handler)
@@ -416,6 +424,44 @@ async def test_waiter_requirements_rehydrate_from_legacy_snapshot() -> None:
         ApprovalResponseEvent(response="bound", waiter_id="waiter_one")
     )
     assert await task == "bound"
+
+
+@pytest.mark.asyncio
+async def test_waiter_without_requirements_does_not_rehydrate() -> None:
+    class ApprovalWorkflow(Workflow):
+        @step
+        async def review(self, ctx: Context, ev: StartEvent) -> StopEvent:
+            result = await ctx.wait_for_event(
+                ApprovalResponseEvent,
+                waiter_event=ApprovalRequiredEvent(prefix="approval"),
+            )
+            return StopEvent(result=result.response)
+
+    workflow = ApprovalWorkflow()
+    handler = workflow.run()
+    ctx_dict = None
+
+    async for ev in handler.stream_events():
+        if isinstance(ev, InputRequiredEvent):
+            ctx_dict = handler.ctx.to_dict()
+            await handler.cancel_run()
+            break
+
+    assert ctx_dict is not None
+    waiters = [
+        waiter
+        for worker in ctx_dict["workers"].values()
+        for waiter in worker["collected_waiters"]
+    ]
+    assert len(waiters) == 1
+    assert waiters[0]["has_requirements"] is False
+
+    new_ctx = Context.from_dict(workflow, ctx_dict)
+    assert isinstance(new_ctx._face, PreContext)
+    current_state = BrokerState.from_serialized(
+        new_ctx._face.init_snapshot, workflow, JsonSerializer()
+    )
+    assert current_state.rehydrate_with_ticks() == []
 
 
 class Waiter1(Event):
