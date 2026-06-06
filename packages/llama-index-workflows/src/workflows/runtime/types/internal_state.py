@@ -218,6 +218,7 @@ class BrokerState:
             for waiter_data in worker_data.collected_waiters:
                 # Import the event type
                 waiting_for_event = _import_event_type(waiter_data.waiting_for_event)
+                needs_rehydration = _serialized_waiter_needs_rehydration(waiter_data)
 
                 worker.collected_waiters.append(
                     StepWorkerWaiter(
@@ -225,7 +226,8 @@ class BrokerState:
                         event=serializer.deserialize(waiter_data.event),
                         waiting_for_event=waiting_for_event,
                         requirements={},
-                        has_requirements=waiter_data.has_requirements,
+                        has_requirements=waiter_data.has_requirements
+                        or needs_rehydration,
                         resolved_event=serializer.deserialize(
                             waiter_data.resolved_event
                         )
@@ -235,6 +237,20 @@ class BrokerState:
                 )
 
         return base_state
+
+
+def _serialized_waiter_needs_rehydration(waiter: SerializedWaiter) -> bool:
+    """Return whether a restored waiter should replay its owning step.
+
+    Requirements are intentionally not serialized because they may contain
+    application objects. New snapshots use ``has_requirements`` for this signal.
+    Legacy snapshots that omit the field do not have a reliable per-waiter
+    requirements signal, so unresolved legacy waiters are replayed
+    conservatively to reconstruct any requirements they owned.
+    """
+    if waiter.resolved_event is not None:
+        return False
+    return waiter.has_requirements or "has_requirements" not in waiter.model_fields_set
 
 
 def _import_event_type(qualified_name: str) -> type[Event]:
