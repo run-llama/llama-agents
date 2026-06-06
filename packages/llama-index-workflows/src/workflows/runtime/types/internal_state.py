@@ -243,20 +243,14 @@ def _serialized_waiter_needs_rehydration(waiter: SerializedWaiter) -> bool:
     """Return whether a restored waiter should replay its owning step.
 
     Requirements are intentionally not serialized because they may contain
-    application objects. New snapshots use ``has_requirements`` for this signal;
-    default waiter IDs also embed the requirements repr, so they provide a
-    backwards-compatible fallback when that flag is absent or stale.
+    application objects. New snapshots use ``has_requirements`` for this signal.
+    Legacy snapshots that omit the field do not have a reliable per-waiter
+    requirements signal, so unresolved legacy waiters are replayed
+    conservatively to reconstruct any requirements they owned.
     """
     if waiter.resolved_event is not None:
         return False
-    return waiter.has_requirements or _default_waiter_id_has_requirements(
-        waiter.waiter_id
-    )
-
-
-def _default_waiter_id_has_requirements(waiter_id: str) -> bool:
-    """Detect default wait_for_event IDs generated with non-empty requirements."""
-    return waiter_id.startswith("waiter_") and not waiter_id.endswith("_{}")
+    return waiter.has_requirements or "has_requirements" not in waiter.model_fields_set
 
 
 def _import_event_type(qualified_name: str) -> type[Event]:

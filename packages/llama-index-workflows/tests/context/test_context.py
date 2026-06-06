@@ -398,13 +398,11 @@ async def test_waiter_requirements_rehydrate_from_legacy_snapshot() -> None:
     ]
     assert len(waiters) == 1
     assert waiters[0]["has_requirements"] is True
-    assert not waiters[0]["waiter_id"].endswith("_{}")
 
     # Simulate a legacy context snapshot written before waiter requirement
-    # metadata was persisted. The original requirements are intentionally not
-    # stored in the snapshot, so restore falls back to the default waiter id's
-    # embedded requirements signal and reconstructs them by replaying the
-    # waiting step.
+    # metadata was persisted. Since that format does not provide a reliable
+    # per-waiter requirement signal, restore conservatively replays unresolved
+    # legacy waiters to reconstruct any requirements they owned.
     waiters[0].pop("has_requirements")
 
     new_handler = workflow.run(ctx=Context.from_dict(workflow, ctx_dict))
