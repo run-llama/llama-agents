@@ -9,7 +9,7 @@ from typing_extensions import TypeVar
 
 from workflows.context.context_types import MODEL_T
 from workflows.context.serializers import JsonSerializer
-from workflows.context.state_store import StateStore
+from workflows.context.state_store import StateStore, build_namespaced_state
 from workflows.errors import WorkflowRuntimeError
 from workflows.events import StopEvent
 from workflows.runtime.types.internal_state import BrokerState
@@ -20,6 +20,7 @@ from workflows.runtime.types.plugin import (
     as_snapshottable_adapter,
     as_v2_runtime_compatibility_shim,
 )
+from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import TickAddEvent, TickCancelRun, WorkflowTick
 
 if TYPE_CHECKING:
@@ -105,11 +106,14 @@ class ExternalContext(Generic[MODEL_T, RunResultT]):
 
     @property
     def store(self) -> StateStore[MODEL_T]:
-        """Access workflow state store."""
-        state_store = self._external_adapter.get_state_store()
-        if state_store is None:
+        """Access workflow state store (the root namespace's view)."""
+        underlying = self._external_adapter.get_underlying_store()
+        if underlying is None:
             raise RuntimeError("State store not available from adapter")
-        return state_store  # type: ignore[return-value]
+        namespaced = build_namespaced_state(
+            self._workflow, underlying, self._serializer
+        )
+        return namespaced.view(())  # type: ignore[return-value]
 
     def send_event(self, message: Event, step: str | None = None) -> None:
         """Send an event into the workflow."""
@@ -118,7 +122,10 @@ class ExternalContext(Generic[MODEL_T, RunResultT]):
 
         self._execute_task(
             self._external_adapter.send_event(
-                TickAddEvent(event=message, step_name=step)
+                TickAddEvent(
+                    event=message,
+                    step_id=StepId.root(step) if step is not None else None,
+                )
             )
         )
 
@@ -126,7 +133,9 @@ class ExternalContext(Generic[MODEL_T, RunResultT]):
         """Get list of currently running step names."""
         state = self._state
         return [
-            step for step in state.workers.keys() if state.workers[step].in_progress
+            str(step_id)
+            for step_id in state.workers.keys()
+            if state.workers[step_id].in_progress
         ]
 
     def _require_v2_runtime_compatibility(self) -> V2RuntimeCompatibilityShim:
@@ -154,11 +163,17 @@ class ExternalContext(Generic[MODEL_T, RunResultT]):
         """Serialize context state for persistence."""
         active_serializer = serializer or self._serializer
 
-        # Fetch state store from adapter and serialize
-        state_data = {}
-        state_store = self._external_adapter.get_state_store()
-        if state_store is not None:
-            state_data = state_store.to_dict(active_serializer)
+        # Serialize the run's whole namespace tree from the single underlying
+        # store. Core owns the format: a childless run stays flat; a child-ful
+        # run nests each child's payload under the reserved key so the whole tree
+        # round-trips through the single ``SerializedContext.state`` dict.
+        state_data: dict[str, Any] = {}
+        underlying = self._external_adapter.get_underlying_store()
+        if underlying is not None:
+            namespaced = build_namespaced_state(
+                self._workflow, underlying, active_serializer
+            )
+            state_data = namespaced.serialize_tree(active_serializer)
 
         # Get the broker state
         broker_state = self._state

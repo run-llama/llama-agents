@@ -27,6 +27,7 @@ from workflows.runtime.types.results import (
     StepWorkerFailed,
     StepWorkerResult,
 )
+from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import (
     TickAddEvent,
     TickCancelRun,
@@ -34,6 +35,7 @@ from workflows.runtime.types.ticks import (
     TickStepResult,
     TickTimeout,
     WorkflowTick,
+    WorkflowTickAdapter,
 )
 
 
@@ -84,7 +86,7 @@ def test_event_type_roundtrip() -> None:
         pytest.param(
             TickAddEvent(
                 event=StartEvent(),
-                step_name="my_step",
+                step_id=StepId.root("my_step"),
                 attempts=3,
                 first_attempt_at=1234567890.0,
             ),
@@ -104,7 +106,7 @@ def test_event_type_roundtrip() -> None:
         ),
         pytest.param(
             TickStepResult(
-                step_name="process",
+                step_id=StepId.root("process"),
                 worker_id=42,
                 event=MyEvent(value="trigger"),
                 result=[StepWorkerResult(result=StopEvent(result="done"))],
@@ -113,7 +115,7 @@ def test_event_type_roundtrip() -> None:
         ),
         pytest.param(
             TickStepResult(
-                step_name="process",
+                step_id=StepId.root("process"),
                 worker_id=1,
                 event=StartEvent(),
                 result=[StepWorkerResult(result=None)],
@@ -122,7 +124,7 @@ def test_event_type_roundtrip() -> None:
         ),
         pytest.param(
             TickStepResult(
-                step_name="collector",
+                step_id=StepId.root("collector"),
                 worker_id=2,
                 event=StartEvent(),
                 result=[
@@ -135,7 +137,7 @@ def test_event_type_roundtrip() -> None:
         ),
         pytest.param(
             TickStepResult(
-                step_name="collector",
+                step_id=StepId.root("collector"),
                 worker_id=3,
                 event=StartEvent(),
                 result=[DeleteCollectedEvent(event_id="evt-2")],
@@ -144,7 +146,7 @@ def test_event_type_roundtrip() -> None:
         ),
         pytest.param(
             TickStepResult(
-                step_name="cleanup",
+                step_id=StepId.root("cleanup"),
                 worker_id=5,
                 event=StartEvent(),
                 result=[DeleteWaiter(waiter_id="w-2")],
@@ -166,7 +168,7 @@ def test_tick_roundtrip(tick: WorkflowTick) -> None:
 def test_tick_step_result_with_failed_value_error() -> None:
     failed_at = time.time()
     tick = TickStepResult(
-        step_name="broken_step",
+        step_id=StepId.root("broken_step"),
         worker_id=7,
         event=StartEvent(),
         result=[
@@ -191,7 +193,7 @@ def test_tick_step_result_with_failed_unimportable_exception() -> None:
     CustomError = type("CustomError", (Exception,), {})
     failed_at = time.time()
     tick = TickStepResult(
-        step_name="broken_step",
+        step_id=StepId.root("broken_step"),
         worker_id=8,
         event=StartEvent(),
         result=[StepWorkerFailed(exception=CustomError("oops"), failed_at=failed_at)],
@@ -210,7 +212,7 @@ def test_tick_step_result_with_failed_unimportable_exception() -> None:
 
 def test_tick_step_result_with_add_waiter() -> None:
     tick = TickStepResult(
-        step_name="waiter_step",
+        step_id=StepId.root("waiter_step"),
         worker_id=4,
         event=StartEvent(),
         result=[
@@ -253,12 +255,12 @@ def test_workflow_tick_discriminated_union_roundtrip() -> None:
     adapter = TypeAdapter(WorkflowTick)
 
     ticks = [
-        TickAddEvent(event=StartEvent(), step_name="s"),
+        TickAddEvent(event=StartEvent(), step_id=StepId.root("s")),
         TickPublishEvent(event=MyEvent(value="x")),
         TickCancelRun(),
         TickTimeout(timeout=10.0),
         TickStepResult(
-            step_name="s",
+            step_id=StepId.root("s"),
             worker_id=0,
             event=StartEvent(),
             result=[StepWorkerResult(result=None)],
@@ -269,3 +271,22 @@ def test_workflow_tick_discriminated_union_roundtrip() -> None:
         roundtripped = json.loads(json.dumps(dumped))
         restored = adapter.validate_python(roundtripped)
         assert type(restored) is type(tick)
+
+
+def test_legacy_step_name_key_deserializes_to_step_id() -> None:
+    """Pre-StepId journals used a ``step_name`` key; it must still decode.
+
+    The wire format now serializes a root step id as the bare name under the
+    ``step_id`` key. The ``step_name`` alias keeps old journals readable: a
+    legacy dict deserializes to a tick whose ``step_id`` is the root StepId.
+    """
+    legacy = {
+        "type": "step_result",
+        "step_name": "foo",
+        "worker_id": 0,
+        "event": _serialize_event(StartEvent()),
+        "result": [],
+    }
+    restored = WorkflowTickAdapter.validate_python(legacy)
+    assert isinstance(restored, TickStepResult)
+    assert restored.step_id == StepId.root("foo")

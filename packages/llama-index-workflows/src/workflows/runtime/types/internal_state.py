@@ -19,6 +19,7 @@ from workflows.decorators import CatchErrorHandler, StepConfig
 from workflows.events import Event
 from workflows.retry_policy import RetryPolicy
 from workflows.runtime.types.results import StepWorkerState, StepWorkerWaiter
+from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import TickAddEvent, WorkflowTick
 from workflows.workflow import Workflow
 
@@ -42,7 +43,13 @@ class BrokerState:
 
     is_running: bool
     config: BrokerConfig
-    workers: dict[str, InternalStepWorkerState]
+    workers: dict[StepId, InternalStepWorkerState]
+    # Per-child-namespace activation times: the moment the first event routed
+    # into a namespace that declares a ``timeout``. Used to arm and to staleness-
+    # check :class:`TickNamespaceTimeout`. Cleared when the namespace completes
+    # (StopEvent boundary) or is expired, so a re-triggered child re-arms. Not
+    # serialized — runtime scheduling state, like waiter timeouts.
+    namespace_started: dict[tuple[str, ...], float] = field(default_factory=dict)
 
     def deepcopy(self) -> BrokerState:
         """
@@ -52,37 +59,60 @@ class BrokerState:
             is_running=self.is_running,
             config=self.config,  # immutable
             workers={
-                name: worker_state._deepcopy()
-                for name, worker_state in self.workers.items()
+                step_id: worker_state._deepcopy()
+                for step_id, worker_state in self.workers.items()
             },
+            namespace_started=dict(self.namespace_started),
         )
 
     @staticmethod
     def from_workflow(workflow: Workflow) -> BrokerState:
+        namespaced_steps = workflow._get_namespaced_steps()
+        # Catch-error tables are per-instance (bare-name keyed) on each workflow;
+        # namespace them by the owning instance's path so a child's handlers
+        # recover its own steps. Root steps (namespace ()) project back to bare
+        # names, preserving the pre-namespace wire format.
+        catch_error_handlers: dict[StepId, CatchErrorHandler] = {}
+        handler_for_step: dict[StepId, StepId] = {}
+        # Per-child-namespace timeouts from each child instance's ``_timeout``.
+        # The root timeout (namespace ()) stays the single global deadline
+        # scheduled in the control loop's ``run()``; only child namespaces get a
+        # per-namespace deadline here.
+        namespace_timeouts: dict[tuple[str, ...], float] = {}
+        for namespace, instance in workflow._namespace_instances().items():
+            for name, handler in instance._catch_error_handlers.items():
+                catch_error_handlers[StepId(namespace, name)] = handler
+            for step_name, handler_name in instance._handler_for_step.items():
+                handler_for_step[StepId(namespace, step_name)] = StepId(
+                    namespace, handler_name
+                )
+            if namespace != () and instance._timeout is not None:
+                namespace_timeouts[namespace] = instance._timeout
         return BrokerState(
             is_running=False,
             config=BrokerConfig(
                 steps={
-                    name: InternalStepConfig(
+                    step_id: InternalStepConfig(
                         accepted_events=step_func._step_config.accepted_events,
                         retry_policy=step_func._step_config.retry_policy,
                         num_workers=step_func._step_config.num_workers,
                     )
-                    for name, step_func in workflow._get_steps().items()
+                    for step_id, step_func in namespaced_steps.items()
                 },
                 timeout=workflow._timeout,
-                catch_error_handlers=dict(workflow._catch_error_handlers),
-                handler_for_step=dict(workflow._handler_for_step),
+                catch_error_handlers=catch_error_handlers,
+                handler_for_step=handler_for_step,
+                namespace_timeouts=namespace_timeouts,
             ),
             workers={
-                name: InternalStepWorkerState(
+                step_id: InternalStepWorkerState(
                     queue=[],
                     config=step_func._step_config,
                     in_progress=[],
                     collected_events={},
                     collected_waiters=[],
                 )
-                for name, step_func in workflow._get_steps().items()
+                for step_id, step_func in namespaced_steps.items()
             },
         )
 
@@ -91,21 +121,21 @@ class BrokerState:
         Rehydrates non-serializable state by re-running commands
         """
         commands: list[WorkflowTick] = []
-        for step_name, worker_state in sorted(self.workers.items(), key=lambda x: x[0]):
+        for step_id, worker_state in sorted(
+            self.workers.items(), key=lambda x: str(x[0])
+        ):
             for waiter in sorted(
                 worker_state.collected_waiters, key=lambda x: x.waiter_id
             ):
                 if waiter.has_requirements and not waiter.requirements:
-                    commands.append(
-                        TickAddEvent(event=waiter.event, step_name=step_name)
-                    )
+                    commands.append(TickAddEvent(event=waiter.event, step_id=step_id))
         return commands
 
     def to_serialized(self, serializer: BaseSerializer) -> SerializedContext:
         """Serialize the broker state to a SerializedContext."""
 
         workers_dict = {}
-        for step_name, worker_state in self.workers.items():
+        for step_id, worker_state in self.workers.items():
             # Serialize queue with retry info
             queue = [
                 SerializedEventAttempt(
@@ -145,7 +175,10 @@ class BrokerState:
                 for waiter in worker_state.collected_waiters
             ]
 
-            workers_dict[step_name] = SerializedStepWorkerState(
+            # The wire format keys workers by the string projection of the
+            # StepId (root steps -> bare name, identical to the pre-StepId
+            # format; child steps -> "namespace/name").
+            workers_dict[str(step_id)] = SerializedStepWorkerState(
                 queue=queue,
                 in_progress=in_progress,
                 collected_events=collected_events,
@@ -177,11 +210,12 @@ class BrokerState:
 
         # Restore worker state (queues, collected events, waiters)
         # We do this regardless of is_running state so workflows can resume from where they left off
-        for step_name, worker_data in serialized.workers.items():
-            if step_name not in base_state.workers:
+        for step_key, worker_data in serialized.workers.items():
+            step_id = StepId.from_str(step_key)
+            if step_id not in base_state.workers:
                 continue
 
-            worker = base_state.workers[step_name]
+            worker = base_state.workers[step_id]
 
             # Restore queue with retry info
             worker.queue = [
@@ -259,14 +293,23 @@ class BrokerConfig:
     Attributes:
         steps: Configuration for each step indexed by step name
         timeout: Maximum seconds before the workflow times out, or None for no timeout
-        catch_error_handlers: handler step name -> CatchErrorHandler descriptor
-        handler_for_step: step name -> handler step name that owns it
+        catch_error_handlers: handler StepId -> CatchErrorHandler descriptor
+        handler_for_step: covered step's StepId -> the handler StepId that owns it
     """
 
-    steps: dict[str, InternalStepConfig]
+    steps: dict[StepId, InternalStepConfig]
     timeout: float | None
-    catch_error_handlers: dict[str, CatchErrorHandler] = field(default_factory=dict)
-    handler_for_step: dict[str, str] = field(default_factory=dict)
+    # Catch-error routing is keyed by StepId so a handler declared on a child
+    # recovers only that child's steps and keeps a recovery budget distinct from
+    # a same-named root handler. Merged from every namespace instance in
+    # ``from_workflow``; ``handler_for_step`` maps a covered step's StepId to its
+    # handler's StepId, ``catch_error_handlers`` maps a handler StepId to its
+    # descriptor.
+    catch_error_handlers: dict[StepId, CatchErrorHandler] = field(default_factory=dict)
+    handler_for_step: dict[StepId, StepId] = field(default_factory=dict)
+    # Per-child-namespace timeout (seconds), from each child's ``_timeout``.
+    # Root (``()``) is absent: its deadline is the global ``timeout`` above.
+    namespace_timeouts: dict[tuple[str, ...], float] = field(default_factory=dict)
 
 
 @dataclass()

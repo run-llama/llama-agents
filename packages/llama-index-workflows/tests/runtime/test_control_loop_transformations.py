@@ -72,6 +72,7 @@ from workflows.runtime.types.results import (
     StepWorkerState,
     StepWorkerWaiter,
 )
+from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import (
     TickAddEvent,
     TickCancelRun,
@@ -83,6 +84,11 @@ from workflows.runtime.types.ticks import (
 )
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
+
+
+TEST_STEP = StepId.root("test_step")
+OTHER_STEP = StepId.root("other_step")
+UNKNOWN_STEP = StepId.root("unknown")
 
 
 class MyTestEvent(Event):
@@ -109,7 +115,7 @@ def base_state() -> BrokerState:
         is_running=True,
         config=BrokerConfig(
             steps={
-                "test_step": InternalStepConfig(
+                TEST_STEP: InternalStepConfig(
                     accepted_events=[MyTestEvent, StartEvent],
                     retry_policy=None,
                     num_workers=1,
@@ -118,7 +124,7 @@ def base_state() -> BrokerState:
             timeout=None,
         ),
         workers={
-            "test_step": InternalStepWorkerState(
+            TEST_STEP: InternalStepWorkerState(
                 queue=[],
                 config=step_config,
                 in_progress=[],
@@ -131,7 +137,7 @@ def base_state() -> BrokerState:
 
 def add_worker(state: BrokerState, event: Event, worker_id: int = 0) -> None:
     """Helper to add an in-progress worker to state."""
-    state.workers["test_step"].in_progress.append(
+    state.workers[TEST_STEP].in_progress.append(
         InProgressState(
             event=event,
             worker_id=worker_id,
@@ -148,7 +154,7 @@ def add_worker(state: BrokerState, event: Event, worker_id: int = 0) -> None:
 
 def test_add_event_unhandled_emits_internal_event(base_state: BrokerState) -> None:
     """Unhandled events should emit UnhandledEvent with idle status."""
-    tick = TickAddEvent(event=OtherEvent(data="unused"), step_name=None)
+    tick = TickAddEvent(event=OtherEvent(data="unused"), step_id=None)
     state, commands = _process_add_event_tick(tick, base_state, now_seconds=0.0)
 
     publish_events = [c.event for c in commands if isinstance(c, CommandPublishEvent)]
@@ -174,7 +180,7 @@ def test_add_event_input_required_does_not_emit_unhandled(
     InputRequiredEvent events are designed to be handled externally by human
     consumers, not by workflow steps. They should not trigger UnhandledEvent.
     """
-    tick = TickAddEvent(event=CustomInputRequired(prompt="test"), step_name=None)
+    tick = TickAddEvent(event=CustomInputRequired(prompt="test"), step_id=None)
     _, commands = _process_add_event_tick(tick, base_state, now_seconds=0.0)
 
     publish_events = [c.event for c in commands if isinstance(c, CommandPublishEvent)]
@@ -186,7 +192,7 @@ def test_add_event_base_input_required_does_not_emit_unhandled(
     base_state: BrokerState,
 ) -> None:
     """Base InputRequiredEvent should also NOT emit UnhandledEvent."""
-    tick = TickAddEvent(event=InputRequiredEvent(), step_name=None)
+    tick = TickAddEvent(event=InputRequiredEvent(), step_id=None)
     _, commands = _process_add_event_tick(tick, base_state, now_seconds=0.0)
 
     publish_events = [c.event for c in commands if isinstance(c, CommandPublishEvent)]
@@ -198,7 +204,7 @@ def test_add_event_matches_waiter_does_not_emit_unhandled(
     base_state: BrokerState,
 ) -> None:
     """Events that satisfy a waiter should not emit UnhandledEvent."""
-    base_state.workers["test_step"].collected_waiters.append(
+    base_state.workers[TEST_STEP].collected_waiters.append(
         StepWorkerWaiter(
             waiter_id="waiter-1",
             event=StartEvent(),
@@ -208,7 +214,7 @@ def test_add_event_matches_waiter_does_not_emit_unhandled(
             resolved_event=None,
         )
     )
-    tick = TickAddEvent(event=OtherEvent(data="hit"), step_name=None)
+    tick = TickAddEvent(event=OtherEvent(data="hit"), step_id=None)
     _, commands = _process_add_event_tick(tick, base_state, now_seconds=0.0)
 
     publish_events = [c.event for c in commands if isinstance(c, CommandPublishEvent)]
@@ -235,7 +241,7 @@ def test_step_worker_results(
     add_worker(base_state, event)
 
     tick = TickStepResult(
-        step_name="test_step",
+        step_id=StepId.root("test_step"),
         worker_id=0,
         event=event,
         result=[StepWorkerResult(result=result)],
@@ -253,19 +259,19 @@ def test_step_worker_results(
             assert isinstance(commands[i], expected_type)
 
     # Worker should be removed from in_progress
-    assert len(new_state.workers["test_step"].in_progress) == 0
+    assert len(new_state.workers[TEST_STEP].in_progress) == 0
 
 
 def test_step_worker_failed_with_retry(base_state: BrokerState) -> None:
     """Test that failures with retry policy queue a retry."""
-    base_state.workers["test_step"].config.retry_policy = ConstantDelayRetryPolicy(
+    base_state.workers[TEST_STEP].config.retry_policy = ConstantDelayRetryPolicy(
         maximum_attempts=3, delay=1.0
     )
     event = MyTestEvent(value=42)
     add_worker(base_state, event)
 
     tick: TickStepResult = TickStepResult(
-        step_name="test_step",
+        step_id=StepId.root("test_step"),
         worker_id=0,
         event=event,
         result=[StepWorkerFailed(exception=ValueError("test"), failed_at=110.0)],
@@ -290,7 +296,7 @@ def test_step_worker_failed_without_retry(base_state: BrokerState) -> None:
     add_worker(base_state, event)
 
     tick: TickStepResult = TickStepResult(
-        step_name="test_step",
+        step_id=StepId.root("test_step"),
         worker_id=0,
         event=event,
         result=[StepWorkerFailed(exception=ValueError("test"), failed_at=110.0)],
@@ -309,18 +315,18 @@ def test_collected_events(base_state: BrokerState) -> None:
 
     # Add event
     tick: TickStepResult = TickStepResult(
-        step_name="test_step",
+        step_id=StepId.root("test_step"),
         worker_id=0,
         event=event,
         result=[AddCollectedEvent(event_id="buf1", event=OtherEvent(data="e1"))],
     )
     new_state, _ = _process_step_result_tick(tick, base_state, now_seconds=110.0)
-    assert "buf1" in new_state.workers["test_step"].collected_events
+    assert "buf1" in new_state.workers[TEST_STEP].collected_events
 
     # Delete event
     add_worker(new_state, event)
     tick = TickStepResult(
-        step_name="test_step",
+        step_id=StepId.root("test_step"),
         worker_id=0,
         event=event,
         result=[
@@ -329,7 +335,7 @@ def test_collected_events(base_state: BrokerState) -> None:
         ],
     )
     new_state, _ = _process_step_result_tick(tick, new_state, now_seconds=110.0)
-    assert "buf1" not in new_state.workers["test_step"].collected_events
+    assert "buf1" not in new_state.workers[TEST_STEP].collected_events
 
 
 def test_waiters(base_state: BrokerState) -> None:
@@ -346,7 +352,7 @@ def test_waiters(base_state: BrokerState) -> None:
     )
     # Add waiter
     tick: TickStepResult = TickStepResult(
-        step_name="test_step",
+        step_id=StepId.root("test_step"),
         worker_id=0,
         event=event,
         result=[
@@ -354,12 +360,12 @@ def test_waiters(base_state: BrokerState) -> None:
         ],
     )
     new_state, _ = _process_step_result_tick(tick, base_state, now_seconds=110.0)
-    assert len(new_state.workers["test_step"].collected_waiters) == 1
+    assert len(new_state.workers[TEST_STEP].collected_waiters) == 1
 
     # Delete waiter
     add_worker(new_state, event)
     tick = TickStepResult(
-        step_name="test_step",
+        step_id=StepId.root("test_step"),
         worker_id=0,
         event=event,
         result=[
@@ -368,7 +374,7 @@ def test_waiters(base_state: BrokerState) -> None:
         ],
     )
     new_state, _ = _process_step_result_tick(tick, new_state, now_seconds=110.0)
-    assert len(new_state.workers["test_step"].collected_waiters) == 0
+    assert len(new_state.workers[TEST_STEP].collected_waiters) == 0
 
 
 def test_start_event_sets_running(base_state: BrokerState) -> None:
@@ -386,7 +392,7 @@ def test_event_routing(base_state: BrokerState) -> None:
 
     run_cmds = [c for c in commands if isinstance(c, CommandRunWorker)]
     assert len(run_cmds) == 1
-    assert run_cmds[0].step_name == "test_step"
+    assert run_cmds[0].step_id == TEST_STEP
 
 
 def test_per_step_explicit_routing_accepts_only_matching_types(
@@ -395,12 +401,12 @@ def test_per_step_explicit_routing_accepts_only_matching_types(
     """Explicit routing with step_name must still satisfy accepted event types."""
     # base_state only has test_step that accepts MyTestEvent and StartEvent
     # Explicitly target test_step with MyTestEvent → should run
-    tick_ok = TickAddEvent(event=MyTestEvent(value=1), step_name="test_step")
+    tick_ok = TickAddEvent(event=MyTestEvent(value=1), step_id=StepId.root("test_step"))
     _, cmds_ok = _process_add_event_tick(tick_ok, base_state, now_seconds=100.0)
     assert any(isinstance(c, CommandRunWorker) for c in cmds_ok)
 
     # Explicitly target an unknown step → should not run anything
-    tick_bad = TickAddEvent(event=MyTestEvent(value=1), step_name="unknown")
+    tick_bad = TickAddEvent(event=MyTestEvent(value=1), step_id=StepId.root("unknown"))
     _, cmds_bad = _process_add_event_tick(tick_bad, base_state, now_seconds=100.0)
     assert not any(isinstance(c, CommandRunWorker) for c in cmds_bad)
 
@@ -417,10 +423,10 @@ def test_explicit_routing_requires_acceptance(base_state: BrokerState) -> None:
         num_workers=1,
         resources=[],
     )
-    base_state.config.steps["other_step"] = InternalStepConfig(
+    base_state.config.steps[OTHER_STEP] = InternalStepConfig(
         accepted_events=[StartEvent], retry_policy=None, num_workers=1
     )
-    base_state.workers["other_step"] = InternalStepWorkerState(
+    base_state.workers[OTHER_STEP] = InternalStepWorkerState(
         queue=[],
         config=other_step_cfg,
         in_progress=[],
@@ -429,19 +435,17 @@ def test_explicit_routing_requires_acceptance(base_state: BrokerState) -> None:
     )
 
     # Try to route MyTestEvent explicitly to non-accepting step → should not start
-    tick = TickAddEvent(event=MyTestEvent(value=1), step_name="other_step")
+    tick = TickAddEvent(event=MyTestEvent(value=1), step_id=StepId.root("other_step"))
     _, commands = _process_add_event_tick(tick, base_state, now_seconds=100.0)
     assert not any(
-        isinstance(c, CommandRunWorker) and c.step_name == "other_step"
-        for c in commands
+        isinstance(c, CommandRunWorker) and c.step_id == OTHER_STEP for c in commands
     )
 
     # Explicitly route to accepting step → should start
-    tick_ok = TickAddEvent(event=MyTestEvent(value=2), step_name="test_step")
+    tick_ok = TickAddEvent(event=MyTestEvent(value=2), step_id=StepId.root("test_step"))
     _, commands_ok = _process_add_event_tick(tick_ok, base_state, now_seconds=100.0)
     assert any(
-        isinstance(c, CommandRunWorker) and c.step_name == "test_step"
-        for c in commands_ok
+        isinstance(c, CommandRunWorker) and c.step_id == TEST_STEP for c in commands_ok
     )
 
 
@@ -456,14 +460,12 @@ def test_waiter_resolution(base_state: BrokerState) -> None:
         has_requirements=True,
         resolved_event=None,
     )
-    base_state.workers["test_step"].collected_waiters.append(waiter)
+    base_state.workers[TEST_STEP].collected_waiters.append(waiter)
 
     tick = TickAddEvent(event=OtherEvent(data="expected"))
     new_state, commands = _process_add_event_tick(tick, base_state, now_seconds=100.0)
 
-    assert (
-        new_state.workers["test_step"].collected_waiters[0].resolved_event is not None
-    )
+    assert new_state.workers[TEST_STEP].collected_waiters[0].resolved_event is not None
     run_cmds = [c for c in commands if isinstance(c, CommandRunWorker)]
     assert any(c.event == original_event for c in run_cmds)
 
@@ -475,7 +477,7 @@ def test_step_state_changed_names(base_state: BrokerState) -> None:
 
     # Return a regular Event → output_event_name should be its type, and input_event_name should be str(type(input))
     tick = TickStepResult(
-        step_name="test_step",
+        step_id=StepId.root("test_step"),
         worker_id=0,
         event=input_ev,
         result=[StepWorkerResult(result=OtherEvent(data="x"))],
@@ -490,7 +492,7 @@ def test_step_state_changed_names(base_state: BrokerState) -> None:
     # Return StopEvent → output_event_name should be None
     add_worker(base_state, input_ev)
     tick2 = TickStepResult(
-        step_name="test_step",
+        step_id=StepId.root("test_step"),
         worker_id=0,
         event=input_ev,
         result=[StepWorkerResult(result=StopEvent(result="done"))],
@@ -558,12 +560,12 @@ def test_add_when_capacity_available(base_state: BrokerState) -> None:
     event = MyTestEvent(value=42)
     commands = _add_or_enqueue_event(
         EventAttempt(event=event),
-        "test_step",
-        base_state.workers["test_step"],
+        TEST_STEP,
+        base_state.workers[TEST_STEP],
         now_seconds=100.0,
     )
 
-    assert len(base_state.workers["test_step"].in_progress) == 1
+    assert len(base_state.workers[TEST_STEP].in_progress) == 1
     assert any(isinstance(c, CommandRunWorker) for c in commands)
     assert any(
         isinstance(c, CommandPublishEvent)
@@ -582,12 +584,12 @@ def test_enqueue_when_no_capacity(base_state: BrokerState) -> None:
     event = MyTestEvent(value=42)
     commands = _add_or_enqueue_event(
         EventAttempt(event=event),
-        "test_step",
-        base_state.workers["test_step"],
+        TEST_STEP,
+        base_state.workers[TEST_STEP],
         now_seconds=100.0,
     )
 
-    assert len(base_state.workers["test_step"].queue) == 1
+    assert len(base_state.workers[TEST_STEP].queue) == 1
     # PREPARING should be published when we enqueue
     assert isinstance(commands[0], CommandPublishEvent)
     assert isinstance(commands[0].event, StepStateChanged)
@@ -596,8 +598,8 @@ def test_enqueue_when_no_capacity(base_state: BrokerState) -> None:
 
 def test_rewind_restarts_workers(base_state: BrokerState) -> None:
     """Test that in_progress workers are restarted."""
-    base_state.workers["test_step"].config.num_workers = 2
-    base_state.config.steps["test_step"].num_workers = 2
+    base_state.workers[TEST_STEP].config.num_workers = 2
+    base_state.config.steps[TEST_STEP].num_workers = 2
 
     add_worker(base_state, MyTestEvent(value=1), worker_id=0)
     add_worker(base_state, MyTestEvent(value=2), worker_id=1)
@@ -607,7 +609,7 @@ def test_rewind_restarts_workers(base_state: BrokerState) -> None:
     # Both should be restarted
     run_cmds = [c for c in commands if isinstance(c, CommandRunWorker)]
     assert len(run_cmds) == 2
-    assert len(new_state.workers["test_step"].in_progress) == 2
+    assert len(new_state.workers[TEST_STEP].in_progress) == 2
 
 
 def test_add_event_tick_preserves_retry_metadata(base_state: BrokerState) -> None:
@@ -629,7 +631,7 @@ def test_add_event_tick_preserves_retry_metadata(base_state: BrokerState) -> Non
     assert len(run_cmds) == 1
 
     # Verify retry metadata was preserved in the InProgressState
-    in_progress = new_state.workers["test_step"].in_progress
+    in_progress = new_state.workers[TEST_STEP].in_progress
     assert len(in_progress) == 1
     assert in_progress[0].attempts == attempts
     assert in_progress[0].first_attempt_at == first_attempt_time
@@ -645,7 +647,7 @@ def test_add_event_tick_uses_now_when_no_retry_metadata(
 
     new_state, _ = _process_add_event_tick(tick, base_state, now_seconds=now)
 
-    in_progress = new_state.workers["test_step"].in_progress
+    in_progress = new_state.workers[TEST_STEP].in_progress
     assert len(in_progress) == 1
     assert in_progress[0].attempts == 0
     assert in_progress[0].first_attempt_at == now
@@ -654,14 +656,14 @@ def test_add_event_tick_uses_now_when_no_retry_metadata(
 def test_step_worker_failed_retry_preserves_delay(base_state: BrokerState) -> None:
     """Test that CommandQueueEvent includes delay from retry policy."""
     retry_delay = 5.0
-    base_state.workers["test_step"].config.retry_policy = ConstantDelayRetryPolicy(
+    base_state.workers[TEST_STEP].config.retry_policy = ConstantDelayRetryPolicy(
         maximum_attempts=3, delay=retry_delay
     )
     event = MyTestEvent(value=42)
     add_worker(base_state, event)
 
     tick: TickStepResult = TickStepResult(
-        step_name="test_step",
+        step_id=StepId.root("test_step"),
         worker_id=0,
         event=event,
         result=[StepWorkerFailed(exception=ValueError("test"), failed_at=110.0)],
@@ -674,21 +676,21 @@ def test_step_worker_failed_retry_preserves_delay(base_state: BrokerState) -> No
     assert queue_cmds[0].delay == retry_delay
     assert queue_cmds[0].attempts == 1
     assert queue_cmds[0].first_attempt_at == 100.0  # from add_worker fixture
-    assert queue_cmds[0].step_name == "test_step"
+    assert queue_cmds[0].step_id == TEST_STEP
 
 
 def test_step_worker_failed_retry_preserves_first_attempt_at(
     base_state: BrokerState,
 ) -> None:
     """Test that first_attempt_at stays constant across retries."""
-    base_state.workers["test_step"].config.retry_policy = ConstantDelayRetryPolicy(
+    base_state.workers[TEST_STEP].config.retry_policy = ConstantDelayRetryPolicy(
         maximum_attempts=5, delay=1.0
     )
     event = MyTestEvent(value=42)
 
     original_first_attempt_at = 50.0
     # Simulate a worker that's already been retried twice
-    base_state.workers["test_step"].in_progress.append(
+    base_state.workers[TEST_STEP].in_progress.append(
         InProgressState(
             event=event,
             worker_id=0,
@@ -703,7 +705,7 @@ def test_step_worker_failed_retry_preserves_first_attempt_at(
     )
 
     tick: TickStepResult = TickStepResult(
-        step_name="test_step",
+        step_id=StepId.root("test_step"),
         worker_id=0,
         event=event,
         result=[StepWorkerFailed(exception=ValueError("test"), failed_at=200.0)],
@@ -728,12 +730,12 @@ def test_step_worker_failed_exponential_jitter_deterministic(
         maximum_attempts=5,
         jitter=True,
     )
-    base_state.workers["test_step"].config.retry_policy = policy
+    base_state.workers[TEST_STEP].config.retry_policy = policy
     event = MyTestEvent(value=42)
     add_worker(base_state, event)
 
     tick: TickStepResult = TickStepResult(
-        step_name="test_step",
+        step_id=StepId.root("test_step"),
         worker_id=0,
         event=event,
         result=[StepWorkerFailed(exception=ValueError("test"), failed_at=110.0)],
@@ -784,9 +786,7 @@ def test_check_idle_state_not_running(base_state: BrokerState) -> None:
 
 def test_check_idle_state_has_queued_events(base_state: BrokerState) -> None:
     """A workflow with queued events is not idle."""
-    base_state.workers["test_step"].queue.append(
-        EventAttempt(event=MyTestEvent(value=1))
-    )
+    base_state.workers[TEST_STEP].queue.append(EventAttempt(event=MyTestEvent(value=1)))
     assert _check_idle_state(base_state) is False
 
 
@@ -811,7 +811,7 @@ def test_check_idle_state_is_idle_with_waiter(base_state: BrokerState) -> None:
         has_requirements=False,
         resolved_event=None,
     )
-    base_state.workers["test_step"].collected_waiters.append(waiter)
+    base_state.workers[TEST_STEP].collected_waiters.append(waiter)
     assert _check_idle_state(base_state) is True
 
 
@@ -825,7 +825,7 @@ def test_step_result_does_not_emit_idle(base_state: BrokerState) -> None:
     add_worker(base_state, event)
 
     tick: TickStepResult = TickStepResult(
-        step_name="test_step",
+        step_id=StepId.root("test_step"),
         worker_id=0,
         event=event,
         result=[StepWorkerResult(result=None)],
@@ -857,10 +857,10 @@ def test_check_idle_state_multi_step_not_idle_if_one_has_work(
         num_workers=1,
         resources=[],
     )
-    base_state.config.steps["other_step"] = InternalStepConfig(
+    base_state.config.steps[OTHER_STEP] = InternalStepConfig(
         accepted_events=[OtherEvent], retry_policy=None, num_workers=1
     )
-    base_state.workers["other_step"] = InternalStepWorkerState(
+    base_state.workers[OTHER_STEP] = InternalStepWorkerState(
         queue=[],
         config=other_step_cfg,
         in_progress=[],
@@ -877,13 +877,13 @@ def test_check_idle_state_multi_step_not_idle_if_one_has_work(
         has_requirements=False,
         resolved_event=None,
     )
-    base_state.workers["test_step"].collected_waiters.append(waiter)
+    base_state.workers[TEST_STEP].collected_waiters.append(waiter)
 
     # Without work in other_step, workflow is idle
     assert _check_idle_state(base_state) is True
 
     # Add in_progress work to other_step - now not idle
-    base_state.workers["other_step"].in_progress.append(
+    base_state.workers[OTHER_STEP].in_progress.append(
         InProgressState(
             event=OtherEvent(data="test"),
             worker_id=0,
@@ -899,8 +899,8 @@ def test_check_idle_state_multi_step_not_idle_if_one_has_work(
     assert _check_idle_state(base_state) is False
 
     # Or with queued work
-    base_state.workers["other_step"].in_progress = []
-    base_state.workers["other_step"].queue.append(
+    base_state.workers[OTHER_STEP].in_progress = []
+    base_state.workers[OTHER_STEP].queue.append(
         EventAttempt(event=OtherEvent(data="queued"))
     )
     assert _check_idle_state(base_state) is False
@@ -912,12 +912,12 @@ def test_no_idle_event_when_work_remains(base_state: BrokerState) -> None:
     add_worker(base_state, event)
 
     # Queue another event so work remains after processing
-    base_state.workers["test_step"].queue.append(
+    base_state.workers[TEST_STEP].queue.append(
         EventAttempt(event=MyTestEvent(value=99))
     )
 
     tick: TickStepResult = TickStepResult(
-        step_name="test_step",
+        step_id=StepId.root("test_step"),
         worker_id=0,
         event=event,
         result=[StepWorkerResult(result=None)],  # Completes but queue has more
@@ -947,11 +947,11 @@ def test_no_idle_event_when_workflow_completes(base_state: BrokerState) -> None:
         has_requirements=False,
         resolved_event=None,
     )
-    base_state.workers["test_step"].collected_waiters.append(waiter)
+    base_state.workers[TEST_STEP].collected_waiters.append(waiter)
 
     # Complete the workflow with StopEvent
     tick: TickStepResult = TickStepResult(
-        step_name="test_step",
+        step_id=StepId.root("test_step"),
         worker_id=0,
         event=event,
         result=[StepWorkerResult(result=StopEvent(result="done"))],
@@ -999,7 +999,7 @@ def test_rebuild_state_from_ticks_clears_in_progress(base_state: BrokerState) ->
         collected_events={},
         collected_waiters=[],
     )
-    base_state.workers["test_step"].in_progress = [
+    base_state.workers[TEST_STEP].in_progress = [
         InProgressState(
             event=event1,
             worker_id=1,  # Original worker ID from checkpoint
@@ -1023,7 +1023,7 @@ def test_rebuild_state_from_ticks_clears_in_progress(base_state: BrokerState) ->
         TickAddEvent(event=event1),
         # Worker 0 completes
         TickStepResult(
-            step_name="test_step",
+            step_id=StepId.root("test_step"),
             worker_id=0,  # New ID assigned after rewind
             event=event1,
             result=[StepWorkerResult(result=OtherEvent(data="done1"))],
@@ -1032,7 +1032,7 @@ def test_rebuild_state_from_ticks_clears_in_progress(base_state: BrokerState) ->
         TickAddEvent(event=event2),
         # Worker 1 completes
         TickStepResult(
-            step_name="test_step",
+            step_id=StepId.root("test_step"),
             worker_id=0,  # Reuses ID 0 since previous worker completed
             event=event2,
             result=[StepWorkerResult(result=StopEvent(result="done2"))],
@@ -1045,7 +1045,7 @@ def test_rebuild_state_from_ticks_clears_in_progress(base_state: BrokerState) ->
 
     # Verify the workflow completed
     assert final_state.is_running is False
-    assert len(final_state.workers["test_step"].in_progress) == 0
+    assert len(final_state.workers[TEST_STEP].in_progress) == 0
 
 
 def test_rebuild_state_from_ticks_preserves_queue_order(
@@ -1068,7 +1068,7 @@ def test_rebuild_state_from_ticks_preserves_queue_order(
         collected_events={},
         collected_waiters=[],
     )
-    base_state.workers["test_step"].in_progress = [
+    base_state.workers[TEST_STEP].in_progress = [
         InProgressState(
             event=event1,
             worker_id=0,
@@ -1078,7 +1078,7 @@ def test_rebuild_state_from_ticks_preserves_queue_order(
         ),
     ]
     # Also has queued event
-    base_state.workers["test_step"].queue = [
+    base_state.workers[TEST_STEP].queue = [
         EventAttempt(event=event2, attempts=0, first_attempt_at=None)
     ]
 
@@ -1087,13 +1087,13 @@ def test_rebuild_state_from_ticks_preserves_queue_order(
 
     # rewind_in_progress re-starts workers, so event1 should be back in in_progress
     # with worker_id=0 (reassigned) and retry info preserved
-    assert len(result.workers["test_step"].in_progress) == 1
-    assert result.workers["test_step"].in_progress[0].event == event1
-    assert result.workers["test_step"].in_progress[0].worker_id == 0
-    assert result.workers["test_step"].in_progress[0].attempts == 2
+    assert len(result.workers[TEST_STEP].in_progress) == 1
+    assert result.workers[TEST_STEP].in_progress[0].event == event1
+    assert result.workers[TEST_STEP].in_progress[0].worker_id == 0
+    assert result.workers[TEST_STEP].in_progress[0].attempts == 2
     # Queue should have event2 (since num_workers=1, only 1 can be in_progress)
-    assert len(result.workers["test_step"].queue) == 1
-    assert result.workers["test_step"].queue[0].event == event2
+    assert len(result.workers[TEST_STEP].queue) == 1
+    assert result.workers[TEST_STEP].queue[0].event == event2
 
 
 async def _aiter(ticks: list[WorkflowTick]) -> AsyncIterator[WorkflowTick]:
@@ -1107,14 +1107,14 @@ def _simple_step_tick_sequence() -> list[WorkflowTick]:
     return [
         TickAddEvent(event=event1),
         TickStepResult(
-            step_name="test_step",
+            step_id=StepId.root("test_step"),
             worker_id=0,
             event=event1,
             result=[StepWorkerResult(result=OtherEvent(data="done1"))],
         ),
         TickAddEvent(event=event2),
         TickStepResult(
-            step_name="test_step",
+            step_id=StepId.root("test_step"),
             worker_id=0,
             event=event2,
             result=[StepWorkerResult(result=StopEvent(result="done2"))],
@@ -1127,7 +1127,7 @@ async def test_rebuild_state_from_ticks_stream_empty(base_state: BrokerState) ->
         step_name="test_step", collected_events={}, collected_waiters=[]
     )
     event1 = MyTestEvent(value=1)
-    base_state.workers["test_step"].in_progress = [
+    base_state.workers[TEST_STEP].in_progress = [
         InProgressState(
             event=event1,
             worker_id=0,
@@ -1140,9 +1140,9 @@ async def test_rebuild_state_from_ticks_stream_empty(base_state: BrokerState) ->
     streamed = await rebuild_state_from_ticks_stream(base_state, _aiter([]))
 
     # rewind_in_progress re-assigns worker_id=0 starting fresh; in_progress preserved.
-    assert len(streamed.workers["test_step"].in_progress) == 1
-    assert streamed.workers["test_step"].in_progress[0].worker_id == 0
-    assert streamed.workers["test_step"].in_progress[0].event == event1
+    assert len(streamed.workers[TEST_STEP].in_progress) == 1
+    assert streamed.workers[TEST_STEP].in_progress[0].worker_id == 0
+    assert streamed.workers[TEST_STEP].in_progress[0].event == event1
 
 
 async def test_rebuild_state_from_ticks_stream_single_tick(
@@ -1193,7 +1193,7 @@ async def test_rebuild_state_from_ticks_stream_clears_in_progress(
     shared_state = StepWorkerState(
         step_name="test_step", collected_events={}, collected_waiters=[]
     )
-    base_state.workers["test_step"].in_progress = [
+    base_state.workers[TEST_STEP].in_progress = [
         InProgressState(
             event=event1,
             worker_id=1,
@@ -1212,14 +1212,14 @@ async def test_rebuild_state_from_ticks_stream_clears_in_progress(
     ticks: list[WorkflowTick] = [
         TickAddEvent(event=event1),
         TickStepResult(
-            step_name="test_step",
+            step_id=StepId.root("test_step"),
             worker_id=0,
             event=event1,
             result=[StepWorkerResult(result=OtherEvent(data="done1"))],
         ),
         TickAddEvent(event=event2),
         TickStepResult(
-            step_name="test_step",
+            step_id=StepId.root("test_step"),
             worker_id=0,
             event=event2,
             result=[StepWorkerResult(result=StopEvent(result="done2"))],
@@ -1229,7 +1229,7 @@ async def test_rebuild_state_from_ticks_stream_clears_in_progress(
     final_state = await rebuild_state_from_ticks_stream(base_state, _aiter(ticks))
 
     assert final_state.is_running is False
-    assert len(final_state.workers["test_step"].in_progress) == 0
+    assert len(final_state.workers[TEST_STEP].in_progress) == 0
 
 
 async def test_replay_ticks_stream_surfaces_stop_event(base_state: BrokerState) -> None:

@@ -17,17 +17,31 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Discriminator, Field, TypeAdapter
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    Field,
+    TypeAdapter,
+)
 from workflows.events import SerializableEvent, SerializableOptionalException
 from workflows.runtime.types.results import StepFunctionResult
+from workflows.runtime.types.step_id import StepId
+
+# Pre-StepId journals serialized this field as ``step_name``; accept both so
+# persisted ticks still deserialize. New ticks serialize under ``step_id``.
+_STEP_ID_ALIAS = AliasChoices("step_id", "step_name")
 
 
 class TickStepResult(BaseModel):
     """When processed, executes a step function and publishes the result"""
 
-    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+    model_config = ConfigDict(
+        frozen=True, arbitrary_types_allowed=True, populate_by_name=True
+    )
     type: Literal["step_result"] = "step_result"
-    step_name: str
+    step_id: StepId = Field(validation_alias=_STEP_ID_ALIAS)
     worker_id: int
     event: SerializableEvent
     result: list[Annotated[StepFunctionResult, Discriminator("type")]]
@@ -36,10 +50,17 @@ class TickStepResult(BaseModel):
 class TickAddEvent(BaseModel):
     """When sent, adds an event to the workflow's event queue"""
 
-    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+    model_config = ConfigDict(
+        frozen=True, arbitrary_types_allowed=True, populate_by_name=True
+    )
     type: Literal["add_event"] = "add_event"
     event: SerializableEvent
-    step_name: str | None = None
+    step_id: StepId | None = Field(default=None, validation_alias=_STEP_ID_ALIAS)
+    # Namespace of the step (or boundary) that emitted this event. Type-routing
+    # is scoped to this namespace so events emitted inside a child stay in the
+    # child; ``()`` (the default) is the root namespace, preserving the
+    # pre-child wire format for old journals.
+    origin_namespace: tuple[str, ...] = ()
     attempts: int | None = None
     first_attempt_at: float | None = None
     last_exception: SerializableOptionalException = None
@@ -80,10 +101,28 @@ class TickTimeout(BaseModel):
 class TickWaiterTimeout(BaseModel):
     """When processed, marks a specific waiter as timed out and replays the step."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
     type: Literal["waiter_timeout"] = "waiter_timeout"
-    step_name: str
+    step_id: StepId = Field(validation_alias=_STEP_ID_ALIAS)
     waiter_id: str
+
+
+class TickNamespaceTimeout(BaseModel):
+    """When processed, times out a single child namespace (not the whole run).
+
+    Scheduled when the first event routes into a child namespace that declares a
+    ``timeout``. On fire it expires *that child* through the namespaced failure
+    path (so the child's ``@catch_error`` can recover it); only the root timeout
+    (:class:`TickTimeout`) halts the whole run. ``started_at`` pins the activation
+    this tick was scheduled for: if the namespace has since completed or been
+    re-armed, the tick is a stale no-op.
+    """
+
+    model_config = ConfigDict(frozen=True)
+    type: Literal["namespace_timeout"] = "namespace_timeout"
+    namespace: tuple[str, ...]
+    timeout: float
+    started_at: float
 
 
 class TickIdleCheck(BaseModel):
@@ -105,6 +144,7 @@ WorkflowTick = Annotated[
     | TickPublishEvent
     | TickTimeout
     | TickWaiterTimeout
+    | TickNamespaceTimeout
     | TickIdleCheck
     | TickIdleRelease,
     Discriminator("type"),

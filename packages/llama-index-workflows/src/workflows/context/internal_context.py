@@ -10,8 +10,10 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Coroutine, Generic, TypeVar, cast
 
 from workflows.context.context_types import MODEL_T
-from workflows.context.state_store import StateStore
+from workflows.context.serializers import JsonSerializer
+from workflows.context.state_store import StateStore, build_namespaced_state
 from workflows.errors import WorkflowRuntimeError
+from workflows.events import _set_event_origin_namespace
 from workflows.retry_policy import RetryInfo
 from workflows.runtime.types.results import (
     AddCollectedEvent,
@@ -22,6 +24,7 @@ from workflows.runtime.types.results import (
     StepWorkerStateContextVar,
     WaitingForEvent,
 )
+from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import TickAddEvent
 
 if TYPE_CHECKING:
@@ -49,9 +52,14 @@ class InternalContext(Generic[MODEL_T]):
         self,
         internal_adapter: InternalRunAdapter,
         workflow: Workflow,
+        state_store: StateStore[Any] | None = None,
     ) -> None:
         self._internal_adapter = internal_adapter
         self._workflow = workflow
+        # The per-namespace state view threaded in by the control loop for a
+        # step. ``None`` outside a step (e.g. the run-level context); ``store``
+        # then resolves the root view on demand from the underlying store.
+        self._state_store = state_store
         self._workers = []
 
     def _execute_task(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
@@ -108,11 +116,21 @@ class InternalContext(Generic[MODEL_T]):
 
     @property
     def store(self) -> StateStore[MODEL_T]:
-        """Access workflow state store."""
-        state_store = self._internal_adapter.get_state_store()
-        if state_store is None:
+        """Access workflow state store.
+
+        Inside a step the per-namespace view is threaded in at construction. For
+        a context built outside a step (no threaded view), resolve the root view
+        on demand from the run's single underlying store.
+        """
+        if self._state_store is not None:
+            return cast("StateStore[MODEL_T]", self._state_store)
+        underlying = self._internal_adapter.get_underlying_store()
+        if underlying is None:
             raise RuntimeError("State store not available from adapter")
-        return state_store  # type: ignore[return-value]
+        namespaced = build_namespaced_state(
+            self._workflow, underlying, JsonSerializer()
+        )
+        return namespaced.view(())  # type: ignore[return-value]
 
     def collect_events(
         self,
@@ -158,10 +176,14 @@ class InternalContext(Generic[MODEL_T]):
             self._workflow._validate_valid_step_message(step, message)
 
         recovery_counts: dict[str, int] = {}
+        namespace: tuple[str, ...] = ()
         try:
-            recovery_counts = dict(
-                StepWorkerStateContextVar.get().retry.recovery_counts
-            )
+            step_ctx = StepWorkerStateContextVar.get()
+            recovery_counts = dict(step_ctx.retry.recovery_counts)
+            # Inherit the emitting step's namespace so the event routes within
+            # the same child (or, for a targeted send, to the named step in this
+            # namespace rather than a root step).
+            namespace = step_ctx.namespace
         except LookupError:
             pass
 
@@ -169,7 +191,8 @@ class InternalContext(Generic[MODEL_T]):
             self._internal_adapter.send_event(
                 TickAddEvent(
                     event=message,
-                    step_name=step,
+                    step_id=StepId(namespace, step) if step is not None else None,
+                    origin_namespace=namespace,
                     recovery_counts=recovery_counts,
                 )
             )
@@ -215,6 +238,16 @@ class InternalContext(Generic[MODEL_T]):
     def write_event_to_stream(self, ev: Event | None) -> None:
         """Write an event to the published event stream."""
         if ev is not None:
+            # Tag the event with the emitting step's namespace so child streams
+            # can be filtered out by default (and surfaced via
+            # ``stream_events(include_children=True)``). Same contextvar source
+            # ``send_event`` reads; root steps leave the default ``()``.
+            try:
+                namespace = StepWorkerStateContextVar.get().namespace
+            except LookupError:
+                namespace = ()
+            if namespace:
+                _set_event_origin_namespace(ev, namespace)
             self._execute_task(self._internal_adapter.write_to_event_stream(ev))
 
     def retry_info(self) -> RetryInfo:

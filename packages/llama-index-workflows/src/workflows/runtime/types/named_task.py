@@ -10,6 +10,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Coroutine
 
+from workflows.runtime.types.step_id import StepId
+
 # Key prefix for pull tasks
 PULL_PREFIX = "__pull__"
 
@@ -18,13 +20,13 @@ PULL_PREFIX = "__pull__"
 class WorkerTask:
     """An asyncio worker task with structured identity."""
 
-    step_name: str
+    step_id: StepId
     worker_id: int
     task: Task[Any]
 
     @property
     def key(self) -> str:
-        return f"{self.step_name}:{self.worker_id}"
+        return f"{self.step_id}:{self.worker_id}"
 
 
 @dataclass
@@ -89,17 +91,17 @@ def pick_highest_priority(
 class PendingWorker:
     """A worker coroutine that hasn't been started yet."""
 
-    step_name: str
+    step_id: StepId
     worker_id: int
     coro: Coroutine[Any, Any, Any]
 
     @property
     def key(self) -> str:
-        return f"{self.step_name}:{self.worker_id}"
+        return f"{self.step_id}:{self.worker_id}"
 
     def start(self, task: Task[Any]) -> WorkerTask:
         """Convert to a started WorkerTask."""
-        return WorkerTask(self.step_name, self.worker_id, task)
+        return WorkerTask(self.step_id, self.worker_id, task)
 
 
 @dataclass

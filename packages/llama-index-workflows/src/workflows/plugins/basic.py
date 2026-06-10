@@ -20,7 +20,9 @@ from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import (
     InMemoryStateStore,
     StateStore,
-    infer_state_type,
+    is_child_ful,
+    namespaced_seed_blob,
+    namespaced_underlying_state_type,
 )
 from workflows.errors import WorkflowRuntimeError
 from workflows.events import Event, StartEvent, StopEvent
@@ -64,7 +66,11 @@ class AsyncioAdapterQueues:
         self.run_id = run_id
         self.init_state = init_state
         self.ticks: list[WorkflowTick] = []
-        self.state_store = state_store
+        # The single per-run durable (here in-memory) store. For a child-ful run
+        # this is a ``DictState`` blob holding the whole tree; core's namespace
+        # lens slices it per child. For a childless run it is the typed root
+        # store (flat format). ``None`` until run_workflow builds it.
+        self.state_store: StateStore[Any] | None = state_store
 
     # created lazily via cached_property for Python 3.14+ compatibility (they require a running event loop)
     @functools.cached_property
@@ -133,7 +139,7 @@ class InternalAsyncioAdapter(InternalRunAdapter, SnapshottableAdapter):
     def replay(self) -> list[WorkflowTick]:
         return self._queues.ticks
 
-    def get_state_store(self) -> StateStore[Any] | None:
+    def get_underlying_store(self) -> StateStore[Any] | None:
         return self._queues.state_store
 
 
@@ -174,7 +180,7 @@ class ExternalAsyncioAdapter(
     def replay(self) -> list[WorkflowTick]:
         return self._queues.ticks
 
-    def get_state_store(self) -> StateStore[Any] | None:
+    def get_underlying_store(self) -> StateStore[Any] | None:
         return self._queues.state_store
 
     async def get_result(self) -> StopEvent:
@@ -275,19 +281,28 @@ class BasicRuntime(Runtime):
 
         registered = self.get_or_register(workflow)
 
-        # Create state store from serialized state or infer type from workflow
+        # Build the single per-run underlying store. Core owns the format gate:
+        # a child-ful run gets one ``DictState`` blob (seeded from the portable
+        # nested payload on resume); a childless run gets the typed root store
+        # (flat format). The namespace lens slices the blob per child at access.
         active_serializer = serializer or JsonSerializer()
-        if serialized_state:
-            state_store = InMemoryStateStore.from_dict(
+        seed_blob = namespaced_seed_blob(
+            serialized_state, child_ful=is_child_ful(registered.workflow)
+        )
+        if seed_blob is not None:
+            underlying: StateStore[Any] = InMemoryStateStore(seed_blob)
+        elif serialized_state:
+            underlying = InMemoryStateStore.from_dict(
                 serialized_state, active_serializer
             )
         else:
-            # Infer state type from workflow step configs
-            state_type = infer_state_type(registered.workflow)
-            state_store = InMemoryStateStore(state_type())
+            underlying = InMemoryStateStore(
+                namespaced_underlying_state_type(registered.workflow)()
+            )
+
         # might want to lock this better. Unlikely race condition if you spam with the same run_id.
         queues = self._get_or_create_queues(run_id, init_state)
-        queues.state_store = state_store
+        queues.state_store = underlying
 
         # Capture propagation context (otel trace, instrument tags, etc.)
         # BEFORE creating the task — contextvars won't be inherited.
