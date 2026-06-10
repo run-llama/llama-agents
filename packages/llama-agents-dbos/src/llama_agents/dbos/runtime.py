@@ -687,10 +687,13 @@ class DBOSRuntime(Runtime):
                 )
                 # Share the runtime's asyncpg pool — PostgresWorkflowStore
                 # borrows it via the factory and never owns its lifecycle.
+                # auto_migrate=False: DBOS run_migrations() already covers the
+                # server-store tables, and it honors run_migrations_on_launch.
                 return PostgresWorkflowStore(
                     dsn=dsn,
                     schema=schema,
                     pool=PoolProvider.borrowed(self._ensure_pool),
+                    auto_migrate=False,
                 )
 
             db_path = str(engine.url.database) if engine.url.database else ":memory:"

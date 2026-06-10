@@ -160,6 +160,42 @@ async def test_borrowed_pool_not_closed_on_close(
     assert store._pool is None
 
 
+async def test_concurrent_start_initializes_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent first-callers get one migration run and one LISTEN setup."""
+    fake_pool = MagicMock()
+
+    async def factory() -> Any:
+        # Yield so a second start() caller can interleave with the first.
+        await asyncio.sleep(0)
+        return fake_pool
+
+    calls = {"migrate": 0, "listen": 0}
+
+    async def fake_run_migrations(self: PostgresWorkflowStore) -> None:
+        calls["migrate"] += 1
+
+    async def fake_setup_listener(self: PostgresWorkflowStore) -> None:
+        calls["listen"] += 1
+
+    monkeypatch.setattr(PostgresWorkflowStore, "run_migrations", fake_run_migrations)
+    monkeypatch.setattr(PostgresWorkflowStore, "_setup_listener", fake_setup_listener)
+
+    store = PostgresWorkflowStore(
+        dsn="postgresql://localhost/test",
+        pool=PoolProvider.borrowed(factory),
+    )
+
+    await asyncio.gather(store.start(), store.start())
+    assert calls == {"migrate": 1, "listen": 1}
+
+    # The guard must not latch: a re-start after close() initializes again.
+    await store.close()
+    await asyncio.gather(store.start(), store.start())
+    assert calls == {"migrate": 2, "listen": 2}
+
+
 async def test_listen_termination_callback_schedules_reconnect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

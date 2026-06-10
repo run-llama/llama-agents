@@ -39,8 +39,7 @@ def string_record_from_state(
     state: BaseModel, serializer: BaseSerializer
 ) -> StateRecord:
     """Encode state into the string-backed storage record format."""
-    record = _state_store._string_record_from_state(state, serializer)
-    return StateRecord.model_validate(record.model_dump())
+    return _state_store._string_record_from_state(state, serializer)
 
 
 async def state_store_handoff(

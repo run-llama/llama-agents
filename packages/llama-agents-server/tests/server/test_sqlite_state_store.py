@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from pathlib import Path
 
@@ -199,6 +200,59 @@ async def test_clear_resets_typed_state(
     state = await typed_store.get_state()
     assert state.count == 0
     assert state.label == "default"
+
+
+@pytest.mark.asyncio
+async def test_clear_resets_subclass_fields(db_path: str) -> None:
+    """Clear resets to the stored state's type; child-only fields don't survive."""
+    store: SqliteStateStore[CounterState] = SqliteStateStore(
+        db_path=db_path,
+        run_id="run-clear-subclass",
+        state_type=CounterState,
+    )
+    await store.set_state(ExtendedCounterState(count=1, extra="dirty"))
+
+    await store.clear()
+
+    state = await store.get_state()
+    assert isinstance(state, ExtendedCounterState)
+    assert state.count == 0
+    assert state.extra == "extra_default"
+
+
+@pytest.mark.asyncio
+async def test_typeless_clear_over_typed_row(db_path: str) -> None:
+    """A DictState-typed facade over a row holding a typed model can still clear."""
+    typed: SqliteStateStore[CounterState] = SqliteStateStore(
+        db_path=db_path,
+        run_id="run-typeless-clear",
+        state_type=CounterState,
+    )
+    await typed.set_state(CounterState(count=9, label="dirty"))
+
+    typeless: SqliteStateStore[DictState] = SqliteStateStore(
+        db_path=db_path,
+        run_id="run-typeless-clear",
+    )
+    await typeless.clear()
+
+    state = await typed.get_state()
+    assert state == CounterState()
+
+
+@pytest.mark.asyncio
+async def test_get_inside_edit_state_does_not_deadlock(
+    store: SqliteStateStore[DictState],
+) -> None:
+    """Reads are lockless: `get` must work inside an `edit_state` block."""
+    await store.set("counter", 1)
+
+    async def nested_read() -> int:
+        async with store.edit_state() as state:
+            state["other"] = 2
+            return int(await store.get("counter"))
+
+    assert await asyncio.wait_for(nested_read(), timeout=2.0) == 1
 
 
 # -- Persistence across instances --

@@ -552,10 +552,13 @@ class StateStore(Protocol[MODEL_T]):
 class _TypedStateStore(Generic[MODEL_T]):
     """Typed StateStore facade over raw storage.
 
-    Concurrency contract: the internal lock serializes read-modify-write
-    operations within one process *through the same facade instance*.
-    Workflow stores memoize one facade per run so in-process writers share
-    that lock. Writers in other processes or replicas are not serialized;
+    Concurrency contract: reads (`get_state`, `get`, `snapshot`) take no
+    lock; writers (`set_state`, `set`, `clear`, `edit_state`) take the
+    internal lock, which serializes read-modify-write cycles within one
+    process *through the same facade instance*. Calling a writer inside
+    an `edit_state` block deadlocks and is unsupported. Workflow stores
+    memoize one facade per run so in-process writers share that lock.
+    Writers in other processes or replicas are not serialized;
     cross-replica consistency requires backend-level atomicity.
     """
 
@@ -621,9 +624,12 @@ class _TypedStateStore(Generic[MODEL_T]):
             await self._save_state(merged)
 
     async def get(self, path: str, default: Any = Ellipsis) -> Any:
-        """Get a nested value using dot-separated paths."""
-        async with self._lock:
-            return get_by_path(await self._load_state(), path, default)
+        """Get a nested value using dot-separated paths.
+
+        Lockless read, like `get_state`, so it stays safe inside
+        `edit_state`.
+        """
+        return get_by_path(await self._load_state(), path, default)
 
     async def set(self, path: str, value: Any) -> None:
         """Set a nested value using dot-separated paths."""
@@ -631,12 +637,26 @@ class _TypedStateStore(Generic[MODEL_T]):
             set_by_path(state, path, value)
 
     async def clear(self) -> None:
-        """Reset the state to its type defaults."""
-        await self.set_state(create_cleared_state(self.state_type))
+        """Reset the state to its type defaults.
+
+        Clear is a reset, not a merge: the stored state is replaced with a
+        default instance of its *current* type, so subclass fields are reset
+        too. Falls back to the construction-time `state_type` when storage
+        is empty.
+        """
+        async with self._lock:
+            current = await self._load_state_or_none()
+            target = type(current) if current is not None else self.state_type
+            await self._save_state(create_cleared_state(target))
 
     @asynccontextmanager
     async def edit_state(self) -> AsyncGenerator[MODEL_T, None]:
-        """Edit state transactionally under a lock."""
+        """Edit state transactionally under a lock.
+
+        Reads (`get_state`, `get`, `snapshot`) are safe inside the block;
+        calling a writer (`set_state`, `set`, `clear`, or a nested
+        `edit_state`) deadlocks and is unsupported.
+        """
         async with self._lock:
             state = await self._load_state()
             yield state
@@ -851,6 +871,7 @@ def deserialize_dict_state_data(
 def deserialize_state_from_dict(
     serialized_state: dict[str, Any],
     serializer: "BaseSerializer",
+    state_type: type[BaseModel] | None = None,
 ) -> BaseModel:
     """Deserialize state from a serialized payload.
 
@@ -861,6 +882,9 @@ def deserialize_state_from_dict(
         serialized_state: The payload from to_dict(), containing state_data,
             state_type, and state_module.
         serializer: Strategy to decode stored values.
+        state_type: Deprecated and ignored. Decoding dispatches on the
+            payload shape; the kwarg is kept so released callers
+            (llama-agents-dbos <= 0.3.x) don't break.
 
     Returns:
         The deserialized state model instance.

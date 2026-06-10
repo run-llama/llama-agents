@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import gc
-import inspect
 import json
 import pickle
 import weakref
@@ -464,6 +463,42 @@ async def test_clear(internal_ctx: Context) -> None:
     assert res is None
 
 
+class ParentClearState(BaseModel):
+    a: int = 0
+
+
+class ChildClearState(ParentClearState):
+    b: int = 0
+
+
+@pytest.mark.asyncio
+async def test_get_inside_edit_state_does_not_deadlock() -> None:
+    """Reads are lockless: `get` must work inside an `edit_state` block."""
+    store = InMemoryStateStore(DictState())
+    await store.set("counter", 1)
+
+    async def nested_read() -> int:
+        async with store.edit_state() as state:
+            state["other"] = 2
+            return cast(int, await store.get("counter"))
+
+    assert await asyncio.wait_for(nested_read(), timeout=2.0) == 1
+
+
+@pytest.mark.asyncio
+async def test_clear_resets_subclass_fields() -> None:
+    """Clear is a reset to the current state's type, not a merge."""
+    store = InMemoryStateStore(ParentClearState())
+    await store.set_state(ChildClearState(a=1, b=7))
+
+    await store.clear()
+
+    state = await store.get_state()
+    assert isinstance(state, ChildClearState)
+    assert state.a == 0
+    assert state.b == 0
+
+
 @pytest.mark.asyncio
 async def test_running_steps_before_run_raises(workflow: Workflow) -> None:
     """Calling running_steps() before workflow.run() should raise ContextStateError."""
@@ -880,10 +915,17 @@ def test_decode_state_json_scalar_string_falls_back_to_dict_state() -> None:
     assert len(list(result.items())) == 0
 
 
-def test_deserialize_state_from_dict_has_no_state_type_override() -> None:
-    signature = inspect.signature(deserialize_state_from_dict)
+def test_deserialize_state_from_dict_accepts_deprecated_state_type_kwarg() -> None:
+    """Released llama-agents-dbos 0.3.x still passes state_type=; it must be ignored, not a TypeError."""
+    serializer = JsonSerializer()
+    store = InMemoryStateStore(TypedTestState(counter=3, name="kwarg"))
+    payload = store.to_dict(serializer)
 
-    assert "state_type" not in signature.parameters
+    with_kwarg = deserialize_state_from_dict(payload, serializer, state_type=DictState)
+    without_kwarg = deserialize_state_from_dict(payload, serializer)
+
+    assert isinstance(with_kwarg, TypedTestState)
+    assert with_kwarg == without_kwarg
 
 
 @pytest.mark.asyncio

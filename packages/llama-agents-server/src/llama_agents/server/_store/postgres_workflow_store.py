@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextlib
+import functools
 import json
 import logging
 import weakref
@@ -111,16 +112,30 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
     def _notify_channel(self) -> str:
         return self._events_table_name
 
+    @functools.cached_property
+    def _start_lock(self) -> asyncio.Lock:
+        """Lazy lock initialization for Python 3.14+ compatibility."""
+        return asyncio.Lock()
+
     async def start(self) -> None:
-        """Resolve the connection pool, run migrations if enabled, and set up LISTEN."""
+        """Resolve the connection pool, run migrations if enabled, and set up LISTEN.
+
+        Safe to call concurrently: the lock plus re-check ensures exactly one
+        caller resolves the pool, runs migrations, and acquires the LISTEN
+        connection. Re-checking inside the lock (instead of latching a
+        "started" flag) keeps re-start after ``close()`` working.
+        """
         if self._pool is not None:
             return
-        # Reset for re-start after a close().
-        self._closing = False
-        self._pool = await self._pool_provider.get()
-        if self._auto_migrate:
-            await self.run_migrations()
-        await self._setup_listener()
+        async with self._start_lock:
+            if self._pool is not None:
+                return
+            # Reset for re-start after a close().
+            self._closing = False
+            self._pool = await self._pool_provider.get()
+            if self._auto_migrate:
+                await self.run_migrations()
+            await self._setup_listener()
 
     async def _setup_listener(self) -> None:
         """Set up a dedicated connection for LISTEN/NOTIFY."""
