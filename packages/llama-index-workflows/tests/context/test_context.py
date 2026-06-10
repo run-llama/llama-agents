@@ -906,10 +906,39 @@ def test_decode_state_pickle_serializer_typed_payload_round_trips() -> None:
     assert result.name == "pickled"
 
 
-def test_decode_state_json_scalar_string_falls_back_to_dict_state() -> None:
+def test_decode_state_json_list_string_raises() -> None:
     serializer = JsonSerializer()
 
-    result = decode_state(json.dumps([1, 2, 3]), serializer)
+    with pytest.raises(ValueError, match="state payload"):
+        decode_state(json.dumps([1, 2, 3]), serializer)
+
+
+def test_decode_state_json_scalar_string_raises() -> None:
+    serializer = JsonSerializer()
+
+    with pytest.raises(ValueError, match="state payload"):
+        decode_state(json.dumps("just a string"), serializer)
+
+
+def test_decode_state_dict_without_data_wrapper_raises() -> None:
+    serializer = JsonSerializer()
+
+    with pytest.raises(ValueError, match="state payload"):
+        decode_state({"foo": 1}, serializer)
+
+
+def test_decode_state_list_raises() -> None:
+    serializer = JsonSerializer()
+
+    with pytest.raises(ValueError, match="state payload"):
+        decode_state([1, 2, 3], serializer)
+
+
+def test_decode_state_none_yields_default_empty_state() -> None:
+    """Blank-store handoffs serialize as state_data=None and must stay valid."""
+    serializer = JsonSerializer()
+
+    result = decode_state(None, serializer)
 
     assert isinstance(result, DictState)
     assert len(list(result.items())) == 0

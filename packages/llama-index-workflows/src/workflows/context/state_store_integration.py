@@ -3,43 +3,17 @@
 
 from __future__ import annotations
 
-from typing import Any, Generic, Protocol, runtime_checkable
+from typing import Any
 
-from pydantic import BaseModel
-from typing_extensions import TypeVar
-
-from . import state_store as _state_store
 from .serializers import BaseSerializer
-from .state_store import DictState, StateStore
-
-MODEL_T = TypeVar("MODEL_T", bound=BaseModel, default=DictState)  # type: ignore[reportGeneralTypeIssues]
-
-
-StateRecord = _state_store._StateRecord
-"""Raw state record loaded and saved by a storage backend."""
-
-
-@runtime_checkable
-class StateStorage(_state_store._DurableStateStorage, Protocol):
-    """Integration protocol for raw durable workflow state persistence."""
-
-
-class StateStoreFacade(_state_store._TypedStateStore[MODEL_T], Generic[MODEL_T]):
-    """Typed state-store facade over raw persistence."""
-
-
-def decode_seed_state(
-    serialized_state: dict[str, Any], serializer: BaseSerializer
-) -> BaseModel:
-    """Decode a portable in-memory state seed."""
-    return _state_store._decode_seed_state(serialized_state, serializer)
-
-
-def string_record_from_state(
-    state: BaseModel, serializer: BaseSerializer
-) -> StateRecord:
-    """Encode state into the string-backed storage record format."""
-    return _state_store._string_record_from_state(state, serializer)
+from .state_store import (
+    StateRecord,
+    StateStorage,
+    StateStore,
+    StateStoreFacade,
+    decode_seed_state,
+    string_record_from_state,
+)
 
 
 async def state_store_handoff(
@@ -52,7 +26,7 @@ async def state_store_handoff(
     (durable reconnect handle or portable snapshot, the store decides).
     Legacy third-party stores fall back to ``to_dict``.
     """
-    if isinstance(store, _state_store._TypedStateStore):
+    if isinstance(store, StateStoreFacade):
         return await store.serialize_for_handoff(serializer)
     return store.to_dict(serializer)
 

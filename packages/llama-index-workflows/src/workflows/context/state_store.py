@@ -56,8 +56,12 @@ class InMemorySerializedState(BaseModel):
         return data
 
 
-class _StateRecord(BaseModel):
-    """Raw state record loaded and saved by a storage backend."""
+class StateRecord(BaseModel):
+    """Raw state record loaded and saved by a storage backend.
+
+    ``state_type``/``state_module`` are written for debugging only; decoding
+    dispatches on the payload shape, so loads may leave them ``None``.
+    """
 
     data: Any
     state_type: str | None = None
@@ -66,32 +70,39 @@ class _StateRecord(BaseModel):
 
 @runtime_checkable
 class _StateStorage(Protocol):
-    """Internal persistence boundary for workflow state."""
+    """Minimal persistence boundary for workflow state: load and save."""
 
-    async def load(self) -> _StateRecord | None:
+    async def load(self) -> StateRecord | None:
         """Load a raw state record, or None when no state exists yet."""
         ...
 
-    async def save(self, record: _StateRecord) -> None:
+    async def save(self, record: StateRecord) -> None:
         """Persist a raw state record."""
         ...
 
 
 @runtime_checkable
-class _DurableStateStorage(_StateStorage, Protocol):
-    """Storage whose state outlives the process and can emit a reconnect handle."""
+class StateStorage(_StateStorage, Protocol):
+    """Durable storage: state outlives the process and supports reconnect handles.
+
+    Backends implement genuine I/O only; the seed lifecycle, locking, and
+    save-path encoding live in [StateStoreFacade][workflows.context.state_store.StateStoreFacade].
+    """
 
     def to_handle(self) -> dict[str, Any]:
         """Return backend-specific reconnect metadata."""
         ...
 
+    def parse_own_handle(self, payload: dict[str, Any]) -> Any | None:
+        """Parse a serialized payload into this backend's handle, or None.
 
-@runtime_checkable
-class _SeededStateStorage(Protocol):
-    """Internal storage lifecycle hook for lazy seed materialization."""
+        Must be sync and pure (no I/O). Returns None when the payload is not
+        a handle this backend produced.
+        """
+        ...
 
-    async def ensure_seeded(self) -> None:
-        """Materialize any deferred seed before observable storage operations."""
+    async def copy_from_handle(self, handle: Any) -> None:
+        """Copy state from another target of this backend into this one."""
         ...
 
 
@@ -106,28 +117,28 @@ def _record_from_state(
     state: BaseModel,
     serializer: BaseSerializer,
     known_unserializable_keys: tuple[str, ...] = KNOWN_UNSERIALIZABLE_KEYS,
-) -> _StateRecord:
+) -> StateRecord:
     """Encode a state model into a raw storage record."""
     state_data, state_type_name, state_module = encode_state(
         state, serializer, known_unserializable_keys
     )
-    return _StateRecord(
+    return StateRecord(
         data=state_data,
         state_type=state_type_name,
         state_module=state_module,
     )
 
 
-def _string_record_from_state(
+def string_record_from_state(
     state: BaseModel,
     serializer: BaseSerializer,
     known_unserializable_keys: tuple[str, ...] = KNOWN_UNSERIALIZABLE_KEYS,
-) -> _StateRecord:
+) -> StateRecord:
     """Encode a state model into a storage record with string data."""
     state_data, state_type_name, state_module = encode_state_to_str(
         state, serializer, known_unserializable_keys
     )
-    return _StateRecord(
+    return StateRecord(
         data=state_data,
         state_type=state_type_name,
         state_module=state_module,
@@ -234,10 +245,18 @@ def decode_state(
     drive module imports. Typed payloads self-describe through the serializer
     (which validates the embedded qualified name before importing anything);
     DictState payloads are recognized by their ``{"_data": ...}`` wrapper.
+
+    Decoding is strict: ``None`` means a blank store (default empty state);
+    any other unrecognized shape raises ``ValueError`` instead of silently
+    degrading to an empty state.
     """
     if isinstance(state_data, BaseModel):
         # Live model from an in-process handoff.
         return state_data
+
+    if state_data is None:
+        # Blank-store handoffs serialize as state_data=None.
+        return DictState()
 
     if isinstance(state_data, str):
         try:
@@ -245,17 +264,22 @@ def decode_state(
         except ValueError:
             parsed = None
         if isinstance(parsed, dict) and "_data" in parsed:
-            state_data = parsed
-        else:
-            # Non-JSON strings (e.g. pickled payloads) and JSON-encoded typed
-            # payloads both reconstruct through the serializer, which fails
-            # closed on disallowed embedded types.
-            deserialized = serializer.deserialize(state_data)
-            if isinstance(deserialized, BaseModel):
-                return deserialized
-            state_data = deserialized
+            return deserialize_dict_state_data(parsed, serializer)
+        # Non-JSON strings (e.g. pickled payloads) and JSON-encoded typed
+        # payloads both reconstruct through the serializer, which fails
+        # closed on disallowed embedded types.
+        deserialized = serializer.deserialize(state_data)
+        if isinstance(deserialized, BaseModel):
+            return deserialized
+        raise ValueError(
+            "Unrecognized state payload: string decoding to "
+            f"{type(deserialized).__name__}; expected a typed model payload "
+            "or a {'_data': ...} DictState wrapper"
+        )
 
-    if isinstance(state_data, dict) and "_data" not in state_data:
+    if isinstance(state_data, dict):
+        if "_data" in state_data:
+            return deserialize_dict_state_data(state_data, serializer)
         # Already-parsed typed payload. JsonSerializer-style serializers can
         # reconstruct it from the embedded self-description.
         deserialize_value = getattr(serializer, "deserialize_value", None)
@@ -263,10 +287,15 @@ def decode_state(
             value = deserialize_value(state_data)
             if isinstance(value, BaseModel):
                 return value
+        raise ValueError(
+            "Unrecognized state payload: dict without a '_data' wrapper that "
+            "the serializer could not reconstruct into a model"
+        )
 
-    if not isinstance(state_data, dict):
-        state_data = {}
-    return deserialize_dict_state_data(state_data, serializer)
+    raise ValueError(
+        f"Unrecognized state payload of type {type(state_data).__name__}; "
+        "refusing to decode"
+    )
 
 
 def create_in_memory_payload(
@@ -549,17 +578,76 @@ class StateStore(Protocol[MODEL_T]):
         ...
 
 
-class _TypedStateStore(Generic[MODEL_T]):
+class _OwnerAwareLock:
+    """asyncio.Lock that records its holder task.
+
+    Writers acquire exclusively and fail loudly when the current task
+    already holds the lock; reads pass through in that case so reads
+    inside an `edit_state` block work.
+    """
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._holder: asyncio.Task[Any] | None = None
+
+    def _held_by_current_task(self) -> bool:
+        return self._holder is not None and self._holder is asyncio.current_task()
+
+    @asynccontextmanager
+    async def acquire_write(self) -> AsyncGenerator[None, None]:
+        if self._held_by_current_task():
+            raise RuntimeError(
+                "writer called inside edit_state: mutate the yielded state instead"
+            )
+        async with self._lock:
+            self._holder = asyncio.current_task()
+            try:
+                yield
+            finally:
+                self._holder = None
+
+    @asynccontextmanager
+    async def acquire_read(self) -> AsyncGenerator[None, None]:
+        if self._held_by_current_task():
+            yield
+            return
+        async with self._lock:
+            yield
+
+
+class _CopySeed:
+    """Pending seed: copy state from another target of the same backend."""
+
+    def __init__(self, handle: Any) -> None:
+        self.handle = handle
+
+
+class _PayloadSeed:
+    """Pending seed: portable in-memory payload to decode and save."""
+
+    def __init__(self, payload: dict[str, Any], serializer: BaseSerializer) -> None:
+        self.payload = payload
+        self.serializer = serializer
+
+
+class StateStoreFacade(Generic[MODEL_T]):
     """Typed StateStore facade over raw storage.
 
-    Concurrency contract: reads (`get_state`, `get`, `snapshot`) take no
-    lock; writers (`set_state`, `set`, `clear`, `edit_state`) take the
-    internal lock, which serializes read-modify-write cycles within one
-    process *through the same facade instance*. Calling a writer inside
-    an `edit_state` block deadlocks and is unsupported. Workflow stores
-    memoize one facade per run so in-process writers share that lock.
-    Writers in other processes or replicas are not serialized;
+    Concurrency contract: Writers serialize on the per-run lock; reads
+    return committed state — durable reads via the backend's committed row
+    (lockless), in-memory reads via the owner-aware lock; a task holding
+    the lock reads through without blocking, and nested writers raise.
+
+    Workflow stores memoize one facade per run so in-process writers share
+    that lock. Writers in other processes or replicas are not serialized;
     cross-replica consistency requires backend-level atomicity.
+
+    Reads are pure: an empty storage yields a default state instance
+    without persisting it; only writers (and seed materialization) save.
+
+    The facade also owns the seed lifecycle: `add_seed` validates a
+    serialized-state payload eagerly (sync, pure) and `ensure_seeded`
+    materializes it lazily on first async access or handoff.
     """
 
     state_type: type[MODEL_T]
@@ -569,26 +657,71 @@ class _TypedStateStore(Generic[MODEL_T]):
         storage: _StateStorage,
         state_type: type[MODEL_T],
         serializer: BaseSerializer,
-        *,
-        to_dict_mode: Literal["snapshot", "handle"] = "snapshot",
     ) -> None:
         self._storage = storage
         self.state_type = state_type
         self._serializer = serializer
-        self._to_dict_mode = to_dict_mode
+        self._pending_seed: _CopySeed | _PayloadSeed | None = None
 
     @functools.cached_property
-    def _lock(self) -> asyncio.Lock:
+    def _lock(self) -> _OwnerAwareLock:
+        """Lazy lock initialization for Python 3.14+ compatibility."""
+        return _OwnerAwareLock()
+
+    @functools.cached_property
+    def _seed_lock(self) -> asyncio.Lock:
         """Lazy lock initialization for Python 3.14+ compatibility."""
         return asyncio.Lock()
 
     def _create_default_state(self) -> MODEL_T:
         return create_cleared_state(self.state_type)
 
+    def add_seed(self, payload: dict[str, Any], serializer: BaseSerializer) -> None:
+        """Stage a serialized-state seed for lazy materialization.
+
+        Validation is eager, sync, and pure: empty payloads and durable
+        handles foreign to this storage raise immediately. I/O stays lazy —
+        the seed materializes on the first async access via `ensure_seeded`.
+        A pending seed wins over whatever already exists in storage.
+        """
+        if not payload:
+            raise ValueError("Cannot seed state store from an empty payload")
+        if isinstance(self._storage, StateStorage):
+            handle = self._storage.parse_own_handle(payload)
+            if handle is not None:
+                own = self._storage.parse_own_handle(self._storage.to_handle())
+                # Same target: state already lives in the backend, nothing
+                # to copy (and any previously staged seed is superseded).
+                self._pending_seed = None if handle == own else _CopySeed(handle)
+                return
+        if is_durable_serialized_state(payload):
+            raise ValueError(
+                "Cannot seed this state store from a durable handle with "
+                f"store_type '{payload.get('store_type')}'"
+            )
+        parse_in_memory_state(payload)  # eager shape validation, raises
+        self._pending_seed = _PayloadSeed(payload, serializer)
+
     async def ensure_seeded(self) -> None:
-        """Materialize any deferred storage seed."""
-        if isinstance(self._storage, _SeededStateStorage):
-            await self._storage.ensure_seeded()
+        """Materialize any pending seed exactly once (double-checked)."""
+        if self._pending_seed is None:
+            return
+        async with self._seed_lock:
+            seed = self._pending_seed
+            if seed is None:
+                return
+            if isinstance(seed, _CopySeed):
+                durable = cast(StateStorage, self._storage)
+                await durable.copy_from_handle(seed.handle)
+            else:
+                state = decode_seed_state(seed.payload, seed.serializer)
+                # Bypass _save_state: its ensure_seeded re-entry would
+                # deadlock on the seed lock we hold.
+                await self._write_state(state)
+            # Popped only after success so a failed materialization stays
+            # pending; concurrent readers block on the seed lock above
+            # until the seed is committed.
+            self._pending_seed = None
 
     async def _load_state_or_none(self) -> MODEL_T | None:
         await self.ensure_seeded()
@@ -601,22 +734,31 @@ class _TypedStateStore(Generic[MODEL_T]):
         state = await self._load_state_or_none()
         if state is not None:
             return state
-        state = self._create_default_state()
-        await self._save_state(state)
-        return state
+        # Reads are pure: return a default without persisting it.
+        return self._create_default_state()
 
     async def _save_state(self, state: BaseModel) -> None:
         await self.ensure_seeded()
-        await self._storage.save(_record_from_state(state, self._serializer))
+        await self._write_state(state)
+
+    async def _write_state(self, state: BaseModel) -> None:
+        """Single save chokepoint: durable rows persist string data."""
+        if isinstance(self._storage, StateStorage):
+            await self._storage.save(string_record_from_state(state, self._serializer))
+        else:
+            await self._storage.save(_record_from_state(state, self._serializer))
 
     async def get_state(self) -> MODEL_T:
-        """Return a copy of the current state model."""
+        """Return a copy of the current state model.
+
+        Durable reads are lockless (read-committed via the backend row).
+        """
         state = await self._load_state()
         return state.model_copy()
 
     async def set_state(self, state: MODEL_T) -> None:
         """Replace or merge into the current state model."""
-        async with self._lock:
+        async with self._lock.acquire_write():
             current = await self._load_state_or_none()
             merged: BaseModel = (
                 state if current is None else merge_state(current, state)
@@ -626,8 +768,7 @@ class _TypedStateStore(Generic[MODEL_T]):
     async def get(self, path: str, default: Any = Ellipsis) -> Any:
         """Get a nested value using dot-separated paths.
 
-        Lockless read, like `get_state`, so it stays safe inside
-        `edit_state`.
+        Durable reads are lockless (read-committed via the backend row).
         """
         return get_by_path(await self._load_state(), path, default)
 
@@ -644,20 +785,20 @@ class _TypedStateStore(Generic[MODEL_T]):
         too. Falls back to the construction-time `state_type` when storage
         is empty.
         """
-        async with self._lock:
+        async with self._lock.acquire_write():
             current = await self._load_state_or_none()
             target = type(current) if current is not None else self.state_type
             await self._save_state(create_cleared_state(target))
 
     @asynccontextmanager
     async def edit_state(self) -> AsyncGenerator[MODEL_T, None]:
-        """Edit state transactionally under a lock.
+        """Edit state transactionally under the writer lock.
 
         Reads (`get_state`, `get`, `snapshot`) are safe inside the block;
         calling a writer (`set_state`, `set`, `clear`, or a nested
-        `edit_state`) deadlocks and is unsupported.
+        `edit_state`) raises RuntimeError.
         """
-        async with self._lock:
+        async with self._lock.acquire_write():
             state = await self._load_state()
             yield state
             await self._save_state(state)
@@ -672,25 +813,19 @@ class _TypedStateStore(Generic[MODEL_T]):
 
         Durable stores return a reconnect handle (the state stays in the
         backend); in-memory stores return a portable, serializer-encoded
-        snapshot that round-trips through ``from_dict``.
+        snapshot that round-trips through ``from_dict``. Any pending seed
+        is materialized first so handles never point at unmaterialized
+        seeds.
         """
         await self.ensure_seeded()
-        if self._to_dict_mode == "handle":
-            return self._durable_storage().to_handle()
+        if isinstance(self._storage, StateStorage):
+            return self._storage.to_handle()
         return await self.snapshot(serializer)
-
-    def _durable_storage(self) -> _DurableStateStorage:
-        """Constructor invariant: handle mode implies durable storage."""
-        if not isinstance(self._storage, _DurableStateStorage):
-            raise TypeError(
-                "to_dict_mode='handle' requires storage implementing to_handle()"
-            )
-        return self._storage
 
     def to_dict(self, serializer: BaseSerializer) -> dict[str, Any]:
         """Serialize state for legacy callers."""
-        if self._to_dict_mode == "handle":
-            return self._durable_storage().to_handle()
+        if isinstance(self._storage, StateStorage):
+            return self._storage.to_handle()
         record = self._sync_snapshot_record()
         return InMemorySerializedState(
             state_type=record.state_type or "DictState",
@@ -698,27 +833,27 @@ class _TypedStateStore(Generic[MODEL_T]):
             state_data=record.data,
         ).model_dump()
 
-    def _sync_snapshot_record(self) -> _StateRecord:
+    def _sync_snapshot_record(self) -> StateRecord:
         raise NotImplementedError("Use await snapshot(serializer) for async storage")
 
 
 class _InMemoryStateStorage:
     """Raw in-process storage for workflow state."""
 
-    def __init__(self, record: _StateRecord | None = None) -> None:
+    def __init__(self, record: StateRecord | None = None) -> None:
         self._record = record
 
-    async def load(self) -> _StateRecord | None:
+    async def load(self) -> StateRecord | None:
         return self._record.model_copy() if self._record is not None else None
 
-    async def save(self, record: _StateRecord) -> None:
+    async def save(self, record: StateRecord) -> None:
         self._record = record.model_copy()
 
-    def load_sync(self) -> _StateRecord | None:
+    def load_sync(self) -> StateRecord | None:
         return self._record.model_copy() if self._record is not None else None
 
 
-class InMemoryStateStore(_TypedStateStore[MODEL_T]):
+class InMemoryStateStore(StateStoreFacade[MODEL_T]):
     """
     Default in-memory implementation of the [StateStore][workflows.context.state_store.StateStore] protocol.
 
@@ -764,7 +899,7 @@ class InMemoryStateStore(_TypedStateStore[MODEL_T]):
 
     def __init__(self, initial_state: MODEL_T):
         self._memory_storage = _InMemoryStateStorage(
-            _StateRecord(
+            StateRecord(
                 data=initial_state,
                 state_type=type(initial_state).__name__,
                 state_module=type(initial_state).__module__,
@@ -774,8 +909,26 @@ class InMemoryStateStore(_TypedStateStore[MODEL_T]):
             self._memory_storage,
             type(initial_state),
             JsonSerializer(),
-            to_dict_mode="snapshot",
         )
+
+    async def get_state(self) -> MODEL_T:
+        """Return a shallow copy of the state, captured under the read lock.
+
+        The owner-aware lock keeps the copy from observing a half-applied
+        `edit_state` block; a task already holding the lock reads through.
+        """
+        async with self._lock.acquire_read():
+            return await super().get_state()
+
+    async def get(self, path: str, default: Any = Ellipsis) -> Any:
+        """Get a nested value, captured under the read lock."""
+        async with self._lock.acquire_read():
+            return await super().get(path, default)
+
+    async def snapshot(self, serializer: BaseSerializer) -> dict[str, Any]:
+        """Serialize portable state data, captured under the read lock."""
+        async with self._lock.acquire_read():
+            return await super().snapshot(serializer)
 
     def to_dict(self, serializer: "BaseSerializer") -> dict[str, Any]:
         """Serialize the state and model metadata for persistence.
@@ -797,21 +950,22 @@ class InMemoryStateStore(_TypedStateStore[MODEL_T]):
         payload = create_in_memory_payload(state, serializer)
         return payload.model_dump()
 
-    def _sync_snapshot_record(self) -> _StateRecord:
+    def _sync_snapshot_record(self) -> StateRecord:
         record = self._memory_storage.load_sync()
         if record is None:
+            # Reads are pure: return a default record without persisting it.
             state = self.state_type()
-            record = _StateRecord(
+            record = StateRecord(
                 data=state,
                 state_type=type(state).__name__,
                 state_module=type(state).__module__,
             )
-            self._memory_storage._record = record
         return record
 
-    async def _save_state(self, state: BaseModel) -> None:
+    async def _write_state(self, state: BaseModel) -> None:
+        # Live-model record: in-memory state keeps value identity, no encoding.
         await self._memory_storage.save(
-            _StateRecord(
+            StateRecord(
                 data=state,
                 state_type=type(state).__name__,
                 state_module=type(state).__module__,
@@ -838,7 +992,7 @@ class InMemoryStateStore(_TypedStateStore[MODEL_T]):
         if not serialized_state:
             return cls(DictState())  # type: ignore[arg-type]
 
-        state_instance = _decode_seed_state(serialized_state, serializer)
+        state_instance = decode_seed_state(serialized_state, serializer)
         return cls(state_instance)  # type: ignore[arg-type]
 
 
@@ -892,10 +1046,11 @@ def deserialize_state_from_dict(
     Raises:
         ValueError: If deserialization fails for any key.
     """
-    return decode_state(serialized_state.get("state_data", {}), serializer)
+    # Absent/None state data decodes to a default empty state.
+    return decode_state(serialized_state.get("state_data"), serializer)
 
 
-def _decode_seed_state(
+def decode_seed_state(
     serialized_state: dict[str, Any],
     serializer: "BaseSerializer",
 ) -> BaseModel:
