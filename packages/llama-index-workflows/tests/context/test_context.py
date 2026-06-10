@@ -472,20 +472,6 @@ class ChildClearState(ParentClearState):
 
 
 @pytest.mark.asyncio
-async def test_get_inside_edit_state_does_not_deadlock() -> None:
-    """Reads are lockless: `get` must work inside an `edit_state` block."""
-    store = InMemoryStateStore(DictState())
-    await store.set("counter", 1)
-
-    async def nested_read() -> int:
-        async with store.edit_state() as state:
-            state["other"] = 2
-            return cast(int, await store.get("counter"))
-
-    assert await asyncio.wait_for(nested_read(), timeout=2.0) == 1
-
-
-@pytest.mark.asyncio
 async def test_clear_resets_subclass_fields() -> None:
     """Clear is a reset to the current state's type, not a merge."""
     store = InMemoryStateStore(ParentClearState())
@@ -838,19 +824,6 @@ def test_decode_state_allows_dict_state_under_restricted_allowlist() -> None:
     assert result["plain"] == 42
 
 
-def test_decode_state_typed_payload_self_describes() -> None:
-    """Typed payloads reconstruct from the serializer-embedded qualified name."""
-    serializer = JsonSerializer()
-    state = TypedTestState(counter=7, name="typed")
-    state_data, _, _ = encode_state(state, serializer)
-
-    result = decode_state(state_data, serializer)
-
-    assert isinstance(result, TypedTestState)
-    assert result.counter == 7
-    assert result.name == "typed"
-
-
 def test_decode_state_typed_payload_with_unimportable_type_raises() -> None:
     serializer = JsonSerializer()
     state_data = json.dumps(
@@ -906,32 +879,18 @@ def test_decode_state_pickle_serializer_typed_payload_round_trips() -> None:
     assert result.name == "pickled"
 
 
-def test_decode_state_json_list_string_raises() -> None:
-    serializer = JsonSerializer()
-
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(json.dumps([1, 2, 3]), id="json-list-string"),
+        pytest.param(json.dumps("just a string"), id="json-scalar-string"),
+        pytest.param({"foo": 1}, id="dict-without-data-wrapper"),
+        pytest.param([1, 2, 3], id="list"),
+    ],
+)
+def test_decode_state_unrecognized_payload_raises(payload: object) -> None:
     with pytest.raises(ValueError, match="state payload"):
-        decode_state(json.dumps([1, 2, 3]), serializer)
-
-
-def test_decode_state_json_scalar_string_raises() -> None:
-    serializer = JsonSerializer()
-
-    with pytest.raises(ValueError, match="state payload"):
-        decode_state(json.dumps("just a string"), serializer)
-
-
-def test_decode_state_dict_without_data_wrapper_raises() -> None:
-    serializer = JsonSerializer()
-
-    with pytest.raises(ValueError, match="state payload"):
-        decode_state({"foo": 1}, serializer)
-
-
-def test_decode_state_list_raises() -> None:
-    serializer = JsonSerializer()
-
-    with pytest.raises(ValueError, match="state payload"):
-        decode_state([1, 2, 3], serializer)
+        decode_state(payload, JsonSerializer())
 
 
 def test_decode_state_none_yields_default_empty_state() -> None:

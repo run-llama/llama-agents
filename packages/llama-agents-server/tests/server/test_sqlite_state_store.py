@@ -244,7 +244,7 @@ async def test_typeless_clear_over_typed_row(db_path: str) -> None:
 async def test_get_inside_edit_state_does_not_deadlock(
     store: SqliteStateStore[DictState],
 ) -> None:
-    """Reads are lockless: `get` must work inside an `edit_state` block."""
+    """`get` must work inside an `edit_state` block on a durable backend."""
     await store.set("counter", 1)
 
     async def nested_read() -> int:
