@@ -131,7 +131,6 @@ class PostgresStateStore(StateStoreFacade[MODEL_T], Generic[MODEL_T]):
         serializer: BaseSerializer | None = None,
         schema: str | None = None,
     ) -> None:
-        self._pool = pool
         self._postgres_storage = _PostgresStateStorage(pool, run_id, schema)
         super().__init__(
             self._postgres_storage,

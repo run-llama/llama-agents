@@ -65,7 +65,10 @@ def test_postgres_adapter_uses_resolved_pool_for_sync_state_store() -> None:
     state_store = adapter.get_state_store()
 
     assert isinstance(state_store, PostgresStateStore)
-    assert state_store._pool is pool
+    assert state_store.run_id == "run-1"
+    # The async factory raising above proves the resolved pool was used
+    # synchronously; confirm it reached the storage layer.
+    assert state_store._postgres_storage._pool is pool
 
 
 @pytest.fixture(scope="module")
@@ -297,16 +300,20 @@ async def test_run_workflow_seeds_state_store_from_durable_handle() -> None:
     class RecordingStateStore(InMemoryStateStore[DictState]):
         def __init__(self) -> None:
             super().__init__(DictState())
-            self.get_state_called = False
+            self.ensure_seeded_called = False
 
-        async def get_state(self) -> DictState:
-            self.get_state_called = True
-            return await super().get_state()
+        async def ensure_seeded(self) -> None:
+            self.ensure_seeded_called = True
+            await super().ensure_seeded()
 
     class RecordingWorkflowStore:
         def __init__(self) -> None:
             self.state_store = RecordingStateStore()
+            self.start_called = False
             self.create_state_store_calls: list[tuple[Any, ...]] = []
+
+        async def start(self) -> None:
+            self.start_called = True
 
         def create_state_store(
             self,
@@ -363,7 +370,8 @@ async def test_run_workflow_seeds_state_store_from_durable_handle() -> None:
         )
         await cast(Any, adapter)._ensure_workflow_started()
 
-    assert workflow_store.state_store.get_state_called
+    assert workflow_store.start_called
+    assert workflow_store.state_store.ensure_seeded_called
     assert workflow_store.create_state_store_calls == [
         ("run-1", DictState, serialized_state, serializer)
     ]

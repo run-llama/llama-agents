@@ -58,6 +58,7 @@ from typing_extensions import Unpack
 from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import (
     StateStore,
+    StateStoreFacade,
     infer_state_type,
 )
 from workflows.events import Event, StartEvent, StopEvent
@@ -121,6 +122,7 @@ class DBOSWorkflowStore(AbstractWorkflowStore):
     """
 
     def __init__(self, factory: Callable[[], AbstractWorkflowStore]) -> None:
+        super().__init__()
         self._factory = factory
         self._inner: AbstractWorkflowStore | None = None
 
@@ -130,10 +132,7 @@ class DBOSWorkflowStore(AbstractWorkflowStore):
         return self._inner
 
     async def start(self) -> None:
-        inner = self._resolve()
-        start = getattr(inner, "start", None)
-        if start is not None:
-            await start()
+        await self._resolve().start()
 
     @property
     def poll_interval(self) -> float:  # type: ignore[override]
@@ -146,9 +145,19 @@ class DBOSWorkflowStore(AbstractWorkflowStore):
         serialized_state: dict[str, Any] | None = None,
         serializer: BaseSerializer | None = None,
     ) -> StateStore[Any]:
+        # Delegate the whole template method so memoization lives in the
+        # inner store's single cache (the proxy's own cache stays unused).
         return self._resolve().create_state_store(
             run_id, state_type, serialized_state, serializer
         )
+
+    def _build_state_store(
+        self,
+        run_id: str,
+        state_type: type[Any] | None,
+        serializer: BaseSerializer | None,
+    ) -> StateStoreFacade[Any]:
+        return self._resolve()._build_state_store(run_id, state_type, serializer)
 
     async def query(self, query: HandlerQuery) -> list[PersistentHandler]:
         return await self._resolve().query(query)
@@ -586,15 +595,17 @@ class DBOSRuntime(Runtime):
                 # Write initial state to DB before starting workflow (non-blocking to caller)
                 if serialized_state:
                     workflow_store = self.create_workflow_store()
-                    if isinstance(workflow_store, DBOSWorkflowStore):
-                        await workflow_store.start()
+                    await workflow_store.start()
                     store = workflow_store.create_state_store(
                         run_id,
                         infer_state_type(workflow),
                         serialized_state,
                         active_serializer,
                     )
-                    await store.get_state()
+                    # Materialize the seed before the workflow starts so the
+                    # first step observes the restored state.
+                    if isinstance(store, StateStoreFacade):
+                        await store.ensure_seeded()
 
                 try:
                     return await DBOS.start_workflow_async(
