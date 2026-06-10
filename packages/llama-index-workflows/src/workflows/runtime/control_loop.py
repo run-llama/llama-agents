@@ -43,6 +43,7 @@ from workflows.runtime.types.commands import (
     CommandRunWorker,
     CommandScheduleIdleCheck,
     CommandScheduleWaiterTimeout,
+    CommandScheduleWakeup,
     WorkflowCommand,
     indicates_exit,
 )
@@ -84,6 +85,7 @@ from workflows.runtime.types.ticks import (
     TickStepResult,
     TickTimeout,
     TickWaiterTimeout,
+    TickWakeup,
     WorkflowTick,
 )
 from workflows.workflow import Workflow
@@ -257,20 +259,17 @@ class _ControlLoopRunner:
     async def process_command(self, command: WorkflowCommand) -> None | StopEvent:
         """Process a single command returned from tick reduction."""
         if isinstance(command, CommandQueueEvent):
-            event = TickAddEvent(
-                event=command.event,
-                step_name=command.step_name,
-                attempts=command.attempts,
-                first_attempt_at=command.first_attempt_at,
-                last_exception=command.last_exception,
-                last_failed_at=command.last_failed_at,
-                recovery_counts=dict(command.recovery_counts),
+            self.tick_buffer.append(
+                TickAddEvent(
+                    event=command.event,
+                    step_name=command.step_name,
+                    attempts=command.attempts,
+                    first_attempt_at=command.first_attempt_at,
+                    last_exception=command.last_exception,
+                    last_failed_at=command.last_failed_at,
+                    recovery_counts=dict(command.recovery_counts),
+                )
             )
-            if command.delay is not None and command.delay > 0:
-                now = await self.adapter.get_now()
-                self.schedule_tick(event, at_time=now + command.delay)
-            else:
-                self.tick_buffer.append(event)
             return None
         elif isinstance(command, CommandRunWorker):
             self.run_worker(command)
@@ -301,6 +300,9 @@ class _ControlLoopRunner:
                 ),
                 at_time=now + command.timeout,
             )
+            return None
+        elif isinstance(command, CommandScheduleWakeup):
+            self.schedule_tick(TickWakeup(), at_time=command.at_time)
             return None
         else:
             raise ValueError(f"Unknown command type: {type(command)}")
@@ -664,6 +666,8 @@ def _reduce_tick(
         if _check_idle_state(init):
             return init, [CommandPublishEvent(WorkflowIdleEvent())]
         return init, []
+    elif isinstance(tick, TickWakeup):
+        state, commands = _process_wakeup_tick(init, now_seconds)
     else:
         raise ValueError(f"Unknown tick type: {type(tick)}")
 
@@ -674,11 +678,44 @@ def _reduce_tick(
     return state, commands
 
 
+def _is_eligible(attempt: EventAttempt, now_seconds: float) -> bool:
+    """An attempt is eligible for dispatch once its not_before time has passed."""
+    return attempt.not_before is None or attempt.not_before <= now_seconds
+
+
+def _drain_eligible_queue(
+    step_name: str,
+    state: InternalStepWorkerState,
+    now_seconds: float,
+) -> list[WorkflowCommand]:
+    """Dispatch eligible queued attempts while worker capacity remains.
+
+    Scans past ineligible (future not_before) attempts so they neither block
+    eligible work queued behind them nor consume a worker slot. Relative order
+    among eligible attempts is preserved.
+    """
+    commands: list[WorkflowCommand] = []
+    while len(state.in_progress) < state.config.num_workers:
+        index = next(
+            (i for i, a in enumerate(state.queue) if _is_eligible(a, now_seconds)),
+            None,
+        )
+        if index is None:
+            break
+        attempt = state.queue.pop(index)
+        commands.extend(_add_or_enqueue_event(attempt, step_name, state, now_seconds))
+    return commands
+
+
 def rewind_in_progress(
     state: BrokerState,
     now_seconds: float,
 ) -> tuple[BrokerState, list[WorkflowCommand]]:
-    """Rewind the in_progress state, extracting commands to re-initiate the workers"""
+    """Rewind the in_progress state, extracting commands to re-initiate the workers.
+
+    Also re-arms wakeups for queued attempts whose not_before is still in the
+    future, so retry delays survive snapshot/resume.
+    """
     state = state.deepcopy()
     commands: list[WorkflowCommand] = []
     for step_name, step_state in sorted(state.workers.items(), key=lambda x: x[0]):
@@ -695,14 +732,10 @@ def rewind_in_progress(
                 ),
             )
         step_state.in_progress = []
-        while (
-            len(step_state.queue) > 0
-            and len(step_state.in_progress) < step_state.config.num_workers
-        ):
-            event = step_state.queue.pop(0)
-            commands.extend(
-                _add_or_enqueue_event(event, step_name, step_state, now_seconds)
-            )
+        commands.extend(_drain_eligible_queue(step_name, step_state, now_seconds))
+        for attempt in step_state.queue:
+            if attempt.not_before is not None and attempt.not_before > now_seconds:
+                commands.append(CommandScheduleWakeup(at_time=attempt.not_before))
     return state, commands
 
 
@@ -713,6 +746,10 @@ def _check_idle_state(state: BrokerState) -> bool:
     1. The workflow is running (hasn't completed/failed/cancelled)
     2. All steps have no pending events in their queues
     3. All steps have no workers currently executing
+
+    A queued attempt with a future not_before (a delayed retry) is pending
+    work: the workflow is not idle during a retry-delay window, so idle
+    release defers until the retry resolves.
     """
     if not state.is_running:
         return False
@@ -807,18 +844,25 @@ def _process_step_result_tick(
             else:
                 delay = None
             if delay is not None:
-                commands.append(
-                    CommandQueueEvent(
+                # Re-queue the attempt directly into persisted state, carrying
+                # an absolute eligibility time. The wakeup is a contentless
+                # poke: dropping it never loses work because resume re-arms it
+                # from the queue (rewind_in_progress).
+                not_before = now_seconds + delay if delay > 0 else None
+                worker_state.queue.insert(
+                    0,
+                    EventAttempt(
                         event=tick.event,
-                        delay=delay,
-                        step_name=tick.step_name,
                         attempts=this_execution.attempts + 1,
                         first_attempt_at=this_execution.first_attempt_at,
                         last_exception=result.exception,
                         last_failed_at=result.failed_at,
                         recovery_counts=dict(this_execution.recovery_counts),
-                    )
+                        not_before=not_before,
+                    ),
                 )
+                if not_before is not None:
+                    commands.append(CommandScheduleWakeup(at_time=not_before))
             else:
                 exception = result.exception
                 total_attempts = this_execution.attempts + 1
@@ -979,15 +1023,9 @@ def _process_step_result_tick(
         worker_state.in_progress.remove(this_execution)
     # enqueue next events if there are any
     if not is_completed:
-        while (
-            len(worker_state.queue) > 0
-            and len(worker_state.in_progress) < worker_state.config.num_workers
-        ):
-            event = worker_state.queue.pop(0)
-            subcommands = _add_or_enqueue_event(
-                event, tick.step_name, worker_state, now_seconds
-            )
-            commands.extend(subcommands)
+        commands.extend(
+            _drain_eligible_queue(tick.step_name, worker_state, now_seconds)
+        )
 
     return state, commands
 
@@ -1003,8 +1041,12 @@ def _add_or_enqueue_event(
     Note! This mutates the state, assuming that its already been deepcopied in an outer scope.
     """
     commands: list[WorkflowCommand] = []
-    # Determine if there is available capacity based on in_progress workers
-    has_space = len(state.in_progress) < state.config.num_workers
+    # Determine if there is available capacity based on in_progress workers.
+    # Attempts whose not_before is still in the future are never dispatched;
+    # they wait in the queue without consuming a worker slot.
+    has_space = len(state.in_progress) < state.config.num_workers and _is_eligible(
+        event, now_seconds
+    )
     if has_space:
         # Assign the smallest available worker id
         used = set(x.worker_id for x in state.in_progress)
@@ -1175,6 +1217,22 @@ def _process_timeout_tick(
             )
         ),
     ]
+
+
+def _process_wakeup_tick(
+    init: BrokerState, now_seconds: float
+) -> tuple[BrokerState, list[WorkflowCommand]]:
+    """Dispatch any queued attempts that have become eligible.
+
+    TickWakeup is a contentless poke scheduled at a delayed retry's not_before
+    time. It carries no work-item data; spurious or duplicate wakeups are
+    harmless no-ops.
+    """
+    state = init.deepcopy()
+    commands: list[WorkflowCommand] = []
+    for step_name, worker_state in sorted(state.workers.items(), key=lambda x: x[0]):
+        commands.extend(_drain_eligible_queue(step_name, worker_state, now_seconds))
+    return state, commands
 
 
 def _process_waiter_timeout_tick(

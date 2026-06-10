@@ -98,6 +98,18 @@ class TickIdleCheck(BaseModel):
     type: Literal["idle_check"] = "idle_check"
 
 
+class TickWakeup(BaseModel):
+    """Contentless poke that re-checks queues for newly eligible work.
+
+    Scheduled at the ``not_before`` time of a delayed retry. Carries no
+    work-item data: the queued attempt lives in BrokerState, so dropping a
+    wakeup can never lose work — resume re-arms it from the queue.
+    """
+
+    model_config = ConfigDict(frozen=True)
+    type: Literal["wakeup"] = "wakeup"
+
+
 WorkflowTick = Annotated[
     TickStepResult
     | TickAddEvent
@@ -106,7 +118,8 @@ WorkflowTick = Annotated[
     | TickTimeout
     | TickWaiterTimeout
     | TickIdleCheck
-    | TickIdleRelease,
+    | TickIdleRelease
+    | TickWakeup,
     Discriminator("type"),
 ]
 

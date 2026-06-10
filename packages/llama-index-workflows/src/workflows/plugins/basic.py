@@ -105,7 +105,10 @@ class InternalAsyncioAdapter(InternalRunAdapter, SnapshottableAdapter):
         self._queues.publish_queue.put_nowait(event)
 
     async def get_now(self) -> float:
-        return time.monotonic()
+        # Wall clock, not monotonic: get_now timestamps (first_attempt_at,
+        # retry not_before) are persisted in snapshots and compared across
+        # process restarts, so they must live in a cross-process time domain.
+        return time.time()
 
     async def send_event(self, tick: WorkflowTick) -> None:
         self._queues.receive_queue.put_nowait(tick)
