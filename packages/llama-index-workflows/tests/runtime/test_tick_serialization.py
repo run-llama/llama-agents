@@ -104,7 +104,7 @@ def test_event_type_roundtrip() -> None:
             id="timeout",
         ),
         pytest.param(
-            TickWakeup(),
+            TickWakeup(due=12345.5),
             id="wakeup",
         ),
         pytest.param(

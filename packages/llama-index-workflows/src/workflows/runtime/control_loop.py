@@ -302,7 +302,7 @@ class _ControlLoopRunner:
             )
             return None
         elif isinstance(command, CommandScheduleWakeup):
-            self.schedule_tick(TickWakeup(), at_time=command.at_time)
+            self.schedule_tick(TickWakeup(due=command.at_time), at_time=command.at_time)
             return None
         else:
             raise ValueError(f"Unknown command type: {type(command)}")
@@ -667,7 +667,7 @@ def _reduce_tick(
             return init, [CommandPublishEvent(WorkflowIdleEvent())]
         return init, []
     elif isinstance(tick, TickWakeup):
-        state, commands = _process_wakeup_tick(init, now_seconds)
+        state, commands = _process_wakeup_tick(tick, init, now_seconds)
     else:
         raise ValueError(f"Unknown tick type: {type(tick)}")
 
@@ -678,9 +678,14 @@ def _reduce_tick(
     return state, commands
 
 
-def _is_eligible(attempt: EventAttempt, now_seconds: float) -> bool:
-    """An attempt is eligible for dispatch once its not_before time has passed."""
-    return attempt.not_before is None or attempt.not_before <= now_seconds
+def _is_eligible(attempt: EventAttempt) -> bool:
+    """Delayed attempts (not_before set) only become eligible via TickWakeup.
+
+    Eligibility is a state flip recorded in the tick journal, never a clock
+    comparison: the reducer must make identical dispatch decisions when
+    replaying journaled ticks as it did during the live run.
+    """
+    return attempt.not_before is None
 
 
 def _drain_eligible_queue(
@@ -690,14 +695,14 @@ def _drain_eligible_queue(
 ) -> list[WorkflowCommand]:
     """Dispatch eligible queued attempts while worker capacity remains.
 
-    Scans past ineligible (future not_before) attempts so they neither block
-    eligible work queued behind them nor consume a worker slot. Relative order
-    among eligible attempts is preserved.
+    Scans past ineligible (delayed) attempts so they neither block eligible
+    work queued behind them nor consume a worker slot. Relative order among
+    eligible attempts is preserved.
     """
     commands: list[WorkflowCommand] = []
     while len(state.in_progress) < state.config.num_workers:
         index = next(
-            (i for i, a in enumerate(state.queue) if _is_eligible(a, now_seconds)),
+            (i for i, a in enumerate(state.queue) if _is_eligible(a)),
             None,
         )
         if index is None:
@@ -713,8 +718,10 @@ def rewind_in_progress(
 ) -> tuple[BrokerState, list[WorkflowCommand]]:
     """Rewind the in_progress state, extracting commands to re-initiate the workers.
 
-    Also re-arms wakeups for queued attempts whose not_before is still in the
-    future, so retry delays survive snapshot/resume.
+    Also re-arms wakeups for queued delayed attempts so retry delays survive
+    snapshot/resume. Even past-due attempts go through a wakeup tick (the
+    runner fires past-due times immediately) rather than dispatching here:
+    the dispatch is then a journaled tick, keeping replay deterministic.
     """
     state = state.deepcopy()
     commands: list[WorkflowCommand] = []
@@ -734,7 +741,7 @@ def rewind_in_progress(
         step_state.in_progress = []
         commands.extend(_drain_eligible_queue(step_name, step_state, now_seconds))
         for attempt in step_state.queue:
-            if attempt.not_before is not None and attempt.not_before > now_seconds:
+            if attempt.not_before is not None:
                 commands.append(CommandScheduleWakeup(at_time=attempt.not_before))
     return state, commands
 
@@ -845,10 +852,11 @@ def _process_step_result_tick(
                 delay = None
             if delay is not None:
                 # Re-queue the attempt directly into persisted state, carrying
-                # an absolute eligibility time. The wakeup is a contentless
-                # poke: dropping it never loses work because resume re-arms it
-                # from the queue (rewind_in_progress).
-                not_before = now_seconds + delay if delay > 0 else None
+                # an absolute eligibility time. not_before derives from the
+                # journaled failure timestamp (not the current clock) so replay
+                # computes the identical value. Dropping the wakeup never loses
+                # work: resume re-arms it from the queue (rewind_in_progress).
+                not_before = result.failed_at + delay if delay > 0 else None
                 worker_state.queue.insert(
                     0,
                     EventAttempt(
@@ -1042,10 +1050,10 @@ def _add_or_enqueue_event(
     """
     commands: list[WorkflowCommand] = []
     # Determine if there is available capacity based on in_progress workers.
-    # Attempts whose not_before is still in the future are never dispatched;
-    # they wait in the queue without consuming a worker slot.
+    # Delayed attempts (not_before set) are never dispatched here; they wait
+    # in the queue without consuming a worker slot until a wakeup flips them.
     has_space = len(state.in_progress) < state.config.num_workers and _is_eligible(
-        event, now_seconds
+        event
     )
     if has_space:
         # Assign the smallest available worker id
@@ -1220,17 +1228,21 @@ def _process_timeout_tick(
 
 
 def _process_wakeup_tick(
-    init: BrokerState, now_seconds: float
+    tick: TickWakeup, init: BrokerState, now_seconds: float
 ) -> tuple[BrokerState, list[WorkflowCommand]]:
-    """Dispatch any queued attempts that have become eligible.
+    """Flip due delayed attempts to eligible, then dispatch what capacity allows.
 
-    TickWakeup is a contentless poke scheduled at a delayed retry's not_before
-    time. It carries no work-item data; spurious or duplicate wakeups are
-    harmless no-ops.
+    Eligibility flips on the tick's ``due`` value (recorded when the wakeup
+    was scheduled), never the current clock, so replaying journaled ticks
+    makes the same dispatch decisions as the live run. Spurious or duplicate
+    wakeups are harmless no-ops.
     """
     state = init.deepcopy()
     commands: list[WorkflowCommand] = []
     for step_name, worker_state in sorted(state.workers.items(), key=lambda x: x[0]):
+        for attempt in worker_state.queue:
+            if attempt.not_before is not None and attempt.not_before <= tick.due:
+                attempt.not_before = None
         commands.extend(_drain_eligible_queue(step_name, worker_state, now_seconds))
     return state, commands
 

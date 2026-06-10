@@ -784,22 +784,46 @@ def test_step_worker_failed_exponential_jitter_deterministic(
 
 
 def test_wakeup_dispatches_eligible_attempt(base_state: BrokerState) -> None:
-    """TickWakeup dispatches attempts whose not_before has passed."""
+    """TickWakeup dispatches attempts whose not_before is covered by its due."""
     base_state.workers["test_step"].queue.append(
         EventAttempt(event=MyTestEvent(value=1), attempts=1, not_before=110.0)
     )
 
-    # Before eligibility: nothing dispatched
-    state_before, commands_before = _reduce_tick(TickWakeup(), base_state, 105.0)
+    # Wakeup due before eligibility: nothing dispatched
+    state_before, commands_before = _reduce_tick(
+        TickWakeup(due=105.0), base_state, 105.0
+    )
     assert not any(isinstance(c, CommandRunWorker) for c in commands_before)
     assert len(state_before.workers["test_step"].queue) == 1
 
-    # At eligibility: dispatched
-    state_after, commands_after = _reduce_tick(TickWakeup(), base_state, 110.0)
+    # Wakeup due at eligibility: dispatched
+    state_after, commands_after = _reduce_tick(TickWakeup(due=110.0), base_state, 110.0)
     run_cmds = [c for c in commands_after if isinstance(c, CommandRunWorker)]
     assert len(run_cmds) == 1
     assert len(state_after.workers["test_step"].queue) == 0
     assert state_after.workers["test_step"].in_progress[0].attempts == 1
+
+
+def test_wakeup_eligibility_is_due_driven_not_clock_driven(
+    base_state: BrokerState,
+) -> None:
+    """Dispatch decisions derive from the journaled due, not the wall clock.
+
+    Regression: replaying a journal long after the fact must reduce each
+    wakeup identically to the live run, even though the replay-time clock is
+    far past every not_before.
+    """
+    base_state.workers["test_step"].queue.append(
+        EventAttempt(event=MyTestEvent(value=1), attempts=1, not_before=110.0)
+    )
+
+    # A stale wakeup (due=105) replayed when the clock is way past 110 must
+    # still NOT dispatch — the live run didn't dispatch on it either.
+    state, commands = _reduce_tick(TickWakeup(due=105.0), base_state, 99_999.0)
+    assert not any(isinstance(c, CommandRunWorker) for c in commands)
+    queue = state.workers["test_step"].queue
+    assert len(queue) == 1
+    assert queue[0].not_before == 110.0
 
 
 def test_ineligible_attempt_does_not_block_eligible_behind_it(
@@ -812,7 +836,7 @@ def test_ineligible_attempt_does_not_block_eligible_behind_it(
     )
     worker_state.queue.append(EventAttempt(event=MyTestEvent(value=2)))
 
-    state, commands = _reduce_tick(TickWakeup(), base_state, 100.0)
+    state, commands = _reduce_tick(TickWakeup(due=100.0), base_state, 100.0)
 
     run_cmds = [c for c in commands if isinstance(c, CommandRunWorker)]
     assert len(run_cmds) == 1
@@ -867,19 +891,33 @@ def test_rewind_rearms_wakeup_for_delayed_attempt(base_state: BrokerState) -> No
     assert wakeups[0].at_time == 150.0
 
 
-def test_rewind_dispatches_expired_delayed_attempt(base_state: BrokerState) -> None:
-    """A not_before in the past delivers immediately on resume, exactly once."""
+def test_rewind_rearms_wakeup_even_when_past_due(base_state: BrokerState) -> None:
+    """A past-due not_before still goes through a wakeup tick, never a direct
+    dispatch from rewind.
+
+    The runner fires a past-due wakeup immediately, so delivery is prompt —
+    but it arrives as a journaled tick, keeping replay deterministic.
+    """
     base_state.workers["test_step"].queue.append(
         EventAttempt(event=MyTestEvent(value=1), attempts=2, not_before=110.0)
     )
 
     new_state, commands = rewind_in_progress(base_state, now_seconds=120.0)
 
-    run_cmds = [c for c in commands if isinstance(c, CommandRunWorker)]
+    assert not any(isinstance(c, CommandRunWorker) for c in commands)
+    wakeups = [c for c in commands if isinstance(c, CommandScheduleWakeup)]
+    assert len(wakeups) == 1
+    assert wakeups[0].at_time == 110.0
+    queue = new_state.workers["test_step"].queue
+    assert len(queue) == 1
+    assert queue[0].attempts == 2
+
+    # The (immediately fired) wakeup then delivers exactly once
+    final_state, wake_commands = _reduce_tick(TickWakeup(due=110.0), new_state, 120.0)
+    run_cmds = [c for c in wake_commands if isinstance(c, CommandRunWorker)]
     assert len(run_cmds) == 1
-    assert not any(isinstance(c, CommandScheduleWakeup) for c in commands)
-    assert len(new_state.workers["test_step"].queue) == 0
-    assert new_state.workers["test_step"].in_progress[0].attempts == 2
+    assert len(final_state.workers["test_step"].queue) == 0
+    assert final_state.workers["test_step"].in_progress[0].attempts == 2
 
 
 # =============================================================================

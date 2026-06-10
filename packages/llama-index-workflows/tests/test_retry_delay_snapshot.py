@@ -20,7 +20,7 @@ import pytest
 from workflows.context import Context
 from workflows.decorators import step
 from workflows.errors import WorkflowCancelledByUser
-from workflows.events import StartEvent, StopEvent
+from workflows.events import Event, StartEvent, StopEvent
 from workflows.handler import WorkflowHandler
 from workflows.retry_policy import ConstantDelayRetryPolicy
 from workflows.workflow import Workflow
@@ -107,3 +107,97 @@ async def test_resume_after_eligibility_delivers_immediately_once() -> None:
 
     assert result == "ok_after_2"
     assert len(wf.attempt_times) == 2
+
+
+@pytest.mark.asyncio
+async def test_snapshot_after_delayed_retry_resolved() -> None:
+    """Snapshots stay available after a delayed retry has fired.
+
+    Regression: snapshots are rebuilt by replaying journaled ticks. When
+    eligibility was a wall-clock comparison, replaying the failure tick
+    recomputed not_before from replay time, so the journaled TickWakeup
+    didn't dispatch and the retry's step-result tick crashed with
+    "Worker not found in in_progress".
+    """
+    wf = FlakyWorkflow(timeout=10.0)
+    handler = wf.run()
+    result = await handler
+
+    assert result == "ok_after_2"
+    assert handler.ctx is not None
+    ctx_dict = handler.ctx.to_dict()
+    assert ctx_dict["workers"]["flaky"]["queue"] == []
+
+
+@pytest.mark.asyncio
+async def test_snapshot_not_before_is_stable_across_snapshots() -> None:
+    """Two snapshots taken at different times agree on not_before.
+
+    Regression: not_before was recomputed from the snapshot-time clock, so
+    every snapshot restarted the full delay (a late snapshot + resume waited
+    the whole delay again instead of the remainder). It must derive from the
+    journaled failure timestamp.
+    """
+    wf = FlakyWorkflow(timeout=10.0)
+    handler = wf.run()
+
+    first = await _snapshot_in_delay_window(handler)
+    await asyncio.sleep(RETRY_DELAY / 3)
+    assert handler.ctx is not None
+    second = handler.ctx.to_dict()
+
+    first_nb = first["workers"]["flaky"]["queue"][0]["not_before"]
+    second_nb = second["workers"]["flaky"]["queue"][0]["not_before"]
+    assert first_nb == second_nb
+
+    await handler.cancel_run()
+    with pytest.raises(WorkflowCancelledByUser):
+        await handler
+
+
+class SideEvent(Event):
+    pass
+
+
+class InterleavedFlakyWorkflow(Workflow):
+    """Retried step also receives an unrelated event during the delay window."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.attempt_times: list[float] = []
+        self.side_events = 0
+
+    @step(retry_policy=ConstantDelayRetryPolicy(maximum_attempts=3, delay=RETRY_DELAY))
+    async def flaky(self, ev: StartEvent | SideEvent) -> StopEvent | SideEvent | None:
+        if isinstance(ev, SideEvent):
+            self.side_events += 1
+            return None
+        self.attempt_times.append(time.time())
+        if len(self.attempt_times) == 1:
+            raise RuntimeError("first attempt fails")
+        return StopEvent(result=f"ok_after_{len(self.attempt_times)}")
+
+
+@pytest.mark.asyncio
+async def test_snapshot_after_interleaved_event_in_delay_window() -> None:
+    """An event dispatched to the step during the delay window must not break
+    snapshot replay.
+
+    Regression: with clock-based eligibility, replay dispatched the retry at
+    the failure tick (past due by replay time) while the live run dispatched
+    the interleaved event first, cross-wiring worker records and crashing on
+    the retry's step-result tick.
+    """
+    wf = InterleavedFlakyWorkflow(timeout=10.0)
+    handler = wf.run()
+
+    await _snapshot_in_delay_window(handler)
+    assert handler.ctx is not None
+    handler.ctx.send_event(SideEvent())
+
+    result = await handler
+    assert result == "ok_after_2"
+    assert wf.side_events == 1
+
+    ctx_dict = handler.ctx.to_dict()
+    assert ctx_dict["workers"]["flaky"]["queue"] == []
