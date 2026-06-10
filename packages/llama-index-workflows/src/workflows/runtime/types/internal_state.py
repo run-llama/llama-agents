@@ -180,8 +180,16 @@ class BrokerState:
                 worker_state.collected_waiters, key=lambda x: x.waiter_id
             ):
                 if waiter.has_requirements and not waiter.requirements:
+                    # Re-ping the step with its whole work record so the
+                    # re-registered waiter keeps its stream scope and any
+                    # collect batch.
                     commands.append(
-                        TickAddEvent(event=waiter.event, step_name=step_name)
+                        TickAddEvent(
+                            event=waiter.event,
+                            step_name=step_name,
+                            scope_path=waiter.scope_path,
+                            collection_release_payload=waiter.collection_release_payload,
+                        )
                     )
         return commands
 
@@ -240,6 +248,10 @@ class BrokerState:
                     resolved_event=serializer.serialize(waiter.resolved_event)
                     if waiter.resolved_event
                     else None,
+                    scope_path=list(waiter.scope_path),
+                    collection_release_payload=_serialize_release_payload(
+                        waiter.collection_release_payload, serializer
+                    ),
                 )
                 for waiter in worker_state.collected_waiters
             ]
@@ -330,40 +342,13 @@ class BrokerState:
 
             worker = base_state.workers[step_name]
 
-            # Restore queue with retry and stream scope info
+            # Restore queue with retry and stream scope info.
+            # in_progress events are moved to the queue on deserialization;
+            # they will be restarted when the workflow runs.
             worker.queue = [
-                EventAttempt(
-                    event=serializer.deserialize(attempt.event),
-                    attempts=attempt.attempts,
-                    first_attempt_at=attempt.first_attempt_at,
-                    last_exception=attempt.last_exception,
-                    last_failed_at=attempt.last_failed_at,
-                    recovery_counts=dict(attempt.recovery_counts),
-                    scope_path=tuple(attempt.scope_path),
-                    collection_release_payload=_deserialize_release_payload(
-                        attempt.collection_release_payload, serializer
-                    ),
-                )
-                for attempt in worker_data.queue
+                _deserialize_event_attempt(attempt, serializer)
+                for attempt in [*worker_data.queue, *worker_data.in_progress]
             ]
-
-            # in_progress events are moved to the queue on deserialization
-            # They will be restarted when the workflow runs
-            for attempt in worker_data.in_progress:
-                worker.queue.append(
-                    EventAttempt(
-                        event=serializer.deserialize(attempt.event),
-                        attempts=attempt.attempts,
-                        first_attempt_at=attempt.first_attempt_at,
-                        last_exception=attempt.last_exception,
-                        last_failed_at=attempt.last_failed_at,
-                        recovery_counts=dict(attempt.recovery_counts),
-                        scope_path=tuple(attempt.scope_path),
-                        collection_release_payload=_deserialize_release_payload(
-                            attempt.collection_release_payload, serializer
-                        ),
-                    )
-                )
 
             # Restore collected events
             worker.collected_events = {
@@ -374,11 +359,18 @@ class BrokerState:
             # Restore waiters
             worker.collected_waiters = []
             for waiter_data in worker_data.collected_waiters:
-                # Import the event type
+                waiter_payload = _deserialize_release_payload(
+                    waiter_data.collection_release_payload, serializer
+                )
                 worker.collected_waiters.append(
                     StepWorkerWaiter(
                         waiter_id=waiter_data.waiter_id,
-                        event=serializer.deserialize(waiter_data.event),
+                        # For a suspended collect invocation the payload is the
+                        # authoritative record; the trigger event is derived
+                        # from it so the two cannot diverge on resume.
+                        event=waiter_payload.as_event()
+                        if waiter_payload is not None
+                        else serializer.deserialize(waiter_data.event),
                         waiting_for_event=_import_event_type(
                             waiter_data.waiting_for_event
                         ),
@@ -389,10 +381,38 @@ class BrokerState:
                         )
                         if waiter_data.resolved_event
                         else None,
+                        scope_path=tuple(waiter_data.scope_path),
+                        collection_release_payload=waiter_payload,
                     )
                 )
 
         return base_state
+
+
+def _deserialize_event_attempt(
+    attempt: SerializedEventAttempt, serializer: BaseSerializer
+) -> EventAttempt:
+    """Restore one queued work item.
+
+    For a collect invocation the persisted payload is the authoritative
+    record; the trigger event is derived from it so the two cannot diverge
+    across a serialize/resume boundary.
+    """
+    payload = _deserialize_release_payload(
+        attempt.collection_release_payload, serializer
+    )
+    return EventAttempt(
+        event=payload.as_event()
+        if payload is not None
+        else serializer.deserialize(attempt.event),
+        attempts=attempt.attempts,
+        first_attempt_at=attempt.first_attempt_at,
+        last_exception=attempt.last_exception,
+        last_failed_at=attempt.last_failed_at,
+        recovery_counts=dict(attempt.recovery_counts),
+        scope_path=tuple(attempt.scope_path),
+        collection_release_payload=payload,
+    )
 
 
 def _import_event_type(qualified_name: str) -> type[Event]:

@@ -122,10 +122,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class _EmptyCollectionTrigger(Event):
-    """Internal carrier event for an empty collection release."""
-
-
 class _ControlLoopRunner:
     """
     Private class to encapsulate the async control loop runtime state and behavior.
@@ -274,6 +270,7 @@ class _ControlLoopRunner:
                 last_failed_at=command.last_failed_at,
                 recovery_counts=dict(command.recovery_counts),
                 scope_path=command.scope_path,
+                collection_release_payload=command.collection_release_payload,
             )
             if command.delay is not None and command.delay > 0:
                 now = await self.adapter.get_now()
@@ -411,6 +408,21 @@ class _ControlLoopRunner:
                 while self.tick_buffer:
                     tick = self.tick_buffer.pop(0)
                     if isinstance(tick, TickIdleCheck):
+                        # An idle check confirms quiescence, so it must observe
+                        # a settled view: defer it behind any pending ticks
+                        # (e.g. a stream-close that will release a collect
+                        # invocation), and drop it entirely while a delayed
+                        # re-delivery (retry) is scheduled — the workflow is
+                        # not idle, work is coming.
+                        if self.tick_buffer:
+                            self.tick_buffer.append(tick)
+                            continue
+                        if any(
+                            isinstance(scheduled, TickAddEvent)
+                            for _, _, scheduled in self.scheduled_wakeups
+                        ):
+                            self._idle_check_pending = False
+                            continue
                         self._idle_check_pending = False
                     result = await self._process_tick(tick)
                     if result is not None:
@@ -683,6 +695,24 @@ def _reduce_tick(
     elif isinstance(tick, TickIdleCheck):
         # Return early — idle check ticks don't schedule further idle checks
         if _check_idle_state(init):
+            stuck = _detect_stuck_streams(init)
+            if stuck is not None:
+                state = init.deepcopy()
+                state.is_running = False
+                first_leaked = next(iter(init.streams.values()))
+                return state, [
+                    CommandPublishEvent(
+                        event=WorkflowFailedEvent(
+                            step_name=first_leaked.source_step,
+                            exception=stuck,
+                            attempts=1,
+                            elapsed_seconds=0.0,
+                        )
+                    ),
+                    CommandFailWorkflow(
+                        step_name=first_leaked.source_step, exception=stuck
+                    ),
+                ]
             return init, [CommandPublishEvent(WorkflowIdleEvent())]
         return init, []
     else:
@@ -747,6 +777,36 @@ def _check_idle_state(state: BrokerState) -> bool:
     return True
 
 
+def _detect_stuck_streams(state: BrokerState) -> WorkflowRuntimeError | None:
+    """Detect a provably-stuck run: idle, no unresolved waiters, open streams.
+
+    Called only when the state is already quiescent (no queued events, no
+    in-progress workers). An unresolved waiter suppresses detection — external
+    events can re-enter scoped work only via waiters, so a pending waiter means
+    the open streams may still legitimately close (HITL workflows). Without
+    one, an open stream can never reach zero open work items: the run would
+    hang to timeout (or forever). Returns the diagnostic error to fail with.
+    """
+    if not state.streams:
+        return None
+    has_unresolved_waiter = any(
+        waiter.resolved_event is None and not waiter.timed_out
+        for worker_state in state.workers.values()
+        for waiter in worker_state.collected_waiters
+    )
+    if has_unresolved_waiter:
+        return None
+    details = "; ".join(
+        f"stream {stream.stream_id!r} opened by step {stream.source_step!r} "
+        f"with {stream.open_work_items} open work item(s)"
+        for stream in state.streams.values()
+    )
+    return WorkflowRuntimeError(
+        "Workflow is idle with open collection streams and no pending "
+        f"waiters; the run can never complete (leaked stream accounting): {details}"
+    )
+
+
 def _mint_stream_id(
     state: BrokerState, scope_path: tuple[str, ...], step_name: str
 ) -> str:
@@ -781,8 +841,24 @@ def _apply_stream_work_delta(
         return []
     stream = state.streams.get(stream_id)
     if stream is None:
+        if delta < 0:
+            logger.warning(
+                "Stream accounting: ignoring a work-item decrement for "
+                "unknown or already-closed stream %r.",
+                stream_id,
+            )
         return []
     stream.open_work_items += delta
+    if stream.open_work_items < 0:
+        # Provably corrupt accounting. Log loudly and let the <= 0 close
+        # below fail fast instead of wedging the stream open.
+        logger.error(
+            "Stream accounting: open_work_items went negative (%d) for "
+            "stream %r from step %r. This is a runtime accounting bug.",
+            stream.open_work_items,
+            stream_id,
+            stream.source_step,
+        )
     if stream.closed_to_new_items and stream.open_work_items <= 0:
         return _close_collection_stream(state, stream_id)
     return []
@@ -801,6 +877,45 @@ def _close_collection_stream(
             scope_path=stream.scope_path,
         )
     ]
+
+
+def _redeliver_work_item(
+    this_execution: InProgressState,
+    *,
+    event: Event,
+    step_name: str,
+    recovery_counts: dict[str, int],
+    carry_payload: bool,
+    delay: float | None = None,
+    attempts: int | None = None,
+    first_attempt_at: float | None = None,
+    last_exception: Exception | None = None,
+    last_failed_at: float | None = None,
+) -> CommandQueueEvent:
+    """Build a re-delivery command from the live execution record.
+
+    The work item's identity (scope, collect payload) travels whole from the
+    in-progress record — never reassembled from fragments. ``carry_payload`` is
+    True when re-delivering the record's own invocation event (retry); a routed
+    successor event (e.g. a catch_error handler's StepFailedEvent) is ordinary
+    same-scope dispatch and must not carry the payload.
+    """
+    return CommandQueueEvent(
+        event=event,
+        step_name=step_name,
+        delay=delay,
+        attempts=attempts,
+        first_attempt_at=first_attempt_at,
+        last_exception=last_exception,
+        last_failed_at=last_failed_at,
+        recovery_counts=recovery_counts,
+        scope_path=this_execution.scope_path,
+        collection_release_payload=(
+            this_execution.shared_state.collection_release_payload
+            if carry_payload
+            else None
+        ),
+    )
 
 
 def _take_threshold(collect: Collect | None) -> int | None:
@@ -910,20 +1025,21 @@ def _process_step_result_tick(
             else:
                 delay = None
             if delay is not None:
+                # A retry re-runs the SAME work item: the record travels whole
+                # (scope, collect payload) so it still closes its stream and a
+                # collect invocation re-fires with its original batch.
                 commands.append(
-                    CommandQueueEvent(
-                        event=tick.event,
-                        delay=delay,
+                    _redeliver_work_item(
+                        this_execution,
+                        event=this_execution.event,
                         step_name=tick.step_name,
+                        recovery_counts=dict(this_execution.recovery_counts),
+                        carry_payload=True,
+                        delay=delay,
                         attempts=this_execution.attempts + 1,
                         first_attempt_at=this_execution.first_attempt_at,
                         last_exception=result.exception,
                         last_failed_at=result.failed_at,
-                        recovery_counts=dict(this_execution.recovery_counts),
-                        # A retry re-runs the SAME work item: keep its scope_path
-                        # so it still closes its stream, and mark it counted so
-                        # re-queuing does not mint a second open_work_items-set member.
-                        scope_path=trigger_stack,
                     )
                 )
             else:
@@ -959,20 +1075,21 @@ def _process_step_result_tick(
                             result.failed_at, tz=timezone.utc
                         ),
                     )
+                    # The recovered branch continues at the same stream level:
+                    # the handler event inherits the failing work item's scope
+                    # so its output stays in-stream and the stream can still
+                    # close. It routes to the handler step, so it must not
+                    # carry the collect payload.
                     commands.append(
-                        CommandQueueEvent(
+                        _redeliver_work_item(
+                            this_execution,
                             event=step_failed_event,
                             step_name=handler.step_name,
                             recovery_counts={
                                 **this_execution.recovery_counts,
                                 handler.step_name: new_count,
                             },
-                            # The recovered branch continues at the same stream
-                            # level: carry the failing work item's stack so the
-                            # handler's output stays in-stream and the stream can
-                            # still close. The handler event is this work item's
-                            # same-level successor, pre-counted below.
-                            scope_path=trigger_stack,
+                            carry_payload=False,
                         )
                     )
                 else:
@@ -1048,6 +1165,10 @@ def _process_step_result_tick(
                 requirements=result.requirements,
                 has_requirements=bool(len(result.requirements)),
                 resolved_event=None,
+                # Store the suspended work item's record so resume re-delivers
+                # it whole: same stream scope, same collect batch.
+                scope_path=this_execution.scope_path,
+                collection_release_payload=this_execution.shared_state.collection_release_payload,
             )
             if existing is not None:
                 worker_state.collected_waiters[existing] = new_waiter
@@ -1234,6 +1355,40 @@ def _process_add_event_tick(
     if isinstance(tick.event, StartEvent):
         state.is_running = True
 
+    # A payload-carrying tick is a re-delivered collect invocation (retry,
+    # waiter re-ping after resume, serialized requeue). It routes directly to
+    # the binding's target step — before waiter matching, before the
+    # member-arrival path — so it can never be swallowed as a stream member or
+    # resolve an unrelated waiter. The event is derived from the payload, the
+    # authoritative work record.
+    if tick.collection_release_payload is not None:
+        payload = tick.collection_release_payload
+        binding = state.config.collection_bindings.get(payload.binding_id)
+        if binding is None:
+            raise WorkflowRuntimeError(
+                f"Collect invocation re-delivered for unknown binding "
+                f"{payload.binding_id!r} (stream {payload.stream_id!r}). "
+                "Workflow state is corrupt."
+            )
+        commands.extend(
+            _add_or_enqueue_event(
+                EventAttempt(
+                    event=payload.as_event(),
+                    attempts=tick.attempts,
+                    first_attempt_at=tick.first_attempt_at,
+                    last_exception=tick.last_exception,
+                    last_failed_at=tick.last_failed_at,
+                    recovery_counts=dict(tick.recovery_counts),
+                    scope_path=tuple(tick.scope_path),
+                    collection_release_payload=payload,
+                ),
+                binding.target_step,
+                state.workers[binding.target_step],
+                now_seconds,
+            )
+        )
+        return state, commands
+
     # First, check if the event resolves any waiters. Track which steps were
     # woken via waiter resolution so we don't also route the event to them
     # as a normal accepted event (which would cause duplicate processing).
@@ -1250,8 +1405,14 @@ def _process_add_event_tick(
                 handled = True
                 waiter_resolved_steps.add(step_name)
                 wait_condition.resolved_event = tick.event
+                # Resume re-delivers the suspended work item whole from the
+                # waiter record: original trigger, stream scope, collect batch.
                 subcommands = _add_or_enqueue_event(
-                    EventAttempt(event=wait_condition.event),
+                    EventAttempt(
+                        event=wait_condition.event,
+                        scope_path=wait_condition.scope_path,
+                        collection_release_payload=wait_condition.collection_release_payload,
+                    ),
                     step_name,
                     state.workers[step_name],
                     now_seconds,
@@ -1269,12 +1430,44 @@ def _process_add_event_tick(
             worker_state = state.workers[step_name]
             if worker_state.config.collection_param is not None:
                 if not tick.scope_path:
+                    # Scope-less events (ctx.send_event, external sends) can
+                    # never join a collect batch — members reach a collect step
+                    # only by being emitted inside a fan-out stream.
+                    if tick.step_name is not None:
+                        logger.warning(
+                            "Ignoring %s sent to collect step %r via "
+                            "send_event(step=...): a collect step cannot "
+                            "receive targeted events; it only collects events "
+                            "emitted inside a fan-out stream.",
+                            type(tick.event).__name__,
+                            step_name,
+                        )
+                    else:
+                        logger.warning(
+                            "Ignoring %s for collect step %r: it was sent "
+                            "outside any collection stream (e.g. via "
+                            "ctx.send_event) so it cannot join a batch.",
+                            type(tick.event).__name__,
+                            step_name,
+                        )
                     continue
                 stream_id = tick.scope_path[-1]
                 binding = state.config.binding_for_target(
                     stream_id, step_name, state.streams
                 )
                 if binding is None:
+                    # Dropped member: its nearest stream has no binding to this
+                    # collect step. Balance the stream accounting for the dead
+                    # work item and say so.
+                    logger.warning(
+                        "Dropping %s for collect step %r: its enclosing "
+                        "stream %r has no collection binding targeting that "
+                        "step, so it can never join a batch.",
+                        type(tick.event).__name__,
+                        step_name,
+                        stream_id,
+                    )
+                    commands.extend(_apply_stream_work_delta(state, stream_id, -1))
                     continue
                 release_state = _release_state_for(state, stream_id, binding)
                 if not release_state.released:
@@ -1392,8 +1585,13 @@ def _process_waiter_timeout_tick(
     if waiter is None or waiter.resolved_event is not None:
         return state, commands
     waiter.timed_out = True
+    # Timeout resumes the suspended work item whole, like waiter resolution.
     subcommands = _add_or_enqueue_event(
-        EventAttempt(event=waiter.event),
+        EventAttempt(
+            event=waiter.event,
+            scope_path=waiter.scope_path,
+            collection_release_payload=waiter.collection_release_payload,
+        ),
         tick.step_name,
         worker_state,
         now_seconds,
@@ -1452,17 +1650,17 @@ def _fire_collection_release(
     output_stack: tuple[str, ...],
     now_seconds: float,
 ) -> list[WorkflowCommand]:
-    carrier: Event = events[0] if events else _EmptyCollectionTrigger()
+    payload = CollectionReleasePayload(
+        binding_id=binding.id,
+        stream_id=stream_id,
+        events=list(events),
+        output_scope_path=output_stack,
+    )
     return _add_or_enqueue_event(
         EventAttempt(
-            event=carrier,
+            event=payload.as_event(),
             scope_path=output_stack,
-            collection_release_payload=CollectionReleasePayload(
-                binding_id=binding.id,
-                stream_id=stream_id,
-                events=list(events),
-                output_scope_path=output_stack,
-            ),
+            collection_release_payload=payload,
         ),
         binding.target_step,
         worker_state,

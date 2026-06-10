@@ -17,6 +17,18 @@ Collect()]`` is an explicit, grep-able synonym for the same default.
 Only ``All`` and ``Take`` are supported. Other cardinalities and the ``at`` /
 ``from_`` / ``where`` knobs are reserved; declaring them raises a validation
 error instead of silently picking the wrong semantics.
+
+Semantics worth knowing:
+
+- A producer returning ``list[E] | None`` that returns ``None`` is equivalent
+  to returning ``[]``: it still opens (and immediately closes) an empty
+  stream, and downstream joins fire once with an empty list. A producer
+  cannot opt out of triggering its joins.
+- ``ctx.send_event`` cannot add members to a collection stream. Sends are
+  ignored with a warning at runtime — whether targeted at the collect step
+  via ``step=...`` or sent untargeted while a stream is open. The static
+  validation error only applies when no ``list[E]`` producer exists for the
+  collect step at all.
 """
 
 from __future__ import annotations

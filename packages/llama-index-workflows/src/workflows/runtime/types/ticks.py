@@ -19,7 +19,10 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, TypeAdapter
 from workflows.events import SerializableEvent, SerializableOptionalException
-from workflows.runtime.types.results import StepFunctionResult
+from workflows.runtime.types.results import (
+    SerializableCollectionReleasePayload,
+    StepFunctionResult,
+)
 
 
 class TickStepResult(BaseModel):
@@ -46,6 +49,10 @@ class TickAddEvent(BaseModel):
     last_failed_at: float | None = None
     recovery_counts: dict[str, int] = Field(default_factory=dict)
     scope_path: tuple[str, ...] = Field(default_factory=tuple)
+    # Collect-invocation work record. A payload-carrying tick is routed
+    # directly to the binding's target step, before waiter matching and the
+    # member-arrival path.
+    collection_release_payload: SerializableCollectionReleasePayload = None
 
 
 class TickCollectionStreamClosed(BaseModel):

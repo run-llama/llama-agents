@@ -392,6 +392,24 @@ class WorkflowFailedEvent(StopEvent):
     elapsed_seconds: float
 
 
+class CollectionReleaseEvent(Event):
+    """Internal: invokes a collect step with one released batch.
+
+    This is the trigger event of a collect-step invocation work item — never a
+    member of the stream itself. The authoritative record of the batch is the
+    work item's collection release payload; the runtime derives this event from
+    that payload at every (re)delivery so the two cannot diverge.
+
+    Surfaces publicly as `StepFailedEvent.input_event` when a collect step
+    fails into a `@catch_error` handler: ``events`` is the real released batch
+    (possibly empty for an empty stream).
+    """
+
+    events: list[SerializableEvent] = Field(default_factory=list)
+    stream_id: str = ""
+    binding_id: str = ""
+
+
 class StepFailedEvent(Event):
     """Delivered to a `@catch_error` handler when a step exhausts its retries.
 

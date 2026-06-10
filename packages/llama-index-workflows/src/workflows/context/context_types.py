@@ -117,6 +117,11 @@ class SerializedWaiter(BaseModel):
     has_requirements: bool = Field(default=False)
     # Resolved event if available (serialized), None otherwise
     resolved_event: str | None = None
+    # Originating work record: collection stream scope of the suspended work
+    # item (innermost stream id last).
+    scope_path: list[str] = Field(default_factory=list)
+    # For a suspended collect invocation, the release batch to re-invoke with.
+    collection_release_payload: SerializedCollectionReleasePayload | None = None
 
     @model_validator(mode="before")
     @classmethod

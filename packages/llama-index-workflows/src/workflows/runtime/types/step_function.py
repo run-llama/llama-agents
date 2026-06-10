@@ -195,9 +195,17 @@ def as_step_worker_function(
             if config.collection_param is not None:
                 param_name, _ = config.collection_param
                 payload = state.collection_release_payload
-                collection_binding = {
-                    param_name: list(payload.events if payload is not None else [])
-                }
+                if payload is None:
+                    # A collect invocation without its release payload is
+                    # corrupt state — fail loudly instead of re-running the
+                    # step with a fabricated empty batch.
+                    raise WorkflowRuntimeError(
+                        f"Collect step {step_name!r} was invoked without a "
+                        "collection release payload. This indicates a lost "
+                        "work record (runtime bug or corrupted serialized "
+                        "state)."
+                    )
+                collection_binding = {param_name: list(payload.events)}
             # Heterogeneous fan-in: multiple event parameters collect one event
             # of each declared type via the existing collect_events buffer. This
             # path is separate from list[E] collection fan-in.

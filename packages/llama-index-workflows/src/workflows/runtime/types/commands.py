@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from workflows.events import Event, StopEvent
+from workflows.runtime.types.results import CollectionReleasePayload
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,10 @@ class CommandQueueEvent:
     last_failed_at: float | None = None
     recovery_counts: dict[str, int] = field(default_factory=dict)
     scope_path: tuple[str, ...] = field(default_factory=tuple)
+    # Collect-invocation work record. When set, the queued event is a collect
+    # step invocation and re-delivery routes it directly to the binding's
+    # target step with this batch.
+    collection_release_payload: CollectionReleasePayload | None = None
 
 
 @dataclass(frozen=True)
