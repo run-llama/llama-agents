@@ -12,7 +12,6 @@ from typing import Any
 
 from llama_agents.client.protocol.serializable_events import EventEnvelopeWithMetadata
 from workflows.context.serializers import BaseSerializer
-from workflows.context.state_store import StateStore
 
 from .._keyed_lock import KeyedLock
 from .._lru_cache import LRUCache
@@ -55,6 +54,7 @@ class AgentDataStore(AbstractWorkflowStore):
         collection: str = "workflow_contexts",
         poll_interval: float = 30.0,
     ) -> None:
+        super().__init__()
         self._client = AgentDataClient(
             base_url=base_url,
             api_key=api_key,
@@ -76,7 +76,9 @@ class AgentDataStore(AbstractWorkflowStore):
         self._tick_seq_lock: asyncio.Lock | None = None
 
         self._subscriber_queues: dict[str, list[asyncio.Queue[StoredEvent | None]]] = {}
-        self._state_stores: dict[str, AgentDataStateStore[Any]] = {}
+        # Strong refs: facades stay alive for the run; _cleanup_run evicts
+        # them on terminal events.
+        self._state_store_cache = {}
         self._pending_ticks: dict[str, list[asyncio.Task[Any]]] = {}
         self._pending_events: dict[str, list[asyncio.Task[Any]]] = {}
 
@@ -167,7 +169,7 @@ class AgentDataStore(AbstractWorkflowStore):
         # Clean up sequence counters and cached state store
         self._event_sequences.pop(run_id, None)
         self._tick_sequences.pop(run_id, None)
-        self._state_stores.pop(run_id, None)
+        self._state_store_cache.pop(run_id, None)
 
     # ------------------------------------------------------------------
     # Sequence helpers
@@ -486,7 +488,7 @@ class AgentDataStore(AbstractWorkflowStore):
     # State store
     # ------------------------------------------------------------------
 
-    def _create_agent_data_state_store(
+    def _build_state_store(
         self,
         run_id: str,
         state_type: type[Any] | None,
@@ -499,32 +501,3 @@ class AgentDataStore(AbstractWorkflowStore):
             collection=f"{self._collection}_state",
             serializer=serializer,
         )
-
-    def create_state_store(
-        self,
-        run_id: str,
-        state_type: type[Any] | None = None,
-        serialized_state: dict[str, Any] | None = None,
-        serializer: BaseSerializer | None = None,
-    ) -> StateStore[Any]:
-        cached = self._state_stores.get(run_id)
-        if cached is not None and serialized_state is None:
-            return cached
-        if serialized_state is not None and serializer is not None:
-            collection = (
-                None
-                if serialized_state.get("store_type") == "agent_data"
-                else f"{self._collection}_state"
-            )
-            store = AgentDataStateStore.from_dict(
-                serialized_state,
-                serializer,
-                client=self._client,
-                state_type=state_type,
-                run_id=run_id,
-                collection=collection,
-            )
-        else:
-            store = self._create_agent_data_state_store(run_id, state_type, serializer)
-        self._state_stores[run_id] = store
-        return store

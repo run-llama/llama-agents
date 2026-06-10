@@ -497,6 +497,20 @@ async def test_create_state_store_with_type(store: AgentDataStore) -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_state_store_upgrades_default_state_type(
+    store: AgentDataStore,
+) -> None:
+    """A later typed caller upgrades the cached type-less facade (no shadowing)."""
+    first = store.create_state_store("run-upgrade")
+    assert first.state_type is DictState
+
+    second = store.create_state_store("run-upgrade", state_type=AgentDataCounterState)
+
+    assert second is first
+    assert first.state_type is AgentDataCounterState
+
+
+@pytest.mark.asyncio
 async def test_create_state_store_seeds_from_in_memory_serialized_state(
     backend: FakeAgentDataBackend,
     monkeypatch: pytest.MonkeyPatch,
@@ -617,7 +631,7 @@ async def test_agent_data_from_dict_accepts_in_memory_snapshot(
 def test_agent_data_from_dict_rejects_wrong_provider_handle(
     store: AgentDataStore,
 ) -> None:
-    with pytest.raises(ValueError, match="Cannot restore store_type 'postgres'"):
+    with pytest.raises(ValueError, match="store_type 'postgres'"):
         AgentDataStateStore.from_dict(
             {"store_type": "postgres", "run_id": "run-1"},
             JsonSerializer(),

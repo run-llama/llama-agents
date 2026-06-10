@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import sqlite3
 import weakref
 from collections.abc import AsyncIterator
@@ -15,7 +16,6 @@ from typing import Any, Iterator, Sequence
 from llama_agents.client.protocol.serializable_events import EventEnvelopeWithMetadata
 from workflows.context import JsonSerializer
 from workflows.context.serializers import BaseSerializer
-from workflows.context.state_store import DictState
 
 from ..abstract_workflow_store import (
     AbstractWorkflowStore,
@@ -26,6 +26,8 @@ from ..abstract_workflow_store import (
 )
 from .migrate import run_migrations as _run_migrations
 from .sqlite_state_store import SqliteStateStore
+
+logger = logging.getLogger(__name__)
 
 _TICK_PAGE_SIZE = 100
 
@@ -38,14 +40,12 @@ class SqliteWorkflowStore(AbstractWorkflowStore):
         auto_migrate: bool = True,
         single_connection: bool = False,
     ) -> None:
+        super().__init__()
         self.db_path = db_path
         self.poll_interval = poll_interval
         self._single_connection = single_connection
         self._persistent_conn: sqlite3.Connection | None = None
         self._conditions: weakref.WeakValueDictionary[str, asyncio.Condition] = (
-            weakref.WeakValueDictionary()
-        )
-        self._state_stores: weakref.WeakValueDictionary[str, SqliteStateStore[Any]] = (
             weakref.WeakValueDictionary()
         )
         if single_connection:
@@ -66,7 +66,13 @@ class SqliteWorkflowStore(AbstractWorkflowStore):
             conn = sqlite3.connect(f"file:{db_path}?vfs=unix-none", uri=True)
             conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
             return conn
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
+            logger.warning(
+                "unix-none VFS probe failed for %s (%s); falling back to a "
+                "regular fcntl-locking sqlite connection",
+                db_path,
+                exc,
+            )
             if conn is not None:
                 with contextlib.suppress(Exception):
                     conn.close()
@@ -84,33 +90,19 @@ class SqliteWorkflowStore(AbstractWorkflowStore):
             finally:
                 conn.close()
 
-    def create_state_store(
+    def _build_state_store(
         self,
         run_id: str,
-        state_type: type[Any] | None = None,
-        serialized_state: dict[str, Any] | None = None,
-        serializer: BaseSerializer | None = None,
+        state_type: type[Any] | None,
+        serializer: BaseSerializer | None,
     ) -> SqliteStateStore[Any]:
-        # One facade per run per process so its write lock is a real
-        # guarantee. Serialized restore requests always rebuild the store.
-        cached = self._state_stores.get(run_id)
-        if cached is not None and serialized_state is None:
-            if state_type is not None and cached.state_type is DictState:
-                # An earlier type-less caller (e.g. handler continuation)
-                # must not shadow the workflow's concrete state type.
-                cached.state_type = state_type
-            return cached
-        store = SqliteStateStore(
+        return SqliteStateStore(
             db_path=self.db_path,
             run_id=run_id,
             state_type=state_type,
             serializer=serializer,
             connection=self._persistent_conn,
         )
-        if serialized_state is not None and serializer is not None:
-            store._seed_from_serialized(serialized_state, serializer)
-        self._state_stores[run_id] = store
-        return store
 
     def _get_or_create_condition(self, run_id: str) -> asyncio.Condition:
         cond = self._conditions.get(run_id)

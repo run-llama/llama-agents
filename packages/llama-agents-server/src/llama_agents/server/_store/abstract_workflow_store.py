@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import weakref
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, MutableMapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -21,7 +22,7 @@ from pydantic import (
 )
 from workflows.context import JsonSerializer
 from workflows.context.serializers import BaseSerializer
-from workflows.context.state_store import StateStore
+from workflows.context.state_store import DictState, StateStore, StateStoreFacade
 from workflows.events import StopEvent
 from workflows.runtime.types.ticks import WorkflowTick, WorkflowTickAdapter
 
@@ -110,7 +111,18 @@ class StoredEvent(BaseModel):
 class AbstractWorkflowStore(ABC):
     poll_interval: float = 0.1
 
-    @abstractmethod
+    def __init__(self) -> None:
+        # Per-run facade cache: the single memoization site for state stores.
+        # Weak-valued by default so facades die with their last consumer.
+        # Backends needing a different lifecycle (strong refs + explicit
+        # eviction) assign a plain dict in their __init__.
+        self._state_store_cache: MutableMapping[str, StateStoreFacade[Any]] = (
+            weakref.WeakValueDictionary()
+        )
+
+    async def start(self) -> None:
+        """Initialize backend resources. Default is a no-op."""
+
     def create_state_store(
         self,
         run_id: str,
@@ -118,12 +130,33 @@ class AbstractWorkflowStore(ABC):
         serialized_state: dict[str, Any] | None = None,
         serializer: BaseSerializer | None = None,
     ) -> StateStore[Any]:
-        """Create a persistent state store for the given run.
+        """Return the per-run state store, creating and caching it on first use.
 
-        If *serialized_state* and *serializer* are provided, the returned store
-        restores from the serialized data. Implementations may materialize that
-        seed lazily on first async state access or handoff.
+        One facade per run per process, so its write lock is a real guarantee.
+        If *serialized_state* is provided, it is staged as a seed on the
+        (possibly already handed-out) facade: validation is eager, the I/O to
+        materialize it stays lazy (first async state access or handoff).
         """
+        store = self._state_store_cache.get(run_id)
+        if store is None:
+            store = self._build_state_store(run_id, state_type, serializer)
+            self._state_store_cache[run_id] = store
+        elif state_type is not None and store.state_type is DictState:
+            # An earlier type-less caller (e.g. handler continuation) must
+            # not shadow the workflow's concrete state type.
+            store.state_type = state_type
+        if serialized_state is not None:
+            store.add_seed(serialized_state, serializer or JsonSerializer())
+        return store
+
+    @abstractmethod
+    def _build_state_store(
+        self,
+        run_id: str,
+        state_type: type[Any] | None,
+        serializer: BaseSerializer | None,
+    ) -> StateStoreFacade[Any]:
+        """Construct the backend facade for a run. No caching, no seeding."""
 
     @abstractmethod
     async def query(self, query: HandlerQuery) -> list[PersistentHandler]: ...

@@ -309,7 +309,7 @@ async def test_from_dict_in_memory_format_migrates(pool: asyncpg.Pool) -> None:
 
 @pytest.mark.docker
 async def test_from_dict_rejects_wrong_provider_handle(pool: asyncpg.Pool) -> None:
-    with pytest.raises(ValueError, match="Cannot restore store_type 'agent_data'"):
+    with pytest.raises(ValueError, match="store_type 'agent_data'"):
         PostgresStateStore.from_dict(
             {"store_type": "agent_data", "run_id": "run-1"},
             JsonSerializer(),

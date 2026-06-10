@@ -10,9 +10,13 @@ from llama_agents.server import (
     PersistentHandler,
     SqliteWorkflowStore,
 )
-from llama_agents.server._store.sqlite.sqlite_state_store import SqliteStateStore
 from pydantic import BaseModel
-from workflows.context.state_store import DictState
+from workflows.context.serializers import JsonSerializer
+from workflows.context.state_store import (
+    DictState,
+    InMemoryStateStore,
+    StateStore,
+)
 from workflows.events import StopEvent
 
 
@@ -237,6 +241,26 @@ async def test_create_state_store_upgrades_default_state_type(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_create_state_store_restore_reuses_cached_facade(tmp_path: Path) -> None:
+    """A restore call must seed the already-handed-out facade, not rebuild it."""
+    db_path: str = str(tmp_path / "handlers.db")
+    store = SqliteWorkflowStore(db_path)
+    serializer = JsonSerializer()
+
+    first = store.create_state_store("run-1")
+    seed = InMemoryStateStore(DictState(token="restored"))
+
+    second = store.create_state_store(
+        "run-1",
+        serialized_state=seed.to_dict(serializer),
+        serializer=serializer,
+    )
+
+    assert second is first
+    assert await asyncio.wait_for(first.get("token"), timeout=2.0) == "restored"
+
+
+@pytest.mark.asyncio
 async def test_create_state_store_concurrent_writers_share_lock(
     tmp_path: Path,
 ) -> None:
@@ -247,7 +271,7 @@ async def test_create_state_store_concurrent_writers_share_lock(
     second = store.create_state_store("run-1")
     await first.set("count", 0)
 
-    async def increment(state_store: SqliteStateStore[Any]) -> None:
+    async def increment(state_store: StateStore[Any]) -> None:
         for _ in range(10):
             async with state_store.edit_state() as state:
                 state["count"] = state["count"] + 1

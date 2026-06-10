@@ -767,15 +767,7 @@ async def test_legacy_ctx_state_not_overwritten_on_second_resume(
 
     # Pre-seed the state table with new_value (simulating a previous partial run)
     state_store = sqlite_store.create_state_store("run-nooverwrite-1")
-    new_state = DictState()
-    new_state["my_key"] = "new_value"
-    new_state_data = {
-        "store_type": "in_memory",
-        "state_type": "DictState",
-        "state_module": "workflows.context.state_store",
-        "state_data": serialize_dict_state_data(new_state, serializer, ()),
-    }
-    state_store._write_in_memory_state(new_state_data)
+    await state_store.set("my_key", "new_value")
 
     server = WorkflowServer(workflow_store=sqlite_store, idle_timeout=0.01)
     server.add_workflow("test", wf)
