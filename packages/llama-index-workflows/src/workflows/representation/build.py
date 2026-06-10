@@ -63,6 +63,17 @@ def _get_event_type_chain(cls: type) -> list[str]:
     Returns a list starting with the class name, followed by parent Event
     subclasses up to (but not including) Event itself.
     """
+    is_event_subclass = False
+    try:
+        if isinstance(cls, type) and issubclass(cls, Event):
+            is_event_subclass = True
+    except TypeError:
+        pass
+
+    if not is_event_subclass:
+        name = _get_type_name(cls)
+        return [name] if name else []
+
     names: list[str] = [cls.__name__]
     for parent in cls.mro()[1:]:
         if parent is Event:
@@ -265,13 +276,14 @@ def get_workflow_representation(workflow: Workflow | type[Workflow]) -> Workflow
     current_stop_event = None
     for step_func in steps.values():
         for return_type in step_func._step_config.return_types:
-            if issubclass(return_type, StopEvent):
+            if isinstance(return_type, type) and issubclass(return_type, StopEvent):
                 current_stop_event = return_type
                 break
         if current_stop_event:
             break
 
     # First pass: Add all nodes
+    graph_event_types: set[type] = set()
     for step_name, step_func in steps.items():
         step_config = step_func._step_config
 
@@ -290,38 +302,53 @@ def get_workflow_representation(workflow: Workflow | type[Workflow]) -> Workflow
             if event_type == StopEvent and event_type != current_stop_event:
                 continue
 
-            if event_type.__name__ not in added_nodes:
+            graph_event_types.add(event_type)
+            event_type_name = _get_type_name(event_type) or "UnknownType"
+            if event_type_name not in added_nodes:
                 nodes.append(
                     WorkflowEventNode(
-                        id=event_type.__name__,
-                        label=event_type.__name__,
-                        event_type=event_type.__name__,
+                        id=event_type_name,
+                        label=event_type_name,
+                        event_type=event_type_name,
                         event_types=_get_event_type_chain(event_type),
-                        event_schema=event_type.model_json_schema(),
+                        event_schema=(
+                            event_type.model_json_schema()
+                            if isinstance(event_type, type)
+                            and issubclass(event_type, BaseModel)
+                            else None
+                        ),
                     )
                 )
-                added_nodes.add(event_type.__name__)
+                added_nodes.add(event_type_name)
 
         # Add event nodes for return types
         for return_type in step_config.return_types:
             if return_type is type(None):
                 continue
 
-            if return_type.__name__ not in added_nodes:
+            graph_event_types.add(return_type)
+            return_type_name = _get_type_name(return_type) or "UnknownType"
+            if return_type_name not in added_nodes:
                 nodes.append(
                     WorkflowEventNode(
-                        id=return_type.__name__,
-                        label=return_type.__name__,
-                        event_type=return_type.__name__,
+                        id=return_type_name,
+                        label=return_type_name,
+                        event_type=return_type_name,
                         event_types=_get_event_type_chain(return_type),
-                        event_schema=return_type.model_json_schema(),
+                        event_schema=(
+                            return_type.model_json_schema()
+                            if isinstance(return_type, type)
+                            and issubclass(return_type, BaseModel)
+                            else None
+                        ),
                     )
                 )
-                added_nodes.add(return_type.__name__)
+                added_nodes.add(return_type_name)
 
             # Add external_step node when InputRequiredEvent is found
             if (
-                issubclass(return_type, InputRequiredEvent)
+                isinstance(return_type, type)
+                and issubclass(return_type, InputRequiredEvent)
                 and "external_step" not in added_nodes
             ):
                 nodes.append(
@@ -344,40 +371,57 @@ def get_workflow_representation(workflow: Workflow | type[Workflow]) -> Workflow
         # Edges from steps to return types
         for return_type in step_config.return_types:
             if return_type is not type(None):
+                return_type_name = _get_type_name(return_type) or "UnknownType"
                 edges.append(
-                    WorkflowGraphEdge(source=step_name, target=return_type.__name__)
+                    WorkflowGraphEdge(source=step_name, target=return_type_name)
                 )
 
-            if issubclass(return_type, InputRequiredEvent):
+            if isinstance(return_type, type) and issubclass(
+                return_type, InputRequiredEvent
+            ):
+                return_type_name = _get_type_name(return_type) or "UnknownType"
                 edges.append(
-                    WorkflowGraphEdge(
-                        source=return_type.__name__, target="external_step"
-                    )
+                    WorkflowGraphEdge(source=return_type_name, target="external_step")
                 )
 
         # Edges from events to steps
         for event_type in step_config.accepted_events:
-            if step_name == "_done" and issubclass(event_type, StopEvent):
-                if current_stop_event:
-                    edges.append(
-                        WorkflowGraphEdge(
-                            source=current_stop_event.__name__, target=step_name
-                        )
-                    )
+            if step_config.accept_event_subclasses:
+                matching_events = [
+                    ev
+                    for ev in graph_event_types
+                    if isinstance(ev, type)
+                    and isinstance(event_type, type)
+                    and issubclass(ev, event_type)
+                ]
             else:
-                edges.append(
-                    WorkflowGraphEdge(source=event_type.__name__, target=step_name)
-                )
+                matching_events = [event_type]
 
-            if (
-                issubclass(event_type, HumanResponseEvent)
-                and "external_step" in added_nodes
-            ):
-                edges.append(
-                    WorkflowGraphEdge(
-                        source="external_step", target=event_type.__name__
+            for ev in matching_events:
+                ev_name = _get_type_name(ev) or "UnknownType"
+                if (
+                    step_name == "_done"
+                    and isinstance(ev, type)
+                    and issubclass(ev, StopEvent)
+                ):
+                    if current_stop_event:
+                        stop_event_name = (
+                            _get_type_name(current_stop_event) or "StopEvent"
+                        )
+                        edges.append(
+                            WorkflowGraphEdge(source=stop_event_name, target=step_name)
+                        )
+                else:
+                    edges.append(WorkflowGraphEdge(source=ev_name, target=step_name))
+
+                if (
+                    isinstance(ev, type)
+                    and issubclass(ev, HumanResponseEvent)
+                    and "external_step" in added_nodes
+                ):
+                    edges.append(
+                        WorkflowGraphEdge(source="external_step", target=ev_name)
                     )
-                )
 
         # Edges from steps to resources (with variable name as label)
         for resource_def in step_config.resources:
