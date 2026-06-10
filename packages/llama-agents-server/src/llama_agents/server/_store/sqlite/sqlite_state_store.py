@@ -34,7 +34,7 @@ def _utc_now() -> datetime:
 
 
 class _SqliteStateStorage:
-    """Sqlite-backed raw state storage (genuine I/O only)."""
+    """Sqlite-backed raw state storage."""
 
     def __init__(
         self,

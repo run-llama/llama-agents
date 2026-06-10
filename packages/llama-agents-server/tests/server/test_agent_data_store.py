@@ -7,7 +7,6 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
-import httpx
 import pytest
 from llama_agents.client.protocol.serializable_events import EventEnvelopeWithMetadata
 from llama_agents.server import (
@@ -73,28 +72,6 @@ def make_envelope(
     if event is None:
         event = Event(data=f"seq-{seq_label}")
     return EventEnvelopeWithMetadata.from_event(event, include_qualified_name=False)
-
-
-def create_agent_data_store_with_collection(
-    backend: FakeAgentDataBackend,
-    monkeypatch: pytest.MonkeyPatch,
-    collection: str,
-) -> AgentDataStore:
-    store = AgentDataStore(
-        base_url="https://fake-api.example.com",
-        api_key="test-key",
-        project_id="test-project",
-        deployment_name="test-deploy",
-        collection=collection,
-    )
-    mock_http = httpx.AsyncClient(
-        base_url=store._client._base_url,
-        headers=store._client._headers(),
-        params={"project_id": store._client._project_id},
-        transport=httpx.MockTransport(backend.handle_request),
-    )
-    monkeypatch.setattr(store._client, "_shared_client", mock_http)
-    return store
 
 
 async def _subscribe_and_collect(
@@ -519,9 +496,7 @@ async def test_create_state_store_seeds_from_in_memory_serialized_state(
     seed = InMemoryStateStore(DictState())
     await seed.set("token", "persisted")
     serialized_state = seed.to_dict(serializer)
-    store = create_agent_data_store_with_collection(
-        backend, monkeypatch, collection="handlers"
-    )
+    store = create_agent_data_store(backend, monkeypatch, collection="handlers")
 
     state_store = store.create_state_store(
         "run-seeded",
@@ -531,9 +506,7 @@ async def test_create_state_store_seeds_from_in_memory_serialized_state(
 
     assert await state_store.get("token") == "persisted"
 
-    restored = create_agent_data_store_with_collection(
-        backend, monkeypatch, collection="handlers"
-    )
+    restored = create_agent_data_store(backend, monkeypatch, collection="handlers")
     reconnected = restored.create_state_store(
         "run-seeded",
         serialized_state=state_store.to_dict(serializer),
@@ -566,14 +539,12 @@ async def test_create_state_store_reconnects_agent_data_handle_collection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     serializer = JsonSerializer()
-    original = create_agent_data_store_with_collection(
-        backend, monkeypatch, collection="handlers"
-    )
+    original = create_agent_data_store(backend, monkeypatch, collection="handlers")
     original_state = original.create_state_store("run-agent-data-handle")
     await original_state.set("token", "persisted")
     serialized_state = original_state.to_dict(serializer)
 
-    restored = create_agent_data_store_with_collection(
+    restored = create_agent_data_store(
         backend, monkeypatch, collection="other_handlers"
     )
     restored_state = restored.create_state_store(
@@ -645,9 +616,7 @@ async def test_legacy_agent_data_typed_state_decodes_without_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     serializer = JsonSerializer()
-    store = create_agent_data_store_with_collection(
-        backend, monkeypatch, collection="handlers"
-    )
+    store = create_agent_data_store(backend, monkeypatch, collection="handlers")
     backend.create(
         "test-deploy",
         "handlers_state",

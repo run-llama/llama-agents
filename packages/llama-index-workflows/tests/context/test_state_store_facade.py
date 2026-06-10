@@ -105,27 +105,19 @@ async def test_concurrent_get_state_never_observes_torn_edit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_inside_edit_state_in_memory() -> None:
-    store = InMemoryStateStore(DictState())
+@pytest.mark.parametrize("durable", [False, True])
+async def test_get_inside_edit_state(durable: bool) -> None:
+    store: Any = (
+        make_facade(FakeDurableStorage())
+        if durable
+        else InMemoryStateStore(DictState())
+    )
     await store.set("counter", 1)
 
     async def nested_read() -> Any:
         async with store.edit_state() as state:
             state["other"] = 2
             return await store.get("counter")
-
-    assert await asyncio.wait_for(nested_read(), timeout=2.0) == 1
-
-
-@pytest.mark.asyncio
-async def test_get_inside_edit_state_durable() -> None:
-    facade = make_facade(FakeDurableStorage())
-    await facade.set("counter", 1)
-
-    async def nested_read() -> Any:
-        async with facade.edit_state() as state:
-            state["other"] = 2
-            return await facade.get("counter")
 
     assert await asyncio.wait_for(nested_read(), timeout=2.0) == 1
 

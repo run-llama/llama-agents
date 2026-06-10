@@ -85,7 +85,7 @@ class _StateStorage(Protocol):
 class StateStorage(_StateStorage, Protocol):
     """Durable storage: state outlives the process and supports reconnect handles.
 
-    Backends implement genuine I/O only; the seed lifecycle, locking, and
+    Backends implement raw I/O only; the seed lifecycle, locking, and
     save-path encoding live in [StateStoreFacade][workflows.context.state_store.StateStoreFacade].
     """
 
@@ -134,15 +134,14 @@ def string_record_from_state(
     serializer: BaseSerializer,
     known_unserializable_keys: tuple[str, ...] = KNOWN_UNSERIALIZABLE_KEYS,
 ) -> StateRecord:
-    """Encode a state model into a storage record with string data."""
-    state_data, state_type_name, state_module = encode_state_to_str(
-        state, serializer, known_unserializable_keys
-    )
-    return StateRecord(
-        data=state_data,
-        state_type=state_type_name,
-        state_module=state_module,
-    )
+    """Encode a state model into a storage record with string data.
+
+    For durable stores that persist a single string column.
+    """
+    record = _record_from_state(state, serializer, known_unserializable_keys)
+    if not isinstance(record.data, str):
+        record.data = json.dumps(record.data)
+    return record
 
 
 def parse_in_memory_state(
@@ -219,20 +218,6 @@ def encode_state(
         state_data = serializer.serialize(state)
 
     return state_data, type(state).__name__, type(state).__module__
-
-
-def encode_state_to_str(
-    state: BaseModel,
-    serializer: BaseSerializer,
-    known_unserializable_keys: tuple[str, ...] = KNOWN_UNSERIALIZABLE_KEYS,
-) -> tuple[str, str, str]:
-    """Encode state for durable stores that persist a single string column."""
-    state_data, state_type_name, state_module = encode_state(
-        state, serializer, known_unserializable_keys
-    )
-    if not isinstance(state_data, str):
-        state_data = json.dumps(state_data)
-    return state_data, state_type_name, state_module
 
 
 def decode_state(
@@ -837,6 +822,15 @@ class StateStoreFacade(Generic[MODEL_T]):
         raise NotImplementedError("Use await snapshot(serializer) for async storage")
 
 
+def _live_record(state: BaseModel) -> StateRecord:
+    """Record wrapping a live model: in-memory state keeps value identity."""
+    return StateRecord(
+        data=state,
+        state_type=type(state).__name__,
+        state_module=type(state).__module__,
+    )
+
+
 class _InMemoryStateStorage:
     """Raw in-process storage for workflow state."""
 
@@ -898,13 +892,7 @@ class InMemoryStateStore(StateStoreFacade[MODEL_T]):
     state_type: type[MODEL_T]
 
     def __init__(self, initial_state: MODEL_T):
-        self._memory_storage = _InMemoryStateStorage(
-            StateRecord(
-                data=initial_state,
-                state_type=type(initial_state).__name__,
-                state_module=type(initial_state).__module__,
-            )
-        )
+        self._memory_storage = _InMemoryStateStorage(_live_record(initial_state))
         super().__init__(
             self._memory_storage,
             type(initial_state),
@@ -954,23 +942,12 @@ class InMemoryStateStore(StateStoreFacade[MODEL_T]):
         record = self._memory_storage.load_sync()
         if record is None:
             # Reads are pure: return a default record without persisting it.
-            state = self.state_type()
-            record = StateRecord(
-                data=state,
-                state_type=type(state).__name__,
-                state_module=type(state).__module__,
-            )
+            record = _live_record(self.state_type())
         return record
 
     async def _write_state(self, state: BaseModel) -> None:
-        # Live-model record: in-memory state keeps value identity, no encoding.
-        await self._memory_storage.save(
-            StateRecord(
-                data=state,
-                state_type=type(state).__name__,
-                state_module=type(state).__module__,
-            )
-        )
+        # Live-model record: no encoding, value identity preserved.
+        await self._memory_storage.save(_live_record(state))
 
     @classmethod
     def from_dict(

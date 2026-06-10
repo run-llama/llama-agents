@@ -32,7 +32,7 @@ def _utc_now() -> datetime:
 
 
 class _PostgresStateStorage:
-    """Asyncpg-backed raw state storage (genuine I/O only)."""
+    """Asyncpg-backed raw state storage."""
 
     def __init__(
         self,

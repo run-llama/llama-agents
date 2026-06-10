@@ -191,6 +191,7 @@ def _patch_client(
 def create_agent_data_store(
     backend: FakeAgentDataBackend,
     monkeypatch: pytest.MonkeyPatch,
+    collection: str = "handlers",
 ) -> AgentDataStore:
     """Create an AgentDataStore with httpx patched to use the fake backend."""
     store = AgentDataStore(
@@ -198,7 +199,7 @@ def create_agent_data_store(
         api_key="test-key",
         project_id="test-project",
         deployment_name="test-deploy",
-        collection="handlers",
+        collection=collection,
     )
     _patch_client(store._client, backend, monkeypatch)
     return store

@@ -44,8 +44,8 @@ class _AgentDataStateStorage:
     """Raw state storage backed by the LlamaCloud Agent Data API.
 
     Uses a single item in a ``workflow_state`` collection, keyed by ``run_id``.
-    Caches the item id and last-seen record — genuine backend I/O policy to
-    avoid a search round-trip per operation.
+    Caches the item id and last-seen record to avoid a search round-trip per
+    operation.
     """
 
     def __init__(
