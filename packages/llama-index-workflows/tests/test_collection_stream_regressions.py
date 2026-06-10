@@ -11,6 +11,7 @@ capacity limits are honored.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Annotated, Callable
 
 import pytest
@@ -18,6 +19,22 @@ from workflows import Collect, Context, Take, Workflow, catch_error, step
 from workflows.errors import WorkflowValidationError
 from workflows.events import Event, StartEvent, StepFailedEvent, StopEvent
 from workflows.retry_policy import retry_policy, stop_after_attempt, wait_fixed
+
+_CONTROL_LOOP_LOGGER = "workflows.runtime.control_loop"
+
+# Counter-drift smells: a premature close shows up as decrements against an
+# already-closed stream or a negative counter, even when the run "succeeds".
+_ACCOUNTING_SMELLS = ("already-closed stream", "went negative")
+
+
+def _assert_clean_accounting(caplog: pytest.LogCaptureFixture) -> None:
+    smells = [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == _CONTROL_LOOP_LOGGER
+        and any(needle in r.getMessage() for needle in _ACCOUNTING_SMELLS)
+    ]
+    assert not smells, smells
 
 
 class Task(Event):
@@ -540,3 +557,178 @@ async def test_resume_mid_stream_with_retry_in_flight_completes() -> None:
     restored = Context.from_dict(wf2, snapshot)
     result = await asyncio.wait_for(wf2.run(ctx=restored), timeout=10)
     assert result == [0, 1, 2, 3, 4], result
+
+
+# ---------------------------------------------------------------------------
+# Consume-once accounting for merge-shaped steps inside a stream. Each shape
+# below resolves every birth-counted delivery exactly once: a stale-snapshot
+# rerun is the same live work item (must not consume), a slot-buffering
+# invocation consumes its trigger, and a waiter that steals a delivery consumes
+# it on behalf of the step it woke.
+# ---------------------------------------------------------------------------
+
+
+async def test_in_stream_collect_events_default_workers_full_batch(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """ctx.collect_events inside a fan-out branch sees the whole batch.
+
+    With the default num_workers, concurrent buffering invocations rerun on
+    stale snapshots; counting each rerun closed the stream early and released
+    the join with [] (silent data loss).
+    """
+
+    class Summed(Event):
+        total: int
+
+    class WF(Workflow):
+        @step
+        async def fan_out(self, ev: StartEvent) -> list[Task]:
+            return [Task(n=i) for i in range(3)]
+
+        @step  # num_workers default 4: buffering invocations overlap
+        async def gather(self, ctx: Context, ev: Task) -> Summed | None:
+            await asyncio.sleep(0.01)  # encourage overlapping snapshots
+            events = ctx.collect_events(ev, [Task] * 3)
+            if events is None:
+                return None
+            return Summed(total=sum(e.n for e in events))
+
+        @step
+        async def join(self, events: list[Summed]) -> StopEvent:
+            return StopEvent(result=[e.total for e in events])
+
+    with caplog.at_level(logging.WARNING, logger=_CONTROL_LOOP_LOGGER):
+        result = await _run(WF(timeout=8))
+
+    assert result == [3], result
+    _assert_clean_accounting(caplog)
+
+
+def _pair_join_workflow(task_count: int) -> tuple[type[Workflow], type[Event]]:
+    class A(Event):
+        n: int
+
+    class B(Event):
+        n: int
+
+    class C(Event):
+        n: int
+
+    class WF(Workflow):
+        @step
+        async def fan_out(self, ev: StartEvent) -> list[Task]:
+            return [Task(n=i) for i in range(task_count)]
+
+        @step
+        async def worker_a(self, ev: Task) -> A:
+            return A(n=ev.n)
+
+        @step
+        async def worker_b(self, ev: Task) -> B:
+            return B(n=ev.n + 10)
+
+        @step
+        async def pair_join(self, a: A, b: B) -> C:
+            return C(n=a.n + b.n)
+
+        @step
+        async def join(self, events: list[C]) -> StopEvent:
+            return StopEvent(result=sorted(e.n for e in events))
+
+    return WF, C
+
+
+async def test_in_stream_multi_slot_join_single_pair(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A two-slot join fed from inside a fan-out stream completes the stream.
+
+    The slot-buffering invocation must consume its work item; otherwise an
+    N-slot join leaks N-1 items per firing and the run dies with a stuck-stream
+    failure.
+    """
+    wf_cls, _ = _pair_join_workflow(1)
+
+    with caplog.at_level(logging.WARNING, logger=_CONTROL_LOOP_LOGGER):
+        result = await _run(wf_cls(timeout=8))
+
+    assert result == [10], result
+    _assert_clean_accounting(caplog)
+
+
+async def test_in_stream_multi_slot_join_many_members_completes(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Multiple same-type members racing into a two-slot join still complete.
+
+    Slot pairing is by arrival order and a duplicate arrival for an
+    already-filled slot is dropped, so the batch size can vary — but every
+    delivery must be consumed exactly once: the run completes (no stuck-stream
+    failure) and the accounting stays clean.
+    """
+    wf_cls, _ = _pair_join_workflow(3)
+
+    with caplog.at_level(logging.WARNING, logger=_CONTROL_LOOP_LOGGER):
+        result = await _run(wf_cls(timeout=8))
+
+    assert isinstance(result, list)
+    assert 1 <= len(result) <= 3, result
+    _assert_clean_accounting(caplog)
+
+
+_STEAL_GATE = asyncio.Event()
+
+
+class _StealWaiting(Event):
+    pass
+
+
+async def test_waiter_steal_of_in_stream_member_completes(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A member that resolves a waiter on a step that also accepts it.
+
+    Waiter matching swallows the member's normal delivery to the woken step;
+    that birth-counted delivery must still be consumed or the stream never
+    closes. The stolen member never joins the woken step's processing — the
+    waiter consumed it — but the list[E] join still sees every member.
+    """
+    _STEAL_GATE.clear()
+
+    class WF(Workflow):
+        @step
+        async def fan_out(self, ev: StartEvent) -> list[Task]:
+            return [Task(n=i) for i in range(3)]
+
+        @step
+        async def work(self, ev: Task) -> Done:
+            if ev.n == 2:
+                # Hold the resolving member until the waiter is registered.
+                await _STEAL_GATE.wait()
+            return Done(n=ev.n)
+
+        @step
+        async def observe(self, ctx: Context, ev: Done) -> None:
+            if ev.n == 0:
+                await ctx.wait_for_event(
+                    Done,
+                    requirements={"n": 2},
+                    waiter_event=_StealWaiting(),
+                    timeout=6,
+                )
+            return None
+
+        @step
+        async def join(self, events: list[Done]) -> StopEvent:
+            return StopEvent(result=sorted(e.n for e in events))
+
+    with caplog.at_level(logging.WARNING, logger=_CONTROL_LOOP_LOGGER):
+        handler = WF(timeout=10).run()
+        async for ev in handler.stream_events():
+            if isinstance(ev, _StealWaiting) and not _STEAL_GATE.is_set():
+                _STEAL_GATE.set()
+        result = await asyncio.wait_for(handler, timeout=8)
+
+    assert result == [0, 1, 2], result
+    _assert_clean_accounting(caplog)

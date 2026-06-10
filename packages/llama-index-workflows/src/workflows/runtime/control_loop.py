@@ -802,8 +802,14 @@ def _detect_stuck_streams(state: BrokerState) -> WorkflowRuntimeError | None:
         for stream in state.streams.values()
     )
     return WorkflowRuntimeError(
-        "Workflow is idle with open collection streams and no pending "
-        f"waiters; the run can never complete (leaked stream accounting): {details}"
+        "Workflow is idle but collection streams are still open, so the run "
+        f"can never complete: {details}. This usually means work inside a "
+        "fan-out stream was consumed in a way that can never finish the "
+        "stream — for example a join over inputs produced at different "
+        "stream levels, or ctx.wait_for_event interplay that swallowed a "
+        "member. To gate in-stream work on external input, use "
+        "ctx.wait_for_event in the producing step; see the workflows.collect "
+        "documentation for the supported fan-out/fan-in shapes."
     )
 
 
@@ -946,6 +952,36 @@ def _process_step_result_tick(
     if this_execution is None:
         # this should not happen unless there's a logic bug in the control loop
         raise ValueError(f"Worker {tick.worker_id} not found in in_progress")
+
+    # Optimistic-concurrency guard for collect firings. A DeleteCollectedEvent
+    # means this invocation consumed a collect buffer (snapshot + trigger). If
+    # the live buffer changed since the snapshot — a concurrent worker fired it
+    # or buffered another member first — this firing observed a stale batch:
+    # discard every result and rerun the same work item against the fresh
+    # buffer. Without this, two racing arrivals can both fire with the same
+    # buffered member, duplicating it downstream.
+    stale_firing = any(
+        isinstance(r, DeleteCollectedEvent)
+        and len(worker_state.collected_events.get(r.event_id, []))
+        != len(this_execution.shared_state.collected_events.get(r.event_id, []))
+        for r in tick.result
+    )
+    if stale_firing:
+        this_execution.shared_state = replace(
+            this_execution.shared_state,
+            collected_events={
+                x: list(y) for x, y in worker_state.collected_events.items()
+            },
+        )
+        commands.append(
+            CommandRunWorker(
+                step_name=tick.step_name,
+                event=this_execution.event,
+                id=this_execution.worker_id,
+            )
+        )
+        return state, commands
+
     output_event_name: str | None = None
 
     did_complete_step = any(isinstance(x, StepWorkerResult) for x in tick.result)
@@ -1212,10 +1248,20 @@ def _process_step_result_tick(
     )
     failing_run = any(isinstance(c, CommandFailWorkflow) for c in commands)
     terminal_run = any(indicates_exit(c) for c in commands)
+    # A scheduled rerun is the SAME live work item — only its final completion
+    # may consume it. Counting each rerun would drift the stream counter under
+    # concurrency and close the stream early.
+    rerun_scheduled = not step_no_longer_in_progress
+    step_failed = any(isinstance(x, StepWorkerFailed) for x in tick.result)
+    added_waiter = any(isinstance(x, AddWaiter) for x in tick.result)
 
     enclosing = trigger_stack[-1] if trigger_stack else None
     skip_accounting = (
-        not did_complete_step or scheduled_retry or failing_run or terminal_run
+        not did_complete_step
+        or rerun_scheduled
+        or scheduled_retry
+        or failing_run
+        or terminal_run
     )
 
     if not skip_accounting and is_fan_out and fan_out_stream_id is not None:
@@ -1247,6 +1293,22 @@ def _process_step_result_tick(
             _count_accepting_steps(state, type(ev)) for ev in emitted_non_stop
         )
         commands.extend(_apply_stream_work_delta(state, enclosing, successors - 1))
+    elif (
+        not did_complete_step
+        and not rerun_scheduled
+        and not step_failed
+        and not added_waiter
+    ):
+        # Buffer absorption: a multi-slot join invocation that only absorbed
+        # its trigger into the slot buffer (one or more AddCollectedEvents), or
+        # silently dropped it (a duplicate arrival for an already-filled slot
+        # records no result at all). Either way the invocation is over and
+        # emitted nothing, so its work item is consumed here — once per work
+        # item, no matter how many buffers were touched. A buffering run that
+        # also completed (legacy collect_events returning None) consumes via
+        # the completion rule above instead; a failed, retried, or suspended
+        # (waiter) run resolves through its later re-delivery.
+        commands.extend(_apply_stream_work_delta(state, enclosing, -1))
 
     is_completed = any(indicates_exit(c) for c in commands)
     if step_no_longer_in_progress:
@@ -1422,10 +1484,22 @@ def _process_add_event_tick(
     # Then route to accepting steps, skipping any that were already woken
     # via waiter resolution above.
     for step_name, step_config in state.config.steps.items():
-        if step_name in waiter_resolved_steps:
-            continue
         is_accepted = type(tick.event) in step_config.accepted_events
-        if is_accepted and (tick.step_name is None or tick.step_name == step_name):
+        is_targeted = tick.step_name is None or tick.step_name == step_name
+        if step_name in waiter_resolved_steps:
+            if is_accepted and is_targeted and tick.scope_path:
+                # The waiter swallowed a delivery this step would otherwise
+                # have received. The delivery was birth-counted as a work item
+                # in its stream, so consume it here — otherwise the stream can
+                # never close. This covers both 1:1 steps and collect steps
+                # parked on wait_for_event of their own member type (the
+                # swallowed member never joins the batch; the waiter consumed
+                # it).
+                commands.extend(
+                    _apply_stream_work_delta(state, tick.scope_path[-1], -1)
+                )
+            continue
+        if is_accepted and is_targeted:
             handled = True
             worker_state = state.workers[step_name]
             if worker_state.config.collection_param is not None:
