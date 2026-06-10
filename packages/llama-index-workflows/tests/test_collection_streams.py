@@ -17,6 +17,7 @@ from workflows import Context, Workflow, step
 from workflows.errors import WorkflowValidationError
 from workflows.events import Event, StartEvent, StopEvent
 from workflows.runtime.control_loop import (
+    rebuild_state_from_ticks,
     rebuild_state_from_ticks_stream,
     replay_ticks_stream,
 )
@@ -24,7 +25,6 @@ from workflows.runtime.types.internal_state import BrokerState
 from workflows.runtime.types.plugin import as_snapshottable_adapter
 from workflows.runtime.types.ticks import (
     TickAddEvent,
-    TickCollectionStreamClosed,
     WorkflowTick,
 )
 
@@ -261,15 +261,6 @@ async def test_replay_reproduces_identical_stream_ids_and_grouping() -> None:
     done_ids = _done_stream_ids(ticks)
     assert len(done_ids) == 4, done_ids
     assert len(set(done_ids)) == 1, done_ids
-    the_stream = done_ids[0]
-
-    # Exactly one close tick for that stream.
-    closes = [
-        t
-        for t in ticks
-        if isinstance(t, TickCollectionStreamClosed) and t.stream_id == the_stream
-    ]
-    assert len(closes) == 1, closes
 
     # Replay the exact stream twice; both reproduce the same final state
     # deterministically (the stream-id counter is a pure function of the stream).
@@ -282,6 +273,55 @@ async def test_replay_reproduces_identical_stream_ids_and_grouping() -> None:
         BrokerState.from_workflow(wf), _stream(ticks)
     )
     assert rebuilt.stream_seq == replay1.state.stream_seq
+
+
+class _NestedReplayFanOut(Workflow):
+    """Two-level fan-out used by the snapshot-prefix invariant test."""
+
+    @step
+    async def outer(self, ev: StartEvent) -> list[Task]:
+        return [Task(n=o) for o in range(2)]
+
+    @step
+    async def inner(self, ev: Task) -> list[InnerTask]:
+        return [InnerTask(outer=ev.n, inner=i) for i in range(2)]
+
+    @step
+    async def inner_work(self, ev: InnerTask) -> InnerDone:
+        return InnerDone(outer=ev.outer, inner=ev.inner)
+
+    @step
+    async def per_inner(self, events: list[InnerDone]) -> InnerSummary:
+        return InnerSummary(outer=events[0].outer, total=len(events))
+
+    @step
+    async def per_outer(self, events: list[InnerSummary]) -> StopEvent:
+        return StopEvent(result=sorted((s.outer, s.total) for s in events))
+
+
+@pytest.mark.parametrize("wf_cls", [_ReplayFanOut, _NestedReplayFanOut])
+async def test_no_tick_prefix_strands_a_release(wf_cls: type[Workflow]) -> None:
+    """A snapshot at any tick boundary can resume: no prefix strands a release.
+
+    Stream closes fire their releases inline within the reduce, so there is no
+    state between two ticks where a stream is gone but its unreleased
+    release-state remains. Rebuild state from every prefix of a recorded run's
+    tick log and assert the invariant — an unreleased ``CollectionReleaseState``
+    always has its stream present.
+    """
+    wf = wf_cls()
+    _, ticks = await _run_recording_ticks(wf)
+    assert ticks
+
+    base = BrokerState.from_workflow(wf)
+    for prefix_len in range(len(ticks) + 1):
+        state = rebuild_state_from_ticks(base, ticks[:prefix_len])
+        stranded = [
+            key
+            for key, release in state.collection_release_states.items()
+            if not release.released and release.stream_id not in state.streams
+        ]
+        assert not stranded, (prefix_len, stranded)
 
 
 async def test_no_stream_state_remains_after_completion() -> None:

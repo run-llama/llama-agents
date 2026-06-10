@@ -294,12 +294,28 @@ class SerializedContext(BaseModel):
 
     @staticmethod
     def from_dict_auto(data: dict[str, Any]) -> "SerializedContext":
-        """Parse a dict as V0, v1, or current format and return the current format."""
+        """Parse a dict as V0, v1, or current format and return the current format.
+
+        A missing ``version`` routes to the legacy V0 parser. An unrecognized
+        version — newer than this library supports, or not an int — fails
+        loudly: routing it to an older parser would "succeed" while silently
+        dropping state (workers, streams).
+        """
         version = data.get("version")
+        if version is None:
+            v0 = SerializedContextV0.model_validate(data)
+            return SerializedContext.from_v0(v0)
+        if not isinstance(version, int) or version > CURRENT_SERIALIZED_VERSION:
+            raise ValueError(
+                f"Cannot load serialized workflow context with "
+                f"version={version!r}; this library supports up to version "
+                f"{CURRENT_SERIALIZED_VERSION}. The payload was likely written "
+                "by a newer version of llama-index-workflows."
+            )
         if version == CURRENT_SERIALIZED_VERSION:
             return SerializedContext.model_validate(data)
         if version == 1:
             return SerializedContext.from_v1(data)
-        # No (or older) version marker: assume legacy V0 format.
+        # Older int version markers (e.g. an explicit 0): legacy V0 format.
         v0 = SerializedContextV0.model_validate(data)
         return SerializedContext.from_v0(v0)

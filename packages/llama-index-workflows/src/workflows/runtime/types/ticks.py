@@ -55,14 +55,6 @@ class TickAddEvent(BaseModel):
     collection_release_payload: SerializableCollectionReleasePayload = None
 
 
-class TickCollectionStreamClosed(BaseModel):
-    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
-    type: Literal["collection_stream_closed"] = "collection_stream_closed"
-    stream_id: str
-    source_step: str
-    scope_path: tuple[str, ...] = Field(default_factory=tuple)
-
-
 class TickCancelRun(BaseModel):
     """When processed, cancels the workflow run"""
 
@@ -117,7 +109,6 @@ class TickIdleCheck(BaseModel):
 WorkflowTick = Annotated[
     TickStepResult
     | TickAddEvent
-    | TickCollectionStreamClosed
     | TickCancelRun
     | TickPublishEvent
     | TickTimeout

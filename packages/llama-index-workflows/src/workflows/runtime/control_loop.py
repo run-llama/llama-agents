@@ -36,7 +36,6 @@ from workflows.events import (
     WorkflowTimedOutEvent,
 )
 from workflows.runtime.types.commands import (
-    CommandCloseCollectionStream,
     CommandCompleteRun,
     CommandFailWorkflow,
     CommandHalt,
@@ -84,7 +83,6 @@ from workflows.runtime.types.results import (
 from workflows.runtime.types.ticks import (
     TickAddEvent,
     TickCancelRun,
-    TickCollectionStreamClosed,
     TickIdleCheck,
     TickIdleRelease,
     TickPublishEvent,
@@ -278,15 +276,6 @@ class _ControlLoopRunner:
             else:
                 self.tick_buffer.append(event)
             return None
-        elif isinstance(command, CommandCloseCollectionStream):
-            self.tick_buffer.append(
-                TickCollectionStreamClosed(
-                    stream_id=command.stream_id,
-                    source_step=command.source_step,
-                    scope_path=command.scope_path,
-                )
-            )
-            return None
         elif isinstance(command, CommandRunWorker):
             self.run_worker(command)
             return None
@@ -409,11 +398,10 @@ class _ControlLoopRunner:
                     tick = self.tick_buffer.pop(0)
                     if isinstance(tick, TickIdleCheck):
                         # An idle check confirms quiescence, so it must observe
-                        # a settled view: defer it behind any pending ticks
-                        # (e.g. a stream-close that will release a collect
-                        # invocation), and drop it entirely while a delayed
-                        # re-delivery (retry) is scheduled — the workflow is
-                        # not idle, work is coming.
+                        # a settled view: defer it behind any pending ticks,
+                        # and drop it entirely while a delayed re-delivery
+                        # (retry) is scheduled — the workflow is not idle,
+                        # work is coming.
                         if self.tick_buffer:
                             self.tick_buffer.append(tick)
                             continue
@@ -677,10 +665,6 @@ def _reduce_tick(
         state, commands = _process_step_result_tick(tick, init, now_seconds, run_id)
     elif isinstance(tick, TickAddEvent):
         state, commands = _process_add_event_tick(tick, init, now_seconds)
-    elif isinstance(tick, TickCollectionStreamClosed):
-        state, commands = _process_collection_stream_closed_tick(
-            tick, init, now_seconds
-        )
     elif isinstance(tick, TickCancelRun):
         state, commands = _process_cancel_run_tick(tick, init)
     elif isinstance(tick, TickIdleRelease):
@@ -697,21 +681,19 @@ def _reduce_tick(
         if _check_idle_state(init):
             stuck = _detect_stuck_streams(init)
             if stuck is not None:
+                stuck_step, stuck_error = stuck
                 state = init.deepcopy()
                 state.is_running = False
-                first_leaked = next(iter(init.streams.values()))
                 return state, [
                     CommandPublishEvent(
                         event=WorkflowFailedEvent(
-                            step_name=first_leaked.source_step,
-                            exception=stuck,
+                            step_name=stuck_step,
+                            exception=stuck_error,
                             attempts=1,
                             elapsed_seconds=0.0,
                         )
                     ),
-                    CommandFailWorkflow(
-                        step_name=first_leaked.source_step, exception=stuck
-                    ),
+                    CommandFailWorkflow(step_name=stuck_step, exception=stuck_error),
                 ]
             return init, [CommandPublishEvent(WorkflowIdleEvent())]
         return init, []
@@ -777,16 +759,41 @@ def _check_idle_state(state: BrokerState) -> bool:
     return True
 
 
-def _detect_stuck_streams(state: BrokerState) -> WorkflowRuntimeError | None:
-    """Detect a provably-stuck run: idle, no unresolved waiters, open streams.
+def _detect_stuck_streams(
+    state: BrokerState,
+) -> tuple[str, WorkflowRuntimeError] | None:
+    """Detect a provably-stuck run while the state is quiescent.
 
-    Called only when the state is already quiescent (no queued events, no
-    in-progress workers). An unresolved waiter suppresses detection — external
-    events can re-enter scoped work only via waiters, so a pending waiter means
-    the open streams may still legitimately close (HITL workflows). Without
-    one, an open stream can never reach zero open work items: the run would
-    hang to timeout (or forever). Returns the diagnostic error to fail with.
+    Two conditions, returned as ``(step_name, error)``:
+
+    - An unreleased release-state whose stream no longer exists. The close
+      path fires releases inline within the same reduce, so this should be
+      impossible; if it ever appears (corrupted or version-skewed persisted
+      state), the release can never fire — fail loudly instead of hanging.
+    - Open streams with no unresolved waiter. An unresolved waiter suppresses
+      detection — external events can re-enter scoped work only via waiters,
+      so a pending waiter means the open streams may still legitimately close
+      (HITL workflows). Without one, an open stream can never reach zero open
+      work items: the run would hang to timeout (or forever).
     """
+    orphaned = next(
+        (
+            release
+            for release in state.collection_release_states.values()
+            if not release.released and release.stream_id not in state.streams
+        ),
+        None,
+    )
+    if orphaned is not None:
+        binding = state.config.collection_bindings.get(orphaned.binding_id)
+        step_name = binding.target_step if binding is not None else "<unknown>"
+        return step_name, WorkflowRuntimeError(
+            f"Workflow is idle with a pending collect release for step "
+            f"{step_name!r} (binding {orphaned.binding_id!r}) whose stream "
+            f"{orphaned.stream_id!r} no longer exists, so the release can "
+            "never fire. This indicates corrupted persisted state (e.g. a "
+            "snapshot written by an incompatible library version)."
+        )
     if not state.streams:
         return None
     has_unresolved_waiter = any(
@@ -796,12 +803,13 @@ def _detect_stuck_streams(state: BrokerState) -> WorkflowRuntimeError | None:
     )
     if has_unresolved_waiter:
         return None
+    first_leaked = next(iter(state.streams.values()))
     details = "; ".join(
         f"stream {stream.stream_id!r} opened by step {stream.source_step!r} "
         f"with {stream.open_work_items} open work item(s)"
         for stream in state.streams.values()
     )
-    return WorkflowRuntimeError(
+    return first_leaked.source_step, WorkflowRuntimeError(
         "Workflow is idle but collection streams are still open, so the run "
         f"can never complete: {details}. This usually means work inside a "
         "fan-out stream was consumed in a way that can never finish the "
@@ -841,7 +849,7 @@ def _count_accepting_steps(state: BrokerState, event_type: type) -> int:
 
 
 def _apply_stream_work_delta(
-    state: BrokerState, stream_id: str | None, delta: int
+    state: BrokerState, stream_id: str | None, delta: int, now_seconds: float
 ) -> list[WorkflowCommand]:
     if stream_id is None:
         return []
@@ -866,23 +874,54 @@ def _apply_stream_work_delta(
             stream.source_step,
         )
     if stream.closed_to_new_items and stream.open_work_items <= 0:
-        return _close_collection_stream(state, stream_id)
+        return _close_collection_stream(state, stream_id, now_seconds)
     return []
 
 
 def _close_collection_stream(
-    state: BrokerState, stream_id: str
+    state: BrokerState, stream_id: str, now_seconds: float
 ) -> list[WorkflowCommand]:
+    """Close a stream and fire its pending releases inline, within the reduce.
+
+    Safe at the moment the counter zeroes: births happen at emission, before
+    the close-triggering decrement, so no member can still be in flight and
+    the release buffers are complete. Firing inline removes the snapshot
+    window that existed when the close traveled as a separate buffered tick —
+    a ``ctx.to_dict()`` between the reduce that popped the stream and the
+    close tick's processing would capture an unreleased release-state with no
+    stream, hanging the resume. Close effects now re-derive deterministically
+    from whichever tick zeroed the counter.
+    """
     stream = state.streams.pop(stream_id, None)
     if stream is None:
         return []
-    return [
-        CommandCloseCollectionStream(
-            stream_id=stream_id,
-            source_step=stream.source_step,
-            scope_path=stream.scope_path,
+    commands: list[WorkflowCommand] = []
+    for binding in state.config.bindings_for_source(stream.source_step):
+        worker_state = state.workers.get(binding.target_step)
+        if worker_state is None or worker_state.config.collection_param is None:
+            continue
+        key = _release_state_key(stream_id, binding.id)
+        release_state = state.collection_release_states.pop(
+            key,
+            CollectionReleaseState(
+                binding_id=binding.id,
+                stream_id=stream_id,
+            ),
         )
-    ]
+        release = _release_on_close(binding, release_state)
+        if release is None:
+            continue
+        commands.extend(
+            _fire_collection_release(
+                binding,
+                stream_id,
+                worker_state,
+                release,
+                tuple(stream.scope_path),
+                now_seconds,
+            )
+        )
+    return commands
 
 
 def _redeliver_work_item(
@@ -1285,10 +1324,14 @@ def _process_step_result_tick(
         )
         # The parent work item now waits for each child collection release.
         commands.extend(
-            _apply_stream_work_delta(state, enclosing, len(accepting_binding_ids) - 1)
+            _apply_stream_work_delta(
+                state, enclosing, len(accepting_binding_ids) - 1, now_seconds
+            )
         )
         if seed == 0:
-            commands.extend(_close_collection_stream(state, fan_out_stream_id))
+            commands.extend(
+                _close_collection_stream(state, fan_out_stream_id, now_seconds)
+            )
     elif not skip_accounting:
         # Same-level resolution (1:1 step, or a collect step firing its
         # summary). Remove this work item and add its same-level successors: one
@@ -1297,7 +1340,9 @@ def _process_step_result_tick(
         successors = sum(
             _count_accepting_steps(state, type(ev)) for ev in emitted_non_stop
         )
-        commands.extend(_apply_stream_work_delta(state, enclosing, successors - 1))
+        commands.extend(
+            _apply_stream_work_delta(state, enclosing, successors - 1, now_seconds)
+        )
     elif (
         not did_complete_step
         and not rerun_scheduled
@@ -1313,7 +1358,7 @@ def _process_step_result_tick(
         # also completed (legacy collect_events returning None) consumes via
         # the completion rule above instead; a failed, retried, or suspended
         # (waiter) run resolves through its later re-delivery.
-        commands.extend(_apply_stream_work_delta(state, enclosing, -1))
+        commands.extend(_apply_stream_work_delta(state, enclosing, -1, now_seconds))
 
     is_completed = any(indicates_exit(c) for c in commands)
     if step_no_longer_in_progress:
@@ -1501,7 +1546,9 @@ def _process_add_event_tick(
                 # swallowed member never joins the batch; the waiter consumed
                 # it).
                 commands.extend(
-                    _apply_stream_work_delta(state, tick.scope_path[-1], -1)
+                    _apply_stream_work_delta(
+                        state, tick.scope_path[-1], -1, now_seconds
+                    )
                 )
             continue
         if is_accepted and is_targeted:
@@ -1546,7 +1593,9 @@ def _process_add_event_tick(
                         step_name,
                         stream_id,
                     )
-                    commands.extend(_apply_stream_work_delta(state, stream_id, -1))
+                    commands.extend(
+                        _apply_stream_work_delta(state, stream_id, -1, now_seconds)
+                    )
                     continue
                 release_state = _release_state_for(state, stream_id, binding)
                 if not release_state.released:
@@ -1563,7 +1612,9 @@ def _process_add_event_tick(
                                 now_seconds,
                             )
                         )
-                commands.extend(_apply_stream_work_delta(state, stream_id, -1))
+                commands.extend(
+                    _apply_stream_work_delta(state, stream_id, -1, now_seconds)
+                )
                 continue
             subcommands = _add_or_enqueue_event(
                 EventAttempt(
@@ -1745,37 +1796,3 @@ def _fire_collection_release(
         worker_state,
         now_seconds,
     )
-
-
-def _process_collection_stream_closed_tick(
-    tick: TickCollectionStreamClosed, init: BrokerState, now_seconds: float
-) -> tuple[BrokerState, list[WorkflowCommand]]:
-    state = init.deepcopy()
-    commands: list[WorkflowCommand] = []
-    bindings = state.config.bindings_for_source(tick.source_step)
-    for binding in bindings:
-        worker_state = state.workers.get(binding.target_step)
-        if worker_state is None or worker_state.config.collection_param is None:
-            continue
-        key = _release_state_key(tick.stream_id, binding.id)
-        release_state = state.collection_release_states.pop(
-            key,
-            CollectionReleaseState(
-                binding_id=binding.id,
-                stream_id=tick.stream_id,
-            ),
-        )
-        release = _release_on_close(binding, release_state)
-        if release is None:
-            continue
-        commands.extend(
-            _fire_collection_release(
-                binding,
-                tick.stream_id,
-                worker_state,
-                release,
-                tuple(tick.scope_path),
-                now_seconds,
-            )
-        )
-    return state, commands

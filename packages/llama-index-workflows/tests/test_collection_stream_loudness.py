@@ -24,6 +24,7 @@ from workflows.runtime.types.commands import (
 )
 from workflows.runtime.types.internal_state import (
     BrokerState,
+    CollectionReleaseState,
     CollectionStreamInstance,
 )
 from workflows.runtime.types.results import StepWorkerWaiter
@@ -174,6 +175,33 @@ def test_idle_check_fails_run_on_leaked_open_stream() -> None:
     assert "fan_out" in message
     assert "stream-x" in message
     assert failures[0].step_name == "fan_out"
+
+
+def test_idle_check_fails_run_on_orphaned_unreleased_release_state() -> None:
+    """An unreleased release whose stream is gone fails loudly, never hangs.
+
+    Stream closes fire releases inline, so this state is unreachable in a
+    healthy run — it indicates corrupted or version-skewed persisted state.
+    The detector must flag it even with no open streams (the blind spot that
+    used to hang resumes silently).
+    """
+    wf = _FanOutWF()
+    wf._validate()
+    state = BrokerState.from_workflow(wf)
+    state.is_running = True
+    binding_id = next(iter(state.config.collection_bindings))
+    state.collection_release_states[f"stream-gone:{binding_id}"] = (
+        CollectionReleaseState(binding_id=binding_id, stream_id="stream-gone")
+    )
+
+    _, commands = _reduce_tick(TickIdleCheck(), state, 0.0)
+
+    failures = [c for c in commands if isinstance(c, CommandFailWorkflow)]
+    assert len(failures) == 1, commands
+    assert failures[0].step_name == "join"
+    message = str(failures[0].exception)
+    assert "stream-gone" in message
+    assert "never fire" in message
 
 
 def test_idle_check_with_unresolved_waiter_publishes_idle_not_failure() -> None:

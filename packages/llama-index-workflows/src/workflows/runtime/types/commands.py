@@ -47,13 +47,6 @@ class CommandQueueEvent:
 
 
 @dataclass(frozen=True)
-class CommandCloseCollectionStream:
-    stream_id: str
-    source_step: str
-    scope_path: tuple[str, ...] = field(default_factory=tuple)
-
-
-@dataclass(frozen=True)
 class CommandHalt:
     exception: Exception
 
@@ -97,7 +90,6 @@ class CommandScheduleIdleCheck:
 WorkflowCommand = (
     CommandRunWorker
     | CommandQueueEvent
-    | CommandCloseCollectionStream
     | CommandHalt
     | CommandCompleteRun
     | CommandFailWorkflow

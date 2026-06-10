@@ -116,6 +116,26 @@ def test_from_dict_auto_passes_current_version_through() -> None:
     assert attempt.attempts == 1
 
 
+def test_from_dict_auto_rejects_future_version() -> None:
+    """A payload from a newer library version fails loudly, not as near-empty V0."""
+    payload = {"version": CURRENT_SERIALIZED_VERSION + 1, "state": {}, "workers": {}}
+    with pytest.raises(ValueError, match="newer version"):
+        SerializedContext.from_dict_auto(payload)
+
+
+def test_from_dict_auto_rejects_non_int_version() -> None:
+    """A stringified version marker is unrecognized and fails loudly."""
+    payload = {"version": str(CURRENT_SERIALIZED_VERSION), "state": {}, "workers": {}}
+    with pytest.raises(ValueError, match="version"):
+        SerializedContext.from_dict_auto(payload)
+
+
+def test_from_dict_auto_missing_version_routes_to_v0() -> None:
+    """No version marker still parses as the legacy V0 format."""
+    result = SerializedContext.from_dict_auto({"state": {}, "is_running": False})
+    assert result.version == CURRENT_SERIALIZED_VERSION
+
+
 def test_deserialize_broken_state_raises_validation_error(workflow: Workflow) -> None:
     """Test that broken V0 state raises an error when deserializing."""
     broken_state = {
