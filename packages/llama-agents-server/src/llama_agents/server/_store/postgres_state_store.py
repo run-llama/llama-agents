@@ -3,18 +3,18 @@
 
 from __future__ import annotations
 
-import uuid
 from datetime import datetime, timezone
 from typing import Any, Generic, Literal
 
 import asyncpg
 from pydantic import BaseModel
 from typing_extensions import TypeVar
-from workflows.context.serializers import BaseSerializer, JsonSerializer
+from workflows.context.serializers import BaseSerializer
 from workflows.context.state_store import DictState
 from workflows.context.state_store_integration import (
     StateRecord,
     StateStoreFacade,
+    restored_run_id,
 )
 
 MODEL_T = TypeVar("MODEL_T", bound=BaseModel, default=DictState)  # type: ignore[reportGeneralTypeIssues]
@@ -131,16 +131,9 @@ class PostgresStateStore(StateStoreFacade[MODEL_T], Generic[MODEL_T]):
         serializer: BaseSerializer | None = None,
         schema: str | None = None,
     ) -> None:
-        self._postgres_storage = _PostgresStateStorage(pool, run_id, schema)
         super().__init__(
-            self._postgres_storage,
-            state_type or DictState,  # type: ignore[arg-type]
-            serializer or JsonSerializer(),
+            _PostgresStateStorage(pool, run_id, schema), state_type, serializer
         )
-
-    @property
-    def run_id(self) -> str:
-        return self._postgres_storage.run_id
 
     @classmethod
     def from_dict(
@@ -162,10 +155,9 @@ class PostgresStateStore(StateStoreFacade[MODEL_T], Generic[MODEL_T]):
         if pool is None:
             raise ValueError("pool is required for PostgresStateStore.from_dict()")
 
-        effective_run_id = run_id or serialized_state.get("run_id") or str(uuid.uuid4())
         store: PostgresStateStore[Any] = cls(
             pool=pool,
-            run_id=effective_run_id,
+            run_id=restored_run_id(run_id, serialized_state),
             state_type=state_type,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
             serializer=serializer,
             schema=schema,

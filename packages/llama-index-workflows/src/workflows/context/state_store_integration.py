@@ -12,6 +12,7 @@ from .state_store import (
     StateStore,
     StateStoreFacade,
     decode_seed_state,
+    restored_run_id,
     string_record_from_state,
 )
 
@@ -36,6 +37,7 @@ __all__ = [
     "StateStorage",
     "StateStoreFacade",
     "decode_seed_state",
+    "restored_run_id",
     "state_store_handoff",
     "string_record_from_state",
 ]

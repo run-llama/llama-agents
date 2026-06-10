@@ -4,16 +4,16 @@
 
 from __future__ import annotations
 
-import uuid
 from typing import Any, Generic, Literal
 
 from pydantic import BaseModel
 from typing_extensions import TypeVar
-from workflows.context.serializers import BaseSerializer, JsonSerializer
+from workflows.context.serializers import BaseSerializer
 from workflows.context.state_store import DictState
 from workflows.context.state_store_integration import (
     StateRecord,
     StateStoreFacade,
+    restored_run_id,
 )
 
 from .agent_data_client import AgentDataClient
@@ -152,20 +152,11 @@ class AgentDataStateStore(StateStoreFacade[MODEL_T], Generic[MODEL_T]):
         collection: str = "workflow_state",
         serializer: BaseSerializer | None = None,
     ) -> None:
-        self._agent_data_storage = _AgentDataStateStorage(
-            client=client,
-            run_id=run_id,
-            collection=collection,
-        )
         super().__init__(
-            self._agent_data_storage,
-            state_type or DictState,  # type: ignore[arg-type]
-            serializer or JsonSerializer(),
+            _AgentDataStateStorage(client=client, run_id=run_id, collection=collection),
+            state_type,
+            serializer,
         )
-
-    @property
-    def run_id(self) -> str:
-        return self._agent_data_storage.run_id
 
     @classmethod
     def from_dict(
@@ -186,13 +177,12 @@ class AgentDataStateStore(StateStoreFacade[MODEL_T], Generic[MODEL_T]):
         if not serialized_state:
             raise ValueError("Cannot restore AgentDataStateStore from empty dict")
 
-        effective_run_id = run_id or serialized_state.get("run_id") or str(uuid.uuid4())
         effective_collection = (
             collection or serialized_state.get("collection") or "workflow_state"
         )
         store: AgentDataStateStore[Any] = cls(
             client=client,
-            run_id=effective_run_id,
+            run_id=restored_run_id(run_id, serialized_state),
             state_type=state_type,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
             collection=effective_collection,
             serializer=serializer,

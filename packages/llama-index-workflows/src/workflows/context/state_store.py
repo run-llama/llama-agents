@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+import uuid
 import warnings
 from contextlib import asynccontextmanager
 from typing import (
@@ -89,6 +90,11 @@ class StateStorage(_StateStorage, Protocol):
     save-path encoding live in [StateStoreFacade][workflows.context.state_store.StateStoreFacade].
     """
 
+    @property
+    def run_id(self) -> str:
+        """Run id identifying this storage's target."""
+        ...
+
     def to_handle(self) -> dict[str, Any]:
         """Return backend-specific reconnect metadata."""
         ...
@@ -111,6 +117,15 @@ def is_durable_serialized_state(data: dict[str, Any] | None) -> bool:
     if not data:
         return False
     return data.get("store_type", "in_memory") != "in_memory"
+
+
+def restored_run_id(run_id: str | None, payload: dict[str, Any]) -> str:
+    """Resolve the target run id for a ``from_dict`` restore.
+
+    Explicit caller run id wins, then the payload's own run id, then a
+    fresh id for portable snapshots that carry none.
+    """
+    return run_id or payload.get("run_id") or str(uuid.uuid4())
 
 
 def _record_from_state(
@@ -640,13 +655,21 @@ class StateStoreFacade(Generic[MODEL_T]):
     def __init__(
         self,
         storage: _StateStorage,
-        state_type: type[MODEL_T],
-        serializer: BaseSerializer,
+        state_type: type[MODEL_T] | None = None,
+        serializer: BaseSerializer | None = None,
     ) -> None:
         self._storage = storage
-        self.state_type = state_type
-        self._serializer = serializer
+        self.state_type = state_type or DictState  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
+        self._serializer = serializer or JsonSerializer()
         self._pending_seed: _CopySeed | _PayloadSeed | None = None
+
+    @property
+    def run_id(self) -> str:
+        """Run id of the durable storage target."""
+        storage = self._storage
+        if isinstance(storage, StateStorage):
+            return storage.run_id
+        raise AttributeError("run_id is only available on durable state stores")
 
     @functools.cached_property
     def _lock(self) -> _OwnerAwareLock:
@@ -808,17 +831,13 @@ class StateStoreFacade(Generic[MODEL_T]):
         return await self.snapshot(serializer)
 
     def to_dict(self, serializer: BaseSerializer) -> dict[str, Any]:
-        """Serialize state for legacy callers."""
+        """Serialize state for legacy callers.
+
+        Durable stores return a reconnect handle. Non-durable storage has no
+        sync snapshot here; `InMemoryStateStore` overrides this.
+        """
         if isinstance(self._storage, StateStorage):
             return self._storage.to_handle()
-        record = self._sync_snapshot_record()
-        return InMemorySerializedState(
-            state_type=record.state_type or "DictState",
-            state_module=record.state_module or "workflows.context.state_store",
-            state_data=record.data,
-        ).model_dump()
-
-    def _sync_snapshot_record(self) -> StateRecord:
         raise NotImplementedError("Use await snapshot(serializer) for async storage")
 
 
@@ -933,17 +952,11 @@ class InMemoryStateStore(StateStoreFacade[MODEL_T]):
             dict[str, Any]: A payload suitable for
             [from_dict][workflows.context.state_store.InMemoryStateStore.from_dict].
         """
-        record = self._sync_snapshot_record()
-        state = decode_state(record.data, JsonSerializer())
-        payload = create_in_memory_payload(state, serializer)
-        return payload.model_dump()
-
-    def _sync_snapshot_record(self) -> StateRecord:
         record = self._memory_storage.load_sync()
-        if record is None:
-            # Reads are pure: return a default record without persisting it.
-            record = _live_record(self.state_type())
-        return record
+        # Records always hold a live model here (see _write_state); when the
+        # storage is empty, snapshot a default without persisting it.
+        state = cast(MODEL_T, record.data) if record is not None else self.state_type()
+        return create_in_memory_payload(state, serializer).model_dump()
 
     async def _write_state(self, state: BaseModel) -> None:
         # Live-model record: no encoding, value identity preserved.

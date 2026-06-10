@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import sqlite3
-import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -12,11 +11,12 @@ from typing import Any, Generic, Literal
 
 from pydantic import BaseModel
 from typing_extensions import TypeVar
-from workflows.context.serializers import BaseSerializer, JsonSerializer
+from workflows.context.serializers import BaseSerializer
 from workflows.context.state_store import DictState
 from workflows.context.state_store_integration import (
     StateRecord,
     StateStoreFacade,
+    restored_run_id,
 )
 
 MODEL_T = TypeVar("MODEL_T", bound=BaseModel, default=DictState)  # type: ignore[reportGeneralTypeIssues]
@@ -135,16 +135,9 @@ class SqliteStateStore(StateStoreFacade[MODEL_T], Generic[MODEL_T]):
         connection: sqlite3.Connection | None = None,
     ) -> None:
         self._db_path = db_path
-        self._sqlite_storage = _SqliteStateStorage(db_path, run_id, connection)
         super().__init__(
-            self._sqlite_storage,
-            state_type or DictState,  # type: ignore[arg-type]
-            serializer or JsonSerializer(),
+            _SqliteStateStorage(db_path, run_id, connection), state_type, serializer
         )
-
-    @property
-    def run_id(self) -> str:
-        return self._sqlite_storage.run_id
 
     @classmethod
     def from_dict(
@@ -165,10 +158,9 @@ class SqliteStateStore(StateStoreFacade[MODEL_T], Generic[MODEL_T]):
         if db_path is None:
             raise ValueError("db_path is required for SqliteStateStore.from_dict()")
 
-        effective_run_id = run_id or serialized_state.get("run_id") or str(uuid.uuid4())
         store: SqliteStateStore[Any] = cls(
             db_path=db_path,
-            run_id=effective_run_id,
+            run_id=restored_run_id(run_id, serialized_state),
             state_type=state_type,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
             serializer=serializer,
         )

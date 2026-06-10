@@ -68,7 +68,7 @@ def test_postgres_adapter_uses_resolved_pool_for_sync_state_store() -> None:
     assert state_store.run_id == "run-1"
     # The async factory raising above proves the resolved pool was used
     # synchronously; confirm it reached the storage layer.
-    assert state_store._postgres_storage._pool is pool
+    assert cast(Any, state_store)._storage._pool is pool
 
 
 @pytest.fixture(scope="module")
