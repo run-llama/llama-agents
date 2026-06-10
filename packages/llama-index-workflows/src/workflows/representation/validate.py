@@ -312,7 +312,7 @@ def _ensure_start_event_class(
     start_events_found: set[type[StartEvent]] = set()
     for cfg in steps.values():
         for event_type in cfg.accepted_events:
-            if issubclass(event_type, StartEvent):
+            if isinstance(event_type, type) and issubclass(event_type, StartEvent):
                 start_events_found.add(event_type)
 
     num_found = len(start_events_found)
@@ -341,7 +341,7 @@ def _ensure_stop_event_class(
     stop_events_found: set[type[StopEvent]] = set()
     for cfg in steps.values():
         for event_type in cfg.return_types:
-            if issubclass(event_type, StopEvent):
+            if isinstance(event_type, type) and issubclass(event_type, StopEvent):
                 stop_events_found.add(event_type)
 
     num_found = len(stop_events_found)
@@ -367,10 +367,10 @@ def _collect_events(steps: dict[str, StepConfig]) -> list[type[Event]]:
     events_found: set[type[Event]] = set()
     for cfg in steps.values():
         for event_type in cfg.return_types:
-            if issubclass(event_type, Event):
+            if isinstance(event_type, type) and issubclass(event_type, Event):
                 events_found.add(event_type)
         for event_type in cfg.accepted_events:
-            if issubclass(event_type, Event):
+            if isinstance(event_type, type) and issubclass(event_type, Event):
                 events_found.add(event_type)
     return list(events_found)
 
