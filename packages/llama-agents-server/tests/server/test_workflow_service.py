@@ -15,13 +15,13 @@ from llama_agents.server import (
     WorkflowServer,
 )
 from llama_agents.server._service import EventSendError, HandlerCompletedError
+from pydantic import BaseModel
 from server_test_fixtures import (  # type: ignore[import]
     ErrorWorkflow,
     ExternalEvent,
     wait_for_passing,
     wait_for_requested_external_event,
 )
-from pydantic import BaseModel
 from workflows import Context, Workflow
 from workflows.context.serializers import BaseSerializer
 from workflows.context.state_store import DictState, InMemoryStateStore
@@ -351,9 +351,7 @@ class _TypedHandoffState(BaseModel):
 
 class _TypedHandoffWorkflow(Workflow):
     @step
-    async def go(
-        self, ev: StartEvent, ctx: Context[_TypedHandoffState]
-    ) -> StopEvent:
+    async def go(self, ev: StartEvent, ctx: Context[_TypedHandoffState]) -> StopEvent:
         async with ctx.store.edit_state() as st:
             st.counter += 1
             return StopEvent(result=st.counter)
@@ -390,9 +388,7 @@ async def test_typed_state_continuation_via_memory_store(
     await prev.set("counter", 41)
 
     async with server.contextmanager():
-        ctx = await server._service._context_from_handler_id(
-            wf, "h-typed-continuation"
-        )
+        ctx = await server._service._context_from_handler_id(wf, "h-typed-continuation")
         assert ctx is not None
         handler = wf.run(ctx=ctx)
         # The continued run must see the previous run's typed state (41) and
@@ -422,9 +418,7 @@ async def test_dict_state_pydantic_value_continuation_via_memory_store(
     await prev.set("obj", _InnerValue(x=42))
 
     async with server.contextmanager():
-        ctx = await server._service._context_from_handler_id(
-            wf, "h-dict-continuation"
-        )
+        ctx = await server._service._context_from_handler_id(wf, "h-dict-continuation")
         assert ctx is not None
         handler = wf.run(ctx=ctx)
         result = await handler

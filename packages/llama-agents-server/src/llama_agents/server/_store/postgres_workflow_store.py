@@ -16,6 +16,7 @@ import asyncpg
 from llama_agents.client.protocol.serializable_events import EventEnvelopeWithMetadata
 from workflows.context import JsonSerializer
 from workflows.context.serializers import BaseSerializer
+from workflows.context.state_store import DictState
 
 from .._pool import PoolProvider
 from .abstract_workflow_store import (
@@ -80,6 +81,9 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
         self._conditions: weakref.WeakValueDictionary[str, asyncio.Condition] = (
             weakref.WeakValueDictionary()
         )
+        self._state_stores: weakref.WeakValueDictionary[
+            str, PostgresStateStore[Any]
+        ] = weakref.WeakValueDictionary()
         # LISTEN reconnect bookkeeping.
         self._closing = False
         self._reconnect_lock = asyncio.Lock()
@@ -256,6 +260,9 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
         if self._pool is not None:
             await self._pool_provider.close()
             self._pool = None
+        # Cached facades hold the closed pool; drop them so a re-start()
+        # builds fresh stores against the new pool.
+        self._state_stores.clear()
 
     async def _ensure_pool(self) -> asyncpg.Pool:
         if self._pool is None:
@@ -281,8 +288,17 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
             raise RuntimeError(
                 "PostgresWorkflowStore pool not initialized. Call start() first."
             )
+        # One facade per run per process so its write lock is a real
+        # guarantee. Serialized restore requests always rebuild the store.
+        cached = self._state_stores.get(run_id)
+        if cached is not None and serialized_state is None:
+            if state_type is not None and cached.state_type is DictState:
+                # An earlier type-less caller (e.g. handler continuation)
+                # must not shadow the workflow's concrete state type.
+                cached.state_type = state_type
+            return cached
         if serialized_state is not None and serializer is not None:
-            return PostgresStateStore.from_dict(
+            store = PostgresStateStore.from_dict(
                 serialized_state,
                 serializer,
                 pool=self._pool,
@@ -290,13 +306,16 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
                 run_id=run_id,
                 schema=self._schema,
             )
-        return PostgresStateStore(
-            pool=self._pool,
-            run_id=run_id,
-            state_type=state_type,
-            serializer=serializer,
-            schema=self._schema,
-        )
+        else:
+            store = PostgresStateStore(
+                pool=self._pool,
+                run_id=run_id,
+                state_type=state_type,
+                serializer=serializer,
+                schema=self._schema,
+            )
+        self._state_stores[run_id] = store
+        return store
 
     # ── Migrations ──────────────────────────────────────────────────────
 

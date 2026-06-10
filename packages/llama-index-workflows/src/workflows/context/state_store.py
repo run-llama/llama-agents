@@ -550,7 +550,14 @@ class StateStore(Protocol[MODEL_T]):
 
 
 class _TypedStateStore(Generic[MODEL_T]):
-    """Typed StateStore facade over raw storage."""
+    """Typed StateStore facade over raw storage.
+
+    Concurrency contract: the internal lock serializes read-modify-write
+    operations within one process *through the same facade instance*.
+    Workflow stores memoize one facade per run so in-process writers share
+    that lock. Writers in other processes or replicas are not serialized;
+    cross-replica consistency requires backend-level atomicity.
+    """
 
     state_type: type[MODEL_T]
 

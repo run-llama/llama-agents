@@ -15,6 +15,7 @@ from typing import Any, Iterator, Sequence
 from llama_agents.client.protocol.serializable_events import EventEnvelopeWithMetadata
 from workflows.context import JsonSerializer
 from workflows.context.serializers import BaseSerializer
+from workflows.context.state_store import DictState
 
 from ..abstract_workflow_store import (
     AbstractWorkflowStore,
@@ -42,6 +43,9 @@ class SqliteWorkflowStore(AbstractWorkflowStore):
         self._single_connection = single_connection
         self._persistent_conn: sqlite3.Connection | None = None
         self._conditions: weakref.WeakValueDictionary[str, asyncio.Condition] = (
+            weakref.WeakValueDictionary()
+        )
+        self._state_stores: weakref.WeakValueDictionary[str, SqliteStateStore[Any]] = (
             weakref.WeakValueDictionary()
         )
         if single_connection:
@@ -87,6 +91,15 @@ class SqliteWorkflowStore(AbstractWorkflowStore):
         serialized_state: dict[str, Any] | None = None,
         serializer: BaseSerializer | None = None,
     ) -> SqliteStateStore[Any]:
+        # One facade per run per process so its write lock is a real
+        # guarantee. Serialized restore requests always rebuild the store.
+        cached = self._state_stores.get(run_id)
+        if cached is not None and serialized_state is None:
+            if state_type is not None and cached.state_type is DictState:
+                # An earlier type-less caller (e.g. handler continuation)
+                # must not shadow the workflow's concrete state type.
+                cached.state_type = state_type
+            return cached
         store = SqliteStateStore(
             db_path=self.db_path,
             run_id=run_id,
@@ -96,6 +109,7 @@ class SqliteWorkflowStore(AbstractWorkflowStore):
         )
         if serialized_state is not None and serializer is not None:
             store._seed_from_serialized(serialized_state, serializer)
+        self._state_stores[run_id] = store
         return store
 
     def _get_or_create_condition(self, run_id: str) -> asyncio.Condition:

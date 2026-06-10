@@ -111,7 +111,9 @@ class _SqliteStateStorage:
             now = _utc_now().isoformat()
             # json.dumps raises TypeError for non-JSON data rather than
             # silently writing a Python repr into the JSON column.
-            data = record.data if isinstance(record.data, str) else json.dumps(record.data)
+            data = (
+                record.data if isinstance(record.data, str) else json.dumps(record.data)
+            )
             conn.execute(
                 """
                 INSERT INTO workflow_state (run_id, state_json, state_type, state_module, created_at, updated_at)

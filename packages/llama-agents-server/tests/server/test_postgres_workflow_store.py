@@ -351,3 +351,30 @@ async def test_integration_tick_append_and_get(postgres_dsn: str) -> None:
         assert await store.get_ticks("other-run") == []
     finally:
         await store.close()
+
+
+@pytest.mark.docker
+async def test_integration_create_state_store_memoizes_per_run(
+    postgres_dsn: str,
+) -> None:
+    store = PostgresWorkflowStore(dsn=postgres_dsn, schema="test_pg_store")
+    try:
+        await store.start()
+        await store.run_migrations()
+
+        first = store.create_state_store("pg-memo-run")
+        second = store.create_state_store("pg-memo-run")
+        assert first is second
+        assert store.create_state_store("pg-memo-other") is not first
+
+        await first.set("count", 0)
+
+        async def increment(state_store: Any) -> None:
+            for _ in range(5):
+                async with state_store.edit_state() as state:
+                    state["count"] = state["count"] + 1
+
+        await asyncio.gather(increment(first), increment(second))
+        assert await first.get("count") == 10
+    finally:
+        await store.close()

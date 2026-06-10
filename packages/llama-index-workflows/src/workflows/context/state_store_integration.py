@@ -53,9 +53,8 @@ async def state_store_handoff(
     (durable reconnect handle or portable snapshot, the store decides).
     Legacy third-party stores fall back to ``to_dict``.
     """
-    serialize = getattr(store, "serialize_for_handoff", None)
-    if callable(serialize):
-        return await serialize(serializer)
+    if isinstance(store, _state_store._TypedStateStore):
+        return await store.serialize_for_handoff(serializer)
     return store.to_dict(serializer)
 
 

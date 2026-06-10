@@ -150,7 +150,9 @@ class _PostgresStateStorage:
             now = _utc_now()
             # json.dumps raises TypeError for non-JSON data rather than
             # silently writing a Python repr into the JSON column.
-            data = record.data if isinstance(record.data, str) else json.dumps(record.data)
+            data = (
+                record.data if isinstance(record.data, str) else json.dumps(record.data)
+            )
             await conn.execute(  # type: ignore[union-attr]
                 f"""
                 INSERT INTO {self._table_ref} (run_id, state_json, state_type, state_module, created_at, updated_at)
