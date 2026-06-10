@@ -15,7 +15,6 @@ from workflows.events import Event, StartEvent, StopEvent
 from workflows.representation.validate import build_step_graph
 from workflows.workflow import Workflow
 
-
 # ── Shared event hierarchy ──────────────────────────────────────────────────
 
 
