@@ -987,14 +987,19 @@ def _process_step_result_tick(
     did_complete_step = any(isinstance(x, StepWorkerResult) for x in tick.result)
     step_no_longer_in_progress = True
 
-    # Collection stream scope. The trigger path is carried on the in-progress state.
-    # A fan-out step (list[E] return) mints ONE fresh stream id for this completed
-    # execution and stamps every event it emits, then closes the stream. A 1:1
-    # step's outputs inherit the trigger stack verbatim.
+    # Collection stream scope. The trigger path is carried on the in-progress
+    # state. Streams are runtime facts: an execution that actually returned a
+    # list (worker-reported via ``fanned_out``) mints ONE fresh stream id,
+    # stamps every event it emits, then closes the stream. An execution of a
+    # fan-out-annotated step that took a non-list branch (None or a declared
+    # bare union member) mints nothing. A 1:1 step's outputs inherit the
+    # trigger stack verbatim.
     trigger_stack = this_execution.scope_path
-    is_fan_out = worker_state.config.is_fan_out
+    fanned_out = any(
+        isinstance(x, StepWorkerResult) and x.fanned_out for x in tick.result
+    )
     fan_out_stream_id: str | None = None
-    if is_fan_out and did_complete_step:
+    if fanned_out:
         fan_out_stream_id = _mint_stream_id(state, trigger_stack, tick.step_name)
     if fan_out_stream_id is not None:
         emit_stack: tuple[str, ...] = trigger_stack + (fan_out_stream_id,)
@@ -1264,7 +1269,7 @@ def _process_step_result_tick(
         or terminal_run
     )
 
-    if not skip_accounting and is_fan_out and fan_out_stream_id is not None:
+    if not skip_accounting and fan_out_stream_id is not None:
         bindings = state.config.bindings_for_source(tick.step_name)
         accepting_binding_ids = tuple(binding.id for binding in bindings)
         seed = sum(_count_accepting_steps(state, type(m)) for m in emitted_non_stop)

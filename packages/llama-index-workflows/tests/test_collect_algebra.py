@@ -12,14 +12,18 @@ raise validation errors when declared.
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Callable
+from typing import Annotated, Any, Callable, cast
 
 import pytest
-from workflows import All, Cardinality, Collect, Take, Workflow, step
+from workflows import All, Cardinality, Collect, Context, Take, Workflow, step
 from workflows.decorators import StepConfig, StepFunction
 from workflows.decorators import step as free_step
-from workflows.errors import WorkflowValidationError
-from workflows.events import Event, StartEvent, StopEvent
+from workflows.errors import (
+    WorkflowCancelledByUser,
+    WorkflowRuntimeError,
+    WorkflowValidationError,
+)
+from workflows.events import Event, StartEvent, StopEvent, WorkflowIdleEvent
 
 
 class Task(Event):
@@ -425,3 +429,231 @@ async def test_annotated_all_runs_like_bare_list() -> None:
 
     result = await _run(FanOut(timeout=10))
     assert result == [0, 1, 2, 3]
+
+
+# --------------------------------------------------------------------------- #
+# Streams are runtime facts: only an actual list return mints a stream.
+# --------------------------------------------------------------------------- #
+
+
+class Round(Event):
+    i: int
+
+
+async def test_none_return_emits_no_stream_and_joins_do_not_fire() -> None:
+    """`return None` is a dead branch: no stream, no join firing.
+
+    The producer is kicked three times; only the execution that actually
+    returns a list opens a stream, so the join fires exactly once with its
+    members — never with a fabricated [] for the None executions.
+    """
+    join_calls: list[list[int]] = []
+    calls = {"n": 0}
+
+    class WF(Workflow):
+        @step
+        async def driver(self, ctx: Context, ev: StartEvent) -> Round:
+            ctx.send_event(Round(i=1))
+            ctx.send_event(Round(i=2))
+            return Round(i=0)
+
+        @step(num_workers=1)
+        async def produce(self, ev: Round) -> list[Task] | None:
+            calls["n"] += 1
+            if calls["n"] < 3:
+                return None
+            return [Task(n=k) for k in range(2)]
+
+        @step
+        async def work(self, ev: Task) -> Done:
+            return Done(n=ev.n)
+
+        @step
+        async def join(self, events: list[Done]) -> StopEvent:
+            join_calls.append(sorted(e.n for e in events))
+            return StopEvent(result=sorted(e.n for e in events))
+
+    result = await _run(WF(timeout=8))
+    assert result == [0, 1]
+    assert join_calls == [[0, 1]], join_calls
+
+
+async def test_bare_union_member_routes_ordinarily_and_join_idles() -> None:
+    """`-> list[A] | B` returning B never fires list[A] joins.
+
+    With the B lineage dying out, the run has no stream and nothing to do: it
+    idles (observably via WorkflowIdleEvent) instead of completing the join
+    with a fabricated [].
+    """
+    join_calls: list[list[int]] = []
+    singles: list[int] = []
+
+    class Single(Event):
+        n: int
+
+    class WF(Workflow):
+        @step
+        async def produce(self, ev: StartEvent) -> list[Task] | Single:
+            return Single(n=7)
+
+        @step
+        async def handle_single(self, ev: Single) -> None:
+            singles.append(ev.n)
+            return None
+
+        @step
+        async def work(self, ev: Task) -> Done:
+            return Done(n=ev.n)
+
+        @step
+        async def join(self, events: list[Done]) -> StopEvent:
+            join_calls.append(sorted(e.n for e in events))
+            return StopEvent(result=None)
+
+    handler = WF(timeout=5).run()
+    saw_idle = False
+    async for ev in handler.stream_events(expose_internal=True):
+        if isinstance(ev, WorkflowIdleEvent):
+            saw_idle = True
+            break
+    await handler.cancel_run()
+    try:
+        await handler
+    except WorkflowCancelledByUser:
+        pass
+
+    assert saw_idle
+    assert singles == [7]
+    assert join_calls == [], join_calls
+
+
+async def test_bare_member_declared_both_listed_and_bare_is_single_dispatch() -> None:
+    """`-> list[A] | A` returning a bare A is the declared single member."""
+    join_calls: list[list[int]] = []
+
+    class WF(Workflow):
+        @step
+        async def produce(self, ev: StartEvent) -> list[Done] | Done:
+            return Done(n=5)
+
+        @step
+        async def handle(self, ev: Done) -> StopEvent:
+            return StopEvent(result=ev.n)
+
+        @step
+        async def join(self, events: list[Done]) -> StopEvent:
+            join_calls.append(sorted(e.n for e in events))
+            return StopEvent(result=sorted(e.n for e in events))
+
+    result = await _run(WF(timeout=5))
+    assert result == 5
+    assert join_calls == [], join_calls
+
+
+async def test_bare_element_under_pure_list_return_is_runtime_error() -> None:
+    """A bare element where only list[E] is declared fails loudly."""
+
+    class WF(Workflow):
+        @step
+        async def produce(self, ev: StartEvent) -> list[Done]:
+            return cast("list[Done]", Done(n=0))  # wrong shape on purpose
+
+        @step
+        async def join(self, events: list[Done]) -> StopEvent:
+            return StopEvent(result=len(events))
+
+    with pytest.raises(WorkflowRuntimeError, match="bare"):
+        await _run(WF(timeout=5))
+
+
+# --------------------------------------------------------------------------- #
+# Re-fanning collect steps open a child stream, not a parent-level binding.
+# --------------------------------------------------------------------------- #
+
+
+async def test_refanning_collect_fires_join_once_per_refan_stream() -> None:
+    """A collect step that fans out again must not create a spurious binding.
+
+    outer -> inner fan-out -> collect_and_refan(list[D]) -> list[N] -> join.
+    The join is bound to each re-fan stream and fires once per instance with
+    its members — never an extra time with [] when the outer stream closes.
+    """
+    join_calls: list[list[tuple[int, int]]] = []
+
+    class Outer(Event):
+        o: int
+
+    class D(Event):
+        o: int
+        i: int
+
+    class N(Event):
+        o: int
+        i: int
+
+    class Total(Event):
+        o: int
+        count: int
+
+    class WF(Workflow):
+        @step
+        async def outer(self, ev: StartEvent) -> list[Outer]:
+            return [Outer(o=k) for k in range(2)]
+
+        @step
+        async def inner_fan(self, ev: Outer) -> list[D]:
+            return [D(o=ev.o, i=j) for j in range(2)]
+
+        @step
+        async def collect_and_refan(self, events: list[D]) -> list[N]:
+            return [N(o=e.o, i=e.i) for e in events]
+
+        @step
+        async def join(self, events: list[N]) -> Total:
+            join_calls.append(sorted((e.o, e.i) for e in events))
+            return Total(o=events[0].o if events else -1, count=len(events))
+
+        @step
+        async def total_join(self, events: list[Total]) -> StopEvent:
+            return StopEvent(result=sorted((t.o, t.count) for t in events))
+
+    result = await _run(WF(timeout=8))
+    assert result == [(0, 2), (1, 2)], result
+    assert sorted(len(c) for c in join_calls) == [2, 2], join_calls
+    assert all(c for c in join_calls), join_calls
+
+
+# --------------------------------------------------------------------------- #
+# Multi-slot joins must fill at one stream level.
+# --------------------------------------------------------------------------- #
+
+
+def test_mixed_level_multi_slot_join_rejected_at_init() -> None:
+    """Slots produced at different stream levels can never join."""
+
+    class A(Event):
+        n: int
+
+    class B(Event):
+        n: int
+
+    with pytest.raises(WorkflowValidationError, match="common stream level"):
+
+        class WF(Workflow):
+            @step
+            async def fan(self, ev: StartEvent) -> list[Task]:
+                return [Task(n=0)]
+
+            @step
+            async def work(self, ev: Task) -> A:
+                return A(n=ev.n)
+
+            @step
+            async def top(self, ev: StartEvent) -> B:
+                return B(n=1)
+
+            @step
+            async def pair(self, a: A, b: B) -> StopEvent:
+                return StopEvent(result=(a.n, b.n))
+
+        WF()._validate()

@@ -315,9 +315,10 @@ def as_step_worker_function(
                     if captured_waiting is not None:
                         raise captured_waiting
                 if isinstance(result, list) and config.is_fan_out:
-                    # A step that returns ``list[E]`` fans out: each element is
-                    # emitted as its own event (static-list emission). An empty
-                    # list emits nothing but still completes the step.
+                    # A step that actually returned a list fans out: each
+                    # element is emitted as its own event into a fresh stream.
+                    # An empty list emits nothing but still opens (and
+                    # immediately closes) the stream, so joins fire with [].
                     for item in result:
                         if not isinstance(item, Event):
                             msg = (
@@ -328,13 +329,41 @@ def as_step_worker_function(
                             raise WorkflowRuntimeError(msg)
                     if result:
                         for item in result:
-                            returns.return_values.append(StepWorkerResult(result=item))
+                            returns.return_values.append(
+                                StepWorkerResult(result=item, fanned_out=True)
+                            )
                     else:
-                        returns.return_values.append(StepWorkerResult(result=None))
+                        returns.return_values.append(
+                            StepWorkerResult(result=None, fanned_out=True)
+                        )
                 elif result is not None and not isinstance(result, Event):
                     msg = f"Step function {step_name} returned {type(result).__name__} instead of an Event instance."
                     raise WorkflowRuntimeError(msg)
+                elif (
+                    config.is_fan_out
+                    and result is not None
+                    and not any(
+                        isinstance(t, type) and isinstance(result, t)
+                        for t in config.bare_return_types
+                    )
+                ):
+                    # A bare event under a list-returning annotation. A type
+                    # declared as a non-list union member (-> list[A] | B
+                    # returning B) is ordinary dispatch and handled below; an
+                    # undeclared bare element is an error, not a silent
+                    # one-member stream.
+                    msg = (
+                        f"Step function {step_name} returned a bare "
+                        f"{type(result).__name__} but its return annotation only "
+                        "declares it inside a list. Return a one-element list to "
+                        "fan out, or declare the bare type as a union member "
+                        "(e.g. -> list[A] | B) for ordinary dispatch."
+                    )
+                    raise WorkflowRuntimeError(msg)
                 else:
+                    # Ordinary dispatch — including a fan-out step's declared
+                    # non-list branch and its None (no emission, no stream)
+                    # branch.
                     returns.return_values.append(StepWorkerResult(result=result))
             except WaitingForEvent as e:
                 await asyncio.sleep(0)

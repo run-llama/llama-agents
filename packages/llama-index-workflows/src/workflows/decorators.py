@@ -58,10 +58,15 @@ class StepConfig:
     # ordinary single-event-trigger model.
     collect_params: list[tuple[str, Any]] | None = None
     # Fan-out producer: True when the return annotation is ``list[E]``. Such
-    # a step mints a fresh stream id per execution and stamps every emitted event
-    # with it, then closes the stream. Computed at decoration time from the return
-    # annotation.
+    # a step MAY mint a fresh stream per execution — whether it does is a
+    # runtime fact: only an actual list return opens a stream. Computed at
+    # decoration time from the return annotation; used for binding computation
+    # and validation.
     is_fan_out: bool = False
+    # Non-list members of a fan-out return union (``-> list[A] | B`` -> (B,)).
+    # A bare return of one of these types is ordinary dispatch; any other bare
+    # event under a list-returning annotation is a runtime error.
+    bare_return_types: tuple[Any, ...] = ()
     # Collection-stream fan-in: set to ``(parameter_name, element_event_types)``
     # when the step declares a single ``list[E]`` parameter. The element types are
     # a tuple — ``list[Done]`` -> ``(Done,)``; a union flat list ``list[A | B]`` ->
@@ -240,6 +245,7 @@ def make_step_function(
         skip_graph_checks=skip_graph_checks or [],
         collect_params=collect_params,
         is_fan_out=spec.is_fan_out,
+        bare_return_types=tuple(spec.bare_return_types),
         collection_param=spec.collection_param,
         collection_policy=spec.collection_policy,
     )

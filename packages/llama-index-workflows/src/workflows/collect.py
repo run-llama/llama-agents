@@ -20,10 +20,17 @@ error instead of silently picking the wrong semantics.
 
 Semantics worth knowing:
 
-- A producer returning ``list[E] | None`` that returns ``None`` is equivalent
-  to returning ``[]``: it still opens (and immediately closes) an empty
-  stream, and downstream joins fire once with an empty list. A producer
-  cannot opt out of triggering its joins.
+- Streams are runtime facts: a stream exists only for an execution that
+  actually returned a list. ``return []`` opens (and immediately closes) an
+  empty stream, so downstream joins fire once with ``[]``. ``return None``
+  (under ``list[E] | None``) emits nothing — no stream opens and joins do not
+  fire; the branch is dead like any other step returning ``None``.
+- A union producer (``-> list[A] | B``) returning a bare ``B`` is ordinary
+  dispatch; ``list[A]`` joins do not fire for that execution. When a type
+  appears both listed and bare (``-> list[A] | A``), a bare return is the
+  declared single member, not a one-element stream. A bare event whose type is
+  only declared inside the list (``-> list[A]`` returning ``A``) is a runtime
+  error.
 - ``ctx.send_event`` cannot add members to a collection stream. Sends are
   ignored with a warning at runtime — whether targeted at the collect step
   via ``step=...`` or sent untargeted while a stream is open. The static

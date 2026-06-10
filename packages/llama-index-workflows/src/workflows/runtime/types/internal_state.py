@@ -8,6 +8,7 @@ import importlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
+from workflows._stream_levels import event_types, stream_level_types_by_producer
 from workflows.collect import Collect, Take
 from workflows.context.context_types import (
     CURRENT_SERIALIZED_VERSION,
@@ -427,11 +428,6 @@ def _import_event_type(qualified_name: str) -> type[Event]:
     return getattr(module, class_name)
 
 
-def _event_types(types: Any) -> list[type[Event]]:
-    """Filter a type sequence down to concrete Event subclasses."""
-    return [t for t in types if isinstance(t, type) and issubclass(t, Event)]
-
-
 def _binding_id(
     source_step: str,
     target_step: str,
@@ -450,10 +446,9 @@ def _compute_collection_bindings(workflow: Workflow) -> dict[str, CollectionBind
     Compute static list[E] stream bindings from the workflow graph.
 
     A fan-out source binds to a collection step when the collection step's item
-    type appears at the same stream level reachable from the source. Nested
-    fan-out is treated as a child stream level; if that child stream feeds a
-    collection step, the parent traversal continues through the collection
-    step's return types so downstream same-level joins remain discoverable.
+    type appears at the same stream level reachable from the source (see
+    :mod:`workflows._stream_levels` for the level traversal, shared with static
+    validation).
     """
     steps = {name: fn._step_config for name, fn in workflow._get_steps().items()}
     collects: dict[str, tuple[Any, ...]] = {
@@ -462,44 +457,10 @@ def _compute_collection_bindings(workflow: Workflow) -> dict[str, CollectionBind
         if cfg.collection_param is not None
     }
 
-    def same_level_types(seed_types: Any, guard: frozenset[str]) -> set[type[Event]]:
-        """
-        Return event types reachable without crossing into another stream level.
-
-        The guard prevents recursive fan-out producers from looping forever while
-        still allowing collection steps to collapse child stream outputs back
-        into the current level.
-        """
-        seen: set[type[Event]] = set()
-        frontier: list[type[Event]] = list(_event_types(seed_types))
-        while frontier:
-            t = frontier.pop()
-            if t in seen:
-                continue
-            seen.add(t)
-            for name, cfg in steps.items():
-                if t not in cfg.accepted_events:
-                    continue
-                if cfg.collection_param is not None:
-                    continue
-                if cfg.is_fan_out:
-                    if name in guard:
-                        continue
-                    child = same_level_types(cfg.return_types, guard | {name})
-                    for cname, cetypes in collects.items():
-                        if any(et in child for et in cetypes):
-                            frontier.extend(_event_types(steps[cname].return_types))
-                    continue
-                frontier.extend(_event_types(cfg.return_types))
-        return seen
-
     bindings: dict[str, CollectionBinding] = {}
-    for source_step, cfg in steps.items():
-        if not cfg.is_fan_out:
-            continue
-        level_types = same_level_types(cfg.return_types, frozenset({source_step}))
+    for source_step, level_types in stream_level_types_by_producer(steps).items():
         for target_step, collect_types in collects.items():
-            item_types = tuple(_event_types(collect_types))
+            item_types = tuple(event_types(collect_types))
             if not any(et in level_types for et in item_types):
                 continue
             policy = steps[target_step].collection_policy

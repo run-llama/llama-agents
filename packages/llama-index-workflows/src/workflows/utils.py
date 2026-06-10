@@ -54,6 +54,10 @@ class StepSignatureSpec(BaseModel):
     collection_policy: Any | None = None
     # Fan-out producer: True when the return annotation is ``list[E]``.
     is_fan_out: bool = False
+    # Non-list members of a fan-out return union (``-> list[A] | B`` -> [B]).
+    # A bare return of one of these types is ordinary dispatch; any other bare
+    # event under a list-returning annotation is a runtime error.
+    bare_return_types: list[Any] = []
 
 
 def inspect_signature(
@@ -188,6 +192,7 @@ def inspect_signature(
         collection_param=collection_param,
         collection_policy=collection_policy,
         is_fan_out=_is_fan_out_return(fn, localns=localns),
+        bare_return_types=_bare_return_types(fn, localns=localns),
     )
 
 
@@ -486,6 +491,39 @@ def _return_hint_is_fan_out(hint: Any) -> bool:
             if arg is not type(None)
         )
     return origin in _COLLECTION_RETURN_ORIGINS
+
+
+def _bare_return_types(
+    func: Callable, localns: dict[str, Any] | None = None
+) -> list[Any]:
+    """Non-list members of the return annotation.
+
+    For ``-> list[A] | B`` this is ``[B]``: a bare ``B`` return from a fan-out
+    step is ordinary dispatch rather than stream emission. A pure ``-> list[A]``
+    has none, so any bare event return is a runtime error there. ``NoneType``
+    is dropped (a ``None`` return is the no-emission path).
+    """
+    type_hints = _resolve_type_hints(func, localns=localns)
+    return_hint = type_hints.get("return")
+    if return_hint is None:
+        return []
+    return _flatten_bare_members(return_hint)
+
+
+def _flatten_bare_members(hint: Any) -> list[Any]:
+    if hint is type(None):
+        return []
+    origin = get_origin(hint)
+    if origin in (Union, UnionType):
+        result: list[Any] = []
+        for arg in get_args(hint):
+            for t in _flatten_bare_members(arg):
+                if t not in result:
+                    result.append(t)
+        return result
+    if origin in _COLLECTION_RETURN_ORIGINS:
+        return []
+    return [hint]
 
 
 def _resolve_type_hints(

@@ -238,6 +238,12 @@ class StepWorkerResult(BaseModel):
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
     type: Literal["result"] = "result"
     result: SerializableOptionalEvent = None
+    # True when this execution actually returned a list (stream emission). A
+    # fan-out-annotated step that takes a non-list branch (None, or a declared
+    # bare union member) does not fan out: no stream is minted and downstream
+    # joins do not fire. An empty list return carries fanned_out=True with
+    # result=None — an empty stream whose joins fire with [].
+    fanned_out: bool = False
 
 
 class StepWorkerFailed(BaseModel):
