@@ -27,7 +27,6 @@ from workflows.decorators import StepConfig
 from workflows.events import DictLikeModel
 
 from .serializers import BaseSerializer, JsonSerializer
-from .utils import import_module_from_qualified_name
 
 if TYPE_CHECKING:
     from workflows.workflow import Workflow
@@ -190,29 +189,6 @@ def serialize_dict_state_data(
     return {"_data": serialized_data}
 
 
-def _resolve_state_type(
-    state_type_name: str | None,
-    state_module: str | None,
-    serializer: BaseSerializer,
-) -> type[BaseModel] | None:
-    if not state_type_name or not state_module:
-        return None
-
-    qualified_name = f"{state_module}.{state_type_name}"
-    validate_qualified_name = getattr(serializer, "_validate_qualified_name", None)
-    if callable(validate_qualified_name):
-        validate_qualified_name(qualified_name)
-
-    try:
-        resolved = import_module_from_qualified_name(qualified_name)
-    except Exception:
-        return None
-
-    if isinstance(resolved, type) and issubclass(resolved, BaseModel):
-        return resolved
-    return None
-
-
 def encode_state(
     state: BaseModel,
     serializer: BaseSerializer,
@@ -245,31 +221,43 @@ def encode_state_to_str(
 
 def decode_state(
     state_data: Any,
-    state_type_name: str | None,
-    state_module: str | None,
     serializer: BaseSerializer,
 ) -> BaseModel:
-    """Decode a state model using the persisted type metadata."""
+    """Decode a persisted state payload by dispatching on its shape.
+
+    Persisted type metadata is intentionally not consulted, so rows cannot
+    drive module imports. Typed payloads self-describe through the serializer
+    (which validates the embedded qualified name before importing anything);
+    DictState payloads are recognized by their ``{"_data": ...}`` wrapper.
+    """
     if isinstance(state_data, BaseModel):
+        # Live model from an in-process handoff.
         return state_data
 
-    state_type = _resolve_state_type(state_type_name, state_module, serializer)
-
-    if state_type is not None and issubclass(state_type, DictState):
-        if isinstance(state_data, str):
-            state_data = json.loads(state_data)
-        if not isinstance(state_data, dict):
-            state_data = {}
-        return deserialize_dict_state_data(state_data, serializer)
-
-    if state_type is not None:
-        return serializer.deserialize(state_data)
-
     if isinstance(state_data, str):
-        deserialized = serializer.deserialize(state_data)
-        if isinstance(deserialized, BaseModel):
-            return deserialized
-        state_data = deserialized
+        try:
+            parsed: Any = json.loads(state_data)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict) and "_data" in parsed:
+            state_data = parsed
+        else:
+            # Non-JSON strings (e.g. pickled payloads) and JSON-encoded typed
+            # payloads both reconstruct through the serializer, which fails
+            # closed on disallowed embedded types.
+            deserialized = serializer.deserialize(state_data)
+            if isinstance(deserialized, BaseModel):
+                return deserialized
+            state_data = deserialized
+
+    if isinstance(state_data, dict) and "_data" not in state_data:
+        # Already-parsed typed payload. JsonSerializer-style serializers can
+        # reconstruct it from the embedded self-description.
+        deserialize_value = getattr(serializer, "deserialize_value", None)
+        if callable(deserialize_value):
+            value = deserialize_value(state_data)
+            if isinstance(value, BaseModel):
+                return value
 
     if not isinstance(state_data, dict):
         state_data = {}
@@ -592,15 +580,7 @@ class _TypedStateStore(Generic[MODEL_T]):
         record = await self._storage.load()
         if record is None:
             return None
-        return cast(
-            MODEL_T,
-            decode_state(
-                record.data,
-                record.state_type,
-                record.state_module,
-                self._serializer,
-            ),
-        )
+        return cast(MODEL_T, decode_state(record.data, self._serializer))
 
     async def _load_state(self) -> MODEL_T:
         state = await self._load_state_or_none()
@@ -775,12 +755,7 @@ class InMemoryStateStore(_TypedStateStore[MODEL_T]):
             [from_dict][workflows.context.state_store.InMemoryStateStore.from_dict].
         """
         record = self._sync_snapshot_record()
-        state = decode_state(
-            record.data,
-            record.state_type,
-            record.state_module,
-            JsonSerializer(),
-        )
+        state = decode_state(record.data, JsonSerializer())
         payload = create_in_memory_payload(state, serializer)
         return payload.model_dump()
 
@@ -849,16 +824,7 @@ def deserialize_dict_state_data(
     deserialized_data = {}
     for key, value in _data_serialized.items():
         try:
-            if isinstance(value, str):
-                try:
-                    deserialized_data[key] = serializer.deserialize(value)
-                except (TypeError, ValueError):
-                    deserialized_data[key] = value
-            else:
-                deserialize_value = getattr(serializer, "deserialize_value", None)
-                deserialized_data[key] = (
-                    deserialize_value(value) if callable(deserialize_value) else value
-                )
+            deserialized_data[key] = serializer.deserialize(value)
         except Exception as e:
             raise ValueError(f"Failed to deserialize state value for key {key}: {e}")
     return DictState(_data=deserialized_data)
@@ -884,12 +850,7 @@ def deserialize_state_from_dict(
     Raises:
         ValueError: If deserialization fails for any key.
     """
-    return decode_state(
-        serialized_state.get("state_data", {}),
-        serialized_state.get("state_type"),
-        serialized_state.get("state_module"),
-        serializer,
-    )
+    return decode_state(serialized_state.get("state_data", {}), serializer)
 
 
 def _decode_seed_state(

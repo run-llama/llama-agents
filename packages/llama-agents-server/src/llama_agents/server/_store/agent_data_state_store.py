@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from typing import Any, Generic, Literal
@@ -140,7 +141,9 @@ class _AgentDataStateStorage:
         await self._save_without_seed(record)
 
     async def _save_without_seed(self, record: StateRecord) -> None:
-        data = record.data if isinstance(record.data, str) else str(record.data)
+        # json.dumps raises TypeError for non-JSON data rather than
+        # silently writing a Python repr into the stored record.
+        data = record.data if isinstance(record.data, str) else json.dumps(record.data)
         stored = _AgentDataStateRecord(
             run_id=self._run_id,
             data=data,

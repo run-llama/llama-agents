@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -147,7 +148,9 @@ class _PostgresStateStorage:
             conn = await self._pool.acquire()  # type: ignore[assignment]
         try:
             now = _utc_now()
-            data = record.data if isinstance(record.data, str) else str(record.data)
+            # json.dumps raises TypeError for non-JSON data rather than
+            # silently writing a Python repr into the JSON column.
+            data = record.data if isinstance(record.data, str) else json.dumps(record.data)
             await conn.execute(  # type: ignore[union-attr]
                 f"""
                 INSERT INTO {self._table_ref} (run_id, state_json, state_type, state_module, created_at, updated_at)

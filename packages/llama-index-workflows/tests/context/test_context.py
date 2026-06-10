@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import gc
 import inspect
 import json
+import pickle
 import weakref
 from typing import cast
 
@@ -21,7 +23,7 @@ from workflows.context.context import (
 )
 from workflows.context.external_context import ExternalContext
 from workflows.context.internal_context import InternalContext
-from workflows.context.serializers import JsonSerializer
+from workflows.context.serializers import JsonSerializer, PickleSerializer
 from workflows.context.state_store import (
     DictState,
     InMemoryStateStore,
@@ -740,8 +742,8 @@ def test_encode_decode_state_handles_dict_state() -> None:
     serializer = JsonSerializer()
     state = DictState(answer=42, name="dict")
 
-    state_data, state_type, state_module = encode_state(state, serializer)
-    result = decode_state(state_data, state_type, state_module, serializer)
+    state_data, _, _ = encode_state(state, serializer)
+    result = decode_state(state_data, serializer)
 
     assert isinstance(result, DictState)
     assert result["answer"] == 42
@@ -754,8 +756,8 @@ def test_encode_decode_state_handles_dict_state_subclass() -> None:
     state["answer"] = 42
     state["name"] = "subclass"
 
-    state_data, state_type, state_module = encode_state(state, serializer)
-    result = decode_state(state_data, state_type, state_module, serializer)
+    state_data, _, _ = encode_state(state, serializer)
+    result = decode_state(state_data, serializer)
 
     assert isinstance(result, DictState)
     assert result["answer"] == 42
@@ -766,8 +768,8 @@ def test_encode_decode_state_handles_typed_state() -> None:
     serializer = JsonSerializer()
     state = TypedTestState(counter=7, name="typed")
 
-    state_data, state_type, state_module = encode_state(state, serializer)
-    result = decode_state(state_data, state_type, state_module, serializer)
+    state_data, _, _ = encode_state(state, serializer)
+    result = decode_state(state_data, serializer)
 
     assert isinstance(result, TypedTestState)
     assert result.counter == 7
@@ -777,42 +779,105 @@ def test_encode_decode_state_handles_typed_state() -> None:
 def test_decode_state_respects_json_serializer_allowed_types() -> None:
     serializer = JsonSerializer()
     state = TypedTestState(counter=7, name="typed")
-    state_data, state_type, state_module = encode_state(state, serializer)
+    state_data, _, _ = encode_state(state, serializer)
     restricted_serializer = JsonSerializer(allowed_types=[DictState])
 
     with pytest.raises(ValueError, match="Refusing to import disallowed"):
-        decode_state(state_data, state_type, state_module, restricted_serializer)
+        decode_state(state_data, restricted_serializer)
 
 
-def test_decode_state_uses_embedded_type_when_metadata_is_stale() -> None:
+def test_decode_state_allows_dict_state_under_restricted_allowlist() -> None:
+    """A restricted allowlist must not reject the default DictState container."""
+    serializer = JsonSerializer()
+    state = DictState()
+    state["inner"] = TypedTestState(counter=3, name="allowed")
+    state["plain"] = 42
+    state_data, _, _ = encode_state(state, serializer)
+    restricted_serializer = JsonSerializer(allowed_types=[TypedTestState])
+
+    result = decode_state(state_data, restricted_serializer)
+
+    assert isinstance(result, DictState)
+    assert isinstance(result["inner"], TypedTestState)
+    assert result["inner"].counter == 3
+    assert result["plain"] == 42
+
+
+def test_decode_state_typed_payload_self_describes() -> None:
+    """Typed payloads reconstruct from the serializer-embedded qualified name."""
     serializer = JsonSerializer()
     state = TypedTestState(counter=7, name="typed")
     state_data, _, _ = encode_state(state, serializer)
 
-    result = decode_state(state_data, "MovedState", "missing.module", serializer)
+    result = decode_state(state_data, serializer)
 
     assert isinstance(result, TypedTestState)
     assert result.counter == 7
     assert result.name == "typed"
 
 
-@pytest.mark.parametrize(
-    ("state_type_name", "state_module"),
-    [
-        (None, None),
-        ("MissingState", None),
-    ],
-)
-def test_decode_state_missing_metadata_falls_back_to_dict_state(
-    state_type_name: str | None, state_module: str | None
-) -> None:
+def test_decode_state_typed_payload_with_unimportable_type_raises() -> None:
+    serializer = JsonSerializer()
+    state_data = json.dumps(
+        {
+            "__is_pydantic": True,
+            "value": {"counter": 1, "name": "gone"},
+            "qualified_name": "missing.module.MovedState",
+        }
+    )
+
+    with pytest.raises(Exception):
+        decode_state(state_data, serializer)
+
+
+def test_decode_state_dict_wrapper_decodes_to_dict_state() -> None:
     serializer = JsonSerializer()
     state_data = {"_data": {"answer": serializer.serialize(42)}}
 
-    result = decode_state(state_data, state_type_name, state_module, serializer)
+    result = decode_state(state_data, serializer)
 
     assert isinstance(result, DictState)
     assert result["answer"] == 42
+
+
+def test_decode_state_dict_wrapper_string_decodes_to_dict_state() -> None:
+    """Durable rows persist the DictState wrapper as a JSON string."""
+    serializer = JsonSerializer()
+    state_data = json.dumps({"_data": {"answer": serializer.serialize(42)}})
+
+    result = decode_state(state_data, serializer)
+
+    assert isinstance(result, DictState)
+    assert result["answer"] == 42
+
+
+def test_decode_state_returns_live_model_unchanged() -> None:
+    serializer = JsonSerializer()
+    state = TypedTestState(counter=9, name="live")
+
+    assert decode_state(state, serializer) is state
+
+
+def test_decode_state_pickle_serializer_typed_payload_round_trips() -> None:
+    """PickleSerializer encodes JSON-incapable typed state as a base64 string."""
+    serializer = PickleSerializer()
+    state = TypedTestState(counter=5, name="pickled")
+    state_data = base64.b64encode(pickle.dumps(state)).decode("utf-8")
+
+    result = decode_state(state_data, serializer)
+
+    assert isinstance(result, TypedTestState)
+    assert result.counter == 5
+    assert result.name == "pickled"
+
+
+def test_decode_state_json_scalar_string_falls_back_to_dict_state() -> None:
+    serializer = JsonSerializer()
+
+    result = decode_state(json.dumps([1, 2, 3]), serializer)
+
+    assert isinstance(result, DictState)
+    assert len(list(result.items())) == 0
 
 
 def test_deserialize_state_from_dict_has_no_state_type_override() -> None:
@@ -882,28 +947,6 @@ def test_deserialize_state_from_dict_empty_dict_state() -> None:
 
     assert isinstance(result, DictState)
     assert len(list(result.items())) == 0
-
-
-def test_deserialize_state_from_dict_with_raw_dict_state_values() -> None:
-    serializer = JsonSerializer()
-    serialized = {
-        "state_data": {
-            "_data": {
-                "count": 5,
-                "state": {"nested": True},
-                "name": "raw",
-            }
-        },
-        "state_type": "DictState",
-        "state_module": "workflows.context.state_store",
-    }
-
-    result = deserialize_state_from_dict(serialized, serializer)
-
-    assert isinstance(result, DictState)
-    assert result["count"] == 5
-    assert result["state"] == {"nested": True}
-    assert result["name"] == "raw"
 
 
 # ============================================================================

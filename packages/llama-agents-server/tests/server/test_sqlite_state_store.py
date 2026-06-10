@@ -239,9 +239,10 @@ async def test_typed_state_persists_across_instances(db_path: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_typed_state_decodes_from_row_metadata_when_store_type_changes(
+async def test_typed_state_decodes_when_store_type_changes(
     db_path: str,
 ) -> None:
+    """The self-describing payload drives decode even if the reader's declared type differs."""
     store1: SqliteStateStore[CounterState] = SqliteStateStore(
         db_path=db_path,
         run_id="run-typed-metadata",
