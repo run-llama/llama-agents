@@ -76,6 +76,11 @@ class _StateStorage(Protocol):
         """Persist a raw state record."""
         ...
 
+
+@runtime_checkable
+class _DurableStateStorage(_StateStorage, Protocol):
+    """Storage whose state outlives the process and can emit a reconnect handle."""
+
     def to_handle(self) -> dict[str, Any]:
         """Return backend-specific reconnect metadata."""
         ...
@@ -635,14 +640,30 @@ class _TypedStateStore(Generic[MODEL_T]):
         state = await self._load_state()
         return create_in_memory_payload(state, serializer).model_dump()
 
-    def handle(self) -> dict[str, Any]:
-        """Serialize reconnect metadata for durable storage."""
-        return self._storage.to_handle()
+    async def serialize_for_handoff(self, serializer: BaseSerializer) -> dict[str, Any]:
+        """Serialize this store for runtime handoff.
+
+        Durable stores return a reconnect handle (the state stays in the
+        backend); in-memory stores return a portable, serializer-encoded
+        snapshot that round-trips through ``from_dict``.
+        """
+        await self.ensure_seeded()
+        if self._to_dict_mode == "handle":
+            return self._durable_storage().to_handle()
+        return await self.snapshot(serializer)
+
+    def _durable_storage(self) -> _DurableStateStorage:
+        """Constructor invariant: handle mode implies durable storage."""
+        if not isinstance(self._storage, _DurableStateStorage):
+            raise TypeError(
+                "to_dict_mode='handle' requires storage implementing to_handle()"
+            )
+        return self._storage
 
     def to_dict(self, serializer: BaseSerializer) -> dict[str, Any]:
         """Serialize state for legacy callers."""
         if self._to_dict_mode == "handle":
-            return self.handle()
+            return self._durable_storage().to_handle()
         record = self._sync_snapshot_record()
         return InMemorySerializedState(
             state_type=record.state_type or "DictState",
@@ -668,16 +689,6 @@ class _InMemoryStateStorage:
 
     def load_sync(self) -> _StateRecord | None:
         return self._record.model_copy() if self._record is not None else None
-
-    def to_handle(self) -> dict[str, Any]:
-        record = self.load_sync()
-        if record is None:
-            return InMemorySerializedState().model_dump()
-        return InMemorySerializedState(
-            state_type=record.state_type or "DictState",
-            state_module=record.state_module or "workflows.context.state_store",
-            state_data=record.data,
-        ).model_dump()
 
 
 class InMemoryStateStore(_TypedStateStore[MODEL_T]):

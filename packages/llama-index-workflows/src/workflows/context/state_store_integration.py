@@ -20,8 +20,8 @@ StateRecord = _state_store._StateRecord
 
 
 @runtime_checkable
-class StateStorage(_state_store._StateStorage, Protocol):
-    """Integration protocol for raw workflow state persistence."""
+class StateStorage(_state_store._DurableStateStorage, Protocol):
+    """Integration protocol for raw durable workflow state persistence."""
 
 
 class StateStoreFacade(_state_store._TypedStateStore[MODEL_T], Generic[MODEL_T]):
@@ -43,48 +43,19 @@ def string_record_from_state(
     return StateRecord.model_validate(record.model_dump())
 
 
-@runtime_checkable
-class StateStoreSnapshotter(Protocol):
-    """Integration protocol for stores that can emit portable state snapshots."""
-
-    async def snapshot(self, serializer: BaseSerializer) -> dict[str, Any]:
-        """Serialize portable state data."""
-        ...
-
-
-@runtime_checkable
-class StateStoreHandleProvider(Protocol):
-    """Integration protocol for durable stores that can emit reconnect handles."""
-
-    def handle(self) -> dict[str, Any]:
-        """Serialize reconnect metadata for durable storage."""
-        ...
-
-
-@runtime_checkable
-class StateStorePreparer(Protocol):
-    """Integration protocol for stores with async lazy materialization."""
-
-    async def ensure_seeded(self) -> None:
-        """Prepare storage before exposing a durable handle."""
-        ...
-
-
 async def state_store_handoff(
     store: StateStore[Any],
     serializer: BaseSerializer,
 ) -> dict[str, Any]:
     """Serialize a store for runtime handoff.
 
-    Durable stores can return a reconnect handle. Snapshot-capable stores can
-    return a portable state payload. Legacy stores fall back to ``to_dict``.
+    Facade-based stores self-describe through ``serialize_for_handoff``
+    (durable reconnect handle or portable snapshot, the store decides).
+    Legacy third-party stores fall back to ``to_dict``.
     """
-    if isinstance(store, StateStorePreparer):
-        await store.ensure_seeded()
-    if isinstance(store, StateStoreHandleProvider):
-        return store.handle()
-    if isinstance(store, StateStoreSnapshotter):
-        return await store.snapshot(serializer)
+    serialize = getattr(store, "serialize_for_handoff", None)
+    if callable(serialize):
+        return await serialize(serializer)
     return store.to_dict(serializer)
 
 
@@ -92,9 +63,6 @@ __all__ = [
     "StateRecord",
     "StateStorage",
     "StateStoreFacade",
-    "StateStoreHandleProvider",
-    "StateStorePreparer",
-    "StateStoreSnapshotter",
     "decode_seed_state",
     "state_store_handoff",
     "string_record_from_state",

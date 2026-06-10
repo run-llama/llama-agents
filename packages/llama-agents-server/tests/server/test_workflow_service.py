@@ -21,9 +21,12 @@ from server_test_fixtures import (  # type: ignore[import]
     wait_for_passing,
     wait_for_requested_external_event,
 )
-from workflows import Workflow
+from pydantic import BaseModel
+from workflows import Context, Workflow
 from workflows.context.serializers import BaseSerializer
 from workflows.context.state_store import DictState, InMemoryStateStore
+from workflows.decorators import step
+from workflows.events import StartEvent, StopEvent
 
 
 class ToDictOnlyStateStore:
@@ -336,3 +339,93 @@ async def test_context_from_handler_id_falls_back_to_legacy_state_snapshot(
 
     assert ctx is not None
     assert await ctx.store.get("count") == 7
+
+
+class _InnerValue(BaseModel):
+    x: int = 1
+
+
+class _TypedHandoffState(BaseModel):
+    counter: int = 0
+
+
+class _TypedHandoffWorkflow(Workflow):
+    @step
+    async def go(
+        self, ev: StartEvent, ctx: Context[_TypedHandoffState]
+    ) -> StopEvent:
+        async with ctx.store.edit_state() as st:
+            st.counter += 1
+            return StopEvent(result=st.counter)
+
+
+class _DictHandoffWorkflow(Workflow):
+    @step
+    async def go(self, ev: StartEvent, ctx: Context) -> StopEvent:
+        obj = await ctx.store.get("obj", default=None)
+        return StopEvent(result=type(obj).__name__)
+
+
+@pytest.mark.asyncio
+async def test_typed_state_continuation_via_memory_store(
+    memory_store: MemoryWorkflowStore,
+) -> None:
+    """Handler continuation must round-trip typed state through the handoff payload."""
+    server = WorkflowServer(workflow_store=memory_store, idle_timeout=0.01)
+    wf = _TypedHandoffWorkflow()
+    server.add_workflow("typed", wf)
+    await memory_store.update(
+        PersistentHandler(
+            handler_id="h-typed-continuation",
+            workflow_name="typed",
+            status="completed",
+            run_id="run-typed-continuation",
+            started_at=datetime.now(timezone.utc),
+        )
+    )
+    # Previous run left typed state in the memory store.
+    prev = memory_store.create_state_store(
+        "run-typed-continuation", state_type=_TypedHandoffState
+    )
+    await prev.set("counter", 41)
+
+    async with server.contextmanager():
+        ctx = await server._service._context_from_handler_id(
+            wf, "h-typed-continuation"
+        )
+        assert ctx is not None
+        handler = wf.run(ctx=ctx)
+        # The continued run must see the previous run's typed state (41) and
+        # be able to use it as the typed model (crash/degradation regression).
+        result = await handler
+        assert result == 42
+
+
+@pytest.mark.asyncio
+async def test_dict_state_pydantic_value_continuation_via_memory_store(
+    memory_store: MemoryWorkflowStore,
+) -> None:
+    """Pydantic values in DictState must survive handler continuation undegraded."""
+    server = WorkflowServer(workflow_store=memory_store, idle_timeout=0.01)
+    wf = _DictHandoffWorkflow()
+    server.add_workflow("dictwf", wf)
+    await memory_store.update(
+        PersistentHandler(
+            handler_id="h-dict-continuation",
+            workflow_name="dictwf",
+            status="completed",
+            run_id="run-dict-continuation",
+            started_at=datetime.now(timezone.utc),
+        )
+    )
+    prev = memory_store.create_state_store("run-dict-continuation")
+    await prev.set("obj", _InnerValue(x=42))
+
+    async with server.contextmanager():
+        ctx = await server._service._context_from_handler_id(
+            wf, "h-dict-continuation"
+        )
+        assert ctx is not None
+        handler = wf.run(ctx=ctx)
+        result = await handler
+        assert result == "_InnerValue", f"pydantic value degraded to {result}"
