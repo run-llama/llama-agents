@@ -79,6 +79,10 @@ class SerializedEventAttempt(BaseModel):
     # Per-handler recovery counts on this event's lineage. Maps catch_error
     # handler step name -> invocations so far. Empty on the main graph.
     recovery_counts: dict[str, int] = Field(default_factory=dict)
+    # Absolute time (adapter get_now domain) before which this attempt must not
+    # be dispatched (retry delay), or None if eligible immediately. Additive:
+    # older payloads validate with the default.
+    not_before: float | None = None
 
 
 class SerializedWaiter(BaseModel):

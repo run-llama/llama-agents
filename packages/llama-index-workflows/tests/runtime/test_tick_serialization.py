@@ -33,6 +33,7 @@ from workflows.runtime.types.ticks import (
     TickPublishEvent,
     TickStepResult,
     TickTimeout,
+    TickWakeup,
     WorkflowTick,
 )
 
@@ -101,6 +102,10 @@ def test_event_type_roundtrip() -> None:
         pytest.param(
             TickTimeout(timeout=30.5),
             id="timeout",
+        ),
+        pytest.param(
+            TickWakeup(due=12345.5),
+            id="wakeup",
         ),
         pytest.param(
             TickStepResult(

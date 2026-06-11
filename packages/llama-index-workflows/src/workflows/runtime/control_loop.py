@@ -12,7 +12,7 @@ import time
 from collections.abc import AsyncIterable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from workflows._event_matching import event_matches, step_accepts_event
 from workflows.errors import (
@@ -35,6 +35,7 @@ from workflows.events import (
     WorkflowIdleEvent,
     WorkflowTimedOutEvent,
 )
+from workflows.retry_policy import RetryPolicy
 from workflows.runtime.types.commands import (
     CommandCompleteRun,
     CommandFailWorkflow,
@@ -44,6 +45,7 @@ from workflows.runtime.types.commands import (
     CommandRunWorker,
     CommandScheduleIdleCheck,
     CommandScheduleWaiterTimeout,
+    CommandScheduleWakeup,
     WorkflowCommand,
     indicates_exit,
 )
@@ -71,6 +73,8 @@ from workflows.runtime.types.results import (
     DeleteCollectedEvent,
     DeleteWaiter,
     RetryAttempt,
+    RetryDecision,
+    StepFunctionResult,
     StepWorkerFailed,
     StepWorkerResult,
     StepWorkerState,
@@ -85,6 +89,7 @@ from workflows.runtime.types.ticks import (
     TickStepResult,
     TickTimeout,
     TickWaiterTimeout,
+    TickWakeup,
     WorkflowTick,
 )
 from workflows.workflow import Workflow
@@ -197,6 +202,7 @@ class _ControlLoopRunner:
         """
 
         async def _run_worker() -> TickStepResult:
+            worker: InProgressState | None = None
             try:
                 worker = next(
                     (
@@ -231,7 +237,9 @@ class _ControlLoopRunner:
                     step_name=command.step_name,
                     worker_id=command.id,
                     event=command.event,
-                    result=result,
+                    result=self._stamp_retry_decisions(
+                        command.step_name, worker, result
+                    ),
                 )
             except Exception as e:
                 if _is_shutdown_error(e):
@@ -240,38 +248,73 @@ class _ControlLoopRunner:
                     logger.error(
                         "error running step worker function: %s", e, exc_info=True
                     )
+                failed = StepWorkerFailed(
+                    exception=e, failed_at=await self.adapter.get_now()
+                )
                 return TickStepResult(
                     step_name=command.step_name,
                     worker_id=command.id,
                     event=command.event,
-                    result=[
-                        StepWorkerFailed(
-                            exception=e, failed_at=await self.adapter.get_now()
-                        )
-                    ],
+                    result=self._stamp_retry_decisions(
+                        command.step_name, worker, [failed]
+                    ),
                 )
 
         self._pending_workers.append(
             PendingWorker(command.step_name, command.id, _run_worker())
         )
 
+    def _stamp_retry_decisions(
+        self,
+        step_name: str,
+        worker: InProgressState | None,
+        results: list[StepFunctionResult],
+    ) -> list[StepFunctionResult]:
+        """Record the retry policy's verdict and dispatch time inside failures.
+
+        Runs at tick creation, before the tick is journaled, so both become
+        replayable data: re-reducing the journaled tick reads the verdict
+        instead of re-invoking policy code (which may have changed between
+        the live run and a later replay), and restores the true
+        first_attempt_at instead of the rebuild-time stamp.
+        """
+        if worker is None:
+            return results
+        policy = self.state.workers[step_name].config.retry_policy
+        out: list[StepFunctionResult] = []
+        for result in results:
+            if isinstance(result, StepWorkerFailed) and result.retry_decision is None:
+                delay = _decide_retry_delay(
+                    policy,
+                    elapsed_time=result.failed_at - worker.first_attempt_at,
+                    failures=worker.attempts + 1,
+                    exception=result.exception,
+                    run_id=self.adapter.run_id,
+                    step_name=step_name,
+                )
+                result = result.model_copy(
+                    update={
+                        "retry_decision": RetryDecision(delay=delay),
+                        "first_attempt_at": worker.first_attempt_at,
+                    }
+                )
+            out.append(result)
+        return out
+
     async def process_command(self, command: WorkflowCommand) -> None | StopEvent:
         """Process a single command returned from tick reduction."""
         if isinstance(command, CommandQueueEvent):
-            event = TickAddEvent(
-                event=command.event,
-                step_name=command.step_name,
-                attempts=command.attempts,
-                first_attempt_at=command.first_attempt_at,
-                last_exception=command.last_exception,
-                last_failed_at=command.last_failed_at,
-                recovery_counts=dict(command.recovery_counts),
+            self.tick_buffer.append(
+                TickAddEvent(
+                    event=command.event,
+                    step_name=command.step_name,
+                    attempts=command.attempts,
+                    first_attempt_at=command.first_attempt_at,
+                    last_exception=command.last_exception,
+                    last_failed_at=command.last_failed_at,
+                    recovery_counts=dict(command.recovery_counts),
+                )
             )
-            if command.delay is not None and command.delay > 0:
-                now = await self.adapter.get_now()
-                self.schedule_tick(event, at_time=now + command.delay)
-            else:
-                self.tick_buffer.append(event)
             return None
         elif isinstance(command, CommandRunWorker):
             self.run_worker(command)
@@ -302,6 +345,9 @@ class _ControlLoopRunner:
                 ),
                 at_time=now + command.timeout,
             )
+            return None
+        elif isinstance(command, CommandScheduleWakeup):
+            self.schedule_tick(TickWakeup(due=command.at_time), at_time=command.at_time)
             return None
         else:
             raise ValueError(f"Unknown command type: {type(command)}")
@@ -558,6 +604,7 @@ async def control_loop(
 def rebuild_state_from_ticks(
     state: BrokerState,
     ticks: list[WorkflowTick],
+    run_id: str | None = None,
 ) -> BrokerState:
     """Rebuild the state from a list of ticks.
 
@@ -569,6 +616,10 @@ def rebuild_state_from_ticks(
     Without this, resuming a workflow and then checkpointing again would fail
     because the original in_progress worker IDs don't match the new worker IDs
     assigned after rewind.
+
+    run_id must match the live run's id whenever it is known: it seeds retry
+    jitter, so replaying a failure tick recomputes the same delay (and thus
+    the same not_before) the live run journaled in its TickWakeup.
     """
     # Apply rewind_in_progress to match what happens at runtime when resuming.
     # This re-assigns worker IDs so they align with the ticks that were recorded
@@ -578,7 +629,7 @@ def rebuild_state_from_ticks(
     # Replay ticks to rebuild state
     for tick in ticks:
         state, _ = _reduce_tick(
-            tick, state, time.time()
+            tick, state, time.time(), run_id=run_id
         )  # somewhat broken kludge on the timestamps, need to move these to ticks
     return state
 
@@ -606,6 +657,7 @@ class ReplayResult:
 async def replay_ticks_stream(
     state: BrokerState,
     ticks: AsyncIterable[WorkflowTick],
+    run_id: str | None = None,
 ) -> ReplayResult:
     """Replay a tick stream, returning state plus the last exit-indicating command.
 
@@ -613,11 +665,15 @@ async def replay_ticks_stream(
     CommandHalt when it processes terminal ticks; this surfaces them instead
     of discarding, so callers can classify terminal outcome (success /
     failure / cancel / timeout) without a second pass over the ticks.
+
+    run_id must match the live run's id whenever it is known: it seeds retry
+    jitter, so replaying a failure tick recomputes the same delay (and thus
+    the same not_before) the live run journaled in its TickWakeup.
     """
     state, _ = rewind_in_progress(state, time.time())
     exit_command: ExitCommand | None = None
     async for tick in ticks:
-        state, commands = _reduce_tick(tick, state, time.time())
+        state, commands = _reduce_tick(tick, state, time.time(), run_id=run_id)
         for command in commands:
             if isinstance(
                 command, (CommandCompleteRun, CommandFailWorkflow, CommandHalt)
@@ -630,13 +686,14 @@ async def replay_ticks_stream(
 async def rebuild_state_from_ticks_stream(
     state: BrokerState,
     ticks: AsyncIterable[WorkflowTick],
+    run_id: str | None = None,
 ) -> BrokerState:
     """Streaming variant of :func:`rebuild_state_from_ticks`.
 
     Thin wrapper over :func:`replay_ticks_stream` that discards the exit
     command. Prefer ``replay_ticks_stream`` when you need terminal info.
     """
-    return (await replay_ticks_stream(state, ticks)).state
+    return (await replay_ticks_stream(state, ticks, run_id=run_id)).state
 
 
 def _reduce_tick(
@@ -665,6 +722,8 @@ def _reduce_tick(
         if _check_idle_state(init):
             return init, [CommandPublishEvent(WorkflowIdleEvent())]
         return init, []
+    elif isinstance(tick, TickWakeup):
+        state, commands = _process_wakeup_tick(tick, init, now_seconds)
     else:
         raise ValueError(f"Unknown tick type: {type(tick)}")
 
@@ -675,11 +734,84 @@ def _reduce_tick(
     return state, commands
 
 
+def _is_eligible(attempt: EventAttempt) -> bool:
+    """Delayed attempts (not_before set) only become eligible via TickWakeup.
+
+    Eligibility is a state flip recorded in the tick journal, never a clock
+    comparison: the reducer must make identical dispatch decisions when
+    replaying journaled ticks as it did during the live run.
+    """
+    return attempt.not_before is None
+
+
+def _decide_retry_delay(
+    policy: RetryPolicy | None,
+    *,
+    elapsed_time: float,
+    failures: int,
+    exception: Exception,
+    run_id: str | None,
+    step_name: str,
+) -> float | None:
+    """Ask the retry policy for the delay before the next attempt.
+
+    Returns seconds to wait, or None to stop retrying. Jitter is seeded from
+    (run_id, step_name, failures) so the same failure always samples the same
+    delay — required when this runs during a replay of legacy ticks that did
+    not journal the decision. Policies whose ``next`` predates the ``seed``
+    kwarg are called without it.
+    """
+    if policy is None:
+        return None
+    jitter_seed = (
+        int(
+            hashlib.sha256(f"{run_id}:{step_name}:{failures}".encode()).hexdigest(),
+            16,
+        )
+        & 0xFFFF_FFFF
+        if run_id is not None
+        else None
+    )
+    next_params = inspect.signature(policy.next).parameters
+    seed_kwarg: dict[str, Any] = {"seed": jitter_seed} if "seed" in next_params else {}
+    return policy.next(elapsed_time, failures, exception, **seed_kwarg)
+
+
+def _drain_eligible_queue(
+    step_name: str,
+    state: InternalStepWorkerState,
+    now_seconds: float,
+) -> list[WorkflowCommand]:
+    """Dispatch eligible queued attempts while worker capacity remains.
+
+    Scans past ineligible (delayed) attempts so they neither block eligible
+    work queued behind them nor consume a worker slot. Relative order among
+    eligible attempts is preserved.
+    """
+    commands: list[WorkflowCommand] = []
+    while len(state.in_progress) < state.config.num_workers:
+        index = next(
+            (i for i, a in enumerate(state.queue) if _is_eligible(a)),
+            None,
+        )
+        if index is None:
+            break
+        attempt = state.queue.pop(index)
+        commands.extend(_add_or_enqueue_event(attempt, step_name, state, now_seconds))
+    return commands
+
+
 def rewind_in_progress(
     state: BrokerState,
     now_seconds: float,
 ) -> tuple[BrokerState, list[WorkflowCommand]]:
-    """Rewind the in_progress state, extracting commands to re-initiate the workers"""
+    """Rewind the in_progress state, extracting commands to re-initiate the workers.
+
+    Also re-arms wakeups for queued delayed attempts so retry delays survive
+    snapshot/resume. Even past-due attempts go through a wakeup tick (the
+    runner fires past-due times immediately) rather than dispatching here:
+    the dispatch is then a journaled tick, keeping replay deterministic.
+    """
     state = state.deepcopy()
     commands: list[WorkflowCommand] = []
     for step_name, step_state in sorted(state.workers.items(), key=lambda x: x[0]):
@@ -696,14 +828,10 @@ def rewind_in_progress(
                 ),
             )
         step_state.in_progress = []
-        while (
-            len(step_state.queue) > 0
-            and len(step_state.in_progress) < step_state.config.num_workers
-        ):
-            event = step_state.queue.pop(0)
-            commands.extend(
-                _add_or_enqueue_event(event, step_name, step_state, now_seconds)
-            )
+        commands.extend(_drain_eligible_queue(step_name, step_state, now_seconds))
+        for attempt in step_state.queue:
+            if attempt.not_before is not None:
+                commands.append(CommandScheduleWakeup(at_time=attempt.not_before))
     return state, commands
 
 
@@ -714,6 +842,10 @@ def _check_idle_state(state: BrokerState) -> bool:
     1. The workflow is running (hasn't completed/failed/cancelled)
     2. All steps have no pending events in their queues
     3. All steps have no workers currently executing
+
+    A queued attempt with a future not_before (a delayed retry) is pending
+    work: the workflow is not idle during a retry-delay window, so idle
+    release defers until the retry resolves.
     """
     if not state.is_running:
         return False
@@ -784,46 +916,58 @@ def _process_step_result_tick(
                     f"Unknown result type returned from step function ({tick.step_name}): {type(result.result)}"
                 )
         elif isinstance(result, StepWorkerFailed):
-            # Schedule a retry if permitted, otherwise fail the workflow
-            retries = worker_state.config.retry_policy
-            failures = this_execution.attempts + 1
-            elapsed_time = result.failed_at - this_execution.first_attempt_at
-            jitter_seed = (
-                int(
-                    hashlib.sha256(
-                        f"{run_id}:{tick.step_name}:{failures}".encode()
-                    ).hexdigest(),
-                    16,
-                )
-                & 0xFFFF_FFFF
-                if run_id is not None
-                else None
+            # Schedule a retry if permitted, otherwise fail the workflow.
+            # Prefer the journaled dispatch time: rebuilds re-stamp
+            # this_execution.first_attempt_at with the rebuild clock, which
+            # would silently restart elapsed-based retry budgets on resume.
+            first_attempt_at = (
+                result.first_attempt_at
+                if result.first_attempt_at is not None
+                else this_execution.first_attempt_at
             )
-            if retries is not None:
-                _next_params = inspect.signature(retries.next).parameters
-                _seed_kwarg = {"seed": jitter_seed} if "seed" in _next_params else {}
-                delay = retries.next(
-                    elapsed_time, failures, result.exception, **_seed_kwarg
-                )
+            if result.retry_decision is not None:
+                # The decision was journaled inside the failure tick; replay
+                # consumes it as data and never re-invokes policy code, so a
+                # policy whose parameters changed between the live run and a
+                # replay cannot diverge from the journaled TickWakeup.due.
+                delay = result.retry_decision.delay
             else:
-                delay = None
+                # Legacy tick (journaled before decisions were recorded):
+                # recompute via the policy, seeding jitter from the run id so
+                # replay samples the same delay the live run did.
+                delay = _decide_retry_delay(
+                    worker_state.config.retry_policy,
+                    elapsed_time=result.failed_at - first_attempt_at,
+                    failures=this_execution.attempts + 1,
+                    exception=result.exception,
+                    run_id=run_id,
+                    step_name=tick.step_name,
+                )
             if delay is not None:
-                commands.append(
-                    CommandQueueEvent(
+                # Re-queue the attempt directly into persisted state, carrying
+                # an absolute eligibility time. not_before derives from the
+                # journaled failure timestamp (not the current clock) so replay
+                # computes the identical value. Dropping the wakeup never loses
+                # work: resume re-arms it from the queue (rewind_in_progress).
+                not_before = result.failed_at + delay if delay > 0 else None
+                worker_state.queue.insert(
+                    0,
+                    EventAttempt(
                         event=tick.event,
-                        delay=delay,
-                        step_name=tick.step_name,
                         attempts=this_execution.attempts + 1,
-                        first_attempt_at=this_execution.first_attempt_at,
+                        first_attempt_at=first_attempt_at,
                         last_exception=result.exception,
                         last_failed_at=result.failed_at,
                         recovery_counts=dict(this_execution.recovery_counts),
-                    )
+                        not_before=not_before,
+                    ),
                 )
+                if not_before is not None:
+                    commands.append(CommandScheduleWakeup(at_time=not_before))
             else:
                 exception = result.exception
                 total_attempts = this_execution.attempts + 1
-                elapsed = result.failed_at - this_execution.first_attempt_at
+                elapsed = result.failed_at - first_attempt_at
 
                 handler_name = state.config.handler_for_step.get(tick.step_name)
                 handler = (
@@ -980,15 +1124,9 @@ def _process_step_result_tick(
         worker_state.in_progress.remove(this_execution)
     # enqueue next events if there are any
     if not is_completed:
-        while (
-            len(worker_state.queue) > 0
-            and len(worker_state.in_progress) < worker_state.config.num_workers
-        ):
-            event = worker_state.queue.pop(0)
-            subcommands = _add_or_enqueue_event(
-                event, tick.step_name, worker_state, now_seconds
-            )
-            commands.extend(subcommands)
+        commands.extend(
+            _drain_eligible_queue(tick.step_name, worker_state, now_seconds)
+        )
 
     return state, commands
 
@@ -1004,8 +1142,12 @@ def _add_or_enqueue_event(
     Note! This mutates the state, assuming that its already been deepcopied in an outer scope.
     """
     commands: list[WorkflowCommand] = []
-    # Determine if there is available capacity based on in_progress workers
-    has_space = len(state.in_progress) < state.config.num_workers
+    # Determine if there is available capacity based on in_progress workers.
+    # Delayed attempts (not_before set) are never dispatched here; they wait
+    # in the queue without consuming a worker slot until a wakeup flips them.
+    has_space = len(state.in_progress) < state.config.num_workers and _is_eligible(
+        event
+    )
     if has_space:
         # Assign the smallest available worker id
         used = set(x.worker_id for x in state.in_progress)
@@ -1105,6 +1247,7 @@ def _process_add_event_tick(
         )
         if is_accepted and (tick.step_name is None or tick.step_name == step_name):
             handled = True
+            _consume_superseded_delayed_attempt(tick, state.workers[step_name])
             subcommands = _add_or_enqueue_event(
                 EventAttempt(
                     event=tick.event,
@@ -1136,6 +1279,36 @@ def _process_add_event_tick(
                 )
             )
     return state, commands
+
+
+def _consume_superseded_delayed_attempt(
+    tick: TickAddEvent, worker_state: InternalStepWorkerState
+) -> None:
+    """Compat shim for journals written before delayed retries lived in state.
+
+    Older versions re-delivered a delayed retry as a journaled TickAddEvent
+    carrying retry metadata (attempts > 0). The current reducer, replaying the
+    same journal's failure tick, also queues the attempt with a not_before.
+    Without this, replaying an old journal double-represents the retry: the
+    TickAddEvent dispatches one copy while the phantom queued attempt blocks
+    idle release and re-runs the step after a resume. The current retry path
+    never emits attempts-bearing TickAddEvents, so this only matches
+    old-format journals.
+    """
+    if not tick.attempts:
+        return
+    match = next(
+        (
+            i
+            for i, a in enumerate(worker_state.queue)
+            if a.not_before is not None
+            and a.attempts == tick.attempts
+            and type(a.event) is type(tick.event)
+        ),
+        None,
+    )
+    if match is not None:
+        worker_state.queue.pop(match)
 
 
 def _process_cancel_run_tick(
@@ -1184,6 +1357,26 @@ def _process_timeout_tick(
             )
         ),
     ]
+
+
+def _process_wakeup_tick(
+    tick: TickWakeup, init: BrokerState, now_seconds: float
+) -> tuple[BrokerState, list[WorkflowCommand]]:
+    """Flip due delayed attempts to eligible, then dispatch what capacity allows.
+
+    Eligibility flips on the tick's ``due`` value (recorded when the wakeup
+    was scheduled), never the current clock, so replaying journaled ticks
+    makes the same dispatch decisions as the live run. Spurious or duplicate
+    wakeups are harmless no-ops.
+    """
+    state = init.deepcopy()
+    commands: list[WorkflowCommand] = []
+    for step_name, worker_state in sorted(state.workers.items(), key=lambda x: x[0]):
+        for attempt in worker_state.queue:
+            if attempt.not_before is not None and attempt.not_before <= tick.due:
+                attempt.not_before = None
+        commands.extend(_drain_eligible_queue(step_name, worker_state, now_seconds))
+    return state, commands
 
 
 def _process_waiter_timeout_tick(

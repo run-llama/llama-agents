@@ -116,6 +116,7 @@ class BrokerState:
                     last_exception=attempt.last_exception,
                     last_failed_at=attempt.last_failed_at,
                     recovery_counts=dict(attempt.recovery_counts),
+                    not_before=attempt.not_before,
                 )
                 for attempt in worker_state.queue
             ]
@@ -193,6 +194,7 @@ class BrokerState:
                     last_exception=attempt.last_exception,
                     last_failed_at=attempt.last_failed_at,
                     recovery_counts=dict(attempt.recovery_counts),
+                    not_before=attempt.not_before,
                 )
                 for attempt in worker_data.queue
             ]
@@ -300,6 +302,8 @@ class EventAttempt:
         first_attempt_at: Unix timestamp of first attempt, or None if not yet attempted
         last_exception: Most recent exception, if this attempt is a retry.
         last_failed_at: Unix timestamp of the most recent failure, or None.
+        not_before: Absolute adapter-get_now time before which this attempt
+            must not be dispatched (retry delay), or None if eligible now.
     """
 
     event: Event
@@ -308,6 +312,7 @@ class EventAttempt:
     last_exception: Exception | None = None
     last_failed_at: float | None = None
     recovery_counts: dict[str, int] = field(default_factory=dict)
+    not_before: float | None = None
 
 
 @dataclass()
