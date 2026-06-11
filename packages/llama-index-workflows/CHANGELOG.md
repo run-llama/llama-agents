@@ -1,5 +1,12 @@
 # llama-index-workflows
 
+## 2.21.0
+
+### Minor Changes
+
+- 9a4dd16: Add optional `allowed_types` and `allow_unknown_types` parameters to `JsonSerializer` to support type allowlisting during deserialization
+- db1258b: Support opt-in subclass event routing via the step decorator parameter `accept_event_subclasses`
+
 ## 2.20.0
 
 ### Minor Changes
