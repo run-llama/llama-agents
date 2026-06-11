@@ -340,6 +340,26 @@ async def test_seed_materializes_exactly_once_under_concurrency(
 
 
 @pytest.mark.asyncio
+async def test_seed_staged_during_materialization_survives(
+    serializer: JsonSerializer,
+) -> None:
+    """A seed staged while another seed is materializing is not dropped."""
+    storage = GatedSaveStorage()
+    facade = make_facade(storage)
+    facade.add_seed(in_memory_seed_payload(serializer, counter=1), serializer)
+
+    first_read = asyncio.create_task(facade.get("counter"))
+    await asyncio.wait_for(storage.save_started.wait(), timeout=2.0)
+    # Re-stage mid-materialization, as a shared facade handed a fresh
+    # snapshot would.
+    facade.add_seed(in_memory_seed_payload(serializer, counter=2), serializer)
+    storage.release_save.set()
+    await asyncio.wait_for(first_read, timeout=2.0)
+
+    assert await asyncio.wait_for(facade.get("counter"), timeout=2.0) == 2
+
+
+@pytest.mark.asyncio
 async def test_seed_own_handle_same_target_is_noop(
     serializer: JsonSerializer,
 ) -> None:

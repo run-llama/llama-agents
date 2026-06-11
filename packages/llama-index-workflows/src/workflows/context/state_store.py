@@ -722,8 +722,11 @@ class StateStoreFacade(Generic[MODEL_T]):
                 await self._write_state(state)
             # Popped only after success so a failed materialization stays
             # pending; concurrent readers block on the seed lock above
-            # until the seed is committed.
-            self._pending_seed = None
+            # until the seed is committed. Identity-checked: sync add_seed
+            # may have staged a fresh seed during the awaits above, which
+            # must survive for the next ensure_seeded call.
+            if self._pending_seed is seed:
+                self._pending_seed = None
 
     async def _load_state_or_none(self) -> MODEL_T | None:
         await self.ensure_seeded()

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from typing import Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from llama_agents.client.protocol.serializable_events import EventEnvelopeWithMetadata
@@ -159,6 +159,35 @@ async def test_borrowed_pool_not_closed_on_close(
     await store.close()
     fake_pool.close.assert_not_called()
     assert store._pool is None
+
+
+async def test_failed_start_still_closes_owned_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pool resolved during a failed start() must not leak past close()."""
+    fake_pool = MagicMock()
+    fake_pool.close = AsyncMock()
+
+    async def factory() -> Any:
+        return fake_pool
+
+    async def failing_migrations(self: PostgresWorkflowStore, pool: Any) -> None:
+        raise RuntimeError("migration boom")
+
+    monkeypatch.setattr(PostgresWorkflowStore, "_run_migrations_on", failing_migrations)
+
+    store = PostgresWorkflowStore(
+        dsn="postgresql://localhost/test",
+        pool=PoolProvider(factory, owns_pool=True),
+    )
+
+    with pytest.raises(RuntimeError, match="migration boom"):
+        await store.start()
+    # start() never published the pool, but the provider holds one.
+    assert store._pool is None
+
+    await store.close()
+    fake_pool.close.assert_awaited_once()
 
 
 async def test_concurrent_start_initializes_once(

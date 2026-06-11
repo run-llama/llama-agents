@@ -272,9 +272,12 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
                     "Failed to release listen connection during close", exc_info=True
                 )
             self._listen_conn = None
-        if self._pool is not None:
-            await self._pool_provider.close()
-            self._pool = None
+        # Close the provider unconditionally: if start() failed after the
+        # provider resolved a pool but before self._pool was published (e.g.
+        # migrations or LISTEN setup raised), the pool would otherwise leak.
+        # Idempotent, and a no-op for borrowed pools.
+        await self._pool_provider.close()
+        self._pool = None
         # Cached facades hold the closed pool; drop them so a re-start()
         # builds fresh stores against the new pool.
         self._state_store_cache.clear()

@@ -1,6 +1,6 @@
 ---
 "llama-index-workflows": minor
-"llama-agents-server": patch
+"llama-agents-server": minor
 "llama-agents-dbos": patch
 "llama-agents-appserver": patch
 ---
