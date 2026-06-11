@@ -12,6 +12,7 @@ import time
 from collections.abc import AsyncIterable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from enum import Enum
 from typing import TYPE_CHECKING
 
 from workflows.collect import Collect, Take
@@ -972,6 +973,81 @@ def _take_threshold(collect: Collect | None) -> int | None:
     return None
 
 
+class WorkDisposition(Enum):
+    """What happened to a work item when its execution finished.
+
+    Stream accounting hinges on answering this exactly once per finished
+    execution: COMPLETED and ABSORBED consume the item (adjusting the
+    enclosing stream's open-work counter), FANNED_OUT consumes it into a
+    child stream, STILL_LIVE and RUN_ENDING leave the counter untouched.
+    """
+
+    # Consumed; same-scope successors (one per accepting step per emitted
+    # event) replace it in the enclosing stream.
+    COMPLETED = "completed"
+    # Consumed; the execution returned a list and opened a child stream.
+    FANNED_OUT = "fanned_out"
+    # Not consumed: the same work item re-delivers later (collect-buffer
+    # rerun, scheduled retry, catch_error handler routing, or a waiter
+    # suspension that resumes it whole).
+    STILL_LIVE = "still_live"
+    # Consumed; the invocation only buffered its trigger into a multi-slot
+    # join (or silently dropped a duplicate arrival) and emitted nothing.
+    ABSORBED = "absorbed"
+    # The run is over (StopEvent, halt, or workflow failure); accounting moot.
+    RUN_ENDING = "run_ending"
+
+
+def _classify_work_item(
+    tick: TickStepResult,
+    commands: list[WorkflowCommand],
+    *,
+    rerun_scheduled: bool,
+    fanned_out: bool,
+) -> WorkDisposition:
+    """Classify a finished execution's work item, positively, in one place.
+
+    Every case matches on what *did* happen (results returned, commands
+    emitted). An unrecognized combination raises instead of falling into a
+    residual bucket — a silently misclassified work item drifts the stream
+    counter and wedges or prematurely closes the stream.
+    """
+    did_complete_step = any(isinstance(x, StepWorkerResult) for x in tick.result)
+    step_failed = any(isinstance(x, StepWorkerFailed) for x in tick.result)
+    added_waiter = any(isinstance(x, AddWaiter) for x in tick.result)
+
+    if any(indicates_exit(c) for c in commands):
+        return WorkDisposition.RUN_ENDING
+    if rerun_scheduled:
+        # The same invocation reruns against a fresh collect-buffer snapshot;
+        # only its final completion may consume the work item.
+        return WorkDisposition.STILL_LIVE
+    if step_failed:
+        # A non-terminal failure always re-delivers the work item: a delayed
+        # retry to this step, or a StepFailedEvent routed to its catch_error
+        # handler. Either way the item travels whole to the re-delivery.
+        if any(isinstance(c, CommandQueueEvent) for c in commands):
+            return WorkDisposition.STILL_LIVE
+        raise WorkflowRuntimeError(
+            f"Step {tick.step_name!r} failed without a retry, handler "
+            "routing, or workflow failure. This is a runtime bug."
+        )
+    if did_complete_step:
+        return WorkDisposition.FANNED_OUT if fanned_out else WorkDisposition.COMPLETED
+    if added_waiter:
+        return WorkDisposition.STILL_LIVE
+    if all(isinstance(x, AddCollectedEvent) for x in tick.result):
+        # Only buffer writes (or no recorded results at all — a duplicate
+        # arrival for an already-filled slot): the invocation is over and
+        # emitted nothing.
+        return WorkDisposition.ABSORBED
+    raise WorkflowRuntimeError(
+        f"Cannot classify finished execution of step {tick.step_name!r} for "
+        f"stream accounting: results={[type(r).__name__ for r in tick.result]}. "
+        "This is a runtime bug."
+    )
+
+
 def _process_step_result_tick(
     tick: TickStepResult,
     init: BrokerState,
@@ -1278,7 +1354,8 @@ def _process_step_result_tick(
 
     # Resolve this work item in its enclosing stream. Completion removes this
     # item and adds same-scope successors. Stream close is driven only by
-    # source exhaustion plus ``open_work_items == 0``.
+    # source exhaustion plus ``open_work_items == 0``. Classification happens
+    # once, before any counter mutation.
     emitted_non_stop = [
         x.result
         for x in tick.result
@@ -1286,29 +1363,15 @@ def _process_step_result_tick(
         and isinstance(x.result, Event)
         and not isinstance(x.result, StopEvent)
     ]
-    scheduled_retry = any(
-        isinstance(c, CommandQueueEvent) and c.step_name == tick.step_name
-        for c in commands
-    )
-    failing_run = any(isinstance(c, CommandFailWorkflow) for c in commands)
-    terminal_run = any(indicates_exit(c) for c in commands)
-    # A scheduled rerun is the SAME live work item — only its final completion
-    # may consume it. Counting each rerun would drift the stream counter under
-    # concurrency and close the stream early.
-    rerun_scheduled = not step_no_longer_in_progress
-    step_failed = any(isinstance(x, StepWorkerFailed) for x in tick.result)
-    added_waiter = any(isinstance(x, AddWaiter) for x in tick.result)
-
     enclosing = trigger_stack[-1] if trigger_stack else None
-    skip_accounting = (
-        not did_complete_step
-        or rerun_scheduled
-        or scheduled_retry
-        or failing_run
-        or terminal_run
+    disposition = _classify_work_item(
+        tick,
+        commands,
+        rerun_scheduled=not step_no_longer_in_progress,
+        fanned_out=fanned_out,
     )
 
-    if not skip_accounting and fan_out_stream_id is not None:
+    if disposition is WorkDisposition.FANNED_OUT and fan_out_stream_id is not None:
         bindings = state.config.bindings_for_source(tick.step_name)
         accepting_binding_ids = tuple(binding.id for binding in bindings)
         seed = sum(_count_accepting_steps(state, type(m)) for m in emitted_non_stop)
@@ -1329,7 +1392,7 @@ def _process_step_result_tick(
             commands.extend(
                 _close_collection_stream(state, fan_out_stream_id, now_seconds)
             )
-    elif not skip_accounting:
+    elif disposition is WorkDisposition.COMPLETED:
         # Same-level resolution (1:1 step, or a collect step firing its
         # summary). Remove this work item and add its same-level successors: one
         # work item per accepting step per emitted event. A step that returns
@@ -1340,22 +1403,11 @@ def _process_step_result_tick(
         commands.extend(
             _apply_stream_work_delta(state, enclosing, successors - 1, now_seconds)
         )
-    elif (
-        not did_complete_step
-        and not rerun_scheduled
-        and not step_failed
-        and not added_waiter
-    ):
-        # Buffer absorption: a multi-slot join invocation that only absorbed
-        # its trigger into the slot buffer (one or more AddCollectedEvents), or
-        # silently dropped it (a duplicate arrival for an already-filled slot
-        # records no result at all). Either way the invocation is over and
-        # emitted nothing, so its work item is consumed here — once per work
-        # item, no matter how many buffers were touched. A buffering run that
-        # also completed (legacy collect_events returning None) consumes via
-        # the completion rule above instead; a failed, retried, or suspended
-        # (waiter) run resolves through its later re-delivery.
+    elif disposition is WorkDisposition.ABSORBED:
+        # Consumed once per work item, no matter how many slot buffers the
+        # invocation touched.
         commands.extend(_apply_stream_work_delta(state, enclosing, -1, now_seconds))
+    # STILL_LIVE re-delivers and resolves later; RUN_ENDING needs no accounting.
 
     is_completed = any(indicates_exit(c) for c in commands)
     if step_no_longer_in_progress:
