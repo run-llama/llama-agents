@@ -578,12 +578,12 @@ class StateStore(Protocol[MODEL_T]):
         ...
 
 
-class _OwnerAwareLock:
+class _WriterLock:
     """asyncio.Lock that records its holder task.
 
     Writers acquire exclusively and fail loudly when the current task
-    already holds the lock; reads pass through in that case so reads
-    inside an `edit_state` block work.
+    already holds the lock (a nested writer inside `edit_state`). Reads
+    never take this lock: they return committed state.
     """
 
     def __init__(self) -> None:
@@ -606,14 +606,6 @@ class _OwnerAwareLock:
             finally:
                 self._holder = None
 
-    @asynccontextmanager
-    async def acquire_read(self) -> AsyncGenerator[None, None]:
-        if self._held_by_current_task():
-            yield
-            return
-        async with self._lock:
-            yield
-
 
 class _CopySeed:
     """Pending seed: copy state from another target of the same backend."""
@@ -634,9 +626,11 @@ class StateStoreFacade(Generic[MODEL_T]):
     """Typed StateStore facade over raw storage.
 
     Concurrency contract: Writers serialize on the per-run lock; reads
-    return committed state — durable reads via the backend's committed row
-    (lockless), in-memory reads via the owner-aware lock; a task holding
-    the lock reads through without blocking, and nested writers raise.
+    are lockless and read-committed on every backend — durable reads see
+    the backend's committed row, in-memory reads see the committed record.
+    An in-flight `edit_state` block works on an isolated copy, so reads
+    (including reads inside the block) return the pre-edit state until the
+    block commits on exit. Nested writers raise.
 
     Workflow stores memoize one facade per run so in-process writers share
     that lock. Writers in other processes or replicas are not serialized;
@@ -672,9 +666,9 @@ class StateStoreFacade(Generic[MODEL_T]):
         raise AttributeError("run_id is only available on durable state stores")
 
     @functools.cached_property
-    def _lock(self) -> _OwnerAwareLock:
+    def _lock(self) -> _WriterLock:
         """Lazy lock initialization for Python 3.14+ compatibility."""
-        return _OwnerAwareLock()
+        return _WriterLock()
 
     @functools.cached_property
     def _seed_lock(self) -> asyncio.Lock:
@@ -756,10 +750,22 @@ class StateStoreFacade(Generic[MODEL_T]):
         else:
             await self._storage.save(_record_from_state(state, self._serializer))
 
+    async def _load_state_for_edit(self) -> MODEL_T:
+        """State instance handed to `edit_state`.
+
+        Must be isolated from concurrent readers: mutations inside the
+        block may not become observable until the block commits. Durable
+        backends get this for free (each load decodes a fresh instance
+        from the committed row); in-memory storage overrides this to edit
+        a copy of its live record.
+        """
+        return await self._load_state()
+
     async def get_state(self) -> MODEL_T:
         """Return a copy of the current state model.
 
-        Durable reads are lockless (read-committed via the backend row).
+        Reads are lockless and read-committed: an in-flight `edit_state`
+        block is not observable until it commits.
         """
         state = await self._load_state()
         return state.model_copy()
@@ -776,7 +782,7 @@ class StateStoreFacade(Generic[MODEL_T]):
     async def get(self, path: str, default: Any = Ellipsis) -> Any:
         """Get a nested value using dot-separated paths.
 
-        Durable reads are lockless (read-committed via the backend row).
+        Reads are lockless and read-committed (see `get_state`).
         """
         return get_by_path(await self._load_state(), path, default)
 
@@ -800,14 +806,16 @@ class StateStoreFacade(Generic[MODEL_T]):
 
     @asynccontextmanager
     async def edit_state(self) -> AsyncGenerator[MODEL_T, None]:
-        """Edit state transactionally under the writer lock.
+        """Edit an isolated copy of the state, committed on block exit.
 
-        Reads (`get_state`, `get`, `snapshot`) are safe inside the block;
-        calling a writer (`set_state`, `set`, `clear`, or a nested
-        `edit_state`) raises RuntimeError.
+        Reads (`get_state`, `get`, `snapshot`) never block on the writer
+        lock; inside or concurrent with the block they return the
+        committed pre-edit state. Calling a writer (`set_state`, `set`,
+        `clear`, or a nested `edit_state`) inside the block raises
+        RuntimeError.
         """
         async with self._lock.acquire_write():
-            state = await self._load_state()
+            state = await self._load_state_for_edit()
             yield state
             await self._save_state(state)
 
@@ -875,9 +883,11 @@ class InMemoryStateStore(StateStoreFacade[MODEL_T]):
     [DictState][workflows.context.state_store.DictState] for flexible,
     dictionary-like usage.
 
-    Thread-safety is ensured with an internal `asyncio.Lock`. Consumers can
-    either perform atomic reads/writes via `get_state` and `set_state`, or make
-    in-place, transactional edits via the `edit_state` context manager.
+    Writers serialize on an internal `asyncio.Lock`; reads are lockless and
+    read-committed. Consumers can either perform atomic reads/writes via
+    `get_state` and `set_state`, or make transactional edits via the
+    `edit_state` context manager — the block edits an isolated copy that is
+    committed when the block exits.
 
     Examples:
         Typed state model:
@@ -918,24 +928,13 @@ class InMemoryStateStore(StateStoreFacade[MODEL_T]):
             JsonSerializer(),
         )
 
-    async def get_state(self) -> MODEL_T:
-        """Return a shallow copy of the state, captured under the read lock.
-
-        The owner-aware lock keeps the copy from observing a half-applied
-        `edit_state` block; a task already holding the lock reads through.
-        """
-        async with self._lock.acquire_read():
-            return await super().get_state()
-
-    async def get(self, path: str, default: Any = Ellipsis) -> Any:
-        """Get a nested value, captured under the read lock."""
-        async with self._lock.acquire_read():
-            return await super().get(path, default)
-
-    async def snapshot(self, serializer: BaseSerializer) -> dict[str, Any]:
-        """Serialize portable state data, captured under the read lock."""
-        async with self._lock.acquire_read():
-            return await super().snapshot(serializer)
+    async def _load_state_for_edit(self) -> MODEL_T:
+        # The live record IS the committed state. Hand `edit_state` a deep
+        # copy so lockless readers keep seeing the committed state until
+        # the block commits (matching durable backends, where each load
+        # decodes a fresh instance from the committed row).
+        state = await self._load_state()
+        return state.model_copy(deep=True)
 
     def to_dict(self, serializer: "BaseSerializer") -> dict[str, Any]:
         """Serialize the state and model metadata for persistence.

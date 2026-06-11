@@ -106,6 +106,51 @@ async def test_concurrent_get_state_never_observes_torn_edit() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("durable", [False, True])
+async def test_concurrent_read_during_edit_returns_committed_state(
+    durable: bool,
+) -> None:
+    """Reads never block on an in-flight edit; they see the pre-edit state."""
+    store: Any = (
+        make_facade(FakeDurableStorage(), TwoFieldState)
+        if durable
+        else InMemoryStateStore(TwoFieldState())
+    )
+    await store.set_state(TwoFieldState(a=1, b=1))
+    mid_edit = asyncio.Event()
+    finish_edit = asyncio.Event()
+
+    async def editor() -> None:
+        async with store.edit_state() as state:
+            state.a = 2
+            mid_edit.set()
+            await finish_edit.wait()
+            state.b = 2
+
+    edit_task = asyncio.create_task(editor())
+    await asyncio.wait_for(mid_edit.wait(), timeout=2.0)
+    # The edit block is held open; the read must complete anyway.
+    observed = await asyncio.wait_for(store.get_state(), timeout=2.0)
+    assert (observed.a, observed.b) == (1, 1)
+    finish_edit.set()
+    await asyncio.wait_for(edit_task, timeout=2.0)
+    committed = await store.get_state()
+    assert (committed.a, committed.b) == (2, 2)
+
+
+@pytest.mark.asyncio
+async def test_edit_state_isolates_nested_mutables_until_commit() -> None:
+    """In-memory edits of nested containers must not leak before commit."""
+    store = InMemoryStateStore(DictState())
+    await store.set("nums", [1])
+    async with store.edit_state() as state:
+        state["nums"].append(2)
+        # Concurrent-style read while the block is open: committed value.
+        assert await store.get("nums") == [1]
+    assert await store.get("nums") == [1, 2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("durable", [False, True])
 async def test_get_inside_edit_state(durable: bool) -> None:
     store: Any = (
         make_facade(FakeDurableStorage())
