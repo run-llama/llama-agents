@@ -23,6 +23,7 @@ from llama_agents.server._runtime.server_runtime import ServerRuntimeDecorator
 from llama_index_instrumentation.dispatcher import instrument_tags
 from workflows import Context
 from workflows.context.serializers import JsonSerializer
+from workflows.context.state_store_integration import state_store_handoff
 from workflows.events import Event, StartEvent
 from workflows.handler import WorkflowHandler
 from workflows.utils import _nanoid as nanoid
@@ -275,15 +276,14 @@ class _WorkflowService:
             return None
 
         try:
-            serializer = JsonSerializer()
             old_state_store = self._store.create_state_store(handler.run_id)
-            state_dict = old_state_store.to_dict(serializer)
+            state_dict = await state_store_handoff(old_state_store, JsonSerializer())
             if not state_dict:
                 return None
             return Context.from_dict(
                 workflow=workflow,
                 data={"version": 1, "state": state_dict},
-                serializer=serializer,
+                serializer=JsonSerializer(),
             )
         except Exception:
             logger.warning(

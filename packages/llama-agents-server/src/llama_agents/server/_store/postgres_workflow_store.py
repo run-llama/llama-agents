@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextlib
+import functools
 import json
 import logging
 import weakref
@@ -62,6 +63,7 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
         When it is omitted, the store owns a lazily-created asyncpg pool using
         the provided DSN and pool size settings.
         """
+        super().__init__()
         self._dsn = dsn
         self._schema = schema
         self.poll_interval = poll_interval
@@ -107,21 +109,37 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
     def _notify_channel(self) -> str:
         return self._events_table_name
 
+    @functools.cached_property
+    def _start_lock(self) -> asyncio.Lock:
+        """Lazy lock initialization for Python 3.14+ compatibility."""
+        return asyncio.Lock()
+
     async def start(self) -> None:
-        """Resolve the connection pool, run migrations if enabled, and set up LISTEN."""
+        """Resolve the connection pool, run migrations if enabled, and set up LISTEN.
+
+        Safe to call concurrently: the lock plus re-check ensures exactly one
+        caller resolves the pool, runs migrations, and acquires the LISTEN
+        connection. ``self._pool`` is published only after everything
+        succeeded, so a late joiner's fast path never observes a half-started
+        store. Re-checking inside the lock (instead of latching a "started"
+        flag) keeps re-start after ``close()`` working.
+        """
         if self._pool is not None:
             return
-        # Reset for re-start after a close().
-        self._closing = False
-        self._pool = await self._pool_provider.get()
-        if self._auto_migrate:
-            await self.run_migrations()
-        await self._setup_listener()
+        async with self._start_lock:
+            if self._pool is not None:
+                return
+            # Reset for re-start after a close().
+            self._closing = False
+            pool = await self._pool_provider.get()
+            if self._auto_migrate:
+                await self._run_migrations_on(pool)
+            await self._setup_listener(pool)
+            self._pool = pool
 
-    async def _setup_listener(self) -> None:
+    async def _setup_listener(self, pool: asyncpg.Pool) -> None:
         """Set up a dedicated connection for LISTEN/NOTIFY."""
-        assert self._pool is not None
-        conn = cast(asyncpg.Connection, await self._pool.acquire())
+        conn = cast(asyncpg.Connection, await pool.acquire())
         try:
             await conn.add_listener(self._notify_channel, self._on_notify)
             # Recover from network blips / Postgres restarts.
@@ -133,7 +151,7 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
                     "Connection.add_termination_listener unavailable; LISTEN reconnect disabled"
                 )
         except Exception:
-            await self._pool.release(conn)
+            await pool.release(conn)
             raise
         self._listen_conn = conn
 
@@ -193,6 +211,7 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
         async with self._reconnect_lock:
             if self._closing or self._pool is None:
                 return
+            pool = self._pool
 
             logger.warning("LISTEN connection dropped; reconnecting")
 
@@ -200,7 +219,7 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
             # closed connections gracefully on release.
             if self._listen_conn is not None:
                 try:
-                    await self._pool.release(self._listen_conn)
+                    await pool.release(self._listen_conn)
                 except Exception:
                     logger.debug(
                         "Failed to release dead listen connection", exc_info=True
@@ -210,7 +229,7 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
             delay = _LISTEN_RECONNECT_INITIAL_DELAY
             while not self._closing:
                 try:
-                    await self._setup_listener()
+                    await self._setup_listener(pool)
                 except Exception:
                     logger.warning(
                         "LISTEN reconnect attempt failed; retrying in %.1fs",
@@ -253,9 +272,15 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
                     "Failed to release listen connection during close", exc_info=True
                 )
             self._listen_conn = None
-        if self._pool is not None:
-            await self._pool_provider.close()
-            self._pool = None
+        # Close the provider unconditionally: if start() failed after the
+        # provider resolved a pool but before self._pool was published (e.g.
+        # migrations or LISTEN setup raised), the pool would otherwise leak.
+        # Idempotent, and a no-op for borrowed pools.
+        await self._pool_provider.close()
+        self._pool = None
+        # Cached facades hold the closed pool; drop them so a re-start()
+        # builds fresh stores against the new pool.
+        self._state_store_cache.clear()
 
     async def _ensure_pool(self) -> asyncpg.Pool:
         if self._pool is None:
@@ -270,32 +295,33 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
             self._conditions[run_id] = cond
         return cond
 
-    def create_state_store(
+    def _build_state_store(
         self,
         run_id: str,
-        state_type: type[Any] | None = None,
-        serialized_state: dict[str, Any] | None = None,
-        serializer: BaseSerializer | None = None,
+        state_type: type[Any] | None,
+        serializer: BaseSerializer | None,
     ) -> PostgresStateStore[Any]:
         if self._pool is None:
             raise RuntimeError(
                 "PostgresWorkflowStore pool not initialized. Call start() first."
             )
-        store = PostgresStateStore(
+        return PostgresStateStore(
             pool=self._pool,
             run_id=run_id,
             state_type=state_type,
+            serializer=serializer,
             schema=self._schema,
         )
-        if serialized_state is not None and serializer is not None:
-            store._pending_seed = (serialized_state, serializer)
-        return store
 
     # ── Migrations ──────────────────────────────────────────────────────
 
     async def run_migrations(self) -> None:
         """Apply file-based migrations to create/update schema."""
         pool = await self._ensure_pool()
+        await self._run_migrations_on(pool)
+
+    async def _run_migrations_on(self, pool: asyncpg.Pool) -> None:
+        """Run migrations against an explicit pool (usable mid-start)."""
         async with pool.acquire() as conn:
             await _run_migrations(cast(asyncpg.Connection, conn), schema=self._schema)
 

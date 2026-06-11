@@ -12,6 +12,7 @@ from workflows.context.state_store import (
     InMemoryStateStore,
     StateStore,
     infer_state_type,
+    is_durable_serialized_state,
 )
 from workflows.errors import ContextSerdeError
 from workflows.runtime.types.internal_state import BrokerState
@@ -75,6 +76,13 @@ class PreContext(Generic[MODEL_T]):
         if self._store is None:
             serialized_state = self._init_snapshot.state
             if serialized_state:
+                if is_durable_serialized_state(serialized_state):
+                    store_type = serialized_state.get("store_type")
+                    raise ContextSerdeError(
+                        "Context.store cannot be accessed before workflow start "
+                        f"for durable state store '{store_type}'. Pass the context "
+                        "to workflow.run() so the runtime can restore it."
+                    )
                 self._store = cast(
                     InMemoryStateStore[MODEL_T],
                     InMemoryStateStore.from_dict(serialized_state, self._serializer),
