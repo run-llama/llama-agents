@@ -873,7 +873,7 @@ def _apply_stream_work_delta(
             stream_id,
             stream.source_step,
         )
-    if stream.closed_to_new_items and stream.open_work_items <= 0:
+    if stream.open_work_items <= 0:
         return _close_collection_stream(state, stream_id, now_seconds)
     return []
 
@@ -1315,12 +1315,9 @@ def _process_step_result_tick(
         state.streams[fan_out_stream_id] = CollectionStreamInstance(
             stream_id=fan_out_stream_id,
             source_step=tick.step_name,
-            source_execution_id=f"{tick.step_name}:{tick.worker_id}:{state.stream_seq - 1}",
-            parent_stream_id=enclosing,
             scope_path=trigger_stack,
             accepting_binding_ids=accepting_binding_ids,
             open_work_items=seed,
-            closed_to_new_items=True,
         )
         # The parent work item now waits for each child collection release.
         commands.extend(
@@ -1755,7 +1752,6 @@ def _release_on_item(
     if threshold is None or len(release_state.buffer) < threshold:
         return None
     release_state.released = True
-    release_state.cursor = threshold
     return list(release_state.buffer[:threshold])
 
 
@@ -1767,7 +1763,6 @@ def _release_on_close(
     release_state.released = True
     threshold = _take_threshold(binding.policy)
     if threshold is not None:
-        release_state.cursor = min(threshold, len(release_state.buffer))
         return list(release_state.buffer[:threshold])
     return list(release_state.buffer)
 

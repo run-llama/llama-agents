@@ -6,7 +6,7 @@ from __future__ import annotations
 import dataclasses
 import importlib
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 from workflows._stream_levels import event_types, stream_level_types_by_producer
 from workflows.collect import Collect, Take
@@ -51,7 +51,6 @@ class CollectionBinding:
     target_step: str
     item_types: tuple[type[Event], ...]
     policy: Collect
-    scope_rule: Literal["nearest"] = "nearest"
 
 
 @dataclass()
@@ -66,12 +65,9 @@ class CollectionStreamInstance:
 
     stream_id: str
     source_step: str
-    source_execution_id: str
-    parent_stream_id: str | None
     scope_path: tuple[str, ...]
     open_work_items: int = 0
     accepting_binding_ids: tuple[str, ...] = ()
-    closed_to_new_items: bool = True
 
     def _copy(self) -> CollectionStreamInstance:
         return dataclasses.replace(self)
@@ -83,15 +79,14 @@ class CollectionReleaseState:
     Release state for one binding within one stream instance.
 
     ``buffer`` stores member events until the binding's Collect policy releases
-    them. ``cursor`` tracks Take(n) progress; ``released`` prevents All() from
-    firing more than once when a stream closes.
+    them. ``released`` makes the release fire-once: Take(n) sets it on the
+    n-th arrival, and stream close sets it for All() (or an unmet Take).
     """
 
     binding_id: str
     stream_id: str
     buffer: list[Event] = field(default_factory=list)
     released: bool = False
-    cursor: int = 0
 
     def _copy(self) -> CollectionReleaseState:
         return dataclasses.replace(self, buffer=list(self.buffer))
@@ -274,12 +269,9 @@ class BrokerState:
                 sid: SerializedCollectionStreamInstance(
                     stream_id=stream.stream_id,
                     source_step=stream.source_step,
-                    source_execution_id=stream.source_execution_id,
-                    parent_stream_id=stream.parent_stream_id,
                     scope_path=list(stream.scope_path),
                     open_work_items=stream.open_work_items,
                     accepting_binding_ids=list(stream.accepting_binding_ids),
-                    closed_to_new_items=stream.closed_to_new_items,
                 )
                 for sid, stream in self.streams.items()
             },
@@ -289,7 +281,6 @@ class BrokerState:
                     stream_id=release.stream_id,
                     buffer=[serializer.serialize(ev) for ev in release.buffer],
                     released=release.released,
-                    cursor=release.cursor,
                 )
                 for key, release in self.collection_release_states.items()
             },
@@ -315,12 +306,9 @@ class BrokerState:
             sid: CollectionStreamInstance(
                 stream_id=stream.stream_id,
                 source_step=stream.source_step,
-                source_execution_id=stream.source_execution_id,
-                parent_stream_id=stream.parent_stream_id,
                 scope_path=tuple(stream.scope_path),
                 open_work_items=stream.open_work_items,
                 accepting_binding_ids=tuple(stream.accepting_binding_ids),
-                closed_to_new_items=stream.closed_to_new_items,
             )
             for sid, stream in serialized.streams.items()
         }
@@ -330,7 +318,6 @@ class BrokerState:
                 stream_id=release.stream_id,
                 buffer=[serializer.deserialize(ev) for ev in release.buffer],
                 released=release.released,
-                cursor=release.cursor,
             )
             for key, release in serialized.collection_release_states.items()
         }

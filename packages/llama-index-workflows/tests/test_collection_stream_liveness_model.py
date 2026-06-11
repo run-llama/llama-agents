@@ -59,8 +59,6 @@ def _open_stream(state: BrokerState, open_work_items: int) -> CollectionStreamIn
     stream = CollectionStreamInstance(
         stream_id="stream-test",
         source_step="fan_out",
-        source_execution_id="fan_out:0:0",
-        parent_stream_id=None,
         scope_path=(),
         accepting_binding_ids=tuple(
             binding.id for binding in state.config.bindings_for_source("fan_out")

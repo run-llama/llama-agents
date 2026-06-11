@@ -157,8 +157,6 @@ def _leaked_stream_state() -> BrokerState:
     state.streams["stream-x"] = CollectionStreamInstance(
         stream_id="stream-x",
         source_step="fan_out",
-        source_execution_id="exec-1",
-        parent_stream_id=None,
         scope_path=("stream-x",),
         open_work_items=1,
     )

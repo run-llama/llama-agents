@@ -156,12 +156,9 @@ class SerializedCollectionStreamInstance(BaseModel):
 
     stream_id: str
     source_step: str
-    source_execution_id: str
-    parent_stream_id: str | None = None
     scope_path: list[str] = Field(default_factory=list)
     open_work_items: int = 0
     accepting_binding_ids: list[str] = Field(default_factory=list)
-    closed_to_new_items: bool = True
 
 
 class SerializedCollectionReleaseState(BaseModel):
@@ -171,7 +168,6 @@ class SerializedCollectionReleaseState(BaseModel):
     stream_id: str
     buffer: list[str] = Field(default_factory=list)
     released: bool = False
-    cursor: int = 0
 
 
 class SerializedContext(BaseModel):
