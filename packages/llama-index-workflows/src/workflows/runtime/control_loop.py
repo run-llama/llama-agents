@@ -690,8 +690,6 @@ def _reduce_tick(
                         event=WorkflowFailedEvent(
                             step_name=stuck_step,
                             exception=stuck_error,
-                            attempts=1,
-                            elapsed_seconds=0.0,
                         )
                     ),
                     CommandFailWorkflow(step_name=stuck_step, exception=stuck_error),
@@ -771,11 +769,13 @@ def _detect_stuck_streams(
       path fires releases inline within the same reduce, so this should be
       impossible; if it ever appears (corrupted or version-skewed persisted
       state), the release can never fire — fail loudly instead of hanging.
-    - Open streams with no unresolved waiter. An unresolved waiter suppresses
-      detection — external events can re-enter scoped work only via waiters,
-      so a pending waiter means the open streams may still legitimately close
-      (HITL workflows). Without one, an open stream can never reach zero open
-      work items: the run would hang to timeout (or forever).
+    - Open streams with no unresolved waiter *inside any of them*. External
+      events can re-enter scoped work only via waiters, so an unresolved
+      waiter whose scope places it inside an open stream (or a descendant)
+      means the streams may still legitimately close (HITL workflows). A
+      waiter elsewhere in the workflow cannot feed the streams and does not
+      mask them. Without an in-stream waiter, an open stream can never reach
+      zero open work items: the run would hang to timeout (or forever).
     """
     orphaned = next(
         (
@@ -797,12 +797,14 @@ def _detect_stuck_streams(
         )
     if not state.streams:
         return None
-    has_unresolved_waiter = any(
-        waiter.resolved_event is None and not waiter.timed_out
+    has_in_stream_waiter = any(
+        waiter.resolved_event is None
+        and not waiter.timed_out
+        and any(sid in state.streams for sid in waiter.scope_path)
         for worker_state in state.workers.values()
         for waiter in worker_state.collected_waiters
     )
-    if has_unresolved_waiter:
+    if has_in_stream_waiter:
         return None
     first_leaked = next(iter(state.streams.values()))
     details = "; ".join(
@@ -1048,6 +1050,19 @@ def _classify_work_item(
     )
 
 
+def _collect_buffer_diverged(live: list[Event], snapshot: list[Event]) -> bool:
+    """True when a live collect buffer no longer matches a worker's snapshot.
+
+    Buffers only ever change by appending members or being popped whole when
+    a firing consumes them, and state copies are shallow, so the same Event
+    objects flow through both lists. Element identity is therefore an exact
+    divergence check; comparing lengths alone would miss a buffer that was
+    popped by a concurrent firing and regrown to the same length with
+    different members.
+    """
+    return len(live) != len(snapshot) or any(a is not b for a, b in zip(live, snapshot))
+
+
 def _process_step_result_tick(
     tick: TickStepResult,
     init: BrokerState,
@@ -1077,8 +1092,10 @@ def _process_step_result_tick(
     # buffered member, duplicating it downstream.
     stale_firing = any(
         isinstance(r, DeleteCollectedEvent)
-        and len(worker_state.collected_events.get(r.event_id, []))
-        != len(this_execution.shared_state.collected_events.get(r.event_id, []))
+        and _collect_buffer_diverged(
+            worker_state.collected_events.get(r.event_id, []),
+            this_execution.shared_state.collected_events.get(r.event_id, []),
+        )
         for r in tick.result
     )
     if stale_firing:
@@ -1609,22 +1626,37 @@ def _process_add_event_tick(
                     # never join a collect batch — members reach a collect step
                     # only by being emitted inside a fan-out stream.
                     if tick.step_name is not None:
-                        logger.warning(
-                            "Ignoring %s sent to collect step %r via "
-                            "send_event(step=...): a collect step cannot "
-                            "receive targeted events; it only collects events "
-                            "emitted inside a fan-out stream.",
-                            type(tick.event).__name__,
-                            step_name,
+                        # A targeted send is an explicit instruction the
+                        # runtime cannot honor; dropping it silently loses
+                        # data, so fail the run loudly instead.
+                        error = WorkflowRuntimeError(
+                            f"{type(tick.event).__name__} was sent to collect "
+                            f"step {step_name!r} via send_event(step=...), but "
+                            "a collect step cannot receive targeted events: it "
+                            "only collects events emitted inside a fan-out "
+                            "stream."
                         )
-                    else:
-                        logger.warning(
-                            "Ignoring %s for collect step %r: it was sent "
-                            "outside any collection stream (e.g. via "
-                            "ctx.send_event) so it cannot join a batch.",
-                            type(tick.event).__name__,
-                            step_name,
+                        state.is_running = False
+                        commands.append(
+                            CommandPublishEvent(
+                                event=WorkflowFailedEvent(
+                                    step_name=step_name, exception=error
+                                )
+                            )
                         )
+                        commands.append(
+                            CommandFailWorkflow(step_name=step_name, exception=error)
+                        )
+                        return state, commands
+                    # An untargeted send may be legitimate traffic for other
+                    # steps that merely overlaps an open stream — warn.
+                    logger.warning(
+                        "Ignoring %s for collect step %r: it was sent "
+                        "outside any collection stream (e.g. via "
+                        "ctx.send_event) so it cannot join a batch.",
+                        type(tick.event).__name__,
+                        step_name,
+                    )
                     continue
                 stream_id = tick.scope_path[-1]
                 binding = state.config.binding_for_target(

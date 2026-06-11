@@ -32,11 +32,12 @@ Semantics worth knowing:
   declared single member, not a one-element stream. A bare event whose type is
   only declared inside the list (``-> list[A]`` returning ``A``) is a runtime
   error.
-- ``ctx.send_event`` cannot add members to a collection stream. Sends are
-  ignored with a warning at runtime — whether targeted at the collect step
-  via ``step=...`` or sent untargeted while a stream is open. The static
-  validation error only applies when no ``list[E]`` producer exists for the
-  collect step at all.
+- ``ctx.send_event`` cannot add members to a collection stream. An untargeted
+  send that merely overlaps an open stream is ignored with a warning (it may
+  be legitimate traffic for other steps); a send *targeted* at the collect
+  step via ``step=...`` is an explicit instruction the runtime cannot honor
+  and raises a ``WorkflowRuntimeError``. The static validation error only
+  applies when no ``list[E]`` producer exists for the collect step at all.
 """
 
 from __future__ import annotations

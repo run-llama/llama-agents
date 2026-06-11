@@ -374,8 +374,11 @@ class WorkflowFailedEvent(StopEvent):
         step_name: The name of the step that failed.
         exception: The raised exception. ``__traceback__`` is present only
             in-process; ``None`` after a replay.
-        attempts: The total number of attempts made before giving up.
-        elapsed_seconds: Time in seconds from first attempt to final failure.
+        attempts: The total number of attempts made before giving up, or
+            ``None`` when the failure is not an exhausted step attempt (e.g.
+            a runtime-detected stuck run).
+        elapsed_seconds: Time in seconds from first attempt to final failure,
+            or ``None`` when not applicable.
 
     Examples:
         ```python
@@ -388,8 +391,8 @@ class WorkflowFailedEvent(StopEvent):
 
     step_name: str
     exception: SerializableException
-    attempts: int
-    elapsed_seconds: float
+    attempts: int | None = None
+    elapsed_seconds: float | None = None
 
 
 class CollectionReleaseEvent(Event):

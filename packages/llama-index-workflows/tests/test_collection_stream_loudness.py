@@ -2,11 +2,12 @@
 # Copyright (c) 2026 LlamaIndex Inc.
 """Loudness around collection streams: drop warnings and the idle hang detector.
 
-Dropping an event that can never join a batch must warn (untargeted
-``ctx.send_event`` of a collected type, and targeted sends at a collect step).
-A quiescent run with open streams and no pending waiters is provably stuck and
-must fail with a diagnostic naming the leaked streams; an unresolved waiter
-(HITL) suppresses the detector.
+An untargeted ``ctx.send_event`` of a collected type that can never join a
+batch warns; a *targeted* send at a collect step is an explicit instruction
+the runtime cannot honor and fails the run. A quiescent run with open streams
+and no pending waiter inside them is provably stuck and must fail with a
+diagnostic naming the leaked streams; an unresolved waiter scoped inside the
+stream (HITL) suppresses the detector.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import logging
 
 import pytest
 from workflows import Context, Workflow, step
+from workflows.errors import WorkflowRuntimeError
 from workflows.events import Event, StartEvent, StopEvent, WorkflowIdleEvent
 from workflows.runtime.control_loop import _reduce_tick
 from workflows.runtime.types.commands import (
@@ -101,9 +103,7 @@ async def test_untargeted_send_of_collected_type_warns_and_is_ignored(
     assert "'join'" in messages[0]
 
 
-async def test_targeted_send_at_collect_step_warns_and_is_ignored(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+async def test_targeted_send_at_collect_step_fails_run() -> None:
     class WF(Workflow):
         @step
         async def fan_out(self, ev: StartEvent) -> list[Task]:
@@ -119,14 +119,8 @@ async def test_targeted_send_at_collect_step_warns_and_is_ignored(
         async def join(self, events: list[Done]) -> StopEvent:
             return StopEvent(result=sorted(e.n for e in events))
 
-    with caplog.at_level(logging.WARNING, logger=_CONTROL_LOOP_LOGGER):
-        result = await _run(WF(timeout=6))
-
-    assert result == [0, 1, 2]
-    messages = _warnings(caplog, "sent to collect step")
-    assert messages, caplog.text
-    assert "Done" in messages[0]
-    assert "'join'" in messages[0]
+    with pytest.raises(WorkflowRuntimeError, match="targeted events"):
+        await _run(WF(timeout=6))
 
 
 # ---------------------------------------------------------------------------
@@ -202,20 +196,22 @@ def test_idle_check_fails_run_on_orphaned_unreleased_release_state() -> None:
     assert "never fire" in message
 
 
-def test_idle_check_with_unresolved_waiter_publishes_idle_not_failure() -> None:
-    state = _leaked_stream_state()
-    state.workers["work"].collected_waiters.append(
-        StepWorkerWaiter(
-            waiter_id="w1",
-            event=Task(n=0),
-            waiting_for_event=Approval,
-            requirements={},
-            has_requirements=False,
-            resolved_event=None,
-            timed_out=False,
-            scope_path=("stream-x",),
-        )
+def _waiter(scope_path: tuple[str, ...]) -> StepWorkerWaiter:
+    return StepWorkerWaiter(
+        waiter_id="w1",
+        event=Task(n=0),
+        waiting_for_event=Approval,
+        requirements={},
+        has_requirements=False,
+        resolved_event=None,
+        timed_out=False,
+        scope_path=scope_path,
     )
+
+
+def test_idle_check_with_in_stream_waiter_publishes_idle_not_failure() -> None:
+    state = _leaked_stream_state()
+    state.workers["work"].collected_waiters.append(_waiter(("stream-x",)))
     _, commands = _reduce_tick(TickIdleCheck(), state, 0.0)
 
     assert not any(isinstance(c, CommandFailWorkflow) for c in commands), commands
@@ -225,6 +221,29 @@ def test_idle_check_with_unresolved_waiter_publishes_idle_not_failure() -> None:
         if isinstance(c, CommandPublishEvent) and isinstance(c.event, WorkflowIdleEvent)
     ]
     assert len(idle_publishes) == 1, commands
+
+
+def test_idle_check_with_out_of_stream_waiter_still_fails_run() -> None:
+    """A HITL waiter elsewhere in the workflow must not mask a wedged stream.
+
+    Only a waiter whose scope places it inside an open stream (or a
+    descendant) can still feed that stream; one outside (empty scope here)
+    cannot, so detection proceeds. The failure event carries no fabricated
+    attempt counters — this is not an exhausted step attempt.
+    """
+    state = _leaked_stream_state()
+    state.workers["work"].collected_waiters.append(_waiter(()))
+    _, commands = _reduce_tick(TickIdleCheck(), state, 0.0)
+
+    failures = [c for c in commands if isinstance(c, CommandFailWorkflow)]
+    assert len(failures) == 1, commands
+    published = [
+        c.event
+        for c in commands
+        if isinstance(c, CommandPublishEvent) and hasattr(c.event, "attempts")
+    ]
+    assert published and published[0].attempts is None
+    assert published[0].elapsed_seconds is None
 
 
 # ---------------------------------------------------------------------------

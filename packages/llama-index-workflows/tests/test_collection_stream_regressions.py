@@ -153,8 +153,14 @@ async def test_retried_stream_member_keeps_scope() -> None:
     assert result == [0, 1, 2, 3, 4], result
 
 
-async def test_catch_error_recovery_closes_stream() -> None:
-    """A member recovered by @catch_error must still let the stream close."""
+async def test_catch_error_recovery_rejoins_stream() -> None:
+    """A member recovered by @catch_error rejoins the stream and makes the join.
+
+    The handler runs in the failed member's scope: the work item travels whole
+    to the handler invocation, and the handler's member-typed emission stays
+    in-stream. The join therefore always sees the recovered member — never a
+    truncated batch from the stream closing first.
+    """
 
     class WF(Workflow):
         @step
@@ -176,8 +182,7 @@ async def test_catch_error_recovery_closes_stream() -> None:
             return StopEvent(result=sorted(e.n for e in events))
 
     result = await _run(WF(timeout=8), timeout=6)
-    # recovered member counted -> [0, 2, 1001]; dead branch -> [0, 2]
-    assert result in ([0, 2], [0, 2, 1001]), result
+    assert result == [0, 2, 1001], result
 
 
 # ---------------------------------------------------------------------------
