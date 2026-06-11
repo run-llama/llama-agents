@@ -30,6 +30,9 @@ from workflows.events import (
 from workflows.retry_policy import (
     ConstantDelayRetryPolicy,
     ExponentialBackoffRetryPolicy,
+    retry_policy,
+    stop_after_attempt,
+    wait_exponential_jitter,
 )
 from workflows.runtime.control_loop import (
     _add_or_enqueue_event,
@@ -918,6 +921,113 @@ def test_rewind_rearms_wakeup_even_when_past_due(base_state: BrokerState) -> Non
     assert len(run_cmds) == 1
     assert len(final_state.workers["test_step"].queue) == 0
     assert final_state.workers["test_step"].in_progress[0].attempts == 2
+
+
+def test_old_journal_retry_add_event_supersedes_queued_delayed_attempt(
+    base_state: BrokerState,
+) -> None:
+    """Compat: journals written before delayed retries lived in state.
+
+    Older versions re-delivered a delayed retry as a journaled TickAddEvent
+    carrying retry metadata. Replaying such a journal with the current
+    reducer also queues the attempt (with not_before) at the failure tick;
+    the TickAddEvent must consume that queued attempt instead of dispatching
+    a duplicate that would re-run the step after a resume.
+    """
+    base_state.workers["test_step"].config.retry_policy = ConstantDelayRetryPolicy(
+        maximum_attempts=3, delay=1.0
+    )
+    event = MyTestEvent(value=42)
+    add_worker(base_state, event)
+    fail_tick: TickStepResult = TickStepResult(
+        step_name="test_step",
+        worker_id=0,
+        event=event,
+        result=[StepWorkerFailed(exception=ValueError("test"), failed_at=110.0)],
+    )
+    state, _ = _process_step_result_tick(fail_tick, base_state, now_seconds=110.0)
+    assert state.workers["test_step"].queue[0].not_before == 111.0
+
+    # Old-format journal re-delivers the retry after the delay elapsed
+    add_tick = TickAddEvent(
+        event=event,
+        step_name="test_step",
+        attempts=1,
+        first_attempt_at=100.0,
+        last_failed_at=110.0,
+    )
+    final_state, commands = _reduce_tick(add_tick, state, 111.0)
+
+    run_cmds = [c for c in commands if isinstance(c, CommandRunWorker)]
+    assert len(run_cmds) == 1
+    assert final_state.workers["test_step"].queue == []
+    assert len(final_state.workers["test_step"].in_progress) == 1
+    assert final_state.workers["test_step"].in_progress[0].attempts == 1
+
+
+def test_plain_add_event_does_not_consume_queued_delayed_attempt(
+    base_state: BrokerState,
+) -> None:
+    """A normal event (no retry metadata) leaves a queued delayed retry alone."""
+    base_state.workers["test_step"].queue.append(
+        EventAttempt(event=MyTestEvent(value=1), attempts=1, not_before=999.0)
+    )
+
+    state, commands = _reduce_tick(
+        TickAddEvent(event=MyTestEvent(value=2)), base_state, 100.0
+    )
+
+    run_cmds = [c for c in commands if isinstance(c, CommandRunWorker)]
+    assert len(run_cmds) == 1
+    assert isinstance(run_cmds[0].event, MyTestEvent)
+    assert run_cmds[0].event.value == 2
+    remaining = state.workers["test_step"].queue
+    assert len(remaining) == 1
+    assert remaining[0].not_before == 999.0
+
+
+def test_replay_recomputes_jittered_not_before_with_run_id(
+    base_state: BrokerState,
+) -> None:
+    """Replay must compute the same jittered not_before the live run journaled.
+
+    Regression: the replay entry points dropped run_id, so jittered waits fell
+    back to unseeded random — replay computed a different not_before than the
+    live TickWakeup.due, the attempt never flipped eligible, and the retry's
+    step-result tick crashed with "Worker not found in in_progress".
+    """
+    run_id = "test-run-id"
+    base_state.workers["test_step"].config.retry_policy = retry_policy(
+        wait=wait_exponential_jitter(initial=0.5, exp_base=2.0, max=60.0, jitter=10.0),
+        stop=stop_after_attempt(5),
+    )
+    event = MyTestEvent(value=42)
+    add_worker(base_state, event)
+    fail_tick: TickStepResult = TickStepResult(
+        step_name="test_step",
+        worker_id=0,
+        event=event,
+        result=[StepWorkerFailed(exception=ValueError("test"), failed_at=110.0)],
+    )
+
+    live_state, live_commands = _reduce_tick(
+        fail_tick, base_state, 110.0, run_id=run_id
+    )
+    live_wakeup = next(c for c in live_commands if isinstance(c, CommandScheduleWakeup))
+
+    # rebuild_state_from_ticks with the run id reproduces the same not_before,
+    # so the journaled wakeup flips the attempt during replay
+    replayed = rebuild_state_from_ticks(base_state, [fail_tick], run_id=run_id)
+    assert (
+        replayed.workers["test_step"].queue[0].not_before
+        == live_state.workers["test_step"].queue[0].not_before
+        == live_wakeup.at_time
+    )
+    flipped, flip_commands = _reduce_tick(
+        TickWakeup(due=live_wakeup.at_time), replayed, 99_999.0
+    )
+    assert any(isinstance(c, CommandRunWorker) for c in flip_commands)
+    assert flipped.workers["test_step"].queue == []
 
 
 # =============================================================================

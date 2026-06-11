@@ -559,6 +559,7 @@ async def control_loop(
 def rebuild_state_from_ticks(
     state: BrokerState,
     ticks: list[WorkflowTick],
+    run_id: str | None = None,
 ) -> BrokerState:
     """Rebuild the state from a list of ticks.
 
@@ -570,6 +571,10 @@ def rebuild_state_from_ticks(
     Without this, resuming a workflow and then checkpointing again would fail
     because the original in_progress worker IDs don't match the new worker IDs
     assigned after rewind.
+
+    run_id must match the live run's id whenever it is known: it seeds retry
+    jitter, so replaying a failure tick recomputes the same delay (and thus
+    the same not_before) the live run journaled in its TickWakeup.
     """
     # Apply rewind_in_progress to match what happens at runtime when resuming.
     # This re-assigns worker IDs so they align with the ticks that were recorded
@@ -579,7 +584,7 @@ def rebuild_state_from_ticks(
     # Replay ticks to rebuild state
     for tick in ticks:
         state, _ = _reduce_tick(
-            tick, state, time.time()
+            tick, state, time.time(), run_id=run_id
         )  # somewhat broken kludge on the timestamps, need to move these to ticks
     return state
 
@@ -607,6 +612,7 @@ class ReplayResult:
 async def replay_ticks_stream(
     state: BrokerState,
     ticks: AsyncIterable[WorkflowTick],
+    run_id: str | None = None,
 ) -> ReplayResult:
     """Replay a tick stream, returning state plus the last exit-indicating command.
 
@@ -614,11 +620,15 @@ async def replay_ticks_stream(
     CommandHalt when it processes terminal ticks; this surfaces them instead
     of discarding, so callers can classify terminal outcome (success /
     failure / cancel / timeout) without a second pass over the ticks.
+
+    run_id must match the live run's id whenever it is known: it seeds retry
+    jitter, so replaying a failure tick recomputes the same delay (and thus
+    the same not_before) the live run journaled in its TickWakeup.
     """
     state, _ = rewind_in_progress(state, time.time())
     exit_command: ExitCommand | None = None
     async for tick in ticks:
-        state, commands = _reduce_tick(tick, state, time.time())
+        state, commands = _reduce_tick(tick, state, time.time(), run_id=run_id)
         for command in commands:
             if isinstance(
                 command, (CommandCompleteRun, CommandFailWorkflow, CommandHalt)
@@ -631,13 +641,14 @@ async def replay_ticks_stream(
 async def rebuild_state_from_ticks_stream(
     state: BrokerState,
     ticks: AsyncIterable[WorkflowTick],
+    run_id: str | None = None,
 ) -> BrokerState:
     """Streaming variant of :func:`rebuild_state_from_ticks`.
 
     Thin wrapper over :func:`replay_ticks_stream` that discards the exit
     command. Prefer ``replay_ticks_stream`` when you need terminal info.
     """
-    return (await replay_ticks_stream(state, ticks)).state
+    return (await replay_ticks_stream(state, ticks, run_id=run_id)).state
 
 
 def _reduce_tick(
@@ -1146,6 +1157,7 @@ def _process_add_event_tick(
         is_accepted = type(tick.event) in step_config.accepted_events
         if is_accepted and (tick.step_name is None or tick.step_name == step_name):
             handled = True
+            _consume_superseded_delayed_attempt(tick, state.workers[step_name])
             subcommands = _add_or_enqueue_event(
                 EventAttempt(
                     event=tick.event,
@@ -1177,6 +1189,36 @@ def _process_add_event_tick(
                 )
             )
     return state, commands
+
+
+def _consume_superseded_delayed_attempt(
+    tick: TickAddEvent, worker_state: InternalStepWorkerState
+) -> None:
+    """Compat shim for journals written before delayed retries lived in state.
+
+    Older versions re-delivered a delayed retry as a journaled TickAddEvent
+    carrying retry metadata (attempts > 0). The current reducer, replaying the
+    same journal's failure tick, also queues the attempt with a not_before.
+    Without this, replaying an old journal double-represents the retry: the
+    TickAddEvent dispatches one copy while the phantom queued attempt blocks
+    idle release and re-runs the step after a resume. The current retry path
+    never emits attempts-bearing TickAddEvents, so this only matches
+    old-format journals.
+    """
+    if not tick.attempts:
+        return
+    match = next(
+        (
+            i
+            for i, a in enumerate(worker_state.queue)
+            if a.not_before is not None
+            and a.attempts == tick.attempts
+            and type(a.event) is type(tick.event)
+        ),
+        None,
+    )
+    if match is not None:
+        worker_state.queue.pop(match)
 
 
 def _process_cancel_run_tick(

@@ -22,7 +22,12 @@ from workflows.decorators import step
 from workflows.errors import WorkflowCancelledByUser
 from workflows.events import Event, StartEvent, StopEvent
 from workflows.handler import WorkflowHandler
-from workflows.retry_policy import ConstantDelayRetryPolicy
+from workflows.retry_policy import (
+    ConstantDelayRetryPolicy,
+    retry_policy,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 from workflows.workflow import Workflow
 
 RETRY_DELAY = 0.3
@@ -153,6 +158,51 @@ async def test_snapshot_not_before_is_stable_across_snapshots() -> None:
     await handler.cancel_run()
     with pytest.raises(WorkflowCancelledByUser):
         await handler
+
+
+class JitteryFlakyWorkflow(Workflow):
+    """First attempt fails; retry delay comes from a jittered (seeded) wait."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.attempts = 0
+
+    @step(
+        retry_policy=retry_policy(
+            wait=wait_exponential_jitter(
+                initial=0.01, exp_base=1.0, max=0.05, jitter=0.04
+            ),
+            stop=stop_after_attempt(3),
+        )
+    )
+    async def flaky(self, ev: StartEvent) -> StopEvent:
+        self.attempts += 1
+        if self.attempts == 1:
+            raise RuntimeError("first attempt fails")
+        return StopEvent(result="ok")
+
+
+@pytest.mark.asyncio
+async def test_snapshot_rebuild_with_jittered_retry_policy() -> None:
+    """Snapshots of runs with jittered retry policies must rebuild.
+
+    Regression: snapshot rebuild replays journaled ticks, but the replay
+    entry points dropped the run id that seeds retry jitter. Replay then
+    sampled an unseeded delay, computed a different not_before than the
+    journaled TickWakeup.due, never flipped the attempt eligible, and the
+    retry's step-result tick crashed with "Worker not found in in_progress"
+    (~50% of runs). Repeated to make a reintroduction loud.
+    """
+    for _ in range(3):
+        wf = JitteryFlakyWorkflow(timeout=10.0)
+        handler = wf.run()
+        result = await handler
+
+        assert result == "ok"
+        assert wf.attempts == 2
+        assert handler.ctx is not None
+        ctx_dict = handler.ctx.to_dict()
+        assert ctx_dict["workers"]["flaky"]["queue"] == []
 
 
 class SideEvent(Event):

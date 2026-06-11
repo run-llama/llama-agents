@@ -261,7 +261,7 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
         """Rebuild BrokerState from persisted ticks."""
         init_state = BrokerState.from_workflow(workflow)
         return await rebuild_state_from_ticks_stream(
-            init_state, stream_workflow_ticks(self._store, run_id)
+            init_state, stream_workflow_ticks(self._store, run_id), run_id=run_id
         )
 
     async def _do_resume(
@@ -313,7 +313,9 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
         # Include the pending tick in the rebuilt state so the control loop
         # has it queued before it starts processing.
         if pending_tick is not None:
-            init_state = rebuild_state_from_ticks(init_state, [pending_tick])
+            init_state = rebuild_state_from_ticks(
+                init_state, [pending_tick], run_id=run_id
+            )
 
         # Carry over state from old run's state store
         serializer = JsonSerializer()
