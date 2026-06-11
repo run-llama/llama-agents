@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import webbrowser
 from pathlib import Path
 from typing import Any, Callable
 
@@ -159,7 +160,7 @@ def test_start_server_open_browser_triggers(
 ) -> None:
     opened = {"count": 0}
     monkeypatch.setattr(
-        app_mod.webbrowser,
+        webbrowser,
         "open",
         lambda *a, **k: opened.__setitem__("count", opened["count"] + 1),
     )

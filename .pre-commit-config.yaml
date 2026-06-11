@@ -32,7 +32,7 @@ repos:
         entry: uv run ty check packages/
         pass_filenames: false
   - repo: https://github.com/DetachHead/basedpyright-pre-commit-mirror
-    rev: 1.31.1
+    rev: 1.39.7
     hooks:
       - id: basedpyright
         exclude: "scripts/"

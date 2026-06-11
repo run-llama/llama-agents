@@ -23,7 +23,7 @@ from workflows.runtime.runtime_decorators import (
     BaseInternalRunAdapterDecorator,
     BaseRuntimeDecorator,
 )
-from workflows.runtime.types.plugin import InternalRunAdapter, Runtime, WorkflowTick
+from workflows.runtime.types.plugin import InternalRunAdapter, Runtime
 from workflows.runtime.types.results import StepWorkerResult
 from workflows.runtime.types.ticks import (
     TickAddEvent,
@@ -33,6 +33,7 @@ from workflows.runtime.types.ticks import (
     TickStepResult,
     TickTimeout,
     TickWaiterTimeout,
+    WorkflowTick,
 )
 from workflows.workflow import Workflow
 

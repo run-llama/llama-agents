@@ -1,10 +1,11 @@
 import asyncio
 
+import httpx
 from llama_agents.cli.auth.client import PlatformAuthClient, RefreshMiddleware
-from llama_agents.cli.config._config import Auth, ConfigManager, Environment
-from llama_agents.cli.config.schema import DeviceOIDC
+from llama_agents.cli.config._config import ConfigManager
+from llama_agents.cli.config.schema import Auth, DeviceOIDC, Environment
 from llama_agents.cli.utils.redact import redact_api_key
-from llama_agents.core.client.manage_client import ControlPlaneClient, httpx
+from llama_agents.core.client.manage_client import ControlPlaneClient
 from llama_agents.core.schema import VersionResponse
 from llama_agents.core.schema.projects import ProjectSummary
 

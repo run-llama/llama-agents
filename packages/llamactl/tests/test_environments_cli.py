@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from click.testing import CliRunner
 from llama_agents.cli.app import app
-from llama_agents.cli.config._config import Environment
+from llama_agents.cli.config.schema import Environment
 
 _INTERACTIVE_PATCH = "llama_agents.cli.commands.environments.is_interactive_session"
 
