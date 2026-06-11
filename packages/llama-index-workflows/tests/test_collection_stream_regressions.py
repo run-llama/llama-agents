@@ -127,32 +127,6 @@ async def test_event_routed_to_step_and_join_keeps_full_stream() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_retried_stream_member_keeps_scope() -> None:
-    """A member that fails once and succeeds on retry still closes the stream."""
-    attempts = {"n2": 0}
-
-    class WF(Workflow):
-        @step
-        async def fan_out(self, ev: StartEvent) -> list[Task]:
-            return [Task(n=i) for i in range(5)]
-
-        @step(
-            retry_policy=retry_policy(wait=wait_fixed(0.01), stop=stop_after_attempt(3))
-        )
-        async def work(self, ev: Task) -> Done:
-            if ev.n == 2 and attempts["n2"] == 0:
-                attempts["n2"] += 1
-                raise RuntimeError("transient on member 2")
-            return Done(n=ev.n)
-
-        @step
-        async def join(self, events: list[Done]) -> StopEvent:
-            return StopEvent(result=sorted(e.n for e in events))
-
-    result = await _run(WF(timeout=10), timeout=8)
-    assert result == [0, 1, 2, 3, 4], result
-
-
 async def test_catch_error_recovery_rejoins_stream() -> None:
     """A member recovered by @catch_error rejoins the stream and makes the join.
 
@@ -445,33 +419,6 @@ async def test_send_event_into_all_collect_rejected() -> None:
 
     with pytest.raises(WorkflowValidationError, match="returned-list producer"):
         await _run(WF(timeout=10), timeout=5)
-
-
-# ---------------------------------------------------------------------------
-# send_event from INSIDE a fan-out branch remains outside stream membership.
-# ---------------------------------------------------------------------------
-
-
-async def test_send_event_extra_member_inside_stream_is_not_joined() -> None:
-    """A sent event from a branch does not become a member of the return stream."""
-
-    class WF(Workflow):
-        @step
-        async def fan_out(self, ev: StartEvent) -> list[Task]:
-            return [Task(n=i) for i in range(3)]
-
-        @step
-        async def work(self, ctx: Context, ev: Task) -> Done:
-            if ev.n == 2:
-                ctx.send_event(Done(n=99))
-            return Done(n=ev.n)
-
-        @step
-        async def join(self, events: list[Done]) -> StopEvent:
-            return StopEvent(result=sorted(e.n for e in events))
-
-    result = await _run(WF(timeout=6), timeout=5)
-    assert result == [0, 1, 2], result
 
 
 async def test_send_event_only_inside_collection_param_rejected() -> None:

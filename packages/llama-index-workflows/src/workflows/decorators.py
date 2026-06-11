@@ -225,6 +225,9 @@ def make_step_function(
     # accepts every declared event type for routing, then collects by
     # declaration order before firing once. ``event_name`` keeps the first
     # parameter, which is still the carrier event passed into the wrapper.
+    # When two slots declare the SAME event type, racing arrivals fill them in
+    # arrival order: which event lands in which slot is nondeterministic (only
+    # the set of paired events is guaranteed).
     collect_params: list[tuple[str, Any]] | None = None
     if len(spec.accepted_events) > 1:
         collect_params = [
