@@ -375,13 +375,19 @@ def get_workflow_representation(workflow: Workflow | type[Workflow]) -> Workflow
         # Edges from events to steps. With subclass routing a single accepted
         # base maps to every produced subclass present in the graph; otherwise
         # each accepted event maps to itself. De-duplicate so the fan-out never
-        # emits the same source twice for one step.
+        # emits the same source twice for one step. StopEvent is excluded from
+        # the fan-out: a returned StopEvent terminates the run instead of
+        # routing, so a broad accepted base (e.g. ``Event``) must not draw a
+        # StopEvent→step edge.
         matching_events: list[Any] = []
         seen_sources: set[Any] = set()
         for event_type in step_config.accepted_events:
             if step_config.accept_event_subclasses and isinstance(event_type, type):
                 candidates = [
-                    ev for ev in graph_event_types if is_subclass(ev, event_type)
+                    ev
+                    for ev in graph_event_types
+                    if is_subclass(ev, event_type)
+                    and (ev is event_type or not is_subclass(ev, StopEvent))
                 ]
             else:
                 candidates = [event_type]

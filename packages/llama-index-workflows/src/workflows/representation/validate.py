@@ -77,12 +77,18 @@ def build_step_graph(
 
     # Build event→step edges. A step consumes an event when its type matches one
     # of the step's accepted events (subclass-aware when the step opted in).
+    # StopEvent is excluded from subclass expansion: a returned StopEvent
+    # terminates the run instead of routing, so a broad accepted base (e.g.
+    # ``Event``) must not produce a StopEvent→step edge.
     for ev_type in event_types:
         for name, cfg in steps.items():
+            allow_subclasses = cfg.accept_event_subclasses and not is_subclass(
+                ev_type, StopEvent
+            )
             if step_accepts_type(
                 ev_type,
                 cfg.accepted_events,
-                allow_subclasses=cfg.accept_event_subclasses,
+                allow_subclasses=allow_subclasses,
             ):
                 outgoing.setdefault(ev_type, []).append(name)
 

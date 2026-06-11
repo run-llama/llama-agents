@@ -1220,3 +1220,30 @@ def test_representation_subclass_fanout_has_no_duplicate_edges() -> None:
     raw_edges = [(e.source, e.target, e.label) for e in graph.edges]
     assert raw_edges.count(("RepChildEvent", "handle_step", None)) == 1
     assert raw_edges.count(("RepParentEvent", "handle_step", None)) == 1
+
+
+def test_representation_subclass_fanout_excludes_stop_event() -> None:
+    """A catch-all opted-in step (accepting ``Event``) must not get a
+    StopEvent→step edge: a returned StopEvent terminates the run instead of
+    routing, so the edge would depict a flow that cannot happen."""
+
+    class CatchAllWorkflow(Workflow):
+        @step
+        async def start_step(self, ev: StartEvent) -> RepChildEvent:
+            return RepChildEvent(value="test")
+
+        @step(accept_event_subclasses=True)
+        async def observe(self, ev: Event) -> StopEvent | None:
+            if isinstance(ev, RepChildEvent):
+                return StopEvent(result=ev.value)
+            return None
+
+    graph = get_workflow_representation(workflow=CatchAllWorkflow())
+    edges = _edges_as_tuples(graph)
+
+    # Real routing edges are present, including the StartEvent the observer
+    # genuinely receives.
+    assert ("RepChildEvent", "observe", None) in edges
+    assert ("StartEvent", "observe", None) in edges
+    # No fictional StopEvent→step edge.
+    assert ("StopEvent", "observe", None) not in edges

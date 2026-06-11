@@ -180,3 +180,31 @@ async def test_waiter_respects_opt_in_subclass_matching_opt_in_resolves() -> Non
     workflow = WaiterOptInWorkflow(timeout=2, disable_validation=True)
     result = await workflow.run()
     assert result == "waiter opt-in"
+
+
+# ── Test 7: StopEvent is excluded from subclass graph expansion ───────────────
+
+
+def test_step_graph_excludes_stop_event_from_subclass_expansion() -> None:
+    """A catch-all opted-in step (accepting ``Event``) gets edges from regular
+    events but not from StopEvent: a returned StopEvent terminates the run
+    instead of routing."""
+
+    class CatchAllWorkflow(Workflow):
+        @step
+        async def start(self, ev: StartEvent) -> ChildEvent:
+            return ChildEvent(value="x")
+
+        @step(accept_event_subclasses=True)
+        async def observe(self, ev: Event) -> StopEvent | None:
+            if isinstance(ev, ChildEvent):
+                return StopEvent(result=ev.value)
+            return None
+
+    workflow = CatchAllWorkflow(disable_validation=True)
+    steps = {name: func._step_config for name, func in workflow._get_steps().items()}
+    graph = build_step_graph(steps, StartEvent)
+
+    assert "observe" in graph.outgoing.get(ChildEvent, [])
+    assert "observe" in graph.outgoing.get(StartEvent, [])
+    assert "observe" not in graph.outgoing.get(StopEvent, [])
