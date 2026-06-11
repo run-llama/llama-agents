@@ -352,12 +352,13 @@ def _capture_decorator_localns() -> dict[str, Any]:
         return {}
 
     try:
-        decorator_frame = frame.f_back
-        localns: dict[str, Any] = {}
-        localns.update(decorator_frame.f_locals)
-        if decorator_frame.f_back is not None:
-            localns.update(decorator_frame.f_back.f_locals)
-        return localns
+        # Parametrized ``@step(...)`` adds an extra decorator-closure frame
+        # between this capture and the user's defining scope, so walk several
+        # ancestor frames and merge their locals (outer-to-inner, so the nearest
+        # scope wins). Without enough depth, an annotation referencing a class
+        # defined in the enclosing function — e.g. inside a test — fails to
+        # resolve under ``from __future__ import annotations``.
+        return _merge_ancestor_locals(frame.f_back, depth=4)
     finally:
         del frame
 
@@ -368,11 +369,27 @@ def _capture_callsite_localns() -> dict[str, Any]:
         return {}
 
     try:
-        callsite_frame = frame.f_back.f_back
-        localns: dict[str, Any] = {}
-        localns.update(callsite_frame.f_locals)
-        if callsite_frame.f_back is not None:
-            localns.update(callsite_frame.f_back.f_locals)
-        return localns
+        return _merge_ancestor_locals(frame.f_back.f_back, depth=3)
     finally:
         del frame
+
+
+def _merge_ancestor_locals(start: Any, depth: int) -> dict[str, Any]:
+    """Merge ``f_locals`` from ``start`` and up to ``depth`` ancestor frames.
+
+    Collected outermost-first then overwritten inner-to-out, so names in the
+    nearest defining scope win. Used to resolve string annotations (under
+    ``from __future__ import annotations``) that reference types defined in an
+    enclosing function or class body.
+    """
+    frames: list[Any] = []
+    f = start
+    for _ in range(depth):
+        if f is None:
+            break
+        frames.append(f)
+        f = f.f_back
+    localns: dict[str, Any] = {}
+    for fr in reversed(frames):
+        localns.update(fr.f_locals)
+    return localns
