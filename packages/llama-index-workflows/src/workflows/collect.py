@@ -14,9 +14,10 @@ A bare ``list[E]`` parameter is exactly equivalent to ``Collect(All())`` — fir
 once when the stream closes with every collected event. ``Annotated[list[E],
 Collect()]`` is an explicit, grep-able synonym for the same default.
 
-Only ``All`` and ``Take`` are supported. Other cardinalities and the ``at`` /
-``from_`` / ``where`` knobs are reserved; declaring them raises a validation
-error instead of silently picking the wrong semantics.
+Only ``All`` and ``Take`` are supported; any other cardinality raises a
+validation error instead of silently picking the wrong semantics. ``Collect``
+takes keyword-style construction, so future selection knobs can be added
+without breaking existing signatures.
 
 Semantics worth knowing:
 
@@ -41,12 +42,6 @@ Semantics worth knowing:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable
-
-# A reference to another step, by name or by the decorated step function itself.
-# Used by ``Collect(at=..., from_=...)``. Resolution to a concrete step is a
-# later phase; the marker only stores the raw reference for now.
-StepRef = str | Callable[..., Any]
 
 
 @dataclass(frozen=True)
@@ -91,15 +86,6 @@ class Collect:
     Attributes:
         cardinality: When to release and which members to deliver. Defaults to
             ``All()`` (fire on stream close with everything).
-        at: Promote scope to this step's stream instead of the nearest enclosing
-            one. Not yet implemented (declaring it raises a validation error).
-        from_: Restrict provenance to events produced by this step. Not yet
-            implemented (declaring it raises a validation error).
-        where: Narrowing predicate over members. Reserved; declaring it raises
-            a validation error.
     """
 
     cardinality: Cardinality = field(default_factory=All)
-    at: StepRef | None = None
-    from_: StepRef | None = None
-    where: Callable[[Any], bool] | None = None

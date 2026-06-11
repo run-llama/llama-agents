@@ -238,21 +238,7 @@ def _event_list_element_types(annotation: Any) -> list[Any] | None:
 
 
 def _validate_collect_marker(marker: Collect, name: str) -> None:
-    """Reject Collect knobs outside the supported finite collection contract."""
-    if marker.where is not None:
-        raise WorkflowValidationError(
-            f"Collect(where=...) on {name!r}: predicate narrowing is not supported."
-        )
-    if marker.at is not None:
-        raise WorkflowValidationError(
-            f"Collect(at=...) on {name!r}: cross-level scope promotion is not "
-            "implemented yet."
-        )
-    if marker.from_ is not None:
-        raise WorkflowValidationError(
-            f"Collect(from_=...) on {name!r}: provenance restriction is not "
-            "implemented yet."
-        )
+    """Reject Collect cardinalities outside the supported contract."""
     if not isinstance(marker.cardinality, (All, Take)):
         raise WorkflowValidationError(
             f"Collect cardinality on {name!r} must be All() or Take(n). "

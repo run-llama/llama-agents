@@ -20,10 +20,10 @@ from pydantic import (
     ConfigDict,
     PlainSerializer,
     PlainValidator,
+    TypeAdapter,
     model_serializer,
     model_validator,
 )
-from workflows.context.serializers import JsonSerializer
 from workflows.events import (
     CollectionReleaseEvent,
     Event,
@@ -128,7 +128,9 @@ class CollectionReleasePayload:
         )
 
 
-_payload_event_serializer = JsonSerializer()
+# Tick wire format for the payload's member events: the same SerializableEvent
+# codec every other tick/result event field uses (events.py).
+_payload_events_adapter: TypeAdapter[list[Event]] = TypeAdapter(list[SerializableEvent])
 
 
 def _serialize_release_payload_value(
@@ -139,9 +141,7 @@ def _serialize_release_payload_value(
     return {
         "binding_id": payload.binding_id,
         "stream_id": payload.stream_id,
-        "events": [
-            _payload_event_serializer.serialize_value(ev) for ev in payload.events
-        ],
+        "events": _payload_events_adapter.dump_python(payload.events),
         "output_scope_path": list(payload.output_scope_path),
     }
 
@@ -152,9 +152,7 @@ def _deserialize_release_payload_value(data: Any) -> CollectionReleasePayload | 
     return CollectionReleasePayload(
         binding_id=data["binding_id"],
         stream_id=data["stream_id"],
-        events=[
-            _payload_event_serializer.deserialize_value(ev) for ev in data["events"]
-        ],
+        events=_payload_events_adapter.validate_python(data["events"]),
         output_scope_path=tuple(data["output_scope_path"]),
     )
 

@@ -5,9 +5,7 @@
 Covers the public ``Collect`` / ``Cardinality`` API, signature inference for
 collection fan-in parameters (bare ``list[E]``, the ``Annotated[..., Collect()]``
 synonym, union flat lists, and the ``Take(n)`` marker), the validation errors
-that keep mode determination legible, and ``Take(n)`` runtime release. Other
-cardinalities and the cross-level/provenance/predicate knobs are reserved and
-raise validation errors when declared.
+that keep mode determination legible, and ``Take(n)`` runtime release.
 """
 
 from __future__ import annotations
@@ -54,9 +52,6 @@ async def _run(wf: Workflow) -> object:
 def test_collect_defaults_to_all_cardinality() -> None:
     marker = Collect()
     assert isinstance(marker.cardinality, All)
-    assert marker.at is None
-    assert marker.from_ is None
-    assert marker.where is None
 
 
 def test_cardinality_hierarchy() -> None:
@@ -162,43 +157,22 @@ def test_single_event_param_is_not_collection_param() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Validation: legible mode determination, reserved knobs
+# Validation: legible mode determination
 # --------------------------------------------------------------------------- #
 
 
-def test_collect_at_raises_clear_error() -> None:
+def test_unknown_cardinality_raises_clear_error() -> None:
     class _W(Workflow):
         pass
 
-    with pytest.raises(WorkflowValidationError, match="at=.*not implemented"):
-
-        @free_step(workflow=_W)
-        async def join(events: Annotated[list[Done], Collect(at="other")]) -> StopEvent:  # type: ignore[unused-ignore]
-            return StopEvent(result="x")
-
-
-def test_collect_from_raises_clear_error() -> None:
-    class _W(Workflow):
+    class Weird(Cardinality):
         pass
 
-    with pytest.raises(WorkflowValidationError, match="from_=.*not implemented"):
-
-        @free_step(workflow=_W)
-        async def join(
-            events: Annotated[list[Done], Collect(from_="src")],
-        ) -> StopEvent:  # type: ignore[unused-ignore]
-            return StopEvent(result="x")
-
-
-def test_collect_where_raises_clear_error() -> None:
-    class _W(Workflow):
-        pass
-
-    with pytest.raises(WorkflowValidationError, match="where=.*not supported"):
+    with pytest.raises(WorkflowValidationError, match="All\\(\\) or Take\\(n\\)"):
 
         @free_step(workflow=_W)
         async def join(  # type: ignore[unused-ignore]
-            events: Annotated[list[Done], Collect(where=lambda e: True)],
+            events: Annotated[list[Done], Collect(Weird())],
         ) -> StopEvent:
             return StopEvent(result="x")
 
