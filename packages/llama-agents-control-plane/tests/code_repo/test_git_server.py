@@ -21,7 +21,6 @@ from dulwich.repo import Repo
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
 from httpx import ASGITransport
-from llama_agents.control_plane.code_repo import git_server as git_server_module
 from llama_agents.control_plane.code_repo.git_server import (
     handle_git_request,
     handle_git_request_readonly,
@@ -470,14 +469,14 @@ async def test_handle_git_request_closes_repo_handles(
         await storage.upload_repo("test-deploy", repo_path)
 
         close_calls = 0
-        original_close = git_server_module.Repo.close
+        original_close = Repo.close
 
         def _spy_close(self: Repo) -> None:
             nonlocal close_calls
             close_calls += 1
             original_close(self)
 
-        monkeypatch.setattr(git_server_module.Repo, "close", _spy_close)
+        monkeypatch.setattr(Repo, "close", _spy_close)
 
         app = _make_test_app(storage)
 
@@ -508,14 +507,14 @@ async def test_handle_git_request_readonly_closes_repo_after_response(
         await storage.upload_repo("test-deploy", repo_path)
 
         close_calls = 0
-        original_close = git_server_module.Repo.close
+        original_close = Repo.close
 
         def _spy_close(self: Repo) -> None:
             nonlocal close_calls
             close_calls += 1
             original_close(self)
 
-        monkeypatch.setattr(git_server_module.Repo, "close", _spy_close)
+        monkeypatch.setattr(Repo, "close", _spy_close)
 
         app = _make_test_app(storage, readonly=True)
 

@@ -9,7 +9,7 @@ import logging
 import pytest
 from workflows import Workflow, step
 from workflows.events import Event, StartEvent, StepState, StepStateChanged, StopEvent
-from workflows.runtime.types.plugin import InternalRunAdapter, WaitResult, WorkflowTick
+from workflows.runtime.types.plugin import InternalRunAdapter, WaitResult
 from workflows.runtime.types.results import StepWorkerResult
 from workflows.runtime.types.ticks import (
     TickAddEvent,
@@ -19,6 +19,7 @@ from workflows.runtime.types.ticks import (
     TickStepResult,
     TickTimeout,
     TickWaiterTimeout,
+    WorkflowTick,
 )
 from workflows.runtime.verbose import _VerboseInternalRunAdapter
 from workflows.testing import WorkflowTestRunner

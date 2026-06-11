@@ -8,7 +8,6 @@ import pytest
 from fastapi import HTTPException
 from fastapi.responses import Response
 from llama_agents.control_plane.manage_api.deployments_service import (
-    DeploymentNotFoundError,
     deployments_service,
 )
 from llama_agents.core import schema
@@ -16,6 +15,7 @@ from llama_agents.core.schema.deployments import (
     INTERNAL_CODE_REPO_SCHEME,
     DeploymentResponse,
 )
+from llama_agents.core.server.manage_api import DeploymentNotFoundError
 
 
 def _make_deployment(
