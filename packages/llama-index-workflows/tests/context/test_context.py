@@ -359,6 +359,75 @@ async def test_wait_for_event_in_workflow_serialization() -> None:
     assert total_waiters == 0
 
 
+class TwoStepHITLWorkflow(Workflow):
+    """The documented two-step HITL shape: emit InputRequiredEvent, consume HumanResponseEvent."""
+
+    @step
+    async def ask(self, ctx: Context, ev: StartEvent) -> InputRequiredEvent:
+        return InputRequiredEvent()
+
+    @step
+    async def answer(self, ctx: Context, ev: HumanResponseEvent) -> StopEvent:
+        return StopEvent(result=ev.response)
+
+
+@pytest.mark.asyncio
+async def test_to_dict_after_stream_events_break() -> None:
+    """Regression for #668: to_dict() must not hang when called after breaking
+    out of the stream_events() loop instead of inside it."""
+    workflow = TwoStepHITLWorkflow()
+    handler = workflow.run()
+
+    async for ev in handler.stream_events():
+        if isinstance(ev, InputRequiredEvent):
+            break
+
+    ctx_dict = handler.ctx.to_dict()
+    assert ctx_dict["is_running"] is True
+    assert ctx_dict["workers"]
+    await handler.cancel_run()
+
+
+class NamedResponseEvent(HumanResponseEvent):
+    response: str
+
+
+@pytest.mark.asyncio
+async def test_to_dict_after_stream_events_break_resumes() -> None:
+    """Regression for #668: a snapshot taken after breaking out of
+    stream_events() (no cancel first) restores and resumes correctly."""
+
+    class WaiterWorkflow(Workflow):
+        @step
+        async def ask(self, ctx: Context, ev: StartEvent) -> StopEvent:
+            response = await ctx.wait_for_event(
+                NamedResponseEvent,
+                waiter_event=InputRequiredEvent(),
+            )
+            return StopEvent(result=response.response)
+
+    workflow = WaiterWorkflow()
+    handler = workflow.run()
+
+    async for ev in handler.stream_events():
+        if isinstance(ev, InputRequiredEvent):
+            break
+
+    ctx_dict = handler.ctx.to_dict()
+    total_waiters = sum(
+        len(worker_data["collected_waiters"])
+        for worker_data in ctx_dict["workers"].values()
+    )
+    assert total_waiters == 1
+    await handler.cancel_run()
+
+    new_ctx = Context.from_dict(workflow, ctx_dict)
+    new_handler = workflow.run(ctx=new_ctx)
+    new_handler.ctx.send_event(NamedResponseEvent(response="bob"))
+    result = await new_handler
+    assert result == "bob"
+
+
 class Waiter1(Event):
     msg: str
 
