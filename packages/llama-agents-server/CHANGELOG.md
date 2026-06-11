@@ -1,5 +1,19 @@
 # llama-agents-server
 
+## 0.5.1
+
+### Patch Changes
+
+- 5fd64dc: Update debugger assets
+
+  - JavaScript: https://cdn.jsdelivr.net/npm/@llamaindex/workflow-debugger@0.2.40/dist/app.js
+  - CSS: https://cdn.jsdelivr.net/npm/@llamaindex/workflow-debugger@0.2.40/dist/app.css
+
+- Updated dependencies [9a4dd16]
+- Updated dependencies [db1258b]
+  - llama-index-workflows@2.21.0
+  - llama-agents-client@0.3.8
+
 ## 0.5.0
 
 ### Minor Changes
