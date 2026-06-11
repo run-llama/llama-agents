@@ -115,6 +115,10 @@ def test_get_by_path_typed_dict_like_model() -> None:
     set_by_path(state, "ev", StopEvent(result=42))
     assert get_by_path(state, "ev.result") == 42
 
+    # A dynamic key written over a property name wins on path reads
+    set_by_path(state, "ev.result", 7)
+    assert get_by_path(state, "ev.result") == 7
+
 
 def test_set_by_path_typed_field_assigns_field() -> None:
     """set_by_path writes declared fields as fields, not shadow _data entries."""
