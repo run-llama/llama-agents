@@ -1099,7 +1099,7 @@ requires-dist = [
     { name = "mkdocs-redirects", specifier = ">=1.2.1,<2" },
     { name = "mkdocs-render-swagger-plugin", specifier = ">=0.1.2,<1" },
     { name = "mkdocstrings", extras = ["python"], specifier = ">=0.26.1,<1" },
-    { name = "pymdown-extensions", specifier = ">=10.21.2" },
+    { name = "pymdown-extensions", specifier = ">=10.21.3" },
 ]
 
 [[package]]
@@ -2885,7 +2885,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiohttp", specifier = ">=3.12.14" },
+    { name = "aiohttp", specifier = ">=3.14.0" },
     { name = "blessed", marker = "sys_platform != 'win32'", specifier = ">=1.20" },
     { name = "click", specifier = ">=8.2.1" },
     { name = "copier", specifier = ">=9.10.2" },
