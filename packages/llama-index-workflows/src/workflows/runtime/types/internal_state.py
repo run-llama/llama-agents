@@ -67,6 +67,7 @@ class BrokerState:
                         accepted_events=step_func._step_config.accepted_events,
                         retry_policy=step_func._step_config.retry_policy,
                         num_workers=step_func._step_config.num_workers,
+                        accept_event_subclasses=step_func._step_config.accept_event_subclasses,
                     )
                     for name, step_func in workflow._get_steps().items()
                 },
@@ -283,6 +284,7 @@ class InternalStepConfig:
     accepted_events: list[Any]
     retry_policy: RetryPolicy | None
     num_workers: int
+    accept_event_subclasses: bool = False
 
 
 @dataclass()

@@ -31,7 +31,7 @@ from workflows import Context, step
 from workflows.context.context_types import SerializedContext
 from workflows.context.serializers import JsonSerializer
 from workflows.context.state_store import DictState, InMemoryStateStore
-from workflows.events import StartEvent, StopEvent
+from workflows.events import Event, StartEvent, StopEvent
 from workflows.workflow import Workflow
 
 
@@ -1420,3 +1420,65 @@ async def test_instrument_tags_contains_handler_id_in_server_context() -> None:
             assert data["status"] == "completed"
             assert seen_handler_id["handler_id"] is not None
             assert seen_handler_id["handler_id"] == handler_id
+
+
+# --- Subclass-aware event routing (accept_event_subclasses) over HTTP ---
+
+
+class SubclassParentEvent(Event):
+    payload: str
+
+
+class SubclassChildEvent(SubclassParentEvent):
+    pass
+
+
+class SubclassRoutingWorkflow(Workflow):
+    """A producer emits a subclass; a consumer accepts the parent with opt-in."""
+
+    @step
+    async def start(self, ev: StartEvent) -> SubclassChildEvent:
+        return SubclassChildEvent(payload="from-start")
+
+    @step(accept_event_subclasses=True)
+    async def consume(self, ev: SubclassParentEvent) -> StopEvent:
+        return StopEvent(result=f"consumed {type(ev).__name__}: {ev.payload}")
+
+
+@pytest_asyncio.fixture
+async def subclass_client() -> AsyncGenerator:
+    server = WorkflowServer(workflow_store=MemoryWorkflowStore(), idle_timeout=0.01)
+    server.add_workflow("subclass", SubclassRoutingWorkflow())
+    async with server.contextmanager():
+        transport = ASGITransport(app=server.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            yield client
+
+
+@pytest.mark.asyncio
+async def test_subclass_routing_runs_over_http(subclass_client: AsyncClient) -> None:
+    response = await subclass_client.post("/workflows/subclass/run", json={})
+    assert response.status_code == 200
+    data = response.json()
+    # The child event must have been routed to the parent-accepting opted-in step.
+    assert (
+        data["result"]["value"]["result"] == "consumed SubclassChildEvent: from-start"
+    )
+
+
+@pytest.mark.asyncio
+async def test_subclass_routing_representation_over_http(
+    subclass_client: AsyncClient,
+) -> None:
+    response = await subclass_client.get("/workflows/subclass/representation")
+    assert response.status_code == 200
+    graph = response.json()["graph"]
+    edges = {(e["source"], e["target"]) for e in graph["edges"]}
+    # Both the declared parent edge and the subclass fan-out edge are present.
+    assert ("SubclassParentEvent", "consume") in edges
+    assert ("SubclassChildEvent", "consume") in edges
+
+    child = next(n for n in graph["nodes"] if n["id"] == "SubclassChildEvent")
+    # The inheritance chain is serialized so the UI can classify the node.
+    assert "SubclassParentEvent" in child["event_types"]
+    assert child["event_schema"] is not None

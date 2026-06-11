@@ -1119,3 +1119,131 @@ def test_resource_config_label_fallback(
     # Label should fall back to type name when not specified
     assert config_node.label == "ConfigData"
     assert config_node.description is None
+
+
+class RepParentEvent(Event):
+    value: str
+
+
+class RepChildEvent(RepParentEvent):
+    pass
+
+
+def test_representation_respects_opt_in_subclass_routing() -> None:
+    """Verify subclass event to consumer step produces an edge when opt-in is enabled."""
+
+    class SubclassMatchingWorkflow(Workflow):
+        @step
+        async def start_step(self, ev: StartEvent) -> RepChildEvent:
+            return RepChildEvent(value="test")
+
+        @step(accept_event_subclasses=True)
+        async def handle_step(self, ev: RepParentEvent) -> StopEvent:
+            return StopEvent(result=ev.value)
+
+    wf = SubclassMatchingWorkflow()
+    graph = get_workflow_representation(workflow=wf)
+    edges = _edges_as_tuples(graph)
+
+    # We expect ChildEvent to map to handle_step because subclass routing is opted in
+    assert ("RepChildEvent", "handle_step", None) in edges
+    assert ("RepParentEvent", "handle_step", None) in edges
+    assert ("StartEvent", "start_step", None) in edges
+    assert ("start_step", "RepChildEvent", None) in edges
+    assert ("handle_step", "StopEvent", None) in edges
+
+
+def test_representation_exact_matching_unchanged() -> None:
+    """Verify subclass event to consumer step does not produce an edge when opt-in is disabled."""
+
+    class ExactMatchingWorkflow(Workflow):
+        @step
+        async def start_step(self, ev: StartEvent) -> RepChildEvent:
+            return RepChildEvent(value="test")
+
+        @step
+        async def handle_step(self, ev: RepParentEvent) -> StopEvent:
+            return StopEvent(result=ev.value)
+
+    wf = ExactMatchingWorkflow()
+    graph = get_workflow_representation(workflow=wf)
+    edges = _edges_as_tuples(graph)
+
+    # We expect ChildEvent NOT to map to handle_step because exact matching is default
+    assert ("RepChildEvent", "handle_step", None) not in edges
+    assert ("RepParentEvent", "handle_step", None) in edges
+    assert ("StartEvent", "start_step", None) in edges
+    assert ("start_step", "RepChildEvent", None) in edges
+    assert ("handle_step", "StopEvent", None) in edges
+
+
+def test_representation_handles_generic_annotations() -> None:
+    """Verify graph generation does not crash with generic annotations like dict, list, typing.Any."""
+    from typing import Any, Dict, List
+
+    class GenericAnnotationWorkflow(Workflow):
+        @step
+        async def start_step(self, ev: StartEvent) -> Dict[str, Any]:
+            return {"key": "val"}
+
+        @step
+        async def other_step(self, ev: StartEvent) -> List[str]:
+            return ["val"]
+
+        @step
+        async def process_step(self, ev: StartEvent) -> StopEvent:
+            return StopEvent(result="done")
+
+    wf = GenericAnnotationWorkflow()
+    # This should not raise TypeError during issubclass check, even before Python 3.10 safety commit
+    graph = get_workflow_representation(workflow=wf)
+    assert graph.name == "GenericAnnotationWorkflow"
+
+
+def test_representation_subclass_fanout_has_no_duplicate_edges() -> None:
+    """A subclass-opted-in step accepting both a base and its subclass should not
+    emit duplicate event→step edges for the overlapping subclass."""
+
+    class FanoutWorkflow(Workflow):
+        @step
+        async def start_step(self, ev: StartEvent) -> RepChildEvent:
+            return RepChildEvent(value="test")
+
+        @step(accept_event_subclasses=True)
+        async def handle_step(self, ev: RepParentEvent | RepChildEvent) -> StopEvent:
+            return StopEvent(result=ev.value)
+
+    wf = FanoutWorkflow()
+    graph = get_workflow_representation(workflow=wf)
+
+    # Raw edge list (not the de-duplicating set) must contain each edge once.
+    raw_edges = [(e.source, e.target, e.label) for e in graph.edges]
+    assert raw_edges.count(("RepChildEvent", "handle_step", None)) == 1
+    assert raw_edges.count(("RepParentEvent", "handle_step", None)) == 1
+
+
+def test_representation_subclass_fanout_excludes_stop_event() -> None:
+    """A catch-all opted-in step (accepting ``Event``) must not get a
+    StopEvent→step edge: a returned StopEvent terminates the run instead of
+    routing, so the edge would depict a flow that cannot happen."""
+
+    class CatchAllWorkflow(Workflow):
+        @step
+        async def start_step(self, ev: StartEvent) -> RepChildEvent:
+            return RepChildEvent(value="test")
+
+        @step(accept_event_subclasses=True)
+        async def observe(self, ev: Event) -> StopEvent | None:
+            if isinstance(ev, RepChildEvent):
+                return StopEvent(result=ev.value)
+            return None
+
+    graph = get_workflow_representation(workflow=CatchAllWorkflow())
+    edges = _edges_as_tuples(graph)
+
+    # Real routing edges are present, including the StartEvent the observer
+    # genuinely receives.
+    assert ("RepChildEvent", "observe", None) in edges
+    assert ("StartEvent", "observe", None) in edges
+    # No fictional StopEvent→step edge.
+    assert ("StopEvent", "observe", None) not in edges
