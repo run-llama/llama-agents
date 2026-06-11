@@ -119,9 +119,15 @@ async def partial(
     event: Event,
     context: Context,
     workflow: Workflow,
+    collected_events: dict[str, Event] | None = None,
 ) -> Callable[[], Any]:
     kwargs: dict[str, Any] = {}
-    kwargs[step_config.event_name] = event
+    if collected_events is not None:
+        # Collect-mode (multi-slot fan-in): bind each declared event
+        # parameter to its collected event instead of a single trigger event.
+        kwargs.update(collected_events)
+    else:
+        kwargs[step_config.event_name] = event
     if step_config.context_parameter:
         # Convert to internal face for step execution
         kwargs[step_config.context_parameter] = context
@@ -171,17 +177,33 @@ def as_step_worker_function(
         internal_context = Context._create_internal(workflow=workflow)
         returns = Returns(return_values=[])
 
-        token = StepWorkerStateContextVar.set(
-            StepWorkerContext(
-                state=state,
-                returns=returns,
-                retry=retry,
-            )
+        step_ctx = StepWorkerContext(
+            state=state,
+            returns=returns,
+            retry=retry,
         )
+        token = StepWorkerStateContextVar.set(step_ctx)
         ctx_token = InternalContextVar.set(weakref.ref(internal_context))
 
         try:
             config = workflow._get_steps()[step_name]._step_config
+            collected_binding: dict[str, Event] | None = None
+            # Heterogeneous fan-in: multiple event parameters collect one event
+            # of each declared type via the existing collect_events buffer.
+            if config.collect_params is not None:
+                expected_types = [event_type for _, event_type in config.collect_params]
+                collected = internal_context.collect_events(event, expected_types)
+                if collected is None:
+                    # Not every declared type has arrived yet. collect_events
+                    # recorded the buffer add on ``returns``; nothing to invoke.
+                    await internal_context._finalize_step()
+                    return returns.return_values
+                collected_binding = {
+                    name: collected_event
+                    for (name, _), collected_event in zip(
+                        config.collect_params, collected
+                    )
+                }
             # Resolve callable at call time:
             # - If the workflow has an attribute with the step name, use it
             #   (this yields a bound method for instance-defined steps).
@@ -248,6 +270,7 @@ def as_step_worker_function(
                 event=event,
                 context=internal_context,
                 workflow=workflow,
+                collected_events=collected_binding,
             )
 
             try:
@@ -271,10 +294,53 @@ def as_step_worker_function(
                         raise captured_cancelled
                     if captured_waiting is not None:
                         raise captured_waiting
-                if result is not None and not isinstance(result, Event):
+                if isinstance(result, list) and config.is_fan_out:
+                    # A step that actually returned a list fans out: each
+                    # element is emitted as its own event. An empty list means
+                    # "no emission" — when collection fan-in (joins over
+                    # list[E] streams) lands, an empty return will instead
+                    # fire joins with [].
+                    for item in result:
+                        if not isinstance(item, Event):
+                            msg = (
+                                f"Step function {step_name} returned a list "
+                                f"containing {type(item).__name__} instead of an "
+                                "Event instance."
+                            )
+                            raise WorkflowRuntimeError(msg)
+                    if result:
+                        for item in result:
+                            returns.return_values.append(StepWorkerResult(result=item))
+                    else:
+                        returns.return_values.append(StepWorkerResult(result=None))
+                elif result is not None and not isinstance(result, Event):
                     msg = f"Step function {step_name} returned {type(result).__name__} instead of an Event instance."
                     raise WorkflowRuntimeError(msg)
-                returns.return_values.append(StepWorkerResult(result=result))
+                elif (
+                    config.is_fan_out
+                    and result is not None
+                    and not any(
+                        isinstance(t, type) and isinstance(result, t)
+                        for t in config.bare_return_types
+                    )
+                ):
+                    # A bare event under a list-returning annotation. A type
+                    # declared as a non-list union member (-> list[A] | B
+                    # returning B) is ordinary dispatch and handled below; an
+                    # undeclared bare element is an error, not a silent
+                    # one-element emission.
+                    msg = (
+                        f"Step function {step_name} returned a bare "
+                        f"{type(result).__name__} but its return annotation only "
+                        "declares it inside a list. Return a one-element list to "
+                        "fan out, or declare the bare type as a union member "
+                        "(e.g. -> list[A] | B) for ordinary dispatch."
+                    )
+                    raise WorkflowRuntimeError(msg)
+                else:
+                    # Ordinary dispatch — including a fan-out step's declared
+                    # non-list branch and its None (no emission) branch.
+                    returns.return_values.append(StepWorkerResult(result=result))
             except WaitingForEvent as e:
                 await asyncio.sleep(0)
                 returns.return_values.append(e.add)
