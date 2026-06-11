@@ -129,15 +129,25 @@ def base_state() -> BrokerState:
     )
 
 
-def add_worker(state: BrokerState, event: Event, worker_id: int = 0) -> None:
-    """Helper to add an in-progress worker to state."""
+def add_worker(
+    state: BrokerState,
+    event: Event,
+    worker_id: int = 0,
+    snapshot_collected: dict[str, list[Event]] | None = None,
+) -> None:
+    """Helper to add an in-progress worker to state.
+
+    ``snapshot_collected`` is the collect-buffer snapshot the worker started
+    with; a worker that consumes a buffer (DeleteCollectedEvent) must have
+    observed it, or the reducer treats the firing as stale and reruns it.
+    """
     state.workers["test_step"].in_progress.append(
         InProgressState(
             event=event,
             worker_id=worker_id,
             shared_state=StepWorkerState(
                 step_name="test_step",
-                collected_events={},
+                collected_events=snapshot_collected or {},
                 collected_waiters=[],
             ),
             attempts=0,
@@ -317,8 +327,15 @@ def test_collected_events(base_state: BrokerState) -> None:
     new_state, _ = _process_step_result_tick(tick, base_state, now_seconds=110.0)
     assert "buf1" in new_state.workers["test_step"].collected_events
 
-    # Delete event
-    add_worker(new_state, event)
+    # Delete event — the deleting worker's snapshot must match the buffer it
+    # consumed, otherwise the firing is treated as stale and rerun.
+    add_worker(
+        new_state,
+        event,
+        snapshot_collected={
+            "buf1": list(new_state.workers["test_step"].collected_events["buf1"])
+        },
+    )
     tick = TickStepResult(
         step_name="test_step",
         worker_id=0,
