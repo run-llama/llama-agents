@@ -319,3 +319,27 @@ async def test_snapshot_rebuild_with_unseeded_random_policy() -> None:
         assert wf.attempts == 2
         # Every rebuild observed the same journaled eligibility time
         assert len(seen) <= 1
+
+
+@pytest.mark.asyncio
+async def test_snapshot_preserves_true_first_attempt_at() -> None:
+    """Snapshots carry the journaled dispatch time, not the rebuild clock.
+
+    Regression: snapshots are rebuilt by replaying ticks, and replaying the
+    dispatch re-stamped first_attempt_at with rebuild-time "now" — observable
+    as first_attempt_at *after* last_failed_at in the snapshot. That pushed
+    the origin of elapsed-based retry budgets (stop_after_delay) forward on
+    every snapshot, so a resumed run's budget silently restarted.
+    """
+    wf = FlakyWorkflow(timeout=10.0)
+    handler = wf.run()
+
+    ctx_dict = await _snapshot_in_delay_window(handler)
+    await handler.cancel_run()
+    with pytest.raises(WorkflowCancelledByUser):
+        await handler
+
+    attempt = ctx_dict["workers"]["flaky"]["queue"][0]
+    # The dispatch precedes the step body, which precedes the failure
+    assert attempt["first_attempt_at"] <= wf.attempt_times[0]
+    assert attempt["first_attempt_at"] < attempt["last_failed_at"]

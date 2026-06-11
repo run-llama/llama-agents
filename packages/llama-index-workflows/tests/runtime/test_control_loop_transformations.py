@@ -25,6 +25,7 @@ from workflows.events import (
     StepStateChanged,
     StopEvent,
     UnhandledEvent,
+    WorkflowFailedEvent,
     WorkflowIdleEvent,
 )
 from workflows.retry_policy import (
@@ -136,7 +137,12 @@ def base_state() -> BrokerState:
     )
 
 
-def add_worker(state: BrokerState, event: Event, worker_id: int = 0) -> None:
+def add_worker(
+    state: BrokerState,
+    event: Event,
+    worker_id: int = 0,
+    first_attempt_at: float = 100.0,
+) -> None:
     """Helper to add an in-progress worker to state."""
     state.workers["test_step"].in_progress.append(
         InProgressState(
@@ -148,7 +154,7 @@ def add_worker(state: BrokerState, event: Event, worker_id: int = 0) -> None:
                 collected_waiters=[],
             ),
             attempts=0,
-            first_attempt_at=100.0,
+            first_attempt_at=first_attempt_at,
         )
     )
 
@@ -1146,6 +1152,75 @@ def test_replay_with_changed_policy_honors_journaled_decision(
     assert any(isinstance(c, CommandRunWorker) for c in commands)
     assert flipped.workers["test_step"].queue == []
     assert flipped.workers["test_step"].in_progress[0].attempts == 1
+
+
+def test_journaled_first_attempt_at_survives_rebuilt_state(
+    base_state: BrokerState,
+) -> None:
+    """The re-queued retry carries the journaled dispatch time, not the
+    (rebuild-time) value sitting in in_progress.
+
+    Regression: replaying a dispatch re-stamps first_attempt_at with the
+    rebuild clock, so elapsed-based retry budgets (stop_after_delay)
+    silently restarted on every snapshot/resume.
+    """
+    base_state.workers["test_step"].config.retry_policy = ConstantDelayRetryPolicy(
+        maximum_attempts=3, delay=1.0
+    )
+    event = MyTestEvent(value=42)
+    # Simulate a rebuilt in_progress entry: dispatch re-stamped at 500.0,
+    # while the failure tick journaled the true dispatch time 100.0.
+    add_worker(base_state, event, first_attempt_at=500.0)
+    fail_tick: TickStepResult = TickStepResult(
+        step_name="test_step",
+        worker_id=0,
+        event=event,
+        result=[
+            StepWorkerFailed(
+                exception=ValueError("test"),
+                failed_at=110.0,
+                retry_decision=RetryDecision(delay=1.0),
+                first_attempt_at=100.0,
+            )
+        ],
+    )
+
+    state, _ = _process_step_result_tick(fail_tick, base_state, 110.0)
+
+    assert state.workers["test_step"].queue[0].first_attempt_at == 100.0
+
+
+def test_journaled_first_attempt_at_used_for_elapsed_on_failure(
+    base_state: BrokerState,
+) -> None:
+    """WorkflowFailedEvent.elapsed_seconds derives from the journaled
+    dispatch time, not the rebuilt in_progress value."""
+    event = MyTestEvent(value=42)
+    add_worker(base_state, event, first_attempt_at=500.0)
+    fail_tick: TickStepResult = TickStepResult(
+        step_name="test_step",
+        worker_id=0,
+        event=event,
+        result=[
+            StepWorkerFailed(
+                exception=ValueError("test"),
+                failed_at=110.0,
+                retry_decision=RetryDecision(delay=None),
+                first_attempt_at=100.0,
+            )
+        ],
+    )
+
+    _, commands = _process_step_result_tick(fail_tick, base_state, 110.0)
+
+    failed_events = [
+        c.event
+        for c in commands
+        if isinstance(c, CommandPublishEvent)
+        and isinstance(c.event, WorkflowFailedEvent)
+    ]
+    assert len(failed_events) == 1
+    assert failed_events[0].elapsed_seconds == 10.0
 
 
 # =============================================================================

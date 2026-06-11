@@ -269,12 +269,13 @@ class _ControlLoopRunner:
         worker: InProgressState | None,
         results: list[StepFunctionResult],
     ) -> list[StepFunctionResult]:
-        """Record the retry policy's verdict inside failure results.
+        """Record the retry policy's verdict and dispatch time inside failures.
 
-        Runs at tick creation, before the tick is journaled, so the decision
-        becomes replayable data: re-reducing the journaled tick reads the
-        verdict instead of re-invoking policy code, which may have changed
-        between the live run and a later replay.
+        Runs at tick creation, before the tick is journaled, so both become
+        replayable data: re-reducing the journaled tick reads the verdict
+        instead of re-invoking policy code (which may have changed between
+        the live run and a later replay), and restores the true
+        first_attempt_at instead of the rebuild-time stamp.
         """
         if worker is None:
             return results
@@ -291,7 +292,10 @@ class _ControlLoopRunner:
                     step_name=step_name,
                 )
                 result = result.model_copy(
-                    update={"retry_decision": RetryDecision(delay=delay)}
+                    update={
+                        "retry_decision": RetryDecision(delay=delay),
+                        "first_attempt_at": worker.first_attempt_at,
+                    }
                 )
             out.append(result)
         return out
@@ -911,7 +915,15 @@ def _process_step_result_tick(
                     f"Unknown result type returned from step function ({tick.step_name}): {type(result.result)}"
                 )
         elif isinstance(result, StepWorkerFailed):
-            # Schedule a retry if permitted, otherwise fail the workflow
+            # Schedule a retry if permitted, otherwise fail the workflow.
+            # Prefer the journaled dispatch time: rebuilds re-stamp
+            # this_execution.first_attempt_at with the rebuild clock, which
+            # would silently restart elapsed-based retry budgets on resume.
+            first_attempt_at = (
+                result.first_attempt_at
+                if result.first_attempt_at is not None
+                else this_execution.first_attempt_at
+            )
             if result.retry_decision is not None:
                 # The decision was journaled inside the failure tick; replay
                 # consumes it as data and never re-invokes policy code, so a
@@ -924,7 +936,7 @@ def _process_step_result_tick(
                 # replay samples the same delay the live run did.
                 delay = _decide_retry_delay(
                     worker_state.config.retry_policy,
-                    elapsed_time=result.failed_at - this_execution.first_attempt_at,
+                    elapsed_time=result.failed_at - first_attempt_at,
                     failures=this_execution.attempts + 1,
                     exception=result.exception,
                     run_id=run_id,
@@ -942,7 +954,7 @@ def _process_step_result_tick(
                     EventAttempt(
                         event=tick.event,
                         attempts=this_execution.attempts + 1,
-                        first_attempt_at=this_execution.first_attempt_at,
+                        first_attempt_at=first_attempt_at,
                         last_exception=result.exception,
                         last_failed_at=result.failed_at,
                         recovery_counts=dict(this_execution.recovery_counts),
@@ -954,7 +966,7 @@ def _process_step_result_tick(
             else:
                 exception = result.exception
                 total_attempts = this_execution.attempts + 1
-                elapsed = result.failed_at - this_execution.first_attempt_at
+                elapsed = result.failed_at - first_attempt_at
 
                 handler_name = state.config.handler_for_step.get(tick.step_name)
                 handler = (

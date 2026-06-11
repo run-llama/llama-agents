@@ -175,6 +175,12 @@ class StepWorkerFailed(BaseModel):
     # None on ticks journaled before decisions were recorded; the reducer
     # falls back to recomputing via the policy (seeded jitter) for those.
     retry_decision: RetryDecision | None = None
+    # When this event was first dispatched, recorded at failure time. State
+    # rebuilds re-stamp dispatch times with the rebuild clock, so without
+    # this the elapsed-time budget of stop conditions silently restarts on
+    # every resume. None on ticks journaled before it was recorded; the
+    # reducer falls back to the (possibly rebuilt) state value.
+    first_attempt_at: float | None = None
 
 
 class DeleteWaiter(BaseModel):
