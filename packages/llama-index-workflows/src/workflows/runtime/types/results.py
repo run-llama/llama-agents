@@ -8,14 +8,24 @@ import weakref
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import (
+    Annotated,
     Any,
     Generic,
     Literal,
     TypeVar,
 )
 
-from pydantic import BaseModel, ConfigDict, model_serializer, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    PlainSerializer,
+    PlainValidator,
+    TypeAdapter,
+    model_serializer,
+    model_validator,
+)
 from workflows.events import (
+    CollectionReleaseEvent,
     Event,
     SerializableEvent,
     SerializableEventType,
@@ -39,8 +49,8 @@ class RetryAttempt:
     is 0-based (0 = first run, 1 = first retry). ``last_exception`` /
     ``last_failed_at`` are ``None`` on the first attempt. ``recovery_counts``
     carries the per-``@catch_error``-handler invocation counts on the running
-    event's lineage so ``ctx.send_event`` can tag emitted events and nested
-    failures route to the same handlers.
+    event's lineage so nested failures and ``ctx.send_event`` emissions route to
+    the same handlers.
     """
 
     retry_number: int = 0
@@ -72,13 +82,86 @@ class StepWorkerState:
     step_name: str
     collected_events: dict[str, list[Event]]
     collected_waiters: list[StepWorkerWaiter]
+    collection_release_payload: CollectionReleasePayload | None = None
+    scope_path: tuple[str, ...] = ()
 
     def _deepcopy(self) -> StepWorkerState:
         return StepWorkerState(
             step_name=self.step_name,
             collected_events={k: list(v) for k, v in self.collected_events.items()},
             collected_waiters=[dataclasses.replace(x) for x in self.collected_waiters],
+            collection_release_payload=self.collection_release_payload._copy()
+            if self.collection_release_payload is not None
+            else None,
+            scope_path=self.scope_path,
         )
+
+
+@dataclass(frozen=True)
+class CollectionReleasePayload:
+    """List payload supplied to a collection step invocation."""
+
+    binding_id: str
+    stream_id: str
+    events: list[Event]
+    output_scope_path: tuple[str, ...]
+
+    def _copy(self) -> CollectionReleasePayload:
+        return CollectionReleasePayload(
+            binding_id=self.binding_id,
+            stream_id=self.stream_id,
+            events=list(self.events),
+            output_scope_path=self.output_scope_path,
+        )
+
+    def as_event(self) -> CollectionReleaseEvent:
+        """Derive the invocation trigger event for this release.
+
+        The payload is the authoritative work record; the event is rebuilt from
+        it at every (re)delivery so the two cannot diverge across retries,
+        waiter resumes, or serialize/resume.
+        """
+        return CollectionReleaseEvent(
+            events=list(self.events),
+            stream_id=self.stream_id,
+            binding_id=self.binding_id,
+        )
+
+
+# Tick wire format for the payload's member events: the same SerializableEvent
+# codec every other tick/result event field uses (events.py).
+_payload_events_adapter: TypeAdapter[list[Event]] = TypeAdapter(list[SerializableEvent])
+
+
+def _serialize_release_payload_value(
+    payload: CollectionReleasePayload | None,
+) -> Any:
+    if payload is None:
+        return None
+    return {
+        "binding_id": payload.binding_id,
+        "stream_id": payload.stream_id,
+        "events": _payload_events_adapter.dump_python(payload.events),
+        "output_scope_path": list(payload.output_scope_path),
+    }
+
+
+def _deserialize_release_payload_value(data: Any) -> CollectionReleasePayload | None:
+    if data is None or isinstance(data, CollectionReleasePayload):
+        return data
+    return CollectionReleasePayload(
+        binding_id=data["binding_id"],
+        stream_id=data["stream_id"],
+        events=_payload_events_adapter.validate_python(data["events"]),
+        output_scope_path=tuple(data["output_scope_path"]),
+    )
+
+
+SerializableCollectionReleasePayload = Annotated[
+    CollectionReleasePayload | None,
+    PlainSerializer(_serialize_release_payload_value, return_type=Any),
+    PlainValidator(_deserialize_release_payload_value),
+]
 
 
 @dataclass()
@@ -101,6 +184,11 @@ class StepWorkerWaiter(Generic[EventType]):
     resolved_event: EventType | None
     # set to true when the waiter has timed out, such that the step raises asyncio.TimeoutError
     timed_out: bool = False
+    # Originating work record: stream scope of the suspended work item, restored
+    # whole on resume so the resumed attempt still closes its stream.
+    scope_path: tuple[str, ...] = ()
+    # For a suspended collect invocation, the release batch to re-invoke with.
+    collection_release_payload: CollectionReleasePayload | None = None
 
 
 @dataclass()
@@ -148,6 +236,12 @@ class StepWorkerResult(BaseModel):
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
     type: Literal["result"] = "result"
     result: SerializableOptionalEvent = None
+    # True when this execution actually returned a list (stream emission). A
+    # fan-out-annotated step that takes a non-list branch (None, or a declared
+    # bare union member) does not fan out: no stream is minted and downstream
+    # joins do not fire. An empty list return carries fanned_out=True with
+    # result=None — an empty stream whose joins fire with [].
+    fanned_out: bool = False
 
 
 class StepWorkerFailed(BaseModel):

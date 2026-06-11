@@ -20,6 +20,7 @@ from typing import (
 
 from pydantic import BaseModel
 
+from .collect import Collect
 from .errors import WorkflowValidationError
 from .events import StepFailedEvent
 from .resource import ResourceDefinition
@@ -56,14 +57,26 @@ class StepConfig:
     # step fires once when one event of each type has arrived. None for the
     # ordinary single-event-trigger model.
     collect_params: list[tuple[str, Any]] | None = None
-    # Fan-out producer: True when the return annotation is ``list[E]``. Computed
-    # at decoration time from the return annotation; only an actual list return
-    # emits per element.
+    # Fan-out producer: True when the return annotation is ``list[E]``. Such
+    # a step MAY mint a fresh stream per execution — whether it does is a
+    # runtime fact: only an actual list return opens a stream. Computed at
+    # decoration time from the return annotation; used for binding computation
+    # and validation.
     is_fan_out: bool = False
     # Non-list members of a fan-out return union (``-> list[A] | B`` -> (B,)).
     # A bare return of one of these types is ordinary dispatch; any other bare
     # event under a list-returning annotation is a runtime error.
     bare_return_types: tuple[Any, ...] = ()
+    # Collection-stream fan-in: set to ``(parameter_name, element_event_types)``
+    # when the step declares a single ``list[E]`` parameter. The element types are
+    # a tuple — ``list[Done]`` -> ``(Done,)``; a union flat list ``list[A | B]`` ->
+    # ``(A, B)`` (every member routes to the step). The step buffers incoming
+    # members by innermost stream id and releases per ``collection_policy``.
+    collection_param: tuple[str, tuple[Any, ...]] | None = None
+    # The resolved ``Collect`` marker for the collection parameter. A bare
+    # ``list[E]`` parameter resolves to ``Collect()`` (``All``). None for steps
+    # without a collection parameter.
+    collection_policy: Collect | None = None
     role: StepRole = "step"
     # Only meaningful when role == "catch_error".
     # None means wildcard — covers any step not claimed by a scoped handler.
@@ -243,6 +256,8 @@ def make_step_function(
         collect_params=collect_params,
         is_fan_out=spec.is_fan_out,
         bare_return_types=tuple(spec.bare_return_types),
+        collection_param=spec.collection_param,
+        collection_policy=spec.collection_policy,
         accept_event_subclasses=accept_event_subclasses,
     )
 

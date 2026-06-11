@@ -7,6 +7,11 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from workflows._event_matching import is_subclass, step_accepts_type, type_matches
+from workflows._stream_levels import (
+    event_types,
+    same_level_types,
+    stream_level_types_by_producer,
+)
 from workflows.decorators import CatchErrorHandler, StepConfig, WorkflowGraphCheck
 from workflows.errors import WorkflowConfigurationError, WorkflowValidationError
 from workflows.events import (
@@ -634,6 +639,101 @@ class _WorkflowValidationResult:
     uses_hitl: bool
 
 
+def _validate_collection_bindings(steps: dict[str, StepConfig]) -> None:
+    """Require list[E] fan-in to bind to a static returned-list producer."""
+
+    level_types_by_producer = stream_level_types_by_producer(steps)
+    errors: list[str] = []
+    for step_name, cfg in steps.items():
+        if cfg.collection_param is None:
+            continue
+        param_name, element_types = cfg.collection_param
+        missing = [
+            event_type
+            for event_type in event_types(element_types)
+            if not any(
+                event_type in level_types
+                for level_types in level_types_by_producer.values()
+            )
+        ]
+        if missing:
+            names = ", ".join(sorted(t.__name__ for t in missing))
+            errors.append(
+                f"Step '{step_name}' parameter '{param_name}' collects "
+                f"list[{names}], but no returned-list producer creates a stream "
+                "for those event types. list[E] fan-in only consumes events "
+                "from steps annotated as returning list[E]; use ctx.collect_events "
+                "for unstreamed ctx.send_event flows."
+            )
+    if errors:
+        raise WorkflowValidationError("\n".join(errors))
+
+
+def _validate_multi_slot_levels(
+    steps: dict[str, StepConfig],
+    start_event_class: type[StartEvent],
+) -> None:
+    """Reject multi-slot joins whose slots cannot fill at one stream level.
+
+    A multi-slot step fires when one event of each declared type has arrived,
+    and its output continues at the scope of its inputs. That is only
+    well-defined when every slot type is producible at a common stream level
+    (the top level, or one returned-list producer's stream). Mixing levels
+    would strand work items: a slot filled at one level waits forever for a
+    slot that only fills at another.
+    """
+    multi_slot = {
+        name: cfg.collect_params
+        for name, cfg in steps.items()
+        if cfg.collect_params is not None
+    }
+    if not multi_slot:
+        return
+
+    external_seeds = [
+        event_type
+        for cfg in steps.values()
+        for event_type in cfg.accepted_events
+        if isinstance(event_type, type) and issubclass(event_type, HumanResponseEvent)
+    ]
+    levels: dict[str, set[type[Event]]] = {
+        "the top level": same_level_types(
+            steps, [start_event_class, *external_seeds], frozenset()
+        )
+    }
+    for producer, level_types in stream_level_types_by_producer(steps).items():
+        levels[f"the stream of step '{producer}'"] = level_types
+
+    errors: list[str] = []
+    for step_name, slots in multi_slot.items():
+        slot_types = {slot_type for _, slot_type in slots or []}
+        if any(slot_types <= level_types for level_types in levels.values()):
+            continue
+        slot_levels = "; ".join(
+            f"'{param_name}' ({slot_type.__name__}) is produced at "
+            + (
+                ", ".join(
+                    sorted(
+                        level_name
+                        for level_name, level_types in levels.items()
+                        if slot_type in level_types
+                    )
+                )
+                or "no level"
+            )
+            for param_name, slot_type in slots or []
+        )
+        errors.append(
+            f"Step '{step_name}' joins event parameters that are never produced "
+            f"at a common stream level: {slot_levels}. A multi-slot join only "
+            "fires when all of its inputs originate at the same level. To gate "
+            "in-stream work on input from another level, use ctx.wait_for_event "
+            "inside the producing step instead."
+        )
+    if errors:
+        raise WorkflowValidationError("\n".join(errors))
+
+
 def _validate_workflow(
     steps: dict[str, StepConfig],
     workflow_cls_name: str,
@@ -658,6 +758,9 @@ def _validate_workflow(
 
     start_event_class = _ensure_start_event_class(steps, workflow_cls_name)
     stop_event_class = _ensure_stop_event_class(steps, workflow_cls_name)
+
+    _validate_collection_bindings(steps)
+    _validate_multi_slot_levels(steps, start_event_class)
 
     uses_hitl = _validate_event_connectivity(steps, start_event_class)
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from workflows.events import Event, StopEvent
+from workflows.runtime.types.results import CollectionReleasePayload
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,11 @@ class CommandQueueEvent:
     last_exception: Exception | None = None
     last_failed_at: float | None = None
     recovery_counts: dict[str, int] = field(default_factory=dict)
+    scope_path: tuple[str, ...] = field(default_factory=tuple)
+    # Collect-invocation work record. When set, the queued event is a collect
+    # step invocation and re-delivery routes it directly to the binding's
+    # target step with this batch.
+    collection_release_payload: CollectionReleasePayload | None = None
 
 
 @dataclass(frozen=True)
@@ -75,7 +81,7 @@ class CommandScheduleIdleCheck:
     Returned by the reducer when state looks quiescent after processing a tick.
     The runner appends a TickIdleCheck to tick_buffer so that idle is confirmed
     on the next loop iteration, after an asyncio.sleep(0) yield gives in-flight
-    ctx.send_event() calls a chance to drain.
+    ctx.send_event() calls a chance to deliver.
     """
 
     pass

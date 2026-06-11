@@ -93,7 +93,7 @@ pythonVersion = "3.14"
 reportMissingImports = false
 
 [tool.codespell]
-ignore-words-list = "NotIn"
+ignore-words-list = "NotIn,atleast"
 
 [tool.coverage.run]
 omit = ["**/tests/*"]

@@ -153,14 +153,37 @@ def test_union_collect_param_rejected() -> None:
             return StopEvent(result="x")
 
 
-def test_list_event_param_rejected_with_forward_pointing_error() -> None:
-    """A list[E] parameter is reserved for collection fan-in, not supported yet."""
+def test_list_event_param_accepted_as_collection_param() -> None:
+    """A single ``list[E]`` parameter is a collection-collect step."""
 
     class _ListWorkflow(Workflow):
         pass
 
-    with pytest.raises(WorkflowValidationError, match="not supported yet"):
+    @free_step(workflow=_ListWorkflow)
+    async def collect(events: list[Header]) -> StopEvent:  # type: ignore[unused-ignore]
+        return StopEvent(result="x")
 
-        @free_step(workflow=_ListWorkflow)
-        async def collect(events: list[Header]) -> StopEvent:  # type: ignore[unused-ignore]
-            return StopEvent(result="x")
+    cfg = collect._step_config
+    assert cfg.collection_param is not None
+    assert cfg.collection_param[0] == "events"
+    assert cfg.collection_param[1] == (Header,)
+    # The step routes on the element event type.
+    assert Header in cfg.accepted_events
+
+
+def test_list_union_event_param_accepted_as_flat_stream() -> None:
+    """A ``list[A | B]`` collect parameter is a flat heterogeneous stream."""
+
+    class _ListUnionWorkflow(Workflow):
+        pass
+
+    @free_step(workflow=_ListUnionWorkflow)
+    async def collect(events: list[Header | Body]) -> StopEvent:  # type: ignore[unused-ignore]
+        return StopEvent(result="x")
+
+    cfg = collect._step_config
+    assert cfg.collection_param is not None
+    assert cfg.collection_param[1] == (Header, Body)
+    # Both member types route to the step.
+    assert Header in cfg.accepted_events
+    assert Body in cfg.accepted_events
