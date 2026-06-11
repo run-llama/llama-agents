@@ -150,6 +150,21 @@ class StepWorkerResult(BaseModel):
     result: SerializableOptionalEvent = None
 
 
+class RetryDecision(BaseModel):
+    """The retry policy's verdict for a failure, recorded at failure time.
+
+    ``delay`` is seconds to wait before the next attempt, or None to stop
+    retrying. Journaling the decision inside the failure tick makes replay
+    independent of retry policy code: a policy whose parameters changed (or
+    whose jitter ignores the seed) between the live run and a replay would
+    otherwise recompute a different delay than the journaled TickWakeup.due,
+    leaving the queued attempt permanently ineligible.
+    """
+
+    model_config = ConfigDict(frozen=True)
+    delay: float | None = None
+
+
 class StepWorkerFailed(BaseModel):
     """Returned after a step function has failed."""
 
@@ -157,6 +172,9 @@ class StepWorkerFailed(BaseModel):
     type: Literal["failed"] = "failed"
     exception: SerializableException
     failed_at: float
+    # None on ticks journaled before decisions were recorded; the reducer
+    # falls back to recomputing via the policy (seeded jitter) for those.
+    retry_decision: RetryDecision | None = None
 
 
 class DeleteWaiter(BaseModel):

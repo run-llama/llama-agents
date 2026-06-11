@@ -12,7 +12,7 @@ import time
 from collections.abc import AsyncIterable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from workflows.errors import (
     WorkflowCancelledByUser,
@@ -34,6 +34,7 @@ from workflows.events import (
     WorkflowIdleEvent,
     WorkflowTimedOutEvent,
 )
+from workflows.retry_policy import RetryPolicy
 from workflows.runtime.types.commands import (
     CommandCompleteRun,
     CommandFailWorkflow,
@@ -71,6 +72,8 @@ from workflows.runtime.types.results import (
     DeleteCollectedEvent,
     DeleteWaiter,
     RetryAttempt,
+    RetryDecision,
+    StepFunctionResult,
     StepWorkerFailed,
     StepWorkerResult,
     StepWorkerState,
@@ -198,6 +201,7 @@ class _ControlLoopRunner:
         """
 
         async def _run_worker() -> TickStepResult:
+            worker: InProgressState | None = None
             try:
                 worker = next(
                     (
@@ -232,7 +236,9 @@ class _ControlLoopRunner:
                     step_name=command.step_name,
                     worker_id=command.id,
                     event=command.event,
-                    result=result,
+                    result=self._stamp_retry_decisions(
+                        command.step_name, worker, result
+                    ),
                 )
             except Exception as e:
                 if _is_shutdown_error(e):
@@ -241,20 +247,54 @@ class _ControlLoopRunner:
                     logger.error(
                         "error running step worker function: %s", e, exc_info=True
                     )
+                failed = StepWorkerFailed(
+                    exception=e, failed_at=await self.adapter.get_now()
+                )
                 return TickStepResult(
                     step_name=command.step_name,
                     worker_id=command.id,
                     event=command.event,
-                    result=[
-                        StepWorkerFailed(
-                            exception=e, failed_at=await self.adapter.get_now()
-                        )
-                    ],
+                    result=self._stamp_retry_decisions(
+                        command.step_name, worker, [failed]
+                    ),
                 )
 
         self._pending_workers.append(
             PendingWorker(command.step_name, command.id, _run_worker())
         )
+
+    def _stamp_retry_decisions(
+        self,
+        step_name: str,
+        worker: InProgressState | None,
+        results: list[StepFunctionResult],
+    ) -> list[StepFunctionResult]:
+        """Record the retry policy's verdict inside failure results.
+
+        Runs at tick creation, before the tick is journaled, so the decision
+        becomes replayable data: re-reducing the journaled tick reads the
+        verdict instead of re-invoking policy code, which may have changed
+        between the live run and a later replay.
+        """
+        if worker is None:
+            return results
+        policy = self.state.workers[step_name].config.retry_policy
+        out: list[StepFunctionResult] = []
+        for result in results:
+            if isinstance(result, StepWorkerFailed) and result.retry_decision is None:
+                delay = _decide_retry_delay(
+                    policy,
+                    elapsed_time=result.failed_at - worker.first_attempt_at,
+                    failures=worker.attempts + 1,
+                    exception=result.exception,
+                    run_id=self.adapter.run_id,
+                    step_name=step_name,
+                )
+                result = result.model_copy(
+                    update={"retry_decision": RetryDecision(delay=delay)}
+                )
+            out.append(result)
+        return out
 
     async def process_command(self, command: WorkflowCommand) -> None | StopEvent:
         """Process a single command returned from tick reduction."""
@@ -699,6 +739,39 @@ def _is_eligible(attempt: EventAttempt) -> bool:
     return attempt.not_before is None
 
 
+def _decide_retry_delay(
+    policy: RetryPolicy | None,
+    *,
+    elapsed_time: float,
+    failures: int,
+    exception: Exception,
+    run_id: str | None,
+    step_name: str,
+) -> float | None:
+    """Ask the retry policy for the delay before the next attempt.
+
+    Returns seconds to wait, or None to stop retrying. Jitter is seeded from
+    (run_id, step_name, failures) so the same failure always samples the same
+    delay — required when this runs during a replay of legacy ticks that did
+    not journal the decision. Policies whose ``next`` predates the ``seed``
+    kwarg are called without it.
+    """
+    if policy is None:
+        return None
+    jitter_seed = (
+        int(
+            hashlib.sha256(f"{run_id}:{step_name}:{failures}".encode()).hexdigest(),
+            16,
+        )
+        & 0xFFFF_FFFF
+        if run_id is not None
+        else None
+    )
+    next_params = inspect.signature(policy.next).parameters
+    seed_kwarg: dict[str, Any] = {"seed": jitter_seed} if "seed" in next_params else {}
+    return policy.next(elapsed_time, failures, exception, **seed_kwarg)
+
+
 def _drain_eligible_queue(
     step_name: str,
     state: InternalStepWorkerState,
@@ -839,28 +912,24 @@ def _process_step_result_tick(
                 )
         elif isinstance(result, StepWorkerFailed):
             # Schedule a retry if permitted, otherwise fail the workflow
-            retries = worker_state.config.retry_policy
-            failures = this_execution.attempts + 1
-            elapsed_time = result.failed_at - this_execution.first_attempt_at
-            jitter_seed = (
-                int(
-                    hashlib.sha256(
-                        f"{run_id}:{tick.step_name}:{failures}".encode()
-                    ).hexdigest(),
-                    16,
-                )
-                & 0xFFFF_FFFF
-                if run_id is not None
-                else None
-            )
-            if retries is not None:
-                _next_params = inspect.signature(retries.next).parameters
-                _seed_kwarg = {"seed": jitter_seed} if "seed" in _next_params else {}
-                delay = retries.next(
-                    elapsed_time, failures, result.exception, **_seed_kwarg
-                )
+            if result.retry_decision is not None:
+                # The decision was journaled inside the failure tick; replay
+                # consumes it as data and never re-invokes policy code, so a
+                # policy whose parameters changed between the live run and a
+                # replay cannot diverge from the journaled TickWakeup.due.
+                delay = result.retry_decision.delay
             else:
-                delay = None
+                # Legacy tick (journaled before decisions were recorded):
+                # recompute via the policy, seeding jitter from the run id so
+                # replay samples the same delay the live run did.
+                delay = _decide_retry_delay(
+                    worker_state.config.retry_policy,
+                    elapsed_time=result.failed_at - this_execution.first_attempt_at,
+                    failures=this_execution.attempts + 1,
+                    exception=result.exception,
+                    run_id=run_id,
+                    step_name=tick.step_name,
+                )
             if delay is not None:
                 # Re-queue the attempt directly into persisted state, carrying
                 # an absolute eligibility time. not_before derives from the

@@ -33,6 +33,7 @@ from workflows.retry_policy import (
     retry_policy,
     stop_after_attempt,
     wait_exponential_jitter,
+    wait_fixed,
 )
 from workflows.runtime.control_loop import (
     _add_or_enqueue_event,
@@ -70,6 +71,7 @@ from workflows.runtime.types.results import (
     AddWaiter,
     DeleteCollectedEvent,
     DeleteWaiter,
+    RetryDecision,
     StepFunctionResult,
     StepWorkerFailed,
     StepWorkerResult,
@@ -1028,6 +1030,122 @@ def test_replay_recomputes_jittered_not_before_with_run_id(
     )
     assert any(isinstance(c, CommandRunWorker) for c in flip_commands)
     assert flipped.workers["test_step"].queue == []
+
+
+class _MustNotBeInvokedPolicy:
+    """Retry policy that fails the test if the reducer consults it."""
+
+    def next(
+        self,
+        elapsed_time: float,
+        attempts: int,
+        error: Exception,
+        *,
+        seed: int | None = None,
+    ) -> float | None:
+        raise AssertionError(
+            "retry policy must not be re-invoked when the decision is journaled"
+        )
+
+
+def test_journaled_retry_decision_is_used_without_invoking_policy(
+    base_state: BrokerState,
+) -> None:
+    """A failure tick carrying a retry decision never re-invokes policy code.
+
+    The live runner stamps the decision into StepWorkerFailed before the tick
+    is journaled; reduction (live and replay alike) consumes it as data.
+    """
+    base_state.workers["test_step"].config.retry_policy = _MustNotBeInvokedPolicy()
+    event = MyTestEvent(value=42)
+    add_worker(base_state, event)
+    fail_tick: TickStepResult = TickStepResult(
+        step_name="test_step",
+        worker_id=0,
+        event=event,
+        result=[
+            StepWorkerFailed(
+                exception=ValueError("test"),
+                failed_at=110.0,
+                retry_decision=RetryDecision(delay=1.0),
+            )
+        ],
+    )
+
+    state, commands = _process_step_result_tick(fail_tick, base_state, 110.0)
+
+    assert state.workers["test_step"].queue[0].not_before == 111.0
+    wakeups = [c for c in commands if isinstance(c, CommandScheduleWakeup)]
+    assert len(wakeups) == 1
+    assert wakeups[0].at_time == 111.0
+
+
+def test_journaled_stop_decision_fails_workflow_even_if_policy_would_retry(
+    base_state: BrokerState,
+) -> None:
+    """RetryDecision(delay=None) means stop, regardless of current policy."""
+    base_state.workers["test_step"].config.retry_policy = ConstantDelayRetryPolicy(
+        maximum_attempts=10, delay=1.0
+    )
+    event = MyTestEvent(value=42)
+    add_worker(base_state, event)
+    fail_tick: TickStepResult = TickStepResult(
+        step_name="test_step",
+        worker_id=0,
+        event=event,
+        result=[
+            StepWorkerFailed(
+                exception=ValueError("test"),
+                failed_at=110.0,
+                retry_decision=RetryDecision(delay=None),
+            )
+        ],
+    )
+
+    state, commands = _process_step_result_tick(fail_tick, base_state, 110.0)
+
+    assert state.workers["test_step"].queue == []
+    assert any(isinstance(c, CommandFailWorkflow) for c in commands)
+
+
+def test_replay_with_changed_policy_honors_journaled_decision(
+    base_state: BrokerState,
+) -> None:
+    """Replay after a retry-policy change must not strand the delayed attempt.
+
+    The live run sampled delay=1.0 and journaled it in the failure tick along
+    with TickWakeup(due=111.0). If replay re-invoked the (now changed) policy,
+    the recomputed not_before (160.0) would exceed the journaled due, the
+    attempt would never flip eligible, and the retry's step-result tick would
+    crash the rebuild.
+    """
+    event = MyTestEvent(value=42)
+    fail_tick: TickStepResult = TickStepResult(
+        step_name="test_step",
+        worker_id=0,
+        event=event,
+        result=[
+            StepWorkerFailed(
+                exception=ValueError("test"),
+                failed_at=110.0,
+                retry_decision=RetryDecision(delay=1.0),
+            )
+        ],
+    )
+
+    # The policy was reconfigured between the live run and this replay
+    base_state.workers["test_step"].config.retry_policy = retry_policy(
+        wait=wait_fixed(50.0), stop=stop_after_attempt(5)
+    )
+    add_worker(base_state, event)
+
+    replayed = rebuild_state_from_ticks(base_state, [fail_tick], run_id="test-run-id")
+    assert replayed.workers["test_step"].queue[0].not_before == 111.0
+
+    flipped, commands = _reduce_tick(TickWakeup(due=111.0), replayed, 99_999.0)
+    assert any(isinstance(c, CommandRunWorker) for c in commands)
+    assert flipped.workers["test_step"].queue == []
+    assert flipped.workers["test_step"].in_progress[0].attempts == 1
 
 
 # =============================================================================

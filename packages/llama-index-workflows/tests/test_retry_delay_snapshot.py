@@ -13,6 +13,7 @@ resumed run would hang.
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 from typing import Any
 
@@ -251,3 +252,70 @@ async def test_snapshot_after_interleaved_event_in_delay_window() -> None:
 
     ctx_dict = handler.ctx.to_dict()
     assert ctx_dict["workers"]["flaky"]["queue"] == []
+
+
+class _UnseededRandomDelayPolicy:
+    """Out-of-contract policy: random delay, ignores the seed kwarg entirely.
+
+    Replaying a journal can't re-sample this policy and get the same delay.
+    """
+
+    def next(
+        self,
+        elapsed_time: float,
+        attempts: int,
+        error: Exception,
+        *,
+        seed: int | None = None,
+    ) -> float | None:
+        if attempts >= 3:
+            return None
+        return random.uniform(0.05, 0.4)
+
+
+class UnseededRandomFlakyWorkflow(Workflow):
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.attempts = 0
+
+    @step(retry_policy=_UnseededRandomDelayPolicy())
+    async def flaky(self, ev: StartEvent) -> StopEvent:
+        self.attempts += 1
+        if self.attempts == 1:
+            raise RuntimeError("first attempt fails")
+        return StopEvent(result="ok")
+
+
+@pytest.mark.asyncio
+async def test_snapshot_rebuild_with_unseeded_random_policy() -> None:
+    """Rebuild never re-samples the policy: the decision is journaled.
+
+    Regression: the reducer re-invoked the retry policy when replaying the
+    failure tick. A policy that ignores the jitter seed (or whose parameters
+    changed between run and replay) recomputed a not_before that didn't match
+    the journaled TickWakeup.due, so the attempt never flipped eligible and
+    the rebuild crashed on the retry's step-result tick. The decision now
+    rides inside the failure tick, making replay independent of policy code.
+    """
+    for _ in range(3):
+        wf = UnseededRandomFlakyWorkflow(timeout=10.0)
+        handler = wf.run()
+
+        # Hammer to_dict during the delay window: every call replays the
+        # journal, and each must agree with the live run's sampled delay.
+        assert handler.ctx is not None
+        seen: set[float] = set()
+        while True:
+            ctx_dict = handler.ctx.to_dict()
+            queue = ctx_dict["workers"]["flaky"]["queue"]
+            if wf.attempts >= 2 or not queue:
+                break
+            if queue[0]["not_before"] is not None:
+                seen.add(queue[0]["not_before"])
+            await asyncio.sleep(0.001)
+
+        result = await handler
+        assert result == "ok"
+        assert wf.attempts == 2
+        # Every rebuild observed the same journaled eligibility time
+        assert len(seen) <= 1
