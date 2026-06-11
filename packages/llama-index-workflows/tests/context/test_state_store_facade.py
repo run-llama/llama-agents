@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
@@ -40,6 +42,10 @@ class FakeDurableStorage:
     async def save(self, record: StateRecord) -> None:
         self.save_count += 1
         self.record = record.model_copy()
+
+    @asynccontextmanager
+    async def session(self) -> AsyncIterator[FakeDurableStorage]:
+        yield self
 
     def to_handle(self) -> dict[str, Any]:
         return {"store_type": "fake", "run_id": self.run_id}

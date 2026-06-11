@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 import pytest
 from llama_agents.server import HandlerQuery, SqliteWorkflowStore
@@ -253,6 +254,34 @@ async def test_get_inside_edit_state_does_not_deadlock(
             return int(await store.get("counter"))
 
     assert await asyncio.wait_for(nested_read(), timeout=2.0) == 1
+
+
+# -- Writer-scoped connection sessions --
+
+
+@pytest.mark.asyncio
+async def test_set_state_opens_exactly_one_connection(
+    store: SqliteStateStore[DictState], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In default multi-connection mode, a write's load+save share one connection."""
+    await store.set("x", 1)  # materialize the row before counting
+
+    connect_count = 0
+    real_connect = sqlite3.connect
+
+    def counting_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        nonlocal connect_count
+        connect_count += 1
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", counting_connect)
+
+    await store.set_state(DictState(y=2))
+    assert connect_count == 1
+
+    connect_count = 0
+    await store.clear()
+    assert connect_count == 1
 
 
 # -- Persistence across instances --

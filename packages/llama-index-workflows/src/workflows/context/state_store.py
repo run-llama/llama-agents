@@ -81,6 +81,15 @@ class _StateStorage(Protocol):
         """Persist a raw state record."""
         ...
 
+    def session(self) -> AsyncContextManager[_StateStorage]:
+        """Scope a load+save pair to one backend connection.
+
+        Yields a *separate* storage value bound to that connection; the
+        receiver storage (and concurrent readers going through it) stays
+        untouched. Backends without per-call connections yield themselves.
+        """
+        ...
+
 
 @runtime_checkable
 class StateStorage(_StateStorage, Protocol):
@@ -653,6 +662,11 @@ class StateStoreFacade(Generic[MODEL_T]):
         serializer: BaseSerializer | None = None,
     ) -> None:
         self._storage = storage
+        # The durability decision is made exactly once, here; everything
+        # downstream branches on this typed field.
+        self._durable: StateStorage | None = (
+            storage if isinstance(storage, StateStorage) else None
+        )
         self.state_type = state_type or DictState  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
         self._serializer = serializer or JsonSerializer()
         self._pending_seed: _CopySeed | _PayloadSeed | None = None
@@ -660,9 +674,8 @@ class StateStoreFacade(Generic[MODEL_T]):
     @property
     def run_id(self) -> str:
         """Run id of the durable storage target."""
-        storage = self._storage
-        if isinstance(storage, StateStorage):
-            return storage.run_id
+        if self._durable is not None:
+            return self._durable.run_id
         raise AttributeError("run_id is only available on durable state stores")
 
     @functools.cached_property
@@ -688,10 +701,10 @@ class StateStoreFacade(Generic[MODEL_T]):
         """
         if not payload:
             raise ValueError("Cannot seed state store from an empty payload")
-        if isinstance(self._storage, StateStorage):
-            handle = self._storage.parse_own_handle(payload)
+        if self._durable is not None:
+            handle = self._durable.parse_own_handle(payload)
             if handle is not None:
-                own = self._storage.parse_own_handle(self._storage.to_handle())
+                own = self._durable.parse_own_handle(self._durable.to_handle())
                 # Same target: state already lives in the backend, nothing
                 # to copy (and any previously staged seed is superseded).
                 self._pending_seed = None if handle == own else _CopySeed(handle)
@@ -713,8 +726,9 @@ class StateStoreFacade(Generic[MODEL_T]):
             if seed is None:
                 return
             if isinstance(seed, _CopySeed):
-                durable = cast(StateStorage, self._storage)
-                await durable.copy_from_handle(seed.handle)
+                # add_seed only stages _CopySeed on durable storage.
+                assert self._durable is not None
+                await self._durable.copy_from_handle(seed.handle)
             else:
                 state = decode_seed_state(seed.payload, seed.serializer)
                 # Bypass _save_state: its ensure_seeded re-entry would
@@ -728,32 +742,43 @@ class StateStoreFacade(Generic[MODEL_T]):
             if self._pending_seed is seed:
                 self._pending_seed = None
 
-    async def _load_state_or_none(self) -> MODEL_T | None:
+    async def _load_state_or_none(
+        self, storage: _StateStorage | None = None
+    ) -> MODEL_T | None:
         await self.ensure_seeded()
-        record = await self._storage.load()
+        record = await (storage or self._storage).load()
         if record is None:
             return None
         return cast(MODEL_T, decode_state(record.data, self._serializer))
 
-    async def _load_state(self) -> MODEL_T:
-        state = await self._load_state_or_none()
+    async def _load_state(self, storage: _StateStorage | None = None) -> MODEL_T:
+        state = await self._load_state_or_none(storage)
         if state is not None:
             return state
         # Reads are pure: return a default without persisting it.
         return self._create_default_state()
 
-    async def _save_state(self, state: BaseModel) -> None:
+    async def _save_state(
+        self, state: BaseModel, storage: _StateStorage | None = None
+    ) -> None:
         await self.ensure_seeded()
-        await self._write_state(state)
+        await self._write_state(state, storage)
 
-    async def _write_state(self, state: BaseModel) -> None:
-        """Single save chokepoint: durable rows persist string data."""
-        if isinstance(self._storage, StateStorage):
-            await self._storage.save(string_record_from_state(state, self._serializer))
-        else:
-            await self._storage.save(_record_from_state(state, self._serializer))
+    async def _write_state(
+        self, state: BaseModel, storage: _StateStorage | None = None
+    ) -> None:
+        """Single save chokepoint: persists string records.
 
-    async def _load_state_for_edit(self) -> MODEL_T:
+        Non-durable facades override this (`InMemoryStateStore` saves
+        live-model records instead).
+        """
+        await (storage or self._storage).save(
+            string_record_from_state(state, self._serializer)
+        )
+
+    async def _load_state_for_edit(
+        self, storage: _StateStorage | None = None
+    ) -> MODEL_T:
         """State instance handed to `edit_state`.
 
         Must be isolated from concurrent readers: mutations inside the
@@ -762,7 +787,7 @@ class StateStoreFacade(Generic[MODEL_T]):
         from the committed row); in-memory storage overrides this to edit
         a copy of its live record.
         """
-        return await self._load_state()
+        return await self._load_state(storage)
 
     async def get_state(self) -> MODEL_T:
         """Return a copy of the current state model.
@@ -776,11 +801,12 @@ class StateStoreFacade(Generic[MODEL_T]):
     async def set_state(self, state: MODEL_T) -> None:
         """Replace or merge into the current state model."""
         async with self._lock.acquire_write():
-            current = await self._load_state_or_none()
-            merged: BaseModel = (
-                state if current is None else merge_state(current, state)
-            )
-            await self._save_state(merged)
+            async with self._storage.session() as storage:
+                current = await self._load_state_or_none(storage)
+                merged: BaseModel = (
+                    state if current is None else merge_state(current, state)
+                )
+                await self._save_state(merged, storage)
 
     async def get(self, path: str, default: Any = Ellipsis) -> Any:
         """Get a nested value using dot-separated paths.
@@ -803,9 +829,10 @@ class StateStoreFacade(Generic[MODEL_T]):
         is empty.
         """
         async with self._lock.acquire_write():
-            current = await self._load_state_or_none()
-            target = type(current) if current is not None else self.state_type
-            await self._save_state(create_cleared_state(target))
+            async with self._storage.session() as storage:
+                current = await self._load_state_or_none(storage)
+                target = type(current) if current is not None else self.state_type
+                await self._save_state(create_cleared_state(target), storage)
 
     @asynccontextmanager
     async def edit_state(self) -> AsyncGenerator[MODEL_T, None]:
@@ -818,9 +845,10 @@ class StateStoreFacade(Generic[MODEL_T]):
         RuntimeError.
         """
         async with self._lock.acquire_write():
-            state = await self._load_state_for_edit()
-            yield state
-            await self._save_state(state)
+            async with self._storage.session() as storage:
+                state = await self._load_state_for_edit(storage)
+                yield state
+                await self._save_state(state, storage)
 
     async def snapshot(self, serializer: BaseSerializer) -> dict[str, Any]:
         """Serialize portable state data."""
@@ -837,8 +865,8 @@ class StateStoreFacade(Generic[MODEL_T]):
         seeds.
         """
         await self.ensure_seeded()
-        if isinstance(self._storage, StateStorage):
-            return self._storage.to_handle()
+        if self._durable is not None:
+            return self._durable.to_handle()
         return await self.snapshot(serializer)
 
     def to_dict(self, serializer: BaseSerializer) -> dict[str, Any]:
@@ -847,8 +875,8 @@ class StateStoreFacade(Generic[MODEL_T]):
         Durable stores return a reconnect handle. Non-durable storage has no
         sync snapshot here; `InMemoryStateStore` overrides this.
         """
-        if isinstance(self._storage, StateStorage):
-            return self._storage.to_handle()
+        if self._durable is not None:
+            return self._durable.to_handle()
         raise NotImplementedError("Use await snapshot(serializer) for async storage")
 
 
@@ -872,6 +900,11 @@ class _InMemoryStateStorage:
 
     async def save(self, record: StateRecord) -> None:
         self._record = record.model_copy()
+
+    @asynccontextmanager
+    async def session(self) -> AsyncGenerator[_InMemoryStateStorage, None]:
+        # No per-call connections: the storage scopes itself.
+        yield self
 
     def load_sync(self) -> StateRecord | None:
         return self._record.model_copy() if self._record is not None else None
@@ -931,12 +964,14 @@ class InMemoryStateStore(StateStoreFacade[MODEL_T]):
             JsonSerializer(),
         )
 
-    async def _load_state_for_edit(self) -> MODEL_T:
+    async def _load_state_for_edit(
+        self, storage: _StateStorage | None = None
+    ) -> MODEL_T:
         # The live record IS the committed state. Hand `edit_state` a deep
         # copy so lockless readers keep seeing the committed state until
         # the block commits (matching durable backends, where each load
         # decodes a fresh instance from the committed row).
-        state = await self._load_state()
+        state = await self._load_state(storage)
         return state.model_copy(deep=True)
 
     def to_dict(self, serializer: "BaseSerializer") -> dict[str, Any]:
@@ -960,8 +995,12 @@ class InMemoryStateStore(StateStoreFacade[MODEL_T]):
         state = cast(MODEL_T, record.data) if record is not None else self.state_type()
         return create_in_memory_payload(state, serializer).model_dump()
 
-    async def _write_state(self, state: BaseModel) -> None:
-        # Live-model record: no encoding, value identity preserved.
+    async def _write_state(
+        self, state: BaseModel, storage: _StateStorage | None = None
+    ) -> None:
+        # Live-model record: no encoding, value identity preserved. The
+        # in-memory session yields the storage itself, so writes always
+        # land in self._memory_storage.
         await self._memory_storage.save(_live_record(state))
 
     @classmethod

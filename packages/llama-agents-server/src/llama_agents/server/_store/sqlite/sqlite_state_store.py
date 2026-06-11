@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from typing import Any, Generic, Literal
 
@@ -58,6 +58,22 @@ class _SqliteStateStorage:
         conn = sqlite3.connect(self._db_path, timeout=30.0)
         try:
             yield conn
+        finally:
+            conn.close()
+
+    @asynccontextmanager
+    async def session(self) -> AsyncIterator[_SqliteStateStorage]:
+        """Scope a load+save pair to one connection.
+
+        Yields a separate conn-bound storage so concurrent readers on this
+        storage keep opening their own connections.
+        """
+        if self._shared_conn is not None:
+            yield self
+            return
+        conn = sqlite3.connect(self._db_path, timeout=30.0)
+        try:
+            yield _SqliteStateStorage(self._db_path, self._run_id, connection=conn)
         finally:
             conn.close()
 

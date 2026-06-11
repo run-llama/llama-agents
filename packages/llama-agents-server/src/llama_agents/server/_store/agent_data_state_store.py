@@ -4,12 +4,14 @@
 
 from __future__ import annotations
 
-from typing import Any, Generic, Literal
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Any, Generic, Literal, cast
 
 from pydantic import BaseModel
 from typing_extensions import TypeVar
 from workflows.context.serializers import BaseSerializer
-from workflows.context.state_store import DictState
+from workflows.context.state_store import DictState, _StateStorage
 from workflows.context.state_store_integration import (
     StateRecord,
     StateStoreFacade,
@@ -44,8 +46,8 @@ class _AgentDataStateStorage:
     """Raw state storage backed by the LlamaCloud Agent Data API.
 
     Uses a single item in a ``workflow_state`` collection, keyed by ``run_id``.
-    Caches the item id and last-seen record to avoid a search round-trip per
-    operation.
+    Caches the item id (the run→item-id mapping is immutable) to avoid a
+    search round-trip per operation.
     """
 
     def __init__(
@@ -59,11 +61,15 @@ class _AgentDataStateStorage:
         self._run_id = run_id
         self._collection = collection
         self._item_id: str | None = None
-        self._cached_record: StateRecord | None = None
 
     @property
     def run_id(self) -> str:
         return self._run_id
+
+    @asynccontextmanager
+    async def session(self) -> AsyncIterator[_AgentDataStateStorage]:
+        # HTTP-backed: no per-call connections, the storage scopes itself.
+        yield self
 
     async def _load_record(self) -> _AgentDataStateRecord | None:
         items = await self._client.search(
@@ -77,13 +83,10 @@ class _AgentDataStateStorage:
         return _AgentDataStateRecord.model_validate(items[0]["data"])
 
     async def load(self) -> StateRecord | None:
-        if self._cached_record is not None:
-            return self._cached_record.model_copy(deep=True)
         record = await self._load_record()
         if record is None:
             return None
-        self._cached_record = StateRecord(data=record.data)
-        return self._cached_record.model_copy(deep=True)
+        return StateRecord(data=record.data)
 
     async def save(self, record: StateRecord) -> None:
         stored = _AgentDataStateRecord(
@@ -108,7 +111,6 @@ class _AgentDataStateStorage:
             else:
                 result = await self._client.create(self._collection, payload)
                 self._item_id = result["id"]
-        self._cached_record = StateRecord(data=stored.data)
 
     def to_handle(self) -> dict[str, Any]:
         payload = AgentDataSerializedState(
@@ -126,8 +128,8 @@ class _AgentDataStateStorage:
     async def copy_from_handle(self, handle: AgentDataSerializedState) -> None:
         """Copy the source target's record into this one (no-op if absent).
 
-        Goes through ``save`` so ``_cached_record``/``_item_id`` stay
-        consistent with the copied row.
+        Goes through ``save`` so ``_item_id`` stays consistent with the
+        copied row.
         """
         source = _AgentDataStateStorage(
             client=self._client,
@@ -141,7 +143,13 @@ class _AgentDataStateStorage:
 
 
 class AgentDataStateStore(StateStoreFacade[MODEL_T], Generic[MODEL_T]):
-    """StateStore facade backed by Agent Data storage."""
+    """StateStore facade backed by Agent Data storage.
+
+    Caches the decoded state model: the backend is a database over HTTP and
+    reads are single-process, so reads after the first skip the round-trip
+    and the re-decode. The cached instance is private — loads and saves
+    exchange deep copies, never the cached object itself.
+    """
 
     def __init__(
         self,
@@ -157,6 +165,35 @@ class AgentDataStateStore(StateStoreFacade[MODEL_T], Generic[MODEL_T]):
             state_type,
             serializer,
         )
+        self._cached_state: MODEL_T | None = None
+
+    async def ensure_seeded(self) -> None:
+        if self._pending_seed is None:
+            return
+        await super().ensure_seeded()
+        # Seed materialization can bypass _write_state (copy_from_handle),
+        # so any materialized seed drops the cache.
+        self._cached_state = None
+
+    async def _load_state_or_none(
+        self, storage: _StateStorage | None = None
+    ) -> MODEL_T | None:
+        # The cache check must come after seeding: a late re-staged seed
+        # invalidates the cache in ensure_seeded.
+        await self.ensure_seeded()
+        if self._cached_state is not None:
+            return self._cached_state.model_copy(deep=True)
+        state = await super()._load_state_or_none(storage)
+        if state is not None:
+            self._cached_state = state.model_copy(deep=True)
+        return state
+
+    async def _write_state(
+        self, state: BaseModel, storage: _StateStorage | None = None
+    ) -> None:
+        await super()._write_state(state, storage)
+        # The caller still holds a reference to `state`; cache a private copy.
+        self._cached_state = cast(MODEL_T, state.model_copy(deep=True))
 
     @classmethod
     def from_dict(

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Generic, Literal
 
@@ -39,10 +41,12 @@ class _PostgresStateStorage:
         pool: asyncpg.Pool,
         run_id: str,
         schema: str | None = None,
+        connection: asyncpg.Connection | asyncpg.pool.PoolConnectionProxy | None = None,
     ) -> None:
         self._pool = pool
         self._run_id = run_id
         self._schema = schema
+        self._shared_conn = connection
 
     @property
     def run_id(self) -> str:
@@ -54,9 +58,35 @@ class _PostgresStateStorage:
             return f"{self._schema}.workflow_state"
         return "workflow_state"
 
+    @asynccontextmanager
+    async def _acquire(
+        self,
+    ) -> AsyncIterator[asyncpg.Connection | asyncpg.pool.PoolConnectionProxy]:
+        """One query-API surface: the bound connection or a pool checkout."""
+        if self._shared_conn is not None:
+            yield self._shared_conn
+            return
+        async with self._pool.acquire() as conn:
+            yield conn
+
+    @asynccontextmanager
+    async def session(self) -> AsyncIterator[_PostgresStateStorage]:
+        """Scope a load+save pair to one pool connection.
+
+        Yields a separate conn-bound storage so concurrent readers on this
+        storage keep acquiring their own connections.
+        """
+        if self._shared_conn is not None:
+            yield self
+            return
+        async with self._pool.acquire() as conn:
+            yield _PostgresStateStorage(
+                self._pool, self._run_id, self._schema, connection=conn
+            )
+
     async def load(self) -> StateRecord | None:
         """Load raw state from the database."""
-        async with self._pool.acquire() as conn:
+        async with self._acquire() as conn:
             row = await conn.fetchrow(
                 f"SELECT state_json FROM {self._table_ref} WHERE run_id = $1",
                 self._run_id,
@@ -68,7 +98,7 @@ class _PostgresStateStorage:
     async def save(self, record: StateRecord) -> None:
         """Save raw state to the database via upsert."""
         now = _utc_now()
-        async with self._pool.acquire() as conn:
+        async with self._acquire() as conn:
             await conn.execute(
                 f"""
                 INSERT INTO {self._table_ref} (run_id, state_json, state_type, state_module, created_at, updated_at)
@@ -101,7 +131,7 @@ class _PostgresStateStorage:
     async def copy_from_handle(self, handle: PostgresSerializedState) -> None:
         """Copy state from another run's row using SQL INSERT...SELECT."""
         now = _utc_now()
-        async with self._pool.acquire() as conn:
+        async with self._acquire() as conn:
             await conn.execute(
                 f"""
                 INSERT INTO {self._table_ref} (run_id, state_json, state_type, state_module, created_at, updated_at)

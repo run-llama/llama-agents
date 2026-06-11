@@ -18,6 +18,7 @@ from llama_agents.server._store.agent_data_state_store import AgentDataStateStor
 from llama_agents.server._store.agent_data_store import AgentDataStore
 from llama_agents_integration_tests.fake_agent_data import (
     FakeAgentDataBackend,
+    create_agent_data_state_store,
     create_agent_data_store,
 )
 from pydantic import BaseModel
@@ -638,6 +639,82 @@ async def test_legacy_agent_data_typed_state_decodes_without_metadata(
     assert isinstance(state, AgentDataCounterState)
     assert state.count == 7
     assert state.label == "legacy"
+
+
+# ---------------------------------------------------------------------------
+# Decoded-state cache (AgentDataStateStore)
+# ---------------------------------------------------------------------------
+
+
+def _count_backend_searches(
+    backend: FakeAgentDataBackend, monkeypatch: pytest.MonkeyPatch
+) -> list[int]:
+    """Count search round-trips reaching the fake backend."""
+    counter = [0]
+    original = backend.search
+
+    def counting_search(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        counter[0] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(backend, "search", counting_search)
+    return counter
+
+
+@pytest.mark.asyncio
+async def test_consecutive_reads_hit_backend_once(
+    backend: FakeAgentDataBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    writer = create_agent_data_state_store(backend, monkeypatch, "run-read-cache")
+    await writer.set("k", "v")
+
+    reader = create_agent_data_state_store(backend, monkeypatch, "run-read-cache")
+    searches = _count_backend_searches(backend, monkeypatch)
+
+    assert (await reader.get_state())["k"] == "v"
+    assert (await reader.get_state())["k"] == "v"
+
+    assert searches[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_read_after_write_skips_backend(
+    backend: FakeAgentDataBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_store = create_agent_data_state_store(backend, monkeypatch, "run-write-cache")
+    await state_store.set("k", "v")
+
+    searches = _count_backend_searches(backend, monkeypatch)
+    assert await state_store.get("k") == "v"
+    assert searches[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_mutating_returned_state_does_not_poison_cache(
+    backend: FakeAgentDataBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_store = create_agent_data_state_store(backend, monkeypatch, "run-mutate")
+    await state_store.set("nums", [1])
+
+    state = await state_store.get_state()
+    state["nums"].append(2)
+
+    assert await state_store.get("nums") == [1]
+
+
+@pytest.mark.asyncio
+async def test_restaged_seed_invalidates_cached_state(
+    backend: FakeAgentDataBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    serializer = JsonSerializer()
+    state_store = create_agent_data_state_store(backend, monkeypatch, "run-reseed")
+    await state_store.set("token", "old")
+    assert await state_store.get("token") == "old"  # cache is warm
+
+    seed = InMemoryStateStore(DictState(token="new")).to_dict(serializer)
+    state_store.add_seed(seed, serializer)
+
+    assert await state_store.get("token") == "new"
 
 
 # ---------------------------------------------------------------------------
