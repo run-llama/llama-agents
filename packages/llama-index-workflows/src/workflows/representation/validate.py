@@ -6,6 +6,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
+from workflows._event_matching import is_subclass, step_accepts_type, type_matches
 from workflows.decorators import CatchErrorHandler, StepConfig, WorkflowGraphCheck
 from workflows.errors import WorkflowConfigurationError, WorkflowValidationError
 from workflows.events import (
@@ -74,24 +75,23 @@ def build_step_graph(
         for ev in cfg.accepted_events:
             event_types.add(ev)
 
-    # Build event→step edges using subclass-aware matching if opted in.
-    # If a produced event is a subclass of an accepted event, add an edge.
+    # Build event→step edges. A step consumes an event when its type matches one
+    # of the step's accepted events (subclass-aware when the step opted in).
     for ev_type in event_types:
         for name, cfg in steps.items():
-            for accepted in cfg.accepted_events:
-                if cfg.accept_event_subclasses:
-                    match = issubclass(ev_type, accepted)
-                else:
-                    match = ev_type is accepted
-                if match:
-                    outgoing.setdefault(ev_type, []).append(name)
+            if step_accepts_type(
+                ev_type,
+                cfg.accepted_events,
+                allow_subclasses=cfg.accept_event_subclasses,
+            ):
+                outgoing.setdefault(ev_type, []).append(name)
 
     # Forward DFS from StartEvent + HumanResponseEvent subclasses +
     # catch_error handler step names (their sub-graphs are reachable via
     # runtime routing of StepFailedEvent, not via any event in the graph).
     seeds: list[GraphNode] = [start_event_class]
     for ev_type in event_types:
-        if issubclass(ev_type, HumanResponseEvent) and ev_type not in seeds:
+        if is_subclass(ev_type, HumanResponseEvent) and ev_type not in seeds:
             seeds.append(ev_type)
     for handler_name in catch_error_steps or []:
         if handler_name not in seeds:
@@ -108,7 +108,7 @@ def build_step_graph(
     output_seeds: list[GraphNode] = [
         ev_type
         for ev_type in event_types
-        if issubclass(ev_type, (StopEvent, InputRequiredEvent))
+        if is_subclass(ev_type, (StopEvent, InputRequiredEvent))
     ]
     reverse_reachable = _dfs(output_seeds, incoming)
 
@@ -207,7 +207,7 @@ def validate_graph(
             targets = graph.outgoing.get(ev_type, [])
             if any(t in graph.step_names for t in targets):
                 continue
-            if issubclass(ev_type, (StopEvent, InputRequiredEvent)):
+            if is_subclass(ev_type, (StopEvent, InputRequiredEvent)):
                 continue
             dangling.append(ev_type)
         if dangling:
@@ -312,7 +312,7 @@ def _ensure_start_event_class(
     start_events_found: set[type[StartEvent]] = set()
     for cfg in steps.values():
         for event_type in cfg.accepted_events:
-            if isinstance(event_type, type) and issubclass(event_type, StartEvent):
+            if is_subclass(event_type, StartEvent):
                 start_events_found.add(event_type)
 
     num_found = len(start_events_found)
@@ -341,7 +341,7 @@ def _ensure_stop_event_class(
     stop_events_found: set[type[StopEvent]] = set()
     for cfg in steps.values():
         for event_type in cfg.return_types:
-            if isinstance(event_type, type) and issubclass(event_type, StopEvent):
+            if is_subclass(event_type, StopEvent):
                 stop_events_found.add(event_type)
 
     num_found = len(stop_events_found)
@@ -367,10 +367,10 @@ def _collect_events(steps: dict[str, StepConfig]) -> list[type[Event]]:
     events_found: set[type[Event]] = set()
     for cfg in steps.values():
         for event_type in cfg.return_types:
-            if isinstance(event_type, type) and issubclass(event_type, Event):
+            if is_subclass(event_type, Event):
                 events_found.add(event_type)
         for event_type in cfg.accepted_events:
-            if isinstance(event_type, type) and issubclass(event_type, Event):
+            if is_subclass(event_type, Event):
                 events_found.add(event_type)
     return list(events_found)
 
@@ -461,7 +461,7 @@ def _validate_event_connectivity(
 
     for name, cfg in steps.items():
         for event_type in cfg.accepted_events:
-            if issubclass(event_type, StopEvent):
+            if is_subclass(event_type, StopEvent):
                 steps_accepting_stop_event.append(name)
                 break
         for event_type in cfg.accepted_events:
@@ -480,20 +480,21 @@ def _validate_event_connectivity(
             "Use a different Event type instead."
         )
 
+    # An accepted event is satisfied when some produced event matches it (under
+    # the consuming step's matching mode); otherwise it is consumed but never
+    # produced.
+    boundary_in = (InputRequiredEvent, HumanResponseEvent, StopEvent, StepFailedEvent)
     unconsumed_events = set()
-    for name, cfg in steps.items():
+    for cfg in steps.values():
         for event_type in cfg.accepted_events:
-            if issubclass(
-                event_type,
-                (InputRequiredEvent, HumanResponseEvent, StopEvent, StepFailedEvent),
-            ):
+            if is_subclass(event_type, boundary_in):
                 continue
-
-            if cfg.accept_event_subclasses:
-                satisfied = any(issubclass(p, event_type) for p in produced_events)
-            else:
-                satisfied = event_type in produced_events
-
+            satisfied = any(
+                type_matches(
+                    p, event_type, allow_subclasses=cfg.accept_event_subclasses
+                )
+                for p in produced_events
+            )
             if not satisfied:
                 unconsumed_events.add(event_type)
 
@@ -503,25 +504,19 @@ def _validate_event_connectivity(
             f"The following events are consumed but never produced: {names}"
         )
 
+    # A produced event is unused when no step accepts it (under that step's
+    # matching mode). Boundary-out events may legitimately leave the workflow.
+    boundary_out = (InputRequiredEvent, HumanResponseEvent, StopEvent)
     unused_events = set()
     for x in produced_events:
-        if issubclass(x, (InputRequiredEvent, HumanResponseEvent, StopEvent)):
+        if is_subclass(x, boundary_out):
             continue
-
-        consumed = False
-        for name, cfg in steps.items():
-            for accepted in cfg.accepted_events:
-                if cfg.accept_event_subclasses:
-                    if issubclass(x, accepted):
-                        consumed = True
-                        break
-                else:
-                    if x is accepted:
-                        consumed = True
-                        break
-            if consumed:
-                break
-
+        consumed = any(
+            step_accepts_type(
+                x, cfg.accepted_events, allow_subclasses=cfg.accept_event_subclasses
+            )
+            for cfg in steps.values()
+        )
         if not consumed:
             unused_events.add(x)
 
@@ -531,8 +526,8 @@ def _validate_event_connectivity(
             f"The following events are produced but never consumed: {names}"
         )
 
-    return any(issubclass(p, InputRequiredEvent) for p in produced_events) or any(
-        issubclass(c, HumanResponseEvent) for c in consumed_events
+    return any(is_subclass(p, InputRequiredEvent) for p in produced_events) or any(
+        is_subclass(c, HumanResponseEvent) for c in consumed_events
     )
 
 

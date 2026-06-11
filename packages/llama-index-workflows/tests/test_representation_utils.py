@@ -1198,3 +1198,25 @@ def test_representation_handles_generic_annotations() -> None:
     # This should not raise TypeError during issubclass check, even before Python 3.10 safety commit
     graph = get_workflow_representation(workflow=wf)
     assert graph.name == "GenericAnnotationWorkflow"
+
+
+def test_representation_subclass_fanout_has_no_duplicate_edges() -> None:
+    """A subclass-opted-in step accepting both a base and its subclass should not
+    emit duplicate event→step edges for the overlapping subclass."""
+
+    class FanoutWorkflow(Workflow):
+        @step
+        async def start_step(self, ev: StartEvent) -> RepChildEvent:
+            return RepChildEvent(value="test")
+
+        @step(accept_event_subclasses=True)
+        async def handle_step(self, ev: RepParentEvent | RepChildEvent) -> StopEvent:
+            return StopEvent(result=ev.value)
+
+    wf = FanoutWorkflow()
+    graph = get_workflow_representation(workflow=wf)
+
+    # Raw edge list (not the de-duplicating set) must contain each edge once.
+    raw_edges = [(e.source, e.target, e.label) for e in graph.edges]
+    assert raw_edges.count(("RepChildEvent", "handle_step", None)) == 1
+    assert raw_edges.count(("RepParentEvent", "handle_step", None)) == 1
