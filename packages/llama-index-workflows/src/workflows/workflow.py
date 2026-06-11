@@ -17,6 +17,7 @@ from pydantic import ValidationError
 if TYPE_CHECKING:  # pragma: no cover
     from .context import Context
     from .runtime.types.plugin import Runtime
+from ._event_matching import step_accepts_event
 from .decorators import CatchErrorHandler, StepConfig, StepFunction, WorkflowGraphCheck
 from .errors import (
     WorkflowRuntimeError,
@@ -187,7 +188,12 @@ class Workflow(metaclass=WorkflowMeta):
 
         step_func = self._get_steps()[step]
         step_config = step_func._step_config
-        if type(message) not in step_config.accepted_events:
+        is_accepted = step_accepts_event(
+            message,
+            step_config.accepted_events,
+            allow_subclasses=step_config.accept_event_subclasses,
+        )
+        if not is_accepted:
             raise WorkflowRuntimeError(
                 f"Step {step} does not accept event of type {type(message)}"
             )

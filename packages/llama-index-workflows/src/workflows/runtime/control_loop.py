@@ -15,6 +15,11 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from workflows._event_matching import (
+    event_matches,
+    step_accepts_event,
+    step_accepts_type,
+)
 from workflows.collect import Collect, Take
 from workflows.errors import (
     WorkflowCancelledByUser,
@@ -844,10 +849,19 @@ def _count_accepting_steps(state: BrokerState, event_type: type) -> int:
 
     An event routed at a stream level becomes one work item per accepting step
     (1:1 *and* collect steps count). This is the per-emission birth count for the
-    open_work_items set: a single emitted event accepted by N steps is N work items.
+    open_work_items set: a single emitted event accepted by N steps is N work
+    items. Must mirror the routing predicate in ``_process_add_event_tick``
+    exactly (including subclass-aware acceptance) — a birth count that differs
+    from the delivery count drifts the stream counter.
     """
     return sum(
-        1 for cfg in state.config.steps.values() if event_type in cfg.accepted_events
+        1
+        for cfg in state.config.steps.values()
+        if step_accepts_type(
+            event_type,
+            cfg.accepted_events,
+            allow_subclasses=cfg.accept_event_subclasses,
+        )
     )
 
 
@@ -1574,7 +1588,11 @@ def _process_add_event_tick(
     for step_name, step_config in state.config.steps.items():
         wait_conditions = state.workers[step_name].collected_waiters
         for wait_condition in wait_conditions:
-            is_match = type(tick.event) is wait_condition.waiting_for_event
+            is_match = event_matches(
+                tick.event,
+                wait_condition.waiting_for_event,
+                allow_subclasses=step_config.accept_event_subclasses,
+            )
             is_match = is_match and all(
                 getattr(tick.event, k, None) == v
                 for k, v in wait_condition.requirements.items()
@@ -1600,7 +1618,11 @@ def _process_add_event_tick(
     # Then route to accepting steps, skipping any that were already woken
     # via waiter resolution above.
     for step_name, step_config in state.config.steps.items():
-        is_accepted = type(tick.event) in step_config.accepted_events
+        is_accepted = step_accepts_event(
+            tick.event,
+            step_config.accepted_events,
+            allow_subclasses=step_config.accept_event_subclasses,
+        )
         is_targeted = tick.step_name is None or tick.step_name == step_name
         if step_name in waiter_resolved_steps:
             if is_accepted and is_targeted and tick.scope_path:

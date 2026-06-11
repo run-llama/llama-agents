@@ -82,6 +82,7 @@ class StepConfig:
     # None means wildcard — covers any step not claimed by a scoped handler.
     catch_error_for_steps: list[str] | None = None
     catch_error_max_recoveries: int = 1
+    accept_event_subclasses: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -125,6 +126,7 @@ def step(
     num_workers: int = 4,
     retry_policy: RetryPolicy | None = None,
     skip_graph_checks: list[StepGraphCheck] | None = None,
+    accept_event_subclasses: bool = False,
 ) -> Callable[[Callable[P, R]], StepFunction[P, R]]: ...
 
 
@@ -135,6 +137,7 @@ def step(
     num_workers: int = 4,
     retry_policy: RetryPolicy | None = None,
     skip_graph_checks: list[StepGraphCheck] | None = None,
+    accept_event_subclasses: bool = False,
 ) -> Callable[[Callable[P, R]], StepFunction[P, R]] | StepFunction[P, R]:
     """
     Decorate a callable to declare it as a workflow step.
@@ -154,6 +157,7 @@ def step(
         skip_graph_checks (list[str] | None): Graph validation checks to skip
             for this step. Currently supports ``"reachability"`` to allow
             intentionally unreachable steps.
+        accept_event_subclasses (bool): If True, enable subclass-aware event routing.
 
     Returns:
         Callable: The original function, annotated with internal step metadata.
@@ -192,6 +196,7 @@ def step(
             workflow=workflow,
             localns=localns,
             skip_graph_checks=skip_graph_checks or [],
+            accept_event_subclasses=accept_event_subclasses,
         )
 
     if func is not None:
@@ -204,6 +209,7 @@ def step(
             workflow=workflow,
             localns=localns,
             skip_graph_checks=skip_graph_checks or [],
+            accept_event_subclasses=accept_event_subclasses,
         )
     return decorator
 
@@ -214,6 +220,7 @@ def make_step_function(
     retry_policy: RetryPolicy | None = None,
     localns: dict[str, Any] | None = None,
     skip_graph_checks: list[StepGraphCheck] | None = None,
+    accept_event_subclasses: bool = False,
 ) -> StepFunction[P, R]:
     # This will raise providing a message with the specific validation failure
     spec = inspect_signature(func, localns=localns)
@@ -251,6 +258,7 @@ def make_step_function(
         bare_return_types=tuple(spec.bare_return_types),
         collection_param=spec.collection_param,
         collection_policy=spec.collection_policy,
+        accept_event_subclasses=accept_event_subclasses,
     )
 
     return casted
@@ -264,6 +272,7 @@ def _apply_step_decorator(
     workflow: type["Workflow"] | None,
     localns: dict[str, Any] | None,
     skip_graph_checks: list[StepGraphCheck],
+    accept_event_subclasses: bool,
 ) -> StepFunction[P, R]:
     if not isinstance(num_workers, int) or num_workers <= 0:
         raise WorkflowValidationError("num_workers must be an integer greater than 0")
@@ -274,6 +283,7 @@ def _apply_step_decorator(
         retry_policy=retry_policy,
         localns=localns,
         skip_graph_checks=skip_graph_checks,
+        accept_event_subclasses=accept_event_subclasses,
     )
 
     # If this is a free function, call add_step() explicitly.
