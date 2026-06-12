@@ -10,6 +10,13 @@ from workflows.events import SerializableOptionalException
 
 MODEL_T = TypeVar("MODEL_T", bound=BaseModel, default=DictState)  # type: ignore[reportGeneralTypeIssues]
 
+# Serialization format version.
+#   v0: legacy nested-JSON-string format (SerializedContextV0).
+#   v1: structured format; per-worker ``in_progress`` was a list of event strings.
+#   v2: ``in_progress`` carries full attempts (retry counts and timestamps), so
+#       a resumed run does not silently restart in-flight work from attempt 0.
+CURRENT_SERIALIZED_VERSION = 2
+
 
 class SerializedContextV0(BaseModel):
     """
@@ -113,8 +120,9 @@ class SerializedStepWorkerState(BaseModel):
 
     # Queue of events waiting to be processed (with retry info)
     queue: list[SerializedEventAttempt] = Field(default_factory=list)
-    # Events currently being processed (no retry info needed, will be re-queued on failure)
-    in_progress: list[str] = Field(default_factory=list)
+    # Events currently being processed. Serialized with full retry info so a
+    # resumed run re-queues them without losing attempt counts.
+    in_progress: list[SerializedEventAttempt] = Field(default_factory=list)
     # Collected events for ctx.collect_events(), keyed by buffer_id -> [event, ...]
     # Events are serialized strings
     collected_events: dict[str, list[str]] = Field(default_factory=dict)
@@ -128,8 +136,8 @@ class SerializedContext(BaseModel):
     This format better represents BrokerState needs including retry information and waiter state.
     """
 
-    # Version marker to distinguish from V0
-    version: int = Field(default=1)
+    # Serialization format version. See CURRENT_SERIALIZED_VERSION.
+    version: int = Field(default=CURRENT_SERIALIZED_VERSION)
 
     # Serialized state store payload (same format as V0)
     state: dict[str, Any] = Field(default_factory=dict)
@@ -203,19 +211,59 @@ class SerializedContext(BaseModel):
             )
 
         return SerializedContext(
-            version=1,
+            version=CURRENT_SERIALIZED_VERSION,
             state=v0.state,
             is_running=v0.is_running,
             workers=workers,
         )
 
     @staticmethod
+    def from_v1(data: dict[str, Any]) -> "SerializedContext":
+        """Migrate a v1 payload to the current format.
+
+        v1 serialized each worker's ``in_progress`` as a list of event strings.
+        v2 serializes them as full SerializedEventAttempt entries so a resumed
+        run keeps retry counts.
+        """
+        migrated = dict(data)
+        migrated["version"] = CURRENT_SERIALIZED_VERSION
+        workers: dict[str, Any] = {}
+        for step_name, worker in (data.get("workers") or {}).items():
+            worker = dict(worker)
+            worker["in_progress"] = [
+                {"event": ev, "attempts": 0, "first_attempt_at": None}
+                if isinstance(ev, str)
+                else ev
+                for ev in worker.get("in_progress", [])
+            ]
+            workers[step_name] = worker
+        migrated["workers"] = workers
+        return SerializedContext.model_validate(migrated)
+
+    @staticmethod
     def from_dict_auto(data: dict[str, Any]) -> "SerializedContext":
-        """Parse a dict as either V0 or V1 format and return V1."""
-        # Check if it has version field
-        if "version" in data and data["version"] == 1:
-            return SerializedContext.model_validate(data)
-        else:
-            # Assume V0 format
+        """Parse a dict as V0, v1, or current format and return the current format.
+
+        A missing ``version`` routes to the legacy V0 parser. An unrecognized
+        version — newer than this library supports, or not an int — fails
+        loudly: routing it to an older parser would "succeed" while silently
+        dropping state.
+        """
+        version = data.get("version")
+        if version is None:
             v0 = SerializedContextV0.model_validate(data)
             return SerializedContext.from_v0(v0)
+        if not isinstance(version, int) or version > CURRENT_SERIALIZED_VERSION:
+            raise ValueError(
+                f"Cannot load serialized workflow context with "
+                f"version={version!r}; this library supports up to version "
+                f"{CURRENT_SERIALIZED_VERSION}. The payload was likely written "
+                "by a newer version of llama-index-workflows."
+            )
+        if version == CURRENT_SERIALIZED_VERSION:
+            return SerializedContext.model_validate(data)
+        if version == 1:
+            return SerializedContext.from_v1(data)
+        # Older int version markers (e.g. an explicit 0): legacy V0 format.
+        v0 = SerializedContextV0.model_validate(data)
+        return SerializedContext.from_v0(v0)

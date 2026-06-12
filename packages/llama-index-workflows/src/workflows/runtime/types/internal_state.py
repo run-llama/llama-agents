@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from workflows.context.context_types import (
+    CURRENT_SERIALIZED_VERSION,
     SerializedContext,
     SerializedEventAttempt,
     SerializedStepWorkerState,
@@ -121,8 +122,18 @@ class BrokerState:
             ]
 
             # Serialize in-progress events (just the events, retry info tracked separately)
+            # Serialize in-progress events with full retry info so they can be
+            # re-queued on resume without restarting from attempt 0
             in_progress = [
-                serializer.serialize(ip.event) for ip in worker_state.in_progress
+                SerializedEventAttempt(
+                    event=serializer.serialize(ip.event),
+                    attempts=ip.attempts or 0,
+                    first_attempt_at=ip.first_attempt_at,
+                    last_exception=ip.last_exception,
+                    last_failed_at=ip.last_failed_at,
+                    recovery_counts=dict(ip.recovery_counts),
+                )
+                for ip in worker_state.in_progress
             ]
 
             # Serialize collected events
@@ -154,7 +165,7 @@ class BrokerState:
             )
 
         return SerializedContext(
-            version=1,
+            version=CURRENT_SERIALIZED_VERSION,
             state={},  # State is filled separately by the state store
             is_running=self.is_running,
             workers=workers_dict,
@@ -184,7 +195,9 @@ class BrokerState:
 
             worker = base_state.workers[step_name]
 
-            # Restore queue with retry info
+            # Restore queue with retry info.
+            # in_progress events are moved to the queue on deserialization;
+            # they will be restarted when the workflow runs.
             worker.queue = [
                 EventAttempt(
                     event=serializer.deserialize(attempt.event),
@@ -194,19 +207,8 @@ class BrokerState:
                     last_failed_at=attempt.last_failed_at,
                     recovery_counts=dict(attempt.recovery_counts),
                 )
-                for attempt in worker_data.queue
+                for attempt in [*worker_data.queue, *worker_data.in_progress]
             ]
-
-            # in_progress events are moved to the queue on deserialization
-            # They will be restarted when the workflow runs
-            for event_str in worker_data.in_progress:
-                worker.queue.append(
-                    EventAttempt(
-                        event=serializer.deserialize(event_str),
-                        attempts=0,
-                        first_attempt_at=None,
-                    )
-                )
 
             # Restore collected events
             worker.collected_events = {
