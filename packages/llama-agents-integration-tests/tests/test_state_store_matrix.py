@@ -282,6 +282,17 @@ async def test_get_missing_raises(state_store: StateStore[DictState]) -> None:
 
 
 @pytest.mark.asyncio
+async def test_method_named_keys(state_store: StateStore[DictState]) -> None:
+    """Keys colliding with mapping method names return stored values, not bound methods."""
+    await state_store.set("items", [1, 2, 3])
+    await state_store.set("keys", "abc")
+
+    assert await state_store.get("items") == [1, 2, 3]
+    assert await state_store.get("keys") == "abc"
+    assert await state_store.get("values", default=None) is None
+
+
+@pytest.mark.asyncio
 async def test_nested_get_set(state_store: StateStore[DictState]) -> None:
     """Test nested path access with dot notation."""
     await state_store.set("nested", {"a": "b"})
