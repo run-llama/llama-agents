@@ -333,6 +333,16 @@ def create_in_memory_payload(
     )
 
 
+def is_declared_model_path_segment(obj: DictLikeModel, segment: str) -> bool:
+    """Return whether a path segment names a declared model attribute."""
+    cls = type(obj)
+    return (
+        segment in cls.model_fields
+        or segment in cls.model_computed_fields
+        or isinstance(getattr(cls, segment, None), property)
+    )
+
+
 def traverse_path_step(obj: Any, segment: str) -> Any:
     """Follow one segment into obj (dict key, list index, or attribute).
 
@@ -348,6 +358,16 @@ def traverse_path_step(obj: Any, segment: str) -> Any:
     """
     if isinstance(obj, dict):
         return obj[segment]
+
+    # DictLikeModel dynamic keys live in _data and are shadowed by mapping
+    # methods (items/keys/values/get, ...) under plain getattr, so check _data
+    # first and never resolve methods as values.
+    if isinstance(obj, DictLikeModel):
+        if segment in obj:  # __contains__ checks _data
+            return obj[segment]
+        if is_declared_model_path_segment(obj, segment):
+            return getattr(obj, segment)
+        raise KeyError(segment)
 
     # Attempt list/tuple index
     try:
@@ -370,6 +390,13 @@ def assign_path_step(obj: Any, segment: str, value: Any) -> None:
     """
     if isinstance(obj, dict):
         obj[segment] = value
+        return
+
+    # DictLikeModel: __setattr__ routes declared field names to the field and
+    # everything else into _data. Handling it before the int-index attempt
+    # keeps numeric segments stored under string keys, matching reads.
+    if isinstance(obj, DictLikeModel):
+        setattr(obj, segment, value)
         return
 
     # Attempt list/tuple index assignment
