@@ -333,6 +333,16 @@ def create_in_memory_payload(
     )
 
 
+def is_declared_model_path_segment(obj: DictLikeModel, segment: str) -> bool:
+    """Return whether a path segment names a declared model attribute."""
+    cls = type(obj)
+    return (
+        segment in cls.model_fields
+        or segment in cls.model_computed_fields
+        or isinstance(getattr(cls, segment, None), property)
+    )
+
+
 def traverse_path_step(obj: Any, segment: str) -> Any:
     """Follow one segment into obj (dict key, list index, or attribute).
 
@@ -355,12 +365,7 @@ def traverse_path_step(obj: Any, segment: str) -> Any:
     if isinstance(obj, DictLikeModel):
         if segment in obj:  # __contains__ checks _data
             return obj[segment]
-        cls = type(obj)
-        if (
-            segment in cls.model_fields
-            or segment in cls.model_computed_fields
-            or isinstance(getattr(cls, segment, None), property)
-        ):
+        if is_declared_model_path_segment(obj, segment):
             return getattr(obj, segment)
         raise KeyError(segment)
 
