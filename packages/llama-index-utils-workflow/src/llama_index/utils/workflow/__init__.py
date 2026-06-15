@@ -185,7 +185,7 @@ def _determine_event_color(event_type: type) -> str:
 
 def _clean_id_for_mermaid(name: str) -> str:
     """Convert a name to a valid Mermaid ID."""
-    return name.replace(" ", "_").replace("-", "_").replace(".", "_")
+    return name.replace(" ", "_").replace("-", "_").replace(".", "_").replace("/", "_")
 
 
 def _get_mermaid_css_class(node: WorkflowGraphNode) -> str:
@@ -900,7 +900,8 @@ def draw_most_recent_execution_mermaid(
     mermaid_lines = ["flowchart TD"]
 
     cleaned_ids = {
-        node_id: node_id.replace(":", "_").replace("#", "_") for node_id in nodes.keys()
+        node_id: _clean_id_for_mermaid(node_id.replace(":", "_").replace("#", "_"))
+        for node_id in nodes.keys()
     }
 
     for node_id, (label, node_type, ev_type) in nodes.items():

@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any, cast
 from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
@@ -15,6 +15,8 @@ from pydantic import BaseModel
 from workflows.decorators import step
 from workflows.events import StartEvent, StopEvent
 from workflows.resource import Resource, ResourceConfig
+from workflows.runtime.types.results import StepWorkerResult
+from workflows.runtime.types.ticks import TickStepResult
 from workflows.workflow import Workflow
 
 
@@ -308,6 +310,29 @@ async def test_draw_most_recent_execution_mermaid(workflow: Workflow) -> None:
         edge_lines = [line for line in lines if " --> " in line]
         assert len(node_lines) > 0
         assert len(edge_lines) > 0
+
+
+@pytest.mark.asyncio
+async def test_draw_most_recent_execution_mermaid_sanitizes_slash_step_ids(
+    workflow: Workflow,
+) -> None:
+    handler = workflow.run()
+    await handler
+
+    adapter = cast(Any, handler.ctx._face)._external_adapter
+    adapter._queues.ticks = [
+        TickStepResult(
+            step_name="parent/child",
+            worker_id=0,
+            event=StartEvent(),
+            result=[StepWorkerResult(result=StopEvent())],
+        )
+    ]
+
+    result = draw_most_recent_execution_mermaid(handler, filename="")
+
+    assert 'step_parent_child_1["parent/child#1"]:::stepStyle' in result
+    assert "step_parent/child_1" not in result
 
 
 # --- Resource node rendering tests ---
