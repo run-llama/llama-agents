@@ -98,6 +98,24 @@ class TickIdleCheck(BaseModel):
     type: Literal["idle_check"] = "idle_check"
 
 
+class TickWakeup(BaseModel):
+    """Poke that flips due delayed attempts to eligible and re-checks queues.
+
+    ``due`` is the absolute adapter-get_now time this wakeup was scheduled
+    for (a delayed retry's ``not_before``). Reducing the tick clears
+    ``not_before`` on queued attempts that are due. Eligibility is derived
+    from the journaled tick, never from the current clock, so replaying a
+    tick stream makes the same dispatch decisions as the live run.
+
+    Carries no work-item data: the queued attempt lives in BrokerState, so
+    dropping a wakeup can never lose work — resume re-arms it from the queue.
+    """
+
+    model_config = ConfigDict(frozen=True)
+    type: Literal["wakeup"] = "wakeup"
+    due: float
+
+
 WorkflowTick = Annotated[
     TickStepResult
     | TickAddEvent
@@ -106,7 +124,8 @@ WorkflowTick = Annotated[
     | TickTimeout
     | TickWaiterTimeout
     | TickIdleCheck
-    | TickIdleRelease,
+    | TickIdleRelease
+    | TickWakeup,
     Discriminator("type"),
 ]
 

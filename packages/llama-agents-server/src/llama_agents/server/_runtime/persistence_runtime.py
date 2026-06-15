@@ -225,7 +225,7 @@ class TickPersistenceDecorator(BaseRuntimeDecorator):
                 async for tick in tick_stream:
                     yield tick
 
-            replay = await replay_ticks_stream(init_state, _with_first())
+            replay = await replay_ticks_stream(init_state, _with_first(), run_id=run_id)
             init_state = replay.state
             exit_command = replay.exit_command
 

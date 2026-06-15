@@ -32,7 +32,6 @@ class CommandRunWorker:
 class CommandQueueEvent:
     event: Event
     step_name: str | None = None
-    delay: float | None = None
     attempts: int | None = None
     first_attempt_at: float | None = None
     last_exception: Exception | None = None
@@ -69,6 +68,18 @@ class CommandScheduleWaiterTimeout:
 
 
 @dataclass(frozen=True)
+class CommandScheduleWakeup:
+    """Schedule a contentless TickWakeup at an absolute adapter-get_now time.
+
+    Emitted when a delayed retry is re-queued with a future ``not_before``.
+    The wakeup carries no payload; it just prompts the loop to re-scan the
+    queues for newly eligible attempts.
+    """
+
+    at_time: float
+
+
+@dataclass(frozen=True)
 class CommandScheduleIdleCheck:
     """Schedule a deferred idle check via TickIdleCheck.
 
@@ -90,6 +101,7 @@ WorkflowCommand = (
     | CommandPublishEvent
     | CommandScheduleIdleCheck
     | CommandScheduleWaiterTimeout
+    | CommandScheduleWakeup
 )
 
 

@@ -42,11 +42,16 @@ from workflows.retry_policy import (
     stop_before_delay,
     wait_fixed,
 )
-from workflows.runtime.control_loop import control_loop
+from workflows.runtime.control_loop import _ControlLoopRunner, control_loop
 from workflows.runtime.types.internal_state import BrokerState
 from workflows.runtime.types.plugin import RunContext, run_context
 from workflows.runtime.types.step_function import as_step_worker_function
-from workflows.runtime.types.ticks import TickAddEvent, TickCancelRun
+from workflows.runtime.types.ticks import (
+    TickAddEvent,
+    TickCancelRun,
+    TickWakeup,
+    WorkflowTick,
+)
 from workflows.workflow import Workflow
 
 from .conftest import MockRunAdapter, MockRuntime
@@ -763,6 +768,50 @@ async def test_control_loop_retry_with_delay(
         )
     # Verify time-machine is active (epoch starts at 1000.0)
     assert wf.attempt_times[0] >= 1000.0
+
+
+@pytest.mark.asyncio
+async def test_wakeup_heap_never_holds_work_items(
+    test_plugin_with_time_machine: tuple[MockRunAdapter, time_machine.Coordinates],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wakeup heap holds only contentless, re-derivable alarms.
+
+    A delayed retry must be represented in BrokerState (queued with
+    not_before) plus a contentless TickWakeup poke — never as a
+    payload-carrying TickAddEvent in the heap, which a snapshot cannot see.
+    """
+    test_plugin, _ = test_plugin_with_time_machine
+    scheduled: list[WorkflowTick] = []
+    original_schedule_tick = _ControlLoopRunner.schedule_tick
+
+    def recording_schedule_tick(
+        self: _ControlLoopRunner, tick: WorkflowTick, at_time: float
+    ) -> None:
+        scheduled.append(tick)
+        original_schedule_tick(self, tick, at_time)
+
+    monkeypatch.setattr(_ControlLoopRunner, "schedule_tick", recording_schedule_tick)
+
+    class RetryingWorkflow(Workflow):
+        attempts = 0
+
+        @step(retry_policy=ConstantDelayRetryPolicy(maximum_attempts=3, delay=0.02))
+        async def flaky(self, ev: StartEvent) -> StopEvent:
+            RetryingWorkflow.attempts += 1
+            if RetryingWorkflow.attempts < 2:
+                raise RuntimeError("fail once")
+            return StopEvent(result="ok")
+
+    result = await run_control_loop(
+        workflow=RetryingWorkflow(timeout=5.0),
+        start_event=StartEvent(),
+        test_runtime=test_plugin,
+    )
+
+    assert isinstance(result, StopEvent)
+    assert any(isinstance(t, TickWakeup) for t in scheduled)
+    assert not any(isinstance(t, TickAddEvent) for t in scheduled)
 
 
 @pytest.mark.asyncio
