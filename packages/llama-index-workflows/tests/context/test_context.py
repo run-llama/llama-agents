@@ -20,6 +20,7 @@ from workflows.context.context import (
     _warn_get_result,
     _warn_is_running_in_step,
 )
+from workflows.context.context_types import CURRENT_SERIALIZED_VERSION
 from workflows.context.external_context import ExternalContext
 from workflows.context.internal_context import InternalContext
 from workflows.context.serializers import JsonSerializer, PickleSerializer
@@ -327,7 +328,7 @@ async def test_wait_for_event_in_workflow_serialization() -> None:
         if isinstance(ev, Event) and ev.msg == "foo":
             ctx_dict = handler.ctx.to_dict()
             # Check that at least one worker has waiters
-            assert ctx_dict["version"] == 1
+            assert ctx_dict["version"] == CURRENT_SERIALIZED_VERSION
             total_waiters = sum(
                 len(worker_data["collected_waiters"])
                 for worker_data in ctx_dict["workers"].values()
@@ -361,6 +362,20 @@ async def test_wait_for_event_in_workflow_serialization() -> None:
         len(worker.collected_waiters) for worker in state.workers.values()
     )
     assert total_waiters == 0
+
+
+def test_context_from_dict_rejects_future_version_as_context_serde_error(
+    workflow: Workflow,
+) -> None:
+    payload = {
+        "version": CURRENT_SERIALIZED_VERSION + 1,
+        "state": {},
+        "is_running": False,
+        "workers": {},
+    }
+
+    with pytest.raises(ContextSerdeError, match="newer version"):
+        Context.from_dict(workflow, payload)
 
 
 class TwoStepHITLWorkflow(Workflow):
