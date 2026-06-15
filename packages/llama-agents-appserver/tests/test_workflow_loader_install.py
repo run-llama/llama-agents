@@ -557,7 +557,7 @@ def test_get_appserver_workflows_requirement() -> None:
     _get_appserver_workflows_requirement.cache_clear()
     req = _get_appserver_workflows_requirement()
     assert req is not None
-    assert Version("2.16.0") in req
+    assert Version("2.21.0") in req
     assert Version("2.14.0") not in req
     assert Version("3.0.0") not in req
 

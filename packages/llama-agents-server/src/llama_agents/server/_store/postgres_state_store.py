@@ -3,32 +3,21 @@
 
 from __future__ import annotations
 
-import asyncio
-import functools
-import json
-import logging
-import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, AsyncGenerator, Generic, Literal
+from typing import Any, Generic, Literal
 
 import asyncpg
 from pydantic import BaseModel
 from typing_extensions import TypeVar
-from workflows.context.serializers import BaseSerializer, JsonSerializer
-from workflows.context.state_store import (
-    DictState,
-    create_cleared_state,
-    deserialize_dict_state_data,
-    deserialize_state_from_dict,
-    get_by_path,
-    merge_state,
-    parse_in_memory_state,
-    serialize_dict_state_data,
-    set_by_path,
+from workflows.context.serializers import BaseSerializer
+from workflows.context.state_store import DictState
+from workflows.context.state_store_integration import (
+    StateRecord,
+    StateStoreFacade,
+    restored_run_id,
 )
-
-logger = logging.getLogger(__name__)
 
 MODEL_T = TypeVar("MODEL_T", bound=BaseModel, default=DictState)  # type: ignore[reportGeneralTypeIssues]
 
@@ -44,29 +33,20 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class PostgresStateStore(Generic[MODEL_T]):
-    """Asyncpg-backed StateStore implementation.
-
-    Every get() reads from the database, every set() writes through.
-    No in-memory cache — the database is the source of truth.
-    """
-
-    state_type: type[MODEL_T]
+class _PostgresStateStorage:
+    """Asyncpg-backed raw state storage."""
 
     def __init__(
         self,
         pool: asyncpg.Pool,
         run_id: str,
-        state_type: type[MODEL_T] | None = None,
-        serializer: BaseSerializer | None = None,
         schema: str | None = None,
+        connection: asyncpg.Connection | asyncpg.pool.PoolConnectionProxy | None = None,
     ) -> None:
         self._pool = pool
         self._run_id = run_id
-        self.state_type = state_type or DictState  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
-        self._serializer = serializer or JsonSerializer()
         self._schema = schema
-        self._pending_seed: tuple[dict[str, Any], BaseSerializer] | None = None
+        self._shared_conn = connection
 
     @property
     def run_id(self) -> str:
@@ -78,50 +58,80 @@ class PostgresStateStore(Generic[MODEL_T]):
             return f"{self._schema}.workflow_state"
         return "workflow_state"
 
-    @functools.cached_property
-    def _lock(self) -> asyncio.Lock:
-        """Lazy lock initialization for Python 3.14+ compatibility."""
-        return asyncio.Lock()
-
-    def _serialize_state(self, state: MODEL_T) -> str:
-        """Serialize state model to JSON string."""
-        if isinstance(state, DictState):
-            return json.dumps(serialize_dict_state_data(state, self._serializer))
-        return self._serializer.serialize(state)
-
-    def _deserialize_state(self, state_json: str) -> MODEL_T:
-        """Deserialize state from JSON string."""
-        if issubclass(self.state_type, DictState):
-            data = json.loads(state_json)
-            return deserialize_dict_state_data(data, self._serializer)  # type: ignore[return-value]  # ty: ignore[invalid-return-type]
-        return self._serializer.deserialize(state_json)
-
-    def _create_default_state(self) -> MODEL_T:
-        return self.state_type()
-
-    async def _write_in_memory_state(self, serialized_state: dict[str, Any]) -> None:
-        """Migrate InMemory-format state into the database."""
-        state = deserialize_state_from_dict(serialized_state, self._serializer)
-        await self._save_state(state)  # type: ignore[arg-type]
-
-    async def _flush_pending_seed(self) -> None:
-        """Flush pending seed data to the database if present."""
-        if self._pending_seed is None:
+    @asynccontextmanager
+    async def _acquire(
+        self,
+    ) -> AsyncIterator[asyncpg.Connection | asyncpg.pool.PoolConnectionProxy]:
+        """One query-API surface: the bound connection or a pool checkout."""
+        if self._shared_conn is not None:
+            yield self._shared_conn
             return
-        serialized_state, serializer = self._pending_seed
-        self._pending_seed = None
-        store_type = serialized_state.get("store_type")
-        if store_type == "postgres":
-            source_run_id = serialized_state.get("run_id")
-            if source_run_id and source_run_id != self._run_id:
-                await self._copy_state_from_run(source_run_id)
-        else:
-            await self._write_in_memory_state(serialized_state)
-
-    async def _copy_state_from_run(self, source_run_id: str) -> None:
-        """Copy state from another run_id using SQL INSERT...SELECT."""
         async with self._pool.acquire() as conn:
-            now = _utc_now()
+            yield conn
+
+    @asynccontextmanager
+    async def session(self) -> AsyncIterator[_PostgresStateStorage]:
+        """Scope a load+save pair to one pool connection.
+
+        Yields a separate conn-bound storage so concurrent readers on this
+        storage keep acquiring their own connections.
+        """
+        if self._shared_conn is not None:
+            yield self
+            return
+        async with self._pool.acquire() as conn:
+            yield _PostgresStateStorage(
+                self._pool, self._run_id, self._schema, connection=conn
+            )
+
+    async def load(self) -> StateRecord | None:
+        """Load raw state from the database."""
+        async with self._acquire() as conn:
+            row = await conn.fetchrow(
+                f"SELECT state_json FROM {self._table_ref} WHERE run_id = $1",
+                self._run_id,
+            )
+        if row is None:
+            return None
+        return StateRecord(data=row["state_json"])
+
+    async def save(self, record: StateRecord) -> None:
+        """Save raw state to the database via upsert."""
+        now = _utc_now()
+        async with self._acquire() as conn:
+            await conn.execute(
+                f"""
+                INSERT INTO {self._table_ref} (run_id, state_json, state_type, state_module, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    state_json = EXCLUDED.state_json,
+                    state_type = EXCLUDED.state_type,
+                    state_module = EXCLUDED.state_module,
+                    updated_at = EXCLUDED.updated_at
+                """,
+                self._run_id,
+                record.data,
+                record.state_type,
+                record.state_module,
+                now,
+                now,
+            )
+
+    def to_handle(self) -> dict[str, Any]:
+        payload = PostgresSerializedState(run_id=self._run_id)
+        return payload.model_dump()
+
+    def parse_own_handle(
+        self, payload: dict[str, Any]
+    ) -> PostgresSerializedState | None:
+        if payload.get("store_type") != "postgres":
+            return None
+        return PostgresSerializedState.model_validate(payload)
+
+    async def copy_from_handle(self, handle: PostgresSerializedState) -> None:
+        """Copy state from another run's row using SQL INSERT...SELECT."""
+        now = _utc_now()
+        async with self._acquire() as conn:
             await conn.execute(
                 f"""
                 INSERT INTO {self._table_ref} (run_id, state_json, state_type, state_module, created_at, updated_at)
@@ -136,114 +146,24 @@ class PostgresStateStore(Generic[MODEL_T]):
                 self._run_id,
                 now,
                 now,
-                source_run_id,
+                handle.run_id,
             )
 
-    async def _load_state(
-        self,
-        conn: asyncpg.Connection | None = None,
-    ) -> MODEL_T:
-        """Load state from database. Creates default if row doesn't exist."""
-        await self._flush_pending_seed()
-        should_release = conn is None
-        if conn is None:
-            conn = await self._pool.acquire()  # type: ignore[assignment]
-        try:
-            row = await conn.fetchrow(  # type: ignore[union-attr]
-                f"SELECT state_json FROM {self._table_ref} WHERE run_id = $1",
-                self._run_id,
-            )
-            if row is None:
-                state = self._create_default_state()
-                await self._save_state(state, conn)
-                return state
-            return self._deserialize_state(row["state_json"])
-        finally:
-            if should_release:
-                await self._pool.release(conn)  # type: ignore[arg-type]
 
-    async def _save_state(
+class PostgresStateStore(StateStoreFacade[MODEL_T], Generic[MODEL_T]):
+    """StateStore facade backed by postgres storage."""
+
+    def __init__(
         self,
-        state: MODEL_T,
-        conn: asyncpg.Connection | asyncpg.pool.PoolConnectionProxy | None = None,
+        pool: asyncpg.Pool,
+        run_id: str,
+        state_type: type[MODEL_T] | None = None,
+        serializer: BaseSerializer | None = None,
+        schema: str | None = None,
     ) -> None:
-        """Save state to database via upsert."""
-        should_release = conn is None
-        if conn is None:
-            conn = await self._pool.acquire()  # type: ignore[assignment]
-        try:
-            now = _utc_now()
-            state_json = self._serialize_state(state)
-            await conn.execute(  # type: ignore[union-attr]
-                f"""
-                INSERT INTO {self._table_ref} (run_id, state_json, state_type, state_module, created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6)
-                ON CONFLICT(run_id) DO UPDATE SET
-                    state_json = EXCLUDED.state_json,
-                    state_type = EXCLUDED.state_type,
-                    state_module = EXCLUDED.state_module,
-                    updated_at = EXCLUDED.updated_at
-                """,
-                self._run_id,
-                state_json,
-                type(state).__name__,
-                type(state).__module__,
-                now,
-                now,
-            )
-        finally:
-            if should_release:
-                await self._pool.release(conn)  # type: ignore[arg-type]
-
-    async def get_state(self) -> MODEL_T:
-        """Return a copy of the current state model."""
-        state = await self._load_state()
-        return state.model_copy()
-
-    async def set_state(self, state: MODEL_T) -> None:
-        """Replace or merge into the current state model."""
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"SELECT state_json FROM {self._table_ref} WHERE run_id = $1",
-                self._run_id,
-            )
-            if row is None:
-                await self._save_state(state, conn)
-                return
-
-            current_state = self._deserialize_state(row["state_json"])
-            merged = merge_state(current_state, state)
-            await self._save_state(merged, conn)  # type: ignore[arg-type]
-
-    async def get(self, path: str, default: Any = ...) -> Any:
-        """Get a nested value using dot-separated paths."""
-        state = await self._load_state()
-        return get_by_path(state, path, default)
-
-    async def set(self, path: str, value: Any) -> None:
-        """Set a nested value using dot-separated paths."""
-        async with self.edit_state() as state:
-            set_by_path(state, path, value)
-
-    async def clear(self) -> None:
-        """Reset the state to its type defaults."""
-        await self.set_state(create_cleared_state(self.state_type))
-
-    @asynccontextmanager
-    async def edit_state(self) -> AsyncGenerator[MODEL_T, None]:
-        """Edit state transactionally under a lock."""
-        async with self._lock:
-            state = await self._load_state()
-            yield state
-            await self._save_state(state)
-
-    def to_dict(self, serializer: BaseSerializer) -> dict[str, Any]:
-        """Serialize state store metadata for persistence.
-
-        Returns metadata only — actual state lives in the database.
-        """
-        payload = PostgresSerializedState(run_id=self._run_id)
-        return payload.model_dump()
+        super().__init__(
+            _PostgresStateStorage(pool, run_id, schema), state_type, serializer
+        )
 
     @classmethod
     def from_dict(
@@ -255,40 +175,22 @@ class PostgresStateStore(Generic[MODEL_T]):
         run_id: str | None = None,
         schema: str | None = None,
     ) -> PostgresStateStore[Any]:
-        """Restore a state store from serialized payload.
+        """Restore a state store from a serialized payload.
 
-        Handles both InMemorySerializedState (migrates data to DB on first use)
-        and PostgresSerializedState (reconnects to existing row).
+        Construct + seed: ``add_seed`` validates the payload eagerly
+        (foreign durable handles raise) and materializes it lazily.
         """
         if not serialized_state:
             raise ValueError("Cannot restore PostgresStateStore from empty dict")
         if pool is None:
             raise ValueError("pool is required for PostgresStateStore.from_dict()")
 
-        store_type = serialized_state.get("store_type")
-
-        if store_type == "postgres":
-            parsed = PostgresSerializedState.model_validate(serialized_state)
-            effective_run_id = run_id or parsed.run_id
-            return cls(
-                pool=pool,
-                run_id=effective_run_id,
-                state_type=state_type,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
-                serializer=serializer,
-                schema=schema,
-            )
-
-        # InMemory format — will need async migration
-        parse_in_memory_state(serialized_state)
-
-        effective_run_id = run_id or str(uuid.uuid4())
-        store = cls(
+        store: PostgresStateStore[Any] = cls(
             pool=pool,
-            run_id=effective_run_id,
+            run_id=restored_run_id(run_id, serialized_state),
             state_type=state_type,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
             serializer=serializer,
             schema=schema,
         )
-        # Note: caller must await store._write_in_memory_state(serialized_state)
-        # since from_dict is synchronous but migration requires async DB access
+        store.add_seed(serialized_state, serializer)
         return store

@@ -24,7 +24,7 @@ description = "HTTP server for deploying and serving LlamaIndex workflows as web
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "llama-index-workflows>=2.20.0,<3.0.0",
+  "llama-index-workflows>=2.21.0,<3.0.0",
   "llama-agents-client>=0.2.0",
   "starlette>=0.39.0",
   "uvicorn>=0.32.0",

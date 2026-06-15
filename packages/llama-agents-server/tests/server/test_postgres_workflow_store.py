@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from typing import Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from llama_agents.client.protocol.serializable_events import EventEnvelopeWithMetadata
 from llama_agents.server._pool import PoolProvider
+from llama_agents.server._store import postgres_workflow_store
 from llama_agents.server._store.abstract_workflow_store import (
     HandlerQuery,
     PersistentHandler,
@@ -140,7 +141,7 @@ async def test_borrowed_pool_not_closed_on_close(
         return fake_pool
 
     # _setup_listener acquires from the pool — short-circuit it for this unit test.
-    async def noop_setup_listener(self: PostgresWorkflowStore) -> None:
+    async def noop_setup_listener(self: PostgresWorkflowStore, pool: Any) -> None:
         return None
 
     monkeypatch.setattr(PostgresWorkflowStore, "_setup_listener", noop_setup_listener)
@@ -158,6 +159,129 @@ async def test_borrowed_pool_not_closed_on_close(
     await store.close()
     fake_pool.close.assert_not_called()
     assert store._pool is None
+
+
+async def test_failed_start_still_closes_owned_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pool resolved during a failed start() must not leak past close()."""
+    fake_pool = MagicMock()
+    fake_pool.close = AsyncMock()
+
+    async def factory() -> Any:
+        return fake_pool
+
+    async def failing_migrations(self: PostgresWorkflowStore, pool: Any) -> None:
+        raise RuntimeError("migration boom")
+
+    monkeypatch.setattr(PostgresWorkflowStore, "_run_migrations_on", failing_migrations)
+
+    store = PostgresWorkflowStore(
+        dsn="postgresql://localhost/test",
+        pool=PoolProvider(factory, owns_pool=True),
+    )
+
+    with pytest.raises(RuntimeError, match="migration boom"):
+        await store.start()
+    # start() never published the pool, but the provider holds one.
+    assert store._pool is None
+
+    await store.close()
+    fake_pool.close.assert_awaited_once()
+
+
+async def test_concurrent_start_initializes_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent first-callers get one migration run and one LISTEN setup."""
+    fake_pool = MagicMock()
+
+    async def factory() -> Any:
+        # Yield so a second start() caller can interleave with the first.
+        await asyncio.sleep(0)
+        return fake_pool
+
+    calls = {"migrate": 0, "listen": 0}
+
+    async def fake_run_migrations(self: PostgresWorkflowStore, pool: Any) -> None:
+        calls["migrate"] += 1
+
+    async def fake_setup_listener(self: PostgresWorkflowStore, pool: Any) -> None:
+        calls["listen"] += 1
+
+    monkeypatch.setattr(
+        PostgresWorkflowStore, "_run_migrations_on", fake_run_migrations
+    )
+    monkeypatch.setattr(PostgresWorkflowStore, "_setup_listener", fake_setup_listener)
+
+    store = PostgresWorkflowStore(
+        dsn="postgresql://localhost/test",
+        pool=PoolProvider.borrowed(factory),
+    )
+
+    await asyncio.gather(store.start(), store.start())
+    assert calls == {"migrate": 1, "listen": 1}
+
+    # The guard must not latch: a re-start after close() initializes again.
+    await store.close()
+    await asyncio.gather(store.start(), store.start())
+    assert calls == {"migrate": 2, "listen": 2}
+
+
+class _FakePoolAcquire:
+    async def __aenter__(self) -> Any:
+        return MagicMock()
+
+    async def __aexit__(self, *exc: Any) -> bool:
+        return False
+
+
+class _FakePool:
+    """Minimal asyncpg.Pool stand-in: acquire() as an async context manager."""
+
+    def acquire(self) -> _FakePoolAcquire:
+        return _FakePoolAcquire()
+
+
+async def test_start_late_joiner_waits_for_migrations_and_listener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second concurrent start() caller must not return before migrations
+    and LISTEN setup have completed."""
+    migrations_started = asyncio.Event()
+    release_migrations = asyncio.Event()
+    listener_ready = False
+
+    async def fake_migrations(conn: Any, schema: str | None = None) -> None:
+        migrations_started.set()
+        await release_migrations.wait()
+
+    async def fake_setup_listener(self: PostgresWorkflowStore, *args: Any) -> None:
+        nonlocal listener_ready
+        listener_ready = True
+
+    monkeypatch.setattr(postgres_workflow_store, "_run_migrations", fake_migrations)
+    monkeypatch.setattr(PostgresWorkflowStore, "_setup_listener", fake_setup_listener)
+
+    async def factory() -> Any:
+        return cast(Any, _FakePool())
+
+    store = PostgresWorkflowStore(
+        dsn="postgresql://localhost/test",
+        pool=PoolProvider.borrowed(factory),
+    )
+
+    first = asyncio.create_task(store.start())
+    await asyncio.wait_for(migrations_started.wait(), timeout=2.0)
+
+    second = asyncio.create_task(store.start())
+    await asyncio.sleep(0.01)
+    assert not second.done(), "late joiner returned before start() finished"
+    assert listener_ready is False
+
+    release_migrations.set()
+    await asyncio.wait_for(asyncio.gather(first, second), timeout=2.0)
+    assert listener_ready is True
 
 
 async def test_listen_termination_callback_schedules_reconnect(
@@ -201,7 +325,7 @@ async def test_reconnect_listener_wakes_subscribers(
 ) -> None:
     """After a successful reconnect, all active subscribe_events conditions are notified."""
 
-    async def fake_setup_listener(self: PostgresWorkflowStore) -> None:
+    async def fake_setup_listener(self: PostgresWorkflowStore, pool: Any) -> None:
         return None
 
     monkeypatch.setattr(PostgresWorkflowStore, "_setup_listener", fake_setup_listener)
@@ -349,5 +473,32 @@ async def test_integration_tick_append_and_get(postgres_dsn: str) -> None:
 
         # Different run_id should be empty
         assert await store.get_ticks("other-run") == []
+    finally:
+        await store.close()
+
+
+@pytest.mark.docker
+async def test_integration_create_state_store_memoizes_per_run(
+    postgres_dsn: str,
+) -> None:
+    store = PostgresWorkflowStore(dsn=postgres_dsn, schema="test_pg_store")
+    try:
+        await store.start()
+        await store.run_migrations()
+
+        first = store.create_state_store("pg-memo-run")
+        second = store.create_state_store("pg-memo-run")
+        assert first is second
+        assert store.create_state_store("pg-memo-other") is not first
+
+        await first.set("count", 0)
+
+        async def increment(state_store: Any) -> None:
+            for _ in range(5):
+                async with state_store.edit_state() as state:
+                    state["count"] = state["count"] + 1
+
+        await asyncio.gather(increment(first), increment(second))
+        assert await first.get("count") == 10
     finally:
         await store.close()

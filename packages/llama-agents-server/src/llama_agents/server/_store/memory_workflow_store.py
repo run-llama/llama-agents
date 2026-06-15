@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import weakref
 from collections import deque
 from collections.abc import AsyncIterator
@@ -10,7 +9,11 @@ from typing import Any
 
 from llama_agents.client.protocol.serializable_events import EventEnvelopeWithMetadata
 from workflows.context.serializers import BaseSerializer
-from workflows.context.state_store import DictState, InMemoryStateStore
+from workflows.context.state_store import (
+    DictState,
+    InMemoryStateStore,
+    StateStoreFacade,
+)
 
 from .abstract_workflow_store import (
     AbstractWorkflowStore,
@@ -20,8 +23,6 @@ from .abstract_workflow_store import (
     StoredTick,
     is_terminal_status,
 )
-
-logger = logging.getLogger(__name__)
 
 
 def _matches_query(handler: PersistentHandler, query: HandlerQuery) -> bool:
@@ -60,42 +61,30 @@ def _matches_query(handler: PersistentHandler, query: HandlerQuery) -> bool:
 
 class MemoryWorkflowStore(AbstractWorkflowStore):
     def __init__(self, max_completed: int | None = 1000) -> None:
+        super().__init__()
         if max_completed is not None and max_completed < 0:
             raise ValueError("max_completed must be >= 0 or None")
 
         self.handlers: dict[str, PersistentHandler] = {}
         self.events: dict[str, list[StoredEvent]] = {}
         self.ticks: dict[str, list[StoredTick]] = {}
-        self.state_stores: dict[str, InMemoryStateStore[Any]] = {}
+        # Strong refs: facades live until eviction. Public alias kept for
+        # tests/plugins that inject stores; the ABC template reads the cache.
+        self.state_stores: dict[str, StateStoreFacade[Any]] = {}
+        self._state_store_cache = self.state_stores
         self._conditions: weakref.WeakValueDictionary[str, asyncio.Condition] = (
             weakref.WeakValueDictionary()
         )
         self.max_completed = max_completed
         self._terminal_queue: deque[str] = deque()
 
-    def create_state_store(
+    def _build_state_store(
         self,
         run_id: str,
-        state_type: type[Any] | None = None,
-        serialized_state: dict[str, Any] | None = None,
-        serializer: BaseSerializer | None = None,
+        state_type: type[Any] | None,
+        serializer: BaseSerializer | None,
     ) -> InMemoryStateStore[Any]:
-        if run_id not in self.state_stores:
-            if serialized_state is not None and serializer is not None:
-                try:
-                    self.state_stores[run_id] = InMemoryStateStore.from_dict(
-                        serialized_state, serializer
-                    )
-                except Exception:
-                    logger.warning("Failed to seed InMemoryStateStore", exc_info=True)
-                    self.state_stores[run_id] = InMemoryStateStore(
-                        state_type() if state_type else DictState()
-                    )
-            else:
-                self.state_stores[run_id] = InMemoryStateStore(
-                    state_type() if state_type else DictState()
-                )
-        return self.state_stores[run_id]
+        return InMemoryStateStore(state_type() if state_type else DictState())
 
     async def query(self, query: HandlerQuery) -> list[PersistentHandler]:
         return [

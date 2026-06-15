@@ -21,6 +21,7 @@ from typing_extensions import override
 from workflows import Context
 from workflows.context.context_types import SerializedContext
 from workflows.context.serializers import BaseSerializer, JsonSerializer
+from workflows.context.state_store_integration import decode_seed_state
 from workflows.errors import WorkflowCancelledByUser
 from workflows.events import IdleReleasedEvent, StartEvent, StopEvent
 from workflows.runtime.control_loop import replay_ticks_stream
@@ -209,7 +210,7 @@ class TickPersistenceDecorator(BaseRuntimeDecorator):
             return None
 
         if legacy_ctx:
-            self._seed_legacy_state(run_id, legacy_ctx)
+            await self._seed_legacy_state(run_id, legacy_ctx)
             parsed = SerializedContext.from_dict_auto(legacy_ctx)
             init_state = BrokerState.from_serialized(parsed, workflow, serializer)
         else:
@@ -247,7 +248,12 @@ class TickPersistenceDecorator(BaseRuntimeDecorator):
             )
             return None
 
-    def _seed_legacy_state(self, run_id: str, legacy_ctx: dict[str, Any]) -> None:
+    async def _seed_legacy_state(self, run_id: str, legacy_ctx: dict[str, Any]) -> None:
+        """Eagerly migrate a legacy ctx state snapshot into the state table.
+
+        No-op when the state table already has a row for the run (a previous
+        partial run's state must win over the legacy snapshot).
+        """
         try:
             parsed = SerializedContext.from_dict_auto(legacy_ctx)
         except Exception:
@@ -274,7 +280,8 @@ class TickPersistenceDecorator(BaseRuntimeDecorator):
         finally:
             conn.close()
 
-        state_store._write_in_memory_state(state_data)
+        state = decode_seed_state(state_data, JsonSerializer())
+        await state_store.set_state(state)
 
 
 class PersistenceDecorator(TickPersistenceDecorator):

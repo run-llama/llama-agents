@@ -25,6 +25,7 @@ from llama_agents.server._store.abstract_workflow_store import (
 from typing_extensions import override
 from workflows.context.serializers import JsonSerializer
 from workflows.context.state_store import infer_state_type
+from workflows.context.state_store_integration import state_store_handoff
 from workflows.events import Event, WorkflowIdleEvent
 from workflows.runtime.control_loop import (
     rebuild_state_from_ticks,
@@ -326,7 +327,9 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
                 old_state_store = self._store.create_state_store(
                     run_id, state_type=state_type
                 )
-                serialized_state = old_state_store.to_dict(serializer)
+                serialized_state = await state_store_handoff(
+                    old_state_store, serializer
+                )
             except Exception:
                 logger.warning(
                     f"Failed to carry over state from run {run_id}", exc_info=True

@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 from llama_agents.server import (
     HandlerQuery,
     PersistentHandler,
     SqliteWorkflowStore,
+)
+from pydantic import BaseModel
+from workflows.context.serializers import JsonSerializer
+from workflows.context.state_store import (
+    DictState,
+    InMemoryStateStore,
+    StateStore,
 )
 from workflows.events import StopEvent
 
@@ -196,3 +205,77 @@ async def test_update_pydantic_result_serialization(
 
     # The row's result should deserialize to a StopEvent
     assert found.result == event
+
+
+class _MemoCounterState(BaseModel):
+    count: int = 0
+
+
+@pytest.mark.asyncio
+async def test_create_state_store_memoizes_per_run(tmp_path: Path) -> None:
+    db_path: str = str(tmp_path / "handlers.db")
+    store = SqliteWorkflowStore(db_path)
+
+    first = store.create_state_store("run-1")
+    second = store.create_state_store("run-1")
+    other = store.create_state_store("run-2")
+
+    assert first is second
+    assert other is not first
+
+
+@pytest.mark.asyncio
+async def test_create_state_store_upgrades_default_state_type(tmp_path: Path) -> None:
+    db_path: str = str(tmp_path / "handlers.db")
+    store = SqliteWorkflowStore(db_path)
+
+    # A type-less caller (e.g. handler continuation) comes first...
+    first = store.create_state_store("run-1")
+    assert first.state_type is DictState
+
+    # ...and must not shadow the workflow's concrete state type.
+    second = store.create_state_store("run-1", state_type=_MemoCounterState)
+
+    assert second is first
+    assert first.state_type is _MemoCounterState
+
+
+@pytest.mark.asyncio
+async def test_create_state_store_restore_reuses_cached_facade(tmp_path: Path) -> None:
+    """A restore call must seed the already-handed-out facade, not rebuild it."""
+    db_path: str = str(tmp_path / "handlers.db")
+    store = SqliteWorkflowStore(db_path)
+    serializer = JsonSerializer()
+
+    first = store.create_state_store("run-1")
+    seed = InMemoryStateStore(DictState(token="restored"))
+
+    second = store.create_state_store(
+        "run-1",
+        serialized_state=seed.to_dict(serializer),
+        serializer=serializer,
+    )
+
+    assert second is first
+    assert await asyncio.wait_for(first.get("token"), timeout=2.0) == "restored"
+
+
+@pytest.mark.asyncio
+async def test_create_state_store_concurrent_writers_share_lock(
+    tmp_path: Path,
+) -> None:
+    db_path: str = str(tmp_path / "handlers.db")
+    store = SqliteWorkflowStore(db_path)
+
+    first = store.create_state_store("run-1")
+    second = store.create_state_store("run-1")
+    await first.set("count", 0)
+
+    async def increment(state_store: StateStore[Any]) -> None:
+        for _ in range(10):
+            async with state_store.edit_state() as state:
+                state["count"] = state["count"] + 1
+
+    await asyncio.gather(increment(first), increment(second))
+
+    assert await first.get("count") == 20

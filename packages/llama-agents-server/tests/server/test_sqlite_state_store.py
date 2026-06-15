@@ -4,11 +4,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 import pytest
-from llama_agents.server import SqliteWorkflowStore
+from llama_agents.server import HandlerQuery, SqliteWorkflowStore
 from llama_agents.server._store.sqlite.migrate import run_migrations
 from llama_agents.server._store.sqlite.sqlite_state_store import (
     SqliteStateStore,
@@ -201,6 +203,87 @@ async def test_clear_resets_typed_state(
     assert state.label == "default"
 
 
+@pytest.mark.asyncio
+async def test_clear_resets_subclass_fields(db_path: str) -> None:
+    """Clear resets to the stored state's type; child-only fields don't survive."""
+    store: SqliteStateStore[CounterState] = SqliteStateStore(
+        db_path=db_path,
+        run_id="run-clear-subclass",
+        state_type=CounterState,
+    )
+    await store.set_state(ExtendedCounterState(count=1, extra="dirty"))
+
+    await store.clear()
+
+    state = await store.get_state()
+    assert isinstance(state, ExtendedCounterState)
+    assert state.count == 0
+    assert state.extra == "extra_default"
+
+
+@pytest.mark.asyncio
+async def test_typeless_clear_over_typed_row(db_path: str) -> None:
+    """A DictState-typed facade over a row holding a typed model can still clear."""
+    typed: SqliteStateStore[CounterState] = SqliteStateStore(
+        db_path=db_path,
+        run_id="run-typeless-clear",
+        state_type=CounterState,
+    )
+    await typed.set_state(CounterState(count=9, label="dirty"))
+
+    typeless: SqliteStateStore[DictState] = SqliteStateStore(
+        db_path=db_path,
+        run_id="run-typeless-clear",
+    )
+    await typeless.clear()
+
+    state = await typed.get_state()
+    assert state == CounterState()
+
+
+@pytest.mark.asyncio
+async def test_get_inside_edit_state_does_not_deadlock(
+    store: SqliteStateStore[DictState],
+) -> None:
+    """`get` must work inside an `edit_state` block on a durable backend."""
+    await store.set("counter", 1)
+
+    async def nested_read() -> int:
+        async with store.edit_state() as state:
+            state["other"] = 2
+            return int(await store.get("counter"))
+
+    assert await asyncio.wait_for(nested_read(), timeout=2.0) == 1
+
+
+# -- Writer-scoped connection sessions --
+
+
+@pytest.mark.asyncio
+async def test_set_state_opens_exactly_one_connection(
+    store: SqliteStateStore[DictState], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In default multi-connection mode, a write's load+save share one connection."""
+    await store.set("x", 1)  # materialize the row before counting
+
+    connect_count = 0
+    real_connect = sqlite3.connect
+
+    def counting_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        nonlocal connect_count
+        connect_count += 1
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", counting_connect)
+
+    await store.set_state(DictState(y=2))
+    assert connect_count == 1
+
+    connect_count = 0
+    await store.clear()
+    assert connect_count == 1
+
+
 # -- Persistence across instances --
 
 
@@ -236,6 +319,31 @@ async def test_typed_state_persists_across_instances(db_path: str) -> None:
     state = await store2.get_state()
     assert state.count == 42
     assert state.label == "persisted"
+
+
+@pytest.mark.asyncio
+async def test_typed_state_decodes_when_store_type_changes(
+    db_path: str,
+) -> None:
+    """The self-describing payload drives decode even if the reader's declared type differs."""
+    store1: SqliteStateStore[CounterState] = SqliteStateStore(
+        db_path=db_path,
+        run_id="run-typed-metadata",
+        state_type=CounterState,
+    )
+    await store1.set_state(CounterState(count=7, label="typed-row"))
+
+    store2: SqliteStateStore[DictState] = SqliteStateStore(
+        db_path=db_path,
+        run_id="run-typed-metadata",
+        state_type=DictState,
+    )
+
+    state = await store2.get_state()
+
+    assert isinstance(state, CounterState)
+    assert state.count == 7
+    assert state.label == "typed-row"
 
 
 @pytest.mark.asyncio
@@ -287,6 +395,29 @@ async def test_from_dict_sqlite_format(db_path: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_from_dict_sqlite_format_with_new_run_copies_state(
+    db_path: str,
+) -> None:
+    store1: SqliteStateStore[DictState] = SqliteStateStore(
+        db_path=db_path, run_id="run-fromdict-source"
+    )
+    await store1.set("saved", True)
+
+    serializer = JsonSerializer()
+    payload = store1.to_dict(serializer)
+
+    store2 = SqliteStateStore.from_dict(
+        payload,
+        serializer,
+        db_path=db_path,
+        state_type=DictState,
+        run_id="run-fromdict-target",
+    )
+    value = await store2.get("saved")
+    assert value is True
+
+
+@pytest.mark.asyncio
 async def test_from_dict_in_memory_format_migrates(db_path: str) -> None:
     """from_dict with InMemorySerializedState format stores data on first DB access."""
     serializer = JsonSerializer()
@@ -327,3 +458,36 @@ async def test_migration_applies_on_existing_db(tmp_path: Path) -> None:
     await store.set("coexist", True)
     value = await store.get("coexist")
     assert value is True
+
+
+@pytest.mark.asyncio
+async def test_sqlite_workflow_store_single_connection_keeps_state_connection_open(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "single-connection.db")
+    workflow_store = SqliteWorkflowStore(db_path, single_connection=True)
+    state_store = workflow_store.create_state_store("run-single")
+
+    await state_store.set("x", 1)
+    assert await state_store.get("x") == 1
+
+    await workflow_store.query(HandlerQuery())
+
+
+@pytest.mark.asyncio
+async def test_sqlite_workflow_store_single_connection_opens_existing_regular_db(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "existing-regular.db")
+    conn = sqlite3.connect(db_path)
+    try:
+        run_migrations(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    workflow_store = SqliteWorkflowStore(db_path, single_connection=True)
+    state_store = workflow_store.create_state_store("run-existing-single")
+
+    await state_store.set("x", 1)
+    assert await state_store.get("x") == 1

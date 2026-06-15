@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import gc
 import json
+import pickle
 import weakref
 from typing import cast
 
@@ -20,14 +22,16 @@ from workflows.context.context import (
 )
 from workflows.context.external_context import ExternalContext
 from workflows.context.internal_context import InternalContext
-from workflows.context.serializers import JsonSerializer
+from workflows.context.serializers import JsonSerializer, PickleSerializer
 from workflows.context.state_store import (
     DictState,
     InMemoryStateStore,
+    decode_state,
     deserialize_state_from_dict,
+    encode_state,
 )
 from workflows.decorators import step
-from workflows.errors import ContextStateError, WorkflowRuntimeError
+from workflows.errors import ContextSerdeError, ContextStateError, WorkflowRuntimeError
 from workflows.events import (
     Event,
     HumanResponseEvent,
@@ -528,6 +532,28 @@ async def test_clear(internal_ctx: Context) -> None:
     assert res is None
 
 
+class ParentClearState(BaseModel):
+    a: int = 0
+
+
+class ChildClearState(ParentClearState):
+    b: int = 0
+
+
+@pytest.mark.asyncio
+async def test_clear_resets_subclass_fields() -> None:
+    """Clear is a reset to the current state's type, not a merge."""
+    store = InMemoryStateStore(ParentClearState())
+    await store.set_state(ChildClearState(a=1, b=7))
+
+    await store.clear()
+
+    state = await store.get_state()
+    assert isinstance(state, ChildClearState)
+    assert state.a == 0
+    assert state.b == 0
+
+
 @pytest.mark.asyncio
 async def test_running_steps_before_run_raises(workflow: Workflow) -> None:
     """Calling running_steps() before workflow.run() should raise ContextStateError."""
@@ -798,6 +824,167 @@ class TypedTestState(BaseModel):
     name: str = "default"
 
 
+class CustomDictState(DictState):
+    """DictState subclass for codec dispatch testing."""
+
+
+def test_encode_decode_state_handles_dict_state() -> None:
+    serializer = JsonSerializer()
+    state = DictState(answer=42, name="dict")
+
+    state_data, _, _ = encode_state(state, serializer)
+    result = decode_state(state_data, serializer)
+
+    assert isinstance(result, DictState)
+    assert result["answer"] == 42
+    assert result["name"] == "dict"
+
+
+def test_encode_decode_state_handles_dict_state_subclass() -> None:
+    serializer = JsonSerializer()
+    state = CustomDictState()
+    state["answer"] = 42
+    state["name"] = "subclass"
+
+    state_data, _, _ = encode_state(state, serializer)
+    result = decode_state(state_data, serializer)
+
+    assert isinstance(result, DictState)
+    assert result["answer"] == 42
+    assert result["name"] == "subclass"
+
+
+def test_encode_decode_state_handles_typed_state() -> None:
+    serializer = JsonSerializer()
+    state = TypedTestState(counter=7, name="typed")
+
+    state_data, _, _ = encode_state(state, serializer)
+    result = decode_state(state_data, serializer)
+
+    assert isinstance(result, TypedTestState)
+    assert result.counter == 7
+    assert result.name == "typed"
+
+
+def test_decode_state_respects_json_serializer_allowed_types() -> None:
+    serializer = JsonSerializer()
+    state = TypedTestState(counter=7, name="typed")
+    state_data, _, _ = encode_state(state, serializer)
+    restricted_serializer = JsonSerializer(allowed_types=[DictState])
+
+    with pytest.raises(ValueError, match="Refusing to import disallowed"):
+        decode_state(state_data, restricted_serializer)
+
+
+def test_decode_state_allows_dict_state_under_restricted_allowlist() -> None:
+    """A restricted allowlist must not reject the default DictState container."""
+    serializer = JsonSerializer()
+    state = DictState()
+    state["inner"] = TypedTestState(counter=3, name="allowed")
+    state["plain"] = 42
+    state_data, _, _ = encode_state(state, serializer)
+    restricted_serializer = JsonSerializer(allowed_types=[TypedTestState])
+
+    result = decode_state(state_data, restricted_serializer)
+
+    assert isinstance(result, DictState)
+    assert isinstance(result["inner"], TypedTestState)
+    assert result["inner"].counter == 3
+    assert result["plain"] == 42
+
+
+def test_decode_state_typed_payload_with_unimportable_type_raises() -> None:
+    serializer = JsonSerializer()
+    state_data = json.dumps(
+        {
+            "__is_pydantic": True,
+            "value": {"counter": 1, "name": "gone"},
+            "qualified_name": "missing.module.MovedState",
+        }
+    )
+
+    with pytest.raises(Exception):
+        decode_state(state_data, serializer)
+
+
+def test_decode_state_dict_wrapper_decodes_to_dict_state() -> None:
+    serializer = JsonSerializer()
+    state_data = {"_data": {"answer": serializer.serialize(42)}}
+
+    result = decode_state(state_data, serializer)
+
+    assert isinstance(result, DictState)
+    assert result["answer"] == 42
+
+
+def test_decode_state_dict_wrapper_string_decodes_to_dict_state() -> None:
+    """Durable rows persist the DictState wrapper as a JSON string."""
+    serializer = JsonSerializer()
+    state_data = json.dumps({"_data": {"answer": serializer.serialize(42)}})
+
+    result = decode_state(state_data, serializer)
+
+    assert isinstance(result, DictState)
+    assert result["answer"] == 42
+
+
+def test_decode_state_returns_live_model_unchanged() -> None:
+    serializer = JsonSerializer()
+    state = TypedTestState(counter=9, name="live")
+
+    assert decode_state(state, serializer) is state
+
+
+def test_decode_state_pickle_serializer_typed_payload_round_trips() -> None:
+    """PickleSerializer encodes JSON-incapable typed state as a base64 string."""
+    serializer = PickleSerializer()
+    state = TypedTestState(counter=5, name="pickled")
+    state_data = base64.b64encode(pickle.dumps(state)).decode("utf-8")
+
+    result = decode_state(state_data, serializer)
+
+    assert isinstance(result, TypedTestState)
+    assert result.counter == 5
+    assert result.name == "pickled"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(json.dumps([1, 2, 3]), id="json-list-string"),
+        pytest.param(json.dumps("just a string"), id="json-scalar-string"),
+        pytest.param({"foo": 1}, id="dict-without-data-wrapper"),
+        pytest.param([1, 2, 3], id="list"),
+    ],
+)
+def test_decode_state_unrecognized_payload_raises(payload: object) -> None:
+    with pytest.raises(ValueError, match="state payload"):
+        decode_state(payload, JsonSerializer())
+
+
+def test_decode_state_none_yields_default_empty_state() -> None:
+    """Blank-store handoffs serialize as state_data=None and must stay valid."""
+    serializer = JsonSerializer()
+
+    result = decode_state(None, serializer)
+
+    assert isinstance(result, DictState)
+    assert len(list(result.items())) == 0
+
+
+def test_deserialize_state_from_dict_accepts_deprecated_state_type_kwarg() -> None:
+    """Released llama-agents-dbos 0.3.x still passes state_type=; it must be ignored, not a TypeError."""
+    serializer = JsonSerializer()
+    store = InMemoryStateStore(TypedTestState(counter=3, name="kwarg"))
+    payload = store.to_dict(serializer)
+
+    with_kwarg = deserialize_state_from_dict(payload, serializer, state_type=DictState)
+    without_kwarg = deserialize_state_from_dict(payload, serializer)
+
+    assert isinstance(with_kwarg, TypedTestState)
+    assert with_kwarg == without_kwarg
+
+
 @pytest.mark.asyncio
 async def test_deserialize_state_from_dict_with_dict_state() -> None:
     """Test deserializing DictState from to_dict() format."""
@@ -815,6 +1002,17 @@ async def test_deserialize_state_from_dict_with_dict_state() -> None:
     assert isinstance(result, DictState)
     assert result["counter"] == 42
     assert result["name"] == "test-value"
+
+
+@pytest.mark.asyncio
+async def test_in_memory_get_preserves_mutable_value_identity() -> None:
+    store = InMemoryStateStore(DictState())
+    await store.set("state", {"items": []})
+
+    state = await store.get("state")
+    state["items"].append("persisted")
+
+    assert await store.get("state.items") == ["persisted"]
 
 
 def test_deserialize_state_from_dict_with_typed_state() -> None:
@@ -1085,3 +1283,29 @@ def test_in_memory_state_store_from_dict_rejects_sql_format() -> None:
 
     with pytest.raises(ValueError, match="Cannot parse store_type 'sql'"):
         InMemoryStateStore.from_dict(sql_format, serializer)
+
+
+def test_pre_run_store_access_rejects_durable_state_handle(workflow: Workflow) -> None:
+    ctx = Context.from_dict(
+        workflow,
+        {"version": 1, "state": {"store_type": "sqlite", "run_id": "run-1"}},
+    )
+
+    with pytest.raises(ContextSerdeError, match="durable state store 'sqlite'"):
+        _ = ctx.store
+
+
+def test_basic_runtime_rejects_durable_state_handle(workflow: Workflow) -> None:
+    runtime = BasicRuntime()
+
+    with pytest.raises(
+        WorkflowRuntimeError,
+        match="BasicRuntime cannot restore durable state store 'postgres'",
+    ):
+        runtime.run_workflow(
+            "run-durable",
+            workflow,
+            BrokerState.from_workflow(workflow),
+            serialized_state={"store_type": "postgres", "run_id": "run-1"},
+            serializer=JsonSerializer(),
+        )

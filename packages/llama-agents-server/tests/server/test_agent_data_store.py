@@ -18,16 +18,24 @@ from llama_agents.server._store.agent_data_state_store import AgentDataStateStor
 from llama_agents.server._store.agent_data_store import AgentDataStore
 from llama_agents_integration_tests.fake_agent_data import (
     FakeAgentDataBackend,
+    create_agent_data_state_store,
     create_agent_data_store,
 )
+from pydantic import BaseModel
 from server_test_fixtures import wait_for_passing  # type: ignore[import]
 from workflows.context.serializers import JsonSerializer
-from workflows.context.state_store import DictState
+from workflows.context.state_store import DictState, InMemoryStateStore
+from workflows.context.state_store_integration import state_store_handoff
 from workflows.events import Event, StopEvent
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+class AgentDataCounterState(BaseModel):
+    count: int = 0
+    label: str = "default"
 
 
 @pytest.fixture()
@@ -466,6 +474,249 @@ async def test_create_state_store_with_type(store: AgentDataStore) -> None:
     assert state_store.state_type is DictState
 
 
+@pytest.mark.asyncio
+async def test_create_state_store_upgrades_default_state_type(
+    store: AgentDataStore,
+) -> None:
+    """A later typed caller upgrades the cached type-less facade (no shadowing)."""
+    first = store.create_state_store("run-upgrade")
+    assert first.state_type is DictState
+
+    second = store.create_state_store("run-upgrade", state_type=AgentDataCounterState)
+
+    assert second is first
+    assert first.state_type is AgentDataCounterState
+
+
+@pytest.mark.asyncio
+async def test_create_state_store_seeds_from_in_memory_serialized_state(
+    backend: FakeAgentDataBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    serializer = JsonSerializer()
+    seed = InMemoryStateStore(DictState())
+    await seed.set("token", "persisted")
+    serialized_state = seed.to_dict(serializer)
+    store = create_agent_data_store(backend, monkeypatch, collection="handlers")
+
+    state_store = store.create_state_store(
+        "run-seeded",
+        serialized_state=serialized_state,
+        serializer=serializer,
+    )
+
+    assert await state_store.get("token") == "persisted"
+
+    restored = create_agent_data_store(backend, monkeypatch, collection="handlers")
+    reconnected = restored.create_state_store(
+        "run-seeded",
+        serialized_state=state_store.to_dict(serializer),
+        serializer=serializer,
+    )
+    assert await reconnected.get("token") == "persisted"
+
+
+@pytest.mark.asyncio
+async def test_create_state_store_cached_run_applies_serialized_restore(
+    store: AgentDataStore,
+) -> None:
+    serializer = JsonSerializer()
+    seed = InMemoryStateStore(DictState(token="restored"))
+    cached = store.create_state_store("run-cached-restore")
+    await cached.set("token", "cached")
+
+    restored = store.create_state_store(
+        "run-cached-restore",
+        serialized_state=seed.to_dict(serializer),
+        serializer=serializer,
+    )
+
+    assert await restored.get("token") == "restored"
+
+
+@pytest.mark.asyncio
+async def test_create_state_store_reconnects_agent_data_handle_collection(
+    backend: FakeAgentDataBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    serializer = JsonSerializer()
+    original = create_agent_data_store(backend, monkeypatch, collection="handlers")
+    original_state = original.create_state_store("run-agent-data-handle")
+    await original_state.set("token", "persisted")
+    serialized_state = original_state.to_dict(serializer)
+
+    restored = create_agent_data_store(
+        backend, monkeypatch, collection="other_handlers"
+    )
+    restored_state = restored.create_state_store(
+        "run-agent-data-handle",
+        serialized_state=serialized_state,
+        serializer=serializer,
+    )
+
+    assert await restored_state.get("token") == "persisted"
+
+
+@pytest.mark.asyncio
+async def test_agent_data_handoff_materializes_new_run_copy(
+    store: AgentDataStore,
+) -> None:
+    serializer = JsonSerializer()
+    source = store.create_state_store("run-handoff-source")
+    await source.set("token", "persisted")
+    target = AgentDataStateStore.from_dict(
+        source.to_dict(serializer),
+        serializer,
+        client=store._client,
+        run_id="run-handoff-target",
+    )
+
+    target_handle = await state_store_handoff(target, serializer)
+    reconnected = AgentDataStateStore.from_dict(
+        target_handle,
+        serializer,
+        client=store._client,
+        run_id="run-handoff-target",
+    )
+
+    assert await reconnected.get("token") == "persisted"
+
+
+@pytest.mark.asyncio
+async def test_agent_data_from_dict_accepts_in_memory_snapshot(
+    store: AgentDataStore,
+) -> None:
+    serializer = JsonSerializer()
+    seed = InMemoryStateStore(DictState(token="portable"))
+
+    restored = AgentDataStateStore.from_dict(
+        seed.to_dict(serializer),
+        serializer,
+        client=store._client,
+        run_id="run-in-memory-snapshot",
+        collection="handlers_state",
+    )
+
+    assert await restored.get("token") == "portable"
+
+
+def test_agent_data_from_dict_rejects_wrong_provider_handle(
+    store: AgentDataStore,
+) -> None:
+    with pytest.raises(ValueError, match="store_type 'postgres'"):
+        AgentDataStateStore.from_dict(
+            {"store_type": "postgres", "run_id": "run-1"},
+            JsonSerializer(),
+            client=store._client,
+        )
+
+
+@pytest.mark.asyncio
+async def test_legacy_agent_data_typed_state_decodes_without_metadata(
+    backend: FakeAgentDataBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    serializer = JsonSerializer()
+    store = create_agent_data_store(backend, monkeypatch, collection="handlers")
+    backend.create(
+        "test-deploy",
+        "handlers_state",
+        {
+            "run_id": "run-legacy-typed",
+            "data": serializer.serialize(
+                AgentDataCounterState(count=7, label="legacy")
+            ),
+        },
+    )
+
+    state_store = store.create_state_store(
+        "run-legacy-typed",
+        state_type=AgentDataCounterState,
+        serializer=serializer,
+    )
+
+    state = await state_store.get_state()
+    assert isinstance(state, AgentDataCounterState)
+    assert state.count == 7
+    assert state.label == "legacy"
+
+
+# ---------------------------------------------------------------------------
+# Decoded-state cache (AgentDataStateStore)
+# ---------------------------------------------------------------------------
+
+
+def _count_backend_searches(
+    backend: FakeAgentDataBackend, monkeypatch: pytest.MonkeyPatch
+) -> list[int]:
+    """Count search round-trips reaching the fake backend."""
+    counter = [0]
+    original = backend.search
+
+    def counting_search(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        counter[0] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(backend, "search", counting_search)
+    return counter
+
+
+@pytest.mark.asyncio
+async def test_consecutive_reads_hit_backend_once(
+    backend: FakeAgentDataBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    writer = create_agent_data_state_store(backend, monkeypatch, "run-read-cache")
+    await writer.set("k", "v")
+
+    reader = create_agent_data_state_store(backend, monkeypatch, "run-read-cache")
+    searches = _count_backend_searches(backend, monkeypatch)
+
+    assert (await reader.get_state())["k"] == "v"
+    assert (await reader.get_state())["k"] == "v"
+
+    assert searches[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_read_after_write_skips_backend(
+    backend: FakeAgentDataBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_store = create_agent_data_state_store(backend, monkeypatch, "run-write-cache")
+    await state_store.set("k", "v")
+
+    searches = _count_backend_searches(backend, monkeypatch)
+    assert await state_store.get("k") == "v"
+    assert searches[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_mutating_returned_state_does_not_poison_cache(
+    backend: FakeAgentDataBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_store = create_agent_data_state_store(backend, monkeypatch, "run-mutate")
+    await state_store.set("nums", [1])
+
+    state = await state_store.get_state()
+    state["nums"].append(2)
+
+    assert await state_store.get("nums") == [1]
+
+
+@pytest.mark.asyncio
+async def test_restaged_seed_invalidates_cached_state(
+    backend: FakeAgentDataBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    serializer = JsonSerializer()
+    state_store = create_agent_data_state_store(backend, monkeypatch, "run-reseed")
+    await state_store.set("token", "old")
+    assert await state_store.get("token") == "old"  # cache is warm
+
+    seed = InMemoryStateStore(DictState(token="new")).to_dict(serializer)
+    state_store.add_seed(seed, serializer)
+
+    assert await state_store.get("token") == "new"
+
+
 # ---------------------------------------------------------------------------
 # LRU cache behavior tests
 # ---------------------------------------------------------------------------
@@ -556,6 +807,25 @@ async def test_state_store_from_dict_preserves_collection(
     )
 
     # Should be able to read data written by the original store
+    val = await restored.get("key")
+    assert val == "hello"
+
+
+@pytest.mark.asyncio
+async def test_state_store_from_dict_with_new_run_copies_state(
+    store: AgentDataStore,
+) -> None:
+    state_store = store.create_state_store("run-source")
+    await state_store.set(path="key", value="hello")
+
+    serialized = state_store.to_dict(JsonSerializer())
+    restored = AgentDataStateStore.from_dict(
+        serialized,
+        JsonSerializer(),
+        client=store._client,
+        run_id="run-target",
+    )
+
     val = await restored.get("key")
     assert val == "hello"
 
