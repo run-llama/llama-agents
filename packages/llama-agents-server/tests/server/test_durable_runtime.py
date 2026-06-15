@@ -283,6 +283,42 @@ async def test_on_server_start_marks_no_ticks_handler_as_failed(
 
 
 @pytest.mark.asyncio
+async def test_on_server_start_skips_handlers_created_within_resume_grace(
+    memory_store: MemoryWorkflowStore, simple_test_workflow: Workflow
+) -> None:
+    """A fresh request can create a running row before its first tick lands.
+
+    Startup resume should not classify recently-created rows as crashed just
+    because the first tick is not persisted yet. The grace window also covers
+    small clock drift around the launch cutoff.
+    """
+    handler_id = "fresh-no-ticks-1"
+    run_id = "run-fresh-no-ticks-1"
+    resume_started_at = datetime(2026, 1, 1, 0, 0, 30, tzinfo=timezone.utc)
+    await memory_store.update(
+        PersistentHandler(
+            handler_id=handler_id,
+            workflow_name="test",
+            status="running",
+            run_id=run_id,
+            started_at=datetime(2026, 1, 1, 0, 0, 5, tzinfo=timezone.utc),
+        )
+    )
+
+    server = WorkflowServer(workflow_store=memory_store, idle_timeout=0.01)
+    server.add_workflow("test", simple_test_workflow)
+    persistence = _get_persistence(server)
+
+    await persistence._on_server_start(
+        {"test": simple_test_workflow}, resume_started_at
+    )
+
+    found = await memory_store.query(HandlerQuery(handler_id_in=[handler_id]))
+    assert found[0].status == "running"
+    assert found[0].error is None
+
+
+@pytest.mark.asyncio
 async def test_on_server_start_finalizes_terminal_replay_as_completed(
     memory_store: MemoryWorkflowStore,
 ) -> None:
@@ -308,6 +344,7 @@ async def test_on_server_start_finalizes_terminal_replay_as_completed(
     zombie.status = "running"
     zombie.result = None
     zombie.completed_at = None
+    zombie.started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
     await memory_store.update(zombie)
 
     server2 = WorkflowServer(workflow_store=memory_store, idle_timeout=0.01)
@@ -341,6 +378,7 @@ async def test_on_server_start_finalizes_terminal_replay_as_failed(
     zombie.status = "running"
     zombie.error = None
     zombie.completed_at = None
+    zombie.started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
     await memory_store.update(zombie)
 
     server2 = WorkflowServer(workflow_store=memory_store, idle_timeout=0.01)
