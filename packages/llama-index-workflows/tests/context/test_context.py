@@ -364,6 +364,20 @@ async def test_wait_for_event_in_workflow_serialization() -> None:
     assert total_waiters == 0
 
 
+def test_context_from_dict_rejects_future_version_as_context_serde_error(
+    workflow: Workflow,
+) -> None:
+    payload = {
+        "version": CURRENT_SERIALIZED_VERSION + 1,
+        "state": {},
+        "is_running": False,
+        "workers": {},
+    }
+
+    with pytest.raises(ContextSerdeError, match="newer version"):
+        Context.from_dict(workflow, payload)
+
+
 class TwoStepHITLWorkflow(Workflow):
     """The documented two-step HITL shape: emit InputRequiredEvent, consume HumanResponseEvent."""
 

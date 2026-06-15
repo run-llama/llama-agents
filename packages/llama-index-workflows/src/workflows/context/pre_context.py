@@ -56,7 +56,7 @@ class PreContext(Generic[MODEL_T]):
                 BrokerState.from_serialized(
                     previous_context_parsed, workflow, self._serializer
                 )
-            except ValidationError as e:
+            except (ValidationError, ValueError) as e:
                 raise ContextSerdeError(
                     f"Context dict specified in an invalid format: {e}"
                 ) from e
