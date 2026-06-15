@@ -344,6 +344,7 @@ async def test_on_server_start_finalizes_terminal_replay_as_completed(
     zombie.status = "running"
     zombie.result = None
     zombie.completed_at = None
+    zombie.started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
     await memory_store.update(zombie)
 
     server2 = WorkflowServer(workflow_store=memory_store, idle_timeout=0.01)
@@ -377,6 +378,7 @@ async def test_on_server_start_finalizes_terminal_replay_as_failed(
     zombie.status = "running"
     zombie.error = None
     zombie.completed_at = None
+    zombie.started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
     await memory_store.update(zombie)
 
     server2 = WorkflowServer(workflow_store=memory_store, idle_timeout=0.01)
