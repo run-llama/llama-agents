@@ -93,7 +93,7 @@ class _VerboseInternalRunAdapter(BaseInternalRunAdapterDecorator):
     async def on_tick(self, tick: WorkflowTick) -> None:
         if isinstance(tick, TickAddEvent):
             summary = summarize_event(tick.event)
-            target = f" -> {tick.step_name}" if tick.step_name else ""
+            target = f" -> {tick.step_id}" if tick.step_id else ""
             self._output(f"[tick] add: {summary}{target}")
         elif isinstance(tick, TickPublishEvent):
             self._output(f"[tick] publish: {summarize_event(tick.event)}")
@@ -101,7 +101,7 @@ class _VerboseInternalRunAdapter(BaseInternalRunAdapterDecorator):
             self._output(f"[tick] timeout: {tick.timeout}s")
         elif isinstance(tick, TickWaiterTimeout):
             self._output(
-                f"[tick] waiter timeout: step {tick.step_name} waiter {tick.waiter_id}"
+                f"[tick] waiter timeout: step {tick.step_id} waiter {tick.waiter_id}"
             )
         elif isinstance(tick, TickCancelRun):
             self._output("[tick] cancelled")

@@ -515,10 +515,11 @@ def _extract_execution_graph(
             ev_id = ensure_event_node(t.event)
             edges.append((external_node_id, ev_id))
         elif isinstance(t, TickStepResult):
-            step_seq[t.step_name] = step_seq.get(t.step_name, 0) + 1
-            seq = step_seq[t.step_name]
-            step_node_id = f"step:{t.step_name}#{seq}"
-            step_label = f"{t.step_name}#{seq}"
+            step_name = str(t.step_id)
+            step_seq[step_name] = step_seq.get(step_name, 0) + 1
+            seq = step_seq[step_name]
+            step_node_id = f"step:{step_name}#{seq}"
+            step_label = f"{step_name}#{seq}"
             display_label = (
                 _truncate_label(step_label, max_label_length)
                 if max_label_length

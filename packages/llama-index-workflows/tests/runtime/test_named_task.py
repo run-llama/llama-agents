@@ -24,6 +24,7 @@ from workflows.runtime.types.named_task import (
     get_key,
     pick_highest_priority,
 )
+from workflows.runtime.types.step_id import StepId
 
 
 async def _never_completes() -> None:
@@ -43,7 +44,7 @@ async def test_worker_task_creates_correct_key() -> None:
     """WorkerTask should create key as 'step_name:worker_id'."""
     task = create_pending_task()
     try:
-        nt = WorkerTask("my_step", 42, task)
+        nt = WorkerTask(StepId.root("my_step"), 42, task)
         assert nt.key == "my_step:42"
         assert nt.task is task
         assert isinstance(nt, WorkerTask)
@@ -81,8 +82,8 @@ async def test_all_tasks_returns_set_of_tasks() -> None:
     pull = create_pending_task()
     try:
         named_tasks = [
-            WorkerTask("step_a", 0, w1),
-            WorkerTask("step_b", 0, w2),
+            WorkerTask(StepId.root("step_a"), 0, w1),
+            WorkerTask(StepId.root("step_b"), 0, w2),
             PullTask(0, pull),
         ]
         result = all_tasks(named_tasks)
@@ -108,7 +109,7 @@ async def test_all_tasks_works_with_asyncio_wait() -> None:
     """all_tasks result should work with asyncio.wait."""
     task = create_pending_task()
     try:
-        named_tasks = [WorkerTask("step", 0, task)]
+        named_tasks = [WorkerTask(StepId.root("step"), 0, task)]
         result = all_tasks(named_tasks)
         done, pending = await asyncio.wait(result, timeout=0.001)
         assert task in pending
@@ -129,8 +130,8 @@ async def test_find_by_key_returns_worker_task() -> None:
     w2 = create_pending_task()
     try:
         named_tasks = [
-            WorkerTask("step_a", 0, w1),
-            WorkerTask("step_b", 1, w2),
+            WorkerTask(StepId.root("step_a"), 0, w1),
+            WorkerTask(StepId.root("step_b"), 1, w2),
         ]
         assert find_by_key(named_tasks, "step_a:0") is w1
         assert find_by_key(named_tasks, "step_b:1") is w2
@@ -161,7 +162,7 @@ async def test_find_by_key_returns_none_for_unknown() -> None:
     """find_by_key should return None for unknown key."""
     task = create_pending_task()
     try:
-        named_tasks = [WorkerTask("step", 0, task)]
+        named_tasks = [WorkerTask(StepId.root("step"), 0, task)]
         assert find_by_key(named_tasks, "unknown:99") is None
     finally:
         task.cancel()
@@ -183,7 +184,7 @@ async def test_get_key_returns_worker_key() -> None:
     """get_key should return the key for a worker task."""
     task = create_pending_task()
     try:
-        named_tasks = [WorkerTask("my_step", 3, task)]
+        named_tasks = [WorkerTask(StepId.root("my_step"), 3, task)]
         assert get_key(named_tasks, task) == "my_step:3"
     finally:
         task.cancel()
@@ -212,7 +213,7 @@ async def test_get_key_raises_for_unknown_task() -> None:
     known = create_pending_task()
     unknown = create_pending_task()
     try:
-        named_tasks = [WorkerTask("step", 0, known)]
+        named_tasks = [WorkerTask(StepId.root("step"), 0, known)]
         with pytest.raises(KeyError):
             get_key(named_tasks, unknown)
     finally:
@@ -231,7 +232,7 @@ async def test_round_trip_worker() -> None:
     """get_key and find_by_key should be inverses for workers."""
     task = create_pending_task()
     try:
-        named_tasks = [WorkerTask("step", 5, task)]
+        named_tasks = [WorkerTask(StepId.root("step"), 5, task)]
         key = get_key(named_tasks, task)
         found = find_by_key(named_tasks, key)
         assert found is task
@@ -269,8 +270,8 @@ async def test_pick_highest_priority_respects_list_order() -> None:
     t3 = create_pending_task()
     try:
         named_tasks = [
-            WorkerTask("step_b", 0, t2),
-            WorkerTask("step_a", 0, t1),
+            WorkerTask(StepId.root("step_b"), 0, t2),
+            WorkerTask(StepId.root("step_a"), 0, t1),
             PullTask(0, t3),
         ]
         done = {t2, t3}
@@ -291,7 +292,7 @@ async def test_pick_highest_priority_workers_before_pull() -> None:
     pull = create_pending_task()
     try:
         named_tasks = [
-            WorkerTask("step", 0, worker),
+            WorkerTask(StepId.root("step"), 0, worker),
             PullTask(0, pull),
         ]
         done = {worker, pull}
@@ -312,7 +313,7 @@ async def test_pick_highest_priority_returns_pull_when_only_pull_done() -> None:
     pull = create_pending_task()
     try:
         named_tasks = [
-            WorkerTask("step", 0, worker),
+            WorkerTask(StepId.root("step"), 0, worker),
             PullTask(0, pull),
         ]
         done = {pull}
@@ -331,7 +332,7 @@ async def test_pick_highest_priority_empty_done() -> None:
     """Should return None when done set is empty."""
     task = create_pending_task()
     try:
-        named_tasks = [WorkerTask("step", 0, task)]
+        named_tasks = [WorkerTask(StepId.root("step"), 0, task)]
         result = pick_highest_priority(named_tasks, set())
         assert result is None
     finally:
@@ -347,7 +348,7 @@ async def test_pick_highest_priority_no_match_raises() -> None:
     task1 = create_pending_task()
     task2 = create_pending_task()
     try:
-        named_tasks = [WorkerTask("step", 0, task1)]
+        named_tasks = [WorkerTask(StepId.root("step"), 0, task1)]
         done = {task2}
         with pytest.raises(ValueError, match="No tasks in done set match"):
             pick_highest_priority(named_tasks, done)
@@ -373,7 +374,7 @@ async def test_integration_with_asyncio_wait() -> None:
     pull = create_pending_task()
     try:
         named_tasks = [
-            WorkerTask("fast_step", 0, worker),
+            WorkerTask(StepId.root("fast_step"), 0, worker),
             PullTask(0, pull),
         ]
 
@@ -401,8 +402,8 @@ async def test_multiple_workers_same_step() -> None:
     w1 = create_pending_task()
     try:
         named_tasks = [
-            WorkerTask("parallel_step", 0, w0),
-            WorkerTask("parallel_step", 1, w1),
+            WorkerTask(StepId.root("parallel_step"), 0, w0),
+            WorkerTask(StepId.root("parallel_step"), 1, w1),
         ]
 
         assert find_by_key(named_tasks, "parallel_step:0") is w0

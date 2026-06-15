@@ -20,6 +20,7 @@ from workflows.runtime.types.plugin import (
     as_snapshottable_adapter,
     as_v2_runtime_compatibility_shim,
 )
+from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import TickAddEvent, TickCancelRun, WorkflowTick
 
 if TYPE_CHECKING:
@@ -120,7 +121,10 @@ class ExternalContext(Generic[MODEL_T, RunResultT]):
 
         self._execute_task(
             self._external_adapter.send_event(
-                TickAddEvent(event=message, step_name=step)
+                TickAddEvent(
+                    event=message,
+                    step_id=StepId.root(step) if step is not None else None,
+                )
             )
         )
 

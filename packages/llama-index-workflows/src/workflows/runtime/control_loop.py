@@ -80,6 +80,7 @@ from workflows.runtime.types.results import (
     StepWorkerState,
     StepWorkerWaiter,
 )
+from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import (
     TickAddEvent,
     TickCancelRun,
@@ -124,6 +125,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _root_step_key(step_id: StepId) -> str:
+    return str(step_id)
+
+
 class _ControlLoopRunner:
     """
     Private class to encapsulate the async control loop runtime state and behavior.
@@ -161,8 +166,8 @@ class _ControlLoopRunner:
         self._wakeup_sequence = 0
         # Pull task sequence counter for deterministic journaling
         self._pull_sequence = 0
-        # Map from worker task to (step_name, worker_id) key
-        self._task_keys: dict[asyncio.Task[TickStepResult], tuple[str, int]] = {}
+        # Map from worker task to (step_id, worker_id) key
+        self._task_keys: dict[asyncio.Task[TickStepResult], tuple[StepId, int]] = {}
         # Whether a TickIdleCheck is currently in tick_buffer
         self._idle_check_pending = False
         # Pending worker coroutines not yet started (started by adapter in wait_for_next_task)
@@ -203,11 +208,12 @@ class _ControlLoopRunner:
 
         async def _run_worker() -> TickStepResult:
             worker: InProgressState | None = None
+            step_name = _root_step_key(command.step_id)
             try:
                 worker = next(
                     (
                         w
-                        for w in self.state.workers[command.step_name].in_progress
+                        for w in self.state.workers[step_name].in_progress
                         if w.worker_id == command.id
                     ),
                     None,
@@ -217,11 +223,11 @@ class _ControlLoopRunner:
                         f"Worker {command.id} not found in in_progress. This should not happen."
                     )
                 snapshot = worker.shared_state
-                step_fn: StepWorkerFunction = self.step_workers[command.step_name]
+                step_fn: StepWorkerFunction = self.step_workers[step_name]
 
                 result = await step_fn(
                     state=snapshot,
-                    step_name=command.step_name,
+                    step_name=step_name,
                     event=command.event,
                     workflow=self.workflow,
                     retry=RetryAttempt(
@@ -234,12 +240,10 @@ class _ControlLoopRunner:
                 )
                 # Return result for main loop to process
                 return TickStepResult(
-                    step_name=command.step_name,
+                    step_id=command.step_id,
                     worker_id=command.id,
                     event=command.event,
-                    result=self._stamp_retry_decisions(
-                        command.step_name, worker, result
-                    ),
+                    result=self._stamp_retry_decisions(command.step_id, worker, result),
                 )
             except Exception as e:
                 if _is_shutdown_error(e):
@@ -252,21 +256,21 @@ class _ControlLoopRunner:
                     exception=e, failed_at=await self.adapter.get_now()
                 )
                 return TickStepResult(
-                    step_name=command.step_name,
+                    step_id=command.step_id,
                     worker_id=command.id,
                     event=command.event,
                     result=self._stamp_retry_decisions(
-                        command.step_name, worker, [failed]
+                        command.step_id, worker, [failed]
                     ),
                 )
 
         self._pending_workers.append(
-            PendingWorker(command.step_name, command.id, _run_worker())
+            PendingWorker(command.step_id, command.id, _run_worker())
         )
 
     def _stamp_retry_decisions(
         self,
-        step_name: str,
+        step_id: StepId,
         worker: InProgressState | None,
         results: list[StepFunctionResult],
     ) -> list[StepFunctionResult]:
@@ -280,6 +284,7 @@ class _ControlLoopRunner:
         """
         if worker is None:
             return results
+        step_name = _root_step_key(step_id)
         policy = self.state.workers[step_name].config.retry_policy
         out: list[StepFunctionResult] = []
         for result in results:
@@ -307,7 +312,7 @@ class _ControlLoopRunner:
             self.tick_buffer.append(
                 TickAddEvent(
                     event=command.event,
-                    step_name=command.step_name,
+                    step_id=command.step_id,
                     attempts=command.attempts,
                     first_attempt_at=command.first_attempt_at,
                     last_exception=command.last_exception,
@@ -340,9 +345,7 @@ class _ControlLoopRunner:
         elif isinstance(command, CommandScheduleWaiterTimeout):
             now = await self.adapter.get_now()
             self.schedule_tick(
-                TickWaiterTimeout(
-                    step_name=command.step_name, waiter_id=command.waiter_id
-                ),
+                TickWaiterTimeout(step_id=command.step_id, waiter_id=command.waiter_id),
                 at_time=now + command.timeout,
             )
             return None
@@ -492,7 +495,7 @@ class _ControlLoopRunner:
                         pull_task = nt.task
                     elif isinstance(nt, WorkerTask):
                         self.worker_tasks.add(nt.task)
-                        self._task_keys[nt.task] = (nt.step_name, nt.worker_id)
+                        self._task_keys[nt.task] = (nt.step_id, nt.worker_id)
 
                 completed_task = result.completed
 
@@ -778,7 +781,7 @@ def _decide_retry_delay(
 
 
 def _drain_eligible_queue(
-    step_name: str,
+    step_id: StepId,
     state: InternalStepWorkerState,
     now_seconds: float,
 ) -> list[WorkflowCommand]:
@@ -797,7 +800,7 @@ def _drain_eligible_queue(
         if index is None:
             break
         attempt = state.queue.pop(index)
-        commands.extend(_add_or_enqueue_event(attempt, step_name, state, now_seconds))
+        commands.extend(_add_or_enqueue_event(attempt, step_id, state, now_seconds))
     return commands
 
 
@@ -815,6 +818,7 @@ def rewind_in_progress(
     state = state.deepcopy()
     commands: list[WorkflowCommand] = []
     for step_name, step_state in sorted(state.workers.items(), key=lambda x: x[0]):
+        step_id = StepId.root(step_name)
         for in_progress in step_state.in_progress:
             step_state.queue.insert(
                 0,
@@ -828,7 +832,7 @@ def rewind_in_progress(
                 ),
             )
         step_state.in_progress = []
-        commands.extend(_drain_eligible_queue(step_name, step_state, now_seconds))
+        commands.extend(_drain_eligible_queue(step_id, step_state, now_seconds))
         for attempt in step_state.queue:
             if attempt.not_before is not None:
                 commands.append(CommandScheduleWakeup(at_time=attempt.not_before))
@@ -868,7 +872,9 @@ def _process_step_result_tick(
     """
     state = init.deepcopy()
     commands: list[WorkflowCommand] = []
-    worker_state = state.workers[tick.step_name]
+    step_id = tick.step_id
+    step_name = _root_step_key(step_id)
+    worker_state = state.workers[step_name]
     # get the current execution details and mark it as no longer in progress
     this_execution = next(
         (w for w in worker_state.in_progress if w.worker_id == tick.worker_id), None
@@ -913,7 +919,7 @@ def _process_step_result_tick(
                 pass
             else:
                 logger.warning(
-                    f"Unknown result type returned from step function ({tick.step_name}): {type(result.result)}"
+                    f"Unknown result type returned from step function ({step_name}): {type(result.result)}"
                 )
         elif isinstance(result, StepWorkerFailed):
             # Schedule a retry if permitted, otherwise fail the workflow.
@@ -941,7 +947,7 @@ def _process_step_result_tick(
                     failures=this_execution.attempts + 1,
                     exception=result.exception,
                     run_id=run_id,
-                    step_name=tick.step_name,
+                    step_name=step_name,
                 )
             if delay is not None:
                 # Re-queue the attempt directly into persisted state, carrying
@@ -969,7 +975,7 @@ def _process_step_result_tick(
                 total_attempts = this_execution.attempts + 1
                 elapsed = result.failed_at - first_attempt_at
 
-                handler_name = state.config.handler_for_step.get(tick.step_name)
+                handler_name = state.config.handler_for_step.get(step_name)
                 handler = (
                     state.config.catch_error_handlers.get(handler_name)
                     if handler_name is not None
@@ -988,7 +994,7 @@ def _process_step_result_tick(
                     # Route to the catch-error handler. Keep workflow running so
                     # the handler can produce either a StopEvent or a new failure.
                     step_failed_event = StepFailedEvent(
-                        step_name=tick.step_name,
+                        step_name=step_name,
                         input_event=tick.event,
                         exception=exception,
                         attempts=total_attempts,
@@ -1000,7 +1006,7 @@ def _process_step_result_tick(
                     commands.append(
                         CommandQueueEvent(
                             event=step_failed_event,
-                            step_name=handler.step_name,
+                            step_id=StepId.root(handler.step_name),
                             recovery_counts={
                                 **this_execution.recovery_counts,
                                 handler.step_name: new_count,
@@ -1013,7 +1019,7 @@ def _process_step_result_tick(
                     commands.append(
                         CommandPublishEvent(
                             event=WorkflowFailedEvent(
-                                step_name=tick.step_name,
+                                step_name=step_name,
                                 exception=exception,
                                 attempts=total_attempts,
                                 elapsed_seconds=elapsed,
@@ -1021,15 +1027,13 @@ def _process_step_result_tick(
                         )
                     )
                     commands.append(
-                        CommandFailWorkflow(
-                            step_name=tick.step_name, exception=exception
-                        )
+                        CommandFailWorkflow(step_id=step_id, exception=exception)
                     )
         elif isinstance(result, AddCollectedEvent):
             # The current state of collected events.
-            collected_events = state.workers[
-                tick.step_name
-            ].collected_events.setdefault(result.event_id, [])
+            collected_events = state.workers[step_name].collected_events.setdefault(
+                result.event_id, []
+            )
             # the events snapshot that was sent with the step function execution that yielded this result
             sent_events = this_execution.shared_state.collected_events.get(
                 result.event_id, []
@@ -1042,15 +1046,13 @@ def _process_step_result_tick(
                     this_execution.shared_state,
                     collected_events={
                         x: list(y)
-                        for x, y in state.workers[
-                            tick.step_name
-                        ].collected_events.items()
+                        for x, y in state.workers[step_name].collected_events.items()
                     },
                 )
                 this_execution.shared_state = updated_state
                 commands.append(
                     CommandRunWorker(
-                        step_name=tick.step_name,
+                        step_id=step_id,
                         event=result.event,
                         id=this_execution.worker_id,
                     )
@@ -1060,9 +1062,7 @@ def _process_step_result_tick(
         elif isinstance(result, DeleteCollectedEvent):
             if did_complete_step:  # allow retries to grab the events
                 # indicates that a run has successfully collected its events, and they can be deleted from the collected events state
-                state.workers[tick.step_name].collected_events.pop(
-                    result.event_id, None
-                )
+                state.workers[step_name].collected_events.pop(result.event_id, None)
         elif isinstance(result, AddWaiter):
             # indicates that a run has added a waiter to the collected waiters state
             existing = next(
@@ -1090,7 +1090,7 @@ def _process_step_result_tick(
                 if result.timeout is not None:
                     commands.append(
                         CommandScheduleWaiterTimeout(
-                            step_name=tick.step_name,
+                            step_id=step_id,
                             waiter_id=result.waiter_id,
                             timeout=result.timeout,
                         )
@@ -1100,7 +1100,7 @@ def _process_step_result_tick(
             if did_complete_step:  # allow retries to grab the waiter events
                 # indicates that a run has obtained the waiting event, and it can be deleted from the collected waiters state
                 to_remove = result.waiter_id
-                waiters = state.workers[tick.step_name].collected_waiters
+                waiters = state.workers[step_name].collected_waiters
                 item = next(filter(lambda w: w.waiter_id == to_remove, waiters), None)
                 if item is not None:
                     waiters.remove(item)
@@ -1114,7 +1114,7 @@ def _process_step_result_tick(
             CommandPublishEvent(
                 StepStateChanged(
                     step_state=StepState.NOT_RUNNING,
-                    name=tick.step_name,
+                    name=step_name,
                     input_event_name=str(type(tick.event)),
                     output_event_name=output_event_name,
                     worker_id=str(tick.worker_id),
@@ -1124,16 +1124,14 @@ def _process_step_result_tick(
         worker_state.in_progress.remove(this_execution)
     # enqueue next events if there are any
     if not is_completed:
-        commands.extend(
-            _drain_eligible_queue(tick.step_name, worker_state, now_seconds)
-        )
+        commands.extend(_drain_eligible_queue(step_id, worker_state, now_seconds))
 
     return state, commands
 
 
 def _add_or_enqueue_event(
     event: EventAttempt,
-    step_name: str,
+    step_id: StepId,
     state: InternalStepWorkerState,
     now_seconds: float,
 ) -> list[WorkflowCommand]:
@@ -1142,6 +1140,7 @@ def _add_or_enqueue_event(
     Note! This mutates the state, assuming that its already been deepcopied in an outer scope.
     """
     commands: list[WorkflowCommand] = []
+    step_name = _root_step_key(step_id)
     # Determine if there is available capacity based on in_progress workers.
     # Delayed attempts (not_before set) are never dispatched here; they wait
     # in the queue without consuming a worker slot until a wakeup flips them.
@@ -1171,7 +1170,7 @@ def _add_or_enqueue_event(
                 recovery_counts=dict(event.recovery_counts),
             )
         )
-        commands.append(CommandRunWorker(step_name=step_name, event=event.event, id=id))
+        commands.append(CommandRunWorker(step_id=step_id, event=event.event, id=id))
         commands.append(
             CommandPublishEvent(
                 StepStateChanged(
@@ -1212,6 +1211,7 @@ def _process_add_event_tick(
     # as a normal accepted event (which would cause duplicate processing).
     waiter_resolved_steps: set[str] = set()
     for step_name, step_config in state.config.steps.items():
+        step_id = StepId.root(step_name)
         wait_conditions = state.workers[step_name].collected_waiters
         for wait_condition in wait_conditions:
             is_match = event_matches(
@@ -1229,7 +1229,7 @@ def _process_add_event_tick(
                 wait_condition.resolved_event = tick.event
                 subcommands = _add_or_enqueue_event(
                     EventAttempt(event=wait_condition.event),
-                    step_name,
+                    step_id,
                     state.workers[step_name],
                     now_seconds,
                 )
@@ -1238,6 +1238,7 @@ def _process_add_event_tick(
     # Then route to accepting steps, skipping any that were already woken
     # via waiter resolution above.
     for step_name, step_config in state.config.steps.items():
+        step_id = StepId.root(step_name)
         if step_name in waiter_resolved_steps:
             continue
         is_accepted = step_accepts_event(
@@ -1245,7 +1246,9 @@ def _process_add_event_tick(
             step_config.accepted_events,
             allow_subclasses=step_config.accept_event_subclasses,
         )
-        if is_accepted and (tick.step_name is None or tick.step_name == step_name):
+        if is_accepted and (
+            tick.step_id is None or _root_step_key(tick.step_id) == step_name
+        ):
             handled = True
             _consume_superseded_delayed_attempt(tick, state.workers[step_name])
             subcommands = _add_or_enqueue_event(
@@ -1257,7 +1260,7 @@ def _process_add_event_tick(
                     last_failed_at=tick.last_failed_at,
                     recovery_counts=dict(tick.recovery_counts),
                 ),
-                step_name,
+                step_id,
                 state.workers[step_name],
                 now_seconds,
             )
@@ -1273,7 +1276,7 @@ def _process_add_event_tick(
                     UnhandledEvent(
                         event_type=event_cls.__name__,
                         qualified_name=f"{event_cls.__module__}.{event_cls.__name__}",
-                        step_name=tick.step_name,
+                        step_name=str(tick.step_id) if tick.step_id else None,
                         idle=_check_idle_state(state),
                     )
                 )
@@ -1372,10 +1375,11 @@ def _process_wakeup_tick(
     state = init.deepcopy()
     commands: list[WorkflowCommand] = []
     for step_name, worker_state in sorted(state.workers.items(), key=lambda x: x[0]):
+        step_id = StepId.root(step_name)
         for attempt in worker_state.queue:
             if attempt.not_before is not None and attempt.not_before <= tick.due:
                 attempt.not_before = None
-        commands.extend(_drain_eligible_queue(step_name, worker_state, now_seconds))
+        commands.extend(_drain_eligible_queue(step_id, worker_state, now_seconds))
     return state, commands
 
 
@@ -1384,9 +1388,11 @@ def _process_waiter_timeout_tick(
 ) -> tuple[BrokerState, list[WorkflowCommand]]:
     state = init.deepcopy()
     commands: list[WorkflowCommand] = []
-    if tick.step_name not in state.workers:
+    step_id = tick.step_id
+    step_name = _root_step_key(step_id)
+    if step_name not in state.workers:
         return state, commands
-    worker_state = state.workers[tick.step_name]
+    worker_state = state.workers[step_name]
     waiter = next(
         (w for w in worker_state.collected_waiters if w.waiter_id == tick.waiter_id),
         None,
@@ -1397,7 +1403,7 @@ def _process_waiter_timeout_tick(
     waiter.timed_out = True
     subcommands = _add_or_enqueue_event(
         EventAttempt(event=waiter.event),
-        tick.step_name,
+        step_id,
         worker_state,
         now_seconds,
     )

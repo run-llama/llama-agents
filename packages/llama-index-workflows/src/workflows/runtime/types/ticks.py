@@ -20,14 +20,17 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, TypeAdapter
 from workflows.events import SerializableEvent, SerializableOptionalException
 from workflows.runtime.types.results import StepFunctionResult
+from workflows.runtime.types.step_id import StepId
 
 
 class TickStepResult(BaseModel):
     """When processed, executes a step function and publishes the result"""
 
-    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+    model_config = ConfigDict(
+        frozen=True, arbitrary_types_allowed=True, populate_by_name=True
+    )
     type: Literal["step_result"] = "step_result"
-    step_name: str
+    step_id: StepId = Field(validation_alias="step_name")
     worker_id: int
     event: SerializableEvent
     result: list[Annotated[StepFunctionResult, Discriminator("type")]]
@@ -36,10 +39,12 @@ class TickStepResult(BaseModel):
 class TickAddEvent(BaseModel):
     """When sent, adds an event to the workflow's event queue"""
 
-    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+    model_config = ConfigDict(
+        frozen=True, arbitrary_types_allowed=True, populate_by_name=True
+    )
     type: Literal["add_event"] = "add_event"
     event: SerializableEvent
-    step_name: str | None = None
+    step_id: StepId | None = Field(default=None, validation_alias="step_name")
     attempts: int | None = None
     first_attempt_at: float | None = None
     last_exception: SerializableOptionalException = None
@@ -80,9 +85,9 @@ class TickTimeout(BaseModel):
 class TickWaiterTimeout(BaseModel):
     """When processed, marks a specific waiter as timed out and replays the step."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
     type: Literal["waiter_timeout"] = "waiter_timeout"
-    step_name: str
+    step_id: StepId = Field(validation_alias="step_name")
     waiter_id: str
 
 

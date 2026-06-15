@@ -20,6 +20,7 @@ from workflows.decorators import CatchErrorHandler, StepConfig
 from workflows.events import Event
 from workflows.retry_policy import RetryPolicy
 from workflows.runtime.types.results import StepWorkerState, StepWorkerWaiter
+from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import TickAddEvent, WorkflowTick
 from workflows.workflow import Workflow
 
@@ -99,7 +100,7 @@ class BrokerState:
             ):
                 if waiter.has_requirements and not waiter.requirements:
                     commands.append(
-                        TickAddEvent(event=waiter.event, step_name=step_name)
+                        TickAddEvent(event=waiter.event, step_id=StepId.root(step_name))
                     )
         return commands
 

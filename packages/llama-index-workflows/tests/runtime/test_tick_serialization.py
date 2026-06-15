@@ -27,19 +27,83 @@ from workflows.runtime.types.results import (
     StepWorkerFailed,
     StepWorkerResult,
 )
+from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import (
     TickAddEvent,
     TickCancelRun,
     TickPublishEvent,
     TickStepResult,
     TickTimeout,
+    TickWaiterTimeout,
     TickWakeup,
     WorkflowTick,
+    WorkflowTickAdapter,
 )
 
 
 class MyEvent(Event):
     value: str = "hello"
+
+
+def test_step_id_root_stringifies_as_bare_step_name() -> None:
+    step_id = StepId.root("my_step")
+
+    assert str(step_id) == "my_step"
+
+    adapter = TypeAdapter(StepId)
+    assert adapter.dump_python(step_id, mode="json") == "my_step"
+    assert adapter.validate_python("my_step") == step_id
+
+
+def test_step_id_accepts_forward_namespaced_string_shape() -> None:
+    step_id = StepId.from_str("parent/child/process")
+
+    assert step_id.namespace == ("parent", "child")
+    assert step_id.name == "process"
+    assert str(step_id) == "parent/child/process"
+
+
+def test_root_step_id_tick_serializes_step_id_as_bare_name() -> None:
+    tick = TickStepResult(
+        step_id=StepId.root("process"),
+        worker_id=42,
+        event=MyEvent(value="trigger"),
+        result=[StepWorkerResult(result=StopEvent(result="done"))],
+    )
+
+    serialized = tick.model_dump(mode="json")
+
+    assert serialized["step_id"] == "process"
+    assert "step_name" not in serialized
+
+
+def test_legacy_step_name_tick_payloads_deserialize_to_root_step_ids() -> None:
+    add_event_payload = TickAddEvent(
+        event=StartEvent(), step_id=StepId.root("start")
+    ).model_dump(mode="json")
+    add_event_payload["step_name"] = add_event_payload.pop("step_id")
+    add_event = WorkflowTickAdapter.validate_python(add_event_payload)
+    assert isinstance(add_event, TickAddEvent)
+    assert add_event.step_id == StepId.root("start")
+
+    step_result_payload = TickStepResult(
+        step_id=StepId.root("process"),
+        worker_id=1,
+        event=StartEvent(),
+        result=[StepWorkerResult(result=None)],
+    ).model_dump(mode="json")
+    step_result_payload["step_name"] = step_result_payload.pop("step_id")
+    step_result = WorkflowTickAdapter.validate_python(step_result_payload)
+    assert isinstance(step_result, TickStepResult)
+    assert step_result.step_id == StepId.root("process")
+
+    waiter_payload = TickWaiterTimeout(
+        step_id=StepId.root("waiter"), waiter_id="w-1"
+    ).model_dump(mode="json")
+    waiter_payload["step_name"] = waiter_payload.pop("step_id")
+    waiter = WorkflowTickAdapter.validate_python(waiter_payload)
+    assert isinstance(waiter, TickWaiterTimeout)
+    assert waiter.step_id == StepId.root("waiter")
 
 
 # -- Serialization helper roundtrip tests --
@@ -85,7 +149,7 @@ def test_event_type_roundtrip() -> None:
         pytest.param(
             TickAddEvent(
                 event=StartEvent(),
-                step_name="my_step",
+                step_id=StepId.root("my_step"),
                 attempts=3,
                 first_attempt_at=1234567890.0,
             ),
@@ -109,7 +173,7 @@ def test_event_type_roundtrip() -> None:
         ),
         pytest.param(
             TickStepResult(
-                step_name="process",
+                step_id=StepId.root("process"),
                 worker_id=42,
                 event=MyEvent(value="trigger"),
                 result=[StepWorkerResult(result=StopEvent(result="done"))],
@@ -118,7 +182,7 @@ def test_event_type_roundtrip() -> None:
         ),
         pytest.param(
             TickStepResult(
-                step_name="process",
+                step_id=StepId.root("process"),
                 worker_id=1,
                 event=StartEvent(),
                 result=[StepWorkerResult(result=None)],
@@ -127,7 +191,7 @@ def test_event_type_roundtrip() -> None:
         ),
         pytest.param(
             TickStepResult(
-                step_name="collector",
+                step_id=StepId.root("collector"),
                 worker_id=2,
                 event=StartEvent(),
                 result=[
@@ -140,7 +204,7 @@ def test_event_type_roundtrip() -> None:
         ),
         pytest.param(
             TickStepResult(
-                step_name="collector",
+                step_id=StepId.root("collector"),
                 worker_id=3,
                 event=StartEvent(),
                 result=[DeleteCollectedEvent(event_id="evt-2")],
@@ -149,7 +213,7 @@ def test_event_type_roundtrip() -> None:
         ),
         pytest.param(
             TickStepResult(
-                step_name="cleanup",
+                step_id=StepId.root("cleanup"),
                 worker_id=5,
                 event=StartEvent(),
                 result=[DeleteWaiter(waiter_id="w-2")],
@@ -171,7 +235,7 @@ def test_tick_roundtrip(tick: WorkflowTick) -> None:
 def test_tick_step_result_with_failed_value_error() -> None:
     failed_at = time.time()
     tick = TickStepResult(
-        step_name="broken_step",
+        step_id=StepId.root("broken_step"),
         worker_id=7,
         event=StartEvent(),
         result=[
@@ -196,7 +260,7 @@ def test_tick_step_result_with_failed_unimportable_exception() -> None:
     CustomError = type("CustomError", (Exception,), {})
     failed_at = time.time()
     tick = TickStepResult(
-        step_name="broken_step",
+        step_id=StepId.root("broken_step"),
         worker_id=8,
         event=StartEvent(),
         result=[StepWorkerFailed(exception=CustomError("oops"), failed_at=failed_at)],
@@ -215,7 +279,7 @@ def test_tick_step_result_with_failed_unimportable_exception() -> None:
 
 def test_tick_step_result_with_add_waiter() -> None:
     tick = TickStepResult(
-        step_name="waiter_step",
+        step_id=StepId.root("waiter_step"),
         worker_id=4,
         event=StartEvent(),
         result=[
@@ -258,12 +322,12 @@ def test_workflow_tick_discriminated_union_roundtrip() -> None:
     adapter = TypeAdapter(WorkflowTick)
 
     ticks = [
-        TickAddEvent(event=StartEvent(), step_name="s"),
+        TickAddEvent(event=StartEvent(), step_id=StepId.root("s")),
         TickPublishEvent(event=MyEvent(value="x")),
         TickCancelRun(),
         TickTimeout(timeout=10.0),
         TickStepResult(
-            step_name="s",
+            step_id=StepId.root("s"),
             worker_id=0,
             event=StartEvent(),
             result=[StepWorkerResult(result=None)],

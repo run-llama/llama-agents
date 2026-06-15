@@ -19,11 +19,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from workflows.events import Event, StopEvent
+from workflows.runtime.types.step_id import StepId
 
 
 @dataclass(frozen=True)
 class CommandRunWorker:
-    step_name: str
+    step_id: StepId
     event: Event
     id: int
 
@@ -31,7 +32,7 @@ class CommandRunWorker:
 @dataclass(frozen=True)
 class CommandQueueEvent:
     event: Event
-    step_name: str | None = None
+    step_id: StepId | None = None
     attempts: int | None = None
     first_attempt_at: float | None = None
     last_exception: Exception | None = None
@@ -51,7 +52,7 @@ class CommandCompleteRun:
 
 @dataclass(frozen=True)
 class CommandFailWorkflow:
-    step_name: str
+    step_id: StepId
     exception: Exception
 
 
@@ -62,7 +63,7 @@ class CommandPublishEvent:
 
 @dataclass(frozen=True)
 class CommandScheduleWaiterTimeout:
-    step_name: str
+    step_id: StepId
     waiter_id: str
     timeout: float
 

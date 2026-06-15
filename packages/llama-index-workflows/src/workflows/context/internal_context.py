@@ -22,6 +22,7 @@ from workflows.runtime.types.results import (
     StepWorkerStateContextVar,
     WaitingForEvent,
 )
+from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import TickAddEvent
 
 if TYPE_CHECKING:
@@ -169,7 +170,7 @@ class InternalContext(Generic[MODEL_T]):
             self._internal_adapter.send_event(
                 TickAddEvent(
                     event=message,
-                    step_name=step,
+                    step_id=StepId.root(step) if step is not None else None,
                     recovery_counts=recovery_counts,
                 )
             )
