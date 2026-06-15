@@ -1,5 +1,19 @@
 # llama-index-workflows
 
+## 2.21.0
+
+### Minor Changes
+
+- 9a4dd16: Add optional `allowed_types` and `allow_unknown_types` parameters to `JsonSerializer` to support type allowlisting during deserialization
+- db1258b: Support opt-in subclass event routing via the step decorator parameter `accept_event_subclasses`
+- 070fc70: State reads are lockless and read-committed on all backends; edit_state edits an isolated copy committed on block exit.
+- 070fc70: Decode workflow state by payload shape instead of persisted type metadata, and make state-store runtime handoff explicit.
+
+### Patch Changes
+
+- 41e354a: Seed retry jitter with the run id during snapshot tick replay so rebuilt snapshots match the live run, and consume old-format delayed-retry journal entries instead of duplicating them
+- 41e354a: Fix delayed retries being lost when a workflow is snapshotted or idle-released during the retry delay window
+
 ## 2.20.0
 
 ### Minor Changes

@@ -1,5 +1,11 @@
 # llama-agents-appserver
 
+## 0.11.5
+
+### Patch Changes
+
+- 070fc70: Decode workflow state by payload shape instead of persisted type metadata, and make state-store runtime handoff explicit.
+
 ## 0.11.4
 
 ### Patch Changes

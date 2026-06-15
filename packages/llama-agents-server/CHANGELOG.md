@@ -1,5 +1,28 @@
 # llama-agents-server
 
+## 0.6.0
+
+### Minor Changes
+
+- 070fc70: Decode workflow state by payload shape instead of persisted type metadata, and make state-store runtime handoff explicit.
+
+### Patch Changes
+
+- 41e354a: Seed retry jitter with the run id during snapshot tick replay so rebuilt snapshots match the live run, and consume old-format delayed-retry journal entries instead of duplicating them
+- 5fd64dc: Update debugger assets
+
+  - JavaScript: https://cdn.jsdelivr.net/npm/@llamaindex/workflow-debugger@0.2.40/dist/app.js
+  - CSS: https://cdn.jsdelivr.net/npm/@llamaindex/workflow-debugger@0.2.40/dist/app.css
+
+- Updated dependencies [9a4dd16]
+- Updated dependencies [db1258b]
+- Updated dependencies [070fc70]
+- Updated dependencies [41e354a]
+- Updated dependencies [41e354a]
+- Updated dependencies [070fc70]
+  - llama-index-workflows@2.21.0
+  - llama-agents-client@0.3.8
+
 ## 0.5.0
 
 ### Minor Changes
