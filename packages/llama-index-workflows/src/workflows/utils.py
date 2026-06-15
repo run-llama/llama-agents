@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import collections.abc as cabc
 import inspect
 import secrets
 import string
@@ -41,6 +42,12 @@ class StepSignatureSpec(BaseModel):
     context_parameter: str | None
     context_state_type: Any | None
     resources: list[Any]
+    # Fan-out producer: True when the return annotation is ``list[E]``.
+    is_fan_out: bool = False
+    # Non-list members of a fan-out return union (``-> list[A] | B`` -> [B]).
+    # A bare return of one of these types is ordinary dispatch; any other bare
+    # event under a list-returning annotation is a runtime error.
+    bare_return_types: list[Any] = []
 
 
 def inspect_signature(
@@ -67,6 +74,7 @@ def inspect_signature(
 
     sig = inspect.signature(fn)
     type_hints = _resolve_type_hints(fn, include_extras=True, localns=localns)
+    _reject_async_iterator_return(fn, type_hints.get("return"))
 
     accepted_events: dict[str, list[EventType]] = {}
     context_parameter = None
@@ -110,7 +118,7 @@ def inspect_signature(
             continue
 
         # Get name and type of the Context param (without state type)
-        if hasattr(annotation, "__name__") and annotation.__name__ == "Context":
+        if getattr(annotation, "__name__", None) == "Context":
             context_parameter = name
             continue
 
@@ -130,6 +138,8 @@ def inspect_signature(
         context_parameter=context_parameter,
         context_state_type=context_state_type,
         resources=resources,
+        is_fan_out=_is_fan_out_return(fn, localns=localns),
+        bare_return_types=_bare_return_types(fn, localns=localns),
     )
 
 
@@ -226,25 +236,157 @@ def _get_param_types(param: inspect.Parameter, type_hints: dict) -> list[Any]:
     return [typ]
 
 
+# Return-annotation origins whose single element type describes emitted events.
+# A step that returns ``list[E]`` declares produced events for validation and
+# graph representation. Async-iterator returns are rejected at decoration.
+_COLLECTION_RETURN_ORIGINS = (list,)
+
+# Async-iterator return origins, rejected at decoration with a pointer to
+# ``list[E]``.
+_ASYNC_ITERATOR_RETURN_ORIGINS = (
+    cabc.AsyncIterator,
+    cabc.AsyncIterable,
+    cabc.AsyncGenerator,
+)
+
+
+def _flatten_return_annotation(hint: Any) -> list[Any]:
+    """Flatten a return annotation into the set of produced event types.
+
+    Unwraps unions, ``Optional`` (``None`` is dropped), and the
+    emission-collection wrappers in ``_COLLECTION_RETURN_ORIGINS`` (``list[E]``).
+    The element ``E`` may itself be a union, which is flattened recursively.
+    ``NoneType`` never appears in the result; order is preserved and duplicates
+    are removed.
+    """
+    if hint is type(None):
+        return []
+
+    origin = get_origin(hint)
+    if origin in (Union, UnionType):
+        # Optional is Union[type, None] so it's covered here.
+        result: list[Any] = []
+        for arg in get_args(hint):
+            for t in _flatten_return_annotation(arg):
+                if t not in result:
+                    result.append(t)
+        return result
+
+    if origin in _COLLECTION_RETURN_ORIGINS:
+        args = get_args(hint)
+        if not args:
+            return []
+        # list[E] -> E
+        return _flatten_return_annotation(args[0])
+
+    return [hint]
+
+
 def _get_return_types(
     func: Callable, localns: dict[str, Any] | None = None
 ) -> list[Any]:
     """
     Extract the return type hints from a function.
 
-    Handles Union, Optional, and List types.
+    Handles Union, Optional, and the ``list[E]`` emission collection, which is
+    unwrapped to the event types it emits for validation and graph
+    representation.
     """
     type_hints = _resolve_type_hints(func, localns=localns)
     return_hint = type_hints.get("return")
     if return_hint is None:
         return []
 
+    flattened = _flatten_return_annotation(return_hint)
+    # Preserve the historical contract that a bare ``-> None`` reports
+    # ``[NoneType]`` (a truthy, annotated return) rather than an empty list,
+    # which validation treats as a missing annotation.
+    if not flattened:
+        return [type(None)]
+    return flattened
+
+
+def _reject_async_iterator_return(func: Callable, return_hint: Any) -> None:
+    """Reject async-iterator fan-out returns.
+
+    A step that is an async generator, or annotates its return as
+    ``AsyncIterator[E]`` / ``AsyncIterable[E]`` / ``AsyncGenerator[E, None]``,
+    The supported fan-out contract is a finite ``list[E]`` return. Async
+    iterators imply streaming member delivery, which the runtime does not model.
+    Producers should return ``list[E]`` or use ``ctx.send_event`` for ordinary
+    dispatch.
+    """
+    is_async_gen = inspect.isasyncgenfunction(
+        getattr(func, "__func__", func)
+    ) or inspect.isasyncgenfunction(func)
     origin = get_origin(return_hint)
+    if is_async_gen or origin in _ASYNC_ITERATOR_RETURN_ORIGINS:
+        raise WorkflowValidationError(
+            "Async-iterator fan-out (AsyncIterator[E] / AsyncGenerator[E, None] / "
+            "async generator steps) is not supported. Return list[E] for a "
+            "static collection, or emit incrementally with ctx.send_event."
+        )
+
+
+def _is_fan_out_return(func: Callable, localns: dict[str, Any] | None = None) -> bool:
+    """True if the return annotation declares per-element list emission.
+
+    A fan-out producer returns ``list[E]``. ``Optional[list[E]]``
+    (``list[E] | None``) also counts — it may emit a list or nothing. A plain
+    single-event or union-of-single-events return is NOT fan-out.
+    """
+    type_hints = _resolve_type_hints(func, localns=localns)
+    return_hint = type_hints.get("return")
+    if return_hint is None:
+        return False
+    return _return_hint_is_fan_out(return_hint)
+
+
+def _return_hint_is_fan_out(hint: Any) -> bool:
+    if hint is type(None):
+        return False
+    origin = get_origin(hint)
     if origin in (Union, UnionType):
-        # Optional is Union[type, None] so it's covered here
-        return [t for t in get_args(return_hint) if t is not type(None)]
-    else:
-        return [return_hint]
+        # Optional / unions: fan-out if any non-None member is a collection.
+        return any(
+            _return_hint_is_fan_out(arg)
+            for arg in get_args(hint)
+            if arg is not type(None)
+        )
+    return origin in _COLLECTION_RETURN_ORIGINS
+
+
+def _bare_return_types(
+    func: Callable, localns: dict[str, Any] | None = None
+) -> list[Any]:
+    """Non-list members of the return annotation.
+
+    For ``-> list[A] | B`` this is ``[B]``: a bare ``B`` return from a fan-out
+    step is ordinary dispatch rather than list emission. A pure ``-> list[A]``
+    has none, so any bare event return is a runtime error there. ``NoneType``
+    is dropped (a ``None`` return is the no-emission path).
+    """
+    type_hints = _resolve_type_hints(func, localns=localns)
+    return_hint = type_hints.get("return")
+    if return_hint is None:
+        return []
+    return _flatten_bare_members(return_hint)
+
+
+def _flatten_bare_members(hint: Any) -> list[Any]:
+    if hint is type(None):
+        return []
+    origin = get_origin(hint)
+    if origin in (Union, UnionType):
+        result: list[Any] = []
+        for arg in get_args(hint):
+            for t in _flatten_bare_members(arg):
+                if t not in result:
+                    result.append(t)
+        return result
+    if origin in _COLLECTION_RETURN_ORIGINS:
+        return []
+    return [hint]
 
 
 def _resolve_type_hints(

@@ -51,6 +51,14 @@ class StepConfig:
     resources: list[ResourceDefinition]
     context_state_type: type[BaseModel] | None = None
     skip_graph_checks: list[StepGraphCheck] = dataclasses.field(default_factory=list)
+    # Fan-out producer: True when the return annotation is ``list[E]``. Computed
+    # at decoration time from the return annotation; only an actual list return
+    # emits per element.
+    is_fan_out: bool = False
+    # Non-list members of a fan-out return union (``-> list[A] | B`` -> (B,)).
+    # A bare return of one of these types is ordinary dispatch; any other bare
+    # event under a list-returning annotation is a runtime error.
+    bare_return_types: tuple[Any, ...] = ()
     role: StepRole = "step"
     # Only meaningful when role == "catch_error".
     # None means wildcard — covers any step not claimed by a scoped handler.
@@ -213,6 +221,8 @@ def make_step_function(
         retry_policy=retry_policy,
         resources=spec.resources,
         skip_graph_checks=skip_graph_checks or [],
+        is_fan_out=spec.is_fan_out,
+        bare_return_types=tuple(spec.bare_return_types),
         accept_event_subclasses=accept_event_subclasses,
     )
 
