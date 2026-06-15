@@ -15,7 +15,7 @@ import logging
 import sqlite3
 from collections.abc import AsyncIterator, Coroutine
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from typing_extensions import override
@@ -58,6 +58,7 @@ from .._store.abstract_workflow_store import (
 from .._store.sqlite.sqlite_state_store import SqliteStateStore
 
 logger = logging.getLogger(__name__)
+RESUME_FRESH_HANDLER_GRACE = timedelta(seconds=30)
 
 
 @dataclass
@@ -328,7 +329,7 @@ class PersistenceDecorator(TickPersistenceDecorator):
             )
         )
         for persistent in handlers:
-            if _created_after(persistent.started_at, resume_started_at):
+            if _created_within_resume_grace(persistent.started_at, resume_started_at):
                 continue
             workflow = registered_workflows.get(persistent.workflow_name)
             if workflow is None:
@@ -408,11 +409,13 @@ class PersistenceDecorator(TickPersistenceDecorator):
                 pass
 
 
-def _created_after(created_at: datetime | None, cutoff: datetime) -> bool:
+def _created_within_resume_grace(
+    created_at: datetime | None, resume_started_at: datetime
+) -> bool:
     if created_at is None:
         return False
     if created_at.tzinfo is None:
         created_at = created_at.replace(tzinfo=timezone.utc)
-    if cutoff.tzinfo is None:
-        cutoff = cutoff.replace(tzinfo=timezone.utc)
-    return created_at > cutoff
+    if resume_started_at.tzinfo is None:
+        resume_started_at = resume_started_at.replace(tzinfo=timezone.utc)
+    return created_at > resume_started_at - RESUME_FRESH_HANDLER_GRACE

@@ -283,24 +283,25 @@ async def test_on_server_start_marks_no_ticks_handler_as_failed(
 
 
 @pytest.mark.asyncio
-async def test_on_server_start_skips_handlers_created_after_resume_cutoff(
+async def test_on_server_start_skips_handlers_created_within_resume_grace(
     memory_store: MemoryWorkflowStore, simple_test_workflow: Workflow
 ) -> None:
     """A fresh request can create a running row before its first tick lands.
 
-    Startup resume should not classify those rows as crashed just because the
-    first tick is not persisted yet.
+    Startup resume should not classify recently-created rows as crashed just
+    because the first tick is not persisted yet. The grace window also covers
+    small clock drift around the launch cutoff.
     """
     handler_id = "fresh-no-ticks-1"
     run_id = "run-fresh-no-ticks-1"
-    resume_started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    resume_started_at = datetime(2026, 1, 1, 0, 0, 30, tzinfo=timezone.utc)
     await memory_store.update(
         PersistentHandler(
             handler_id=handler_id,
             workflow_name="test",
             status="running",
             run_id=run_id,
-            started_at=datetime(2026, 1, 1, 0, 0, 1, tzinfo=timezone.utc),
+            started_at=datetime(2026, 1, 1, 0, 0, 5, tzinfo=timezone.utc),
         )
     )
 
