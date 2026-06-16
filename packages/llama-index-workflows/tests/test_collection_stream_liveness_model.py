@@ -16,7 +16,7 @@ from workflows import Workflow, step
 from workflows.context.serializers import JsonSerializer
 from workflows.errors import WorkflowRuntimeError
 from workflows.events import Event, StartEvent, StopEvent
-from workflows.runtime.control_loop import (
+from workflows.runtime.control_loop.streams import (
     _adjust_open_work_items,
     _classify_work_item,
     _close_collection_stream,
