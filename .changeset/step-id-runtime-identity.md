@@ -1,6 +1,6 @@
 ---
-"llama-index-workflows": patch
-"llama-index-utils-workflow": patch
+"llama-index-workflows": minor
+"llama-index-utils-workflow": minor
 ---
 
-Add typed runtime step identities while preserving root workflow tick compatibility
+Add typed runtime step identities.
