@@ -109,6 +109,7 @@ class StepWorkerFunction(Protocol):
         step_name: str,
         event: Event,
         workflow: Workflow,
+        bound_events: dict[str, Event] | None = None,
         retry: RetryAttempt = RetryAttempt(),
     ) -> Awaitable[list[StepFunctionResult]]: ...
 
@@ -119,9 +120,13 @@ async def partial(
     event: Event,
     context: Context,
     workflow: Workflow,
+    collected_events: dict[str, Event] | None = None,
 ) -> Callable[[], Any]:
     kwargs: dict[str, Any] = {}
-    kwargs[step_config.event_name] = event
+    if collected_events is not None:
+        kwargs.update(collected_events)
+    else:
+        kwargs[step_config.event_name] = event
     if step_config.context_parameter:
         # Convert to internal face for step execution
         kwargs[step_config.context_parameter] = context
@@ -164,6 +169,7 @@ def as_step_worker_function(
         step_name: str,
         event: Event,
         workflow: Workflow,
+        bound_events: dict[str, Event] | None = None,
         retry: RetryAttempt = RetryAttempt(),
     ) -> list[StepFunctionResult]:
         from workflows.context.context import Context
@@ -247,6 +253,7 @@ def as_step_worker_function(
                 event=event,
                 context=internal_context,
                 workflow=workflow,
+                collected_events=bound_events,
             )
 
             try:

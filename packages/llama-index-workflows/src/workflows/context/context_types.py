@@ -75,6 +75,8 @@ class SerializedEventAttempt(BaseModel):
 
     # The event being processed (as serializer-encoded string)
     event: str
+    # Pre-bound fan-in parameters for static multi-event steps.
+    bound_events: dict[str, str] | None = None
     # Number of times this event has been attempted (0 for first attempt)
     attempts: int = 0
     # Unix timestamp of first attempt, or None if not yet attempted
@@ -125,11 +127,13 @@ class SerializedStepWorkerState(BaseModel):
     # Queue of events waiting to be processed (with retry info)
     queue: list[SerializedEventAttempt] = Field(default_factory=list)
     # Events currently being processed. Serialized with full retry info so a
-    # resumed run re-queues them without losing attempt counts.
+    # resumed run re-queues them without losing attempt counts or fan-in bindings.
     in_progress: list[SerializedEventAttempt] = Field(default_factory=list)
     # Collected events for ctx.collect_events(), keyed by buffer_id -> [event, ...]
     # Events are serialized strings
     collected_events: dict[str, list[str]] = Field(default_factory=dict)
+    # Pending static multi-parameter fan-in events.
+    static_collect_events: list[str] = Field(default_factory=list)
     # Active waiters created by ctx.wait_for_event()
     collected_waiters: list[SerializedWaiter] = Field(default_factory=list)
 

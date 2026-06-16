@@ -83,6 +83,7 @@ class BrokerState:
                     config=step_func._step_config,
                     in_progress=[],
                     collected_events={},
+                    static_collect_events=[],
                     collected_waiters=[],
                 )
                 for name, step_func in workflow._get_steps().items()
@@ -113,6 +114,12 @@ class BrokerState:
             queue = [
                 SerializedEventAttempt(
                     event=serializer.serialize(attempt.event),
+                    bound_events={
+                        name: serializer.serialize(event)
+                        for name, event in attempt.bound_events.items()
+                    }
+                    if attempt.bound_events is not None
+                    else None,
                     attempts=attempt.attempts or 0,
                     first_attempt_at=attempt.first_attempt_at,
                     last_exception=attempt.last_exception,
@@ -123,11 +130,16 @@ class BrokerState:
                 for attempt in worker_state.queue
             ]
 
-            # Serialize in-progress events with full retry info so they can be
-            # re-queued on resume without restarting from attempt 0.
+            # Serialize in-progress attempts, including retry and fan-in binding state.
             in_progress = [
                 SerializedEventAttempt(
                     event=serializer.serialize(ip.event),
+                    bound_events={
+                        name: serializer.serialize(event)
+                        for name, event in ip.bound_events.items()
+                    }
+                    if ip.bound_events is not None
+                    else None,
                     attempts=ip.attempts or 0,
                     first_attempt_at=ip.first_attempt_at,
                     last_exception=ip.last_exception,
@@ -162,6 +174,10 @@ class BrokerState:
                 queue=queue,
                 in_progress=in_progress,
                 collected_events=collected_events,
+                static_collect_events=[
+                    serializer.serialize(ev)
+                    for ev in worker_state.static_collect_events
+                ],
                 collected_waiters=waiters,
             )
 
@@ -202,6 +218,12 @@ class BrokerState:
             worker.queue = [
                 EventAttempt(
                     event=serializer.deserialize(attempt.event),
+                    bound_events={
+                        name: serializer.deserialize(event)
+                        for name, event in attempt.bound_events.items()
+                    }
+                    if attempt.bound_events is not None
+                    else None,
                     attempts=attempt.attempts,
                     first_attempt_at=attempt.first_attempt_at,
                     last_exception=attempt.last_exception,
@@ -217,6 +239,9 @@ class BrokerState:
                 buffer_id: [serializer.deserialize(ev) for ev in events]
                 for buffer_id, events in worker_data.collected_events.items()
             }
+            worker.static_collect_events = [
+                serializer.deserialize(ev) for ev in worker_data.static_collect_events
+            ]
 
             # Restore waiters
             worker.collected_waiters = []
@@ -309,6 +334,7 @@ class EventAttempt:
     """
 
     event: Event
+    bound_events: dict[str, Event] | None = None
     attempts: int | None = None
     first_attempt_at: float | None = None
     last_exception: Exception | None = None
@@ -338,6 +364,7 @@ class InternalStepWorkerState:
     in_progress: list[InProgressState]
     collected_events: dict[str, list[Event]]
     collected_waiters: list[StepWorkerWaiter]
+    static_collect_events: list[Event] = field(default_factory=list)
 
     def _deepcopy(self) -> InternalStepWorkerState:
         return InternalStepWorkerState(
@@ -345,6 +372,7 @@ class InternalStepWorkerState:
             config=self.config,
             in_progress=[x._deepcopy() for x in self.in_progress],
             collected_events={k: list(v) for k, v in self.collected_events.items()},
+            static_collect_events=list(self.static_collect_events),
             collected_waiters=[dataclasses.replace(x) for x in self.collected_waiters],
         )
 
@@ -377,10 +405,12 @@ class InProgressState:
     last_exception: Exception | None = None
     last_failed_at: float | None = None
     recovery_counts: dict[str, int] = field(default_factory=dict)
+    bound_events: dict[str, Event] | None = None
 
     def _deepcopy(self) -> InProgressState:
         return InProgressState(
             event=self.event,
+            bound_events=dict(self.bound_events) if self.bound_events else None,
             worker_id=self.worker_id,
             shared_state=self.shared_state._deepcopy(),
             attempts=self.attempts,
