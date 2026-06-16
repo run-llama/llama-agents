@@ -143,6 +143,7 @@ def add_worker(
     event: Event,
     worker_id: int = 0,
     first_attempt_at: float = 100.0,
+    snapshot_collected: dict[str, list[Event]] | None = None,
 ) -> None:
     """Helper to add an in-progress worker to state."""
     state.workers["test_step"].in_progress.append(
@@ -151,7 +152,7 @@ def add_worker(
             worker_id=worker_id,
             shared_state=StepWorkerState(
                 step_name="test_step",
-                collected_events={},
+                collected_events=snapshot_collected or {},
                 collected_waiters=[],
             ),
             attempts=0,
@@ -336,8 +337,14 @@ def test_collected_events(base_state: BrokerState) -> None:
     new_state, _ = _process_step_result_tick(tick, base_state, now_seconds=110.0)
     assert "buf1" in new_state.workers["test_step"].collected_events
 
-    # Delete event
-    add_worker(new_state, event)
+    # Delete event from the matching legacy collect_events() snapshot.
+    add_worker(
+        new_state,
+        event,
+        snapshot_collected={
+            "buf1": list(new_state.workers["test_step"].collected_events["buf1"])
+        },
+    )
     tick = TickStepResult(
         step_id=StepId.root("test_step"),
         worker_id=0,
@@ -349,6 +356,34 @@ def test_collected_events(base_state: BrokerState) -> None:
     )
     new_state, _ = _process_step_result_tick(tick, new_state, now_seconds=110.0)
     assert "buf1" not in new_state.workers["test_step"].collected_events
+
+
+def test_stale_collect_events_firing_reruns_without_deleting_buffer(
+    base_state: BrokerState,
+) -> None:
+    event = MyTestEvent(value=42)
+    live = OtherEvent(data="live")
+    stale = OtherEvent(data="stale")
+    base_state.workers["test_step"].collected_events["buf1"] = [live]
+    add_worker(base_state, event, snapshot_collected={"buf1": [stale]})
+
+    tick = TickStepResult(
+        step_id=StepId.root("test_step"),
+        worker_id=0,
+        event=event,
+        result=[
+            StepWorkerResult(result=StopEvent()),
+            DeleteCollectedEvent(event_id="buf1"),
+        ],
+    )
+
+    new_state, commands = _process_step_result_tick(tick, base_state, now_seconds=110.0)
+
+    assert new_state.workers["test_step"].collected_events["buf1"] == [live]
+    run_cmds = [c for c in commands if isinstance(c, CommandRunWorker)]
+    assert len(run_cmds) == 1
+    assert run_cmds[0].event is event
+    assert not any(isinstance(c, CommandCompleteRun) for c in commands)
 
 
 def test_waiters(base_state: BrokerState) -> None:

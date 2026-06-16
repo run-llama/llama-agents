@@ -50,6 +50,7 @@ from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import (
     TickAddEvent,
     TickCancelRun,
+    TickIdleCheck,
     TickWakeup,
     WorkflowTick,
 )
@@ -557,6 +558,123 @@ async def test_control_loop_collect_events_same_type(
 
     assert isinstance(result, StopEvent)
     assert result.result == "sum_10"
+
+
+@pytest.mark.asyncio
+async def test_control_loop_reruns_stale_collect_events_firing(
+    test_plugin: MockRunAdapter,
+) -> None:
+    class Item(Event):
+        n: int
+
+    class Pair(Event):
+        nums: list[int]
+
+    seeded = asyncio.Event()
+    racing_workers: set[int] = set()
+    release_race = asyncio.Event()
+
+    class StaleCollectWorkflow(Workflow):
+        @step
+        async def start(self, ctx: Context, ev: StartEvent) -> None:
+            ctx.send_event(Item(n=1))
+
+        @step(num_workers=2)
+        async def collect(self, ctx: Context, ev: Item) -> Pair | None:
+            if ev.n in {2, 3}:
+                racing_workers.add(ev.n)
+                if racing_workers == {2, 3}:
+                    release_race.set()
+                await release_race.wait()
+
+            events = ctx.collect_events(ev, [Item, Item])
+            if events is None:
+                if ev.n == 1:
+                    seeded.set()
+                return None
+            return Pair(nums=sorted(e.n for e in events))
+
+        @step(num_workers=1)
+        async def finish(self, ctx: Context, ev: Pair) -> StopEvent | None:
+            pairs = ctx.collect_events(ev, [Pair, Pair])
+            if pairs is None:
+                return None
+            return StopEvent(result=sorted(pair.nums for pair in pairs))
+
+    task = asyncio.create_task(
+        run_control_loop(
+            workflow=StaleCollectWorkflow(timeout=5.0),
+            start_event=StartEvent(),
+            test_runtime=test_plugin,
+        )
+    )
+
+    await asyncio.wait_for(seeded.wait(), timeout=1.0)
+    await test_plugin.send_event(TickAddEvent(event=Item(n=2)))
+    await test_plugin.send_event(TickAddEvent(event=Item(n=3)))
+    await test_plugin.send_event(TickAddEvent(event=Item(n=4)))
+
+    result = await asyncio.wait_for(task, timeout=2.0)
+
+    assert result.result == [[1, 2], [3, 4]]
+
+
+@pytest.mark.asyncio
+async def test_control_loop_defers_idle_behind_buffered_tick(
+    test_plugin: MockRunAdapter,
+) -> None:
+    class ContinueEvent(Event):
+        value: str
+
+    class BufferedTickWorkflow(Workflow):
+        @step
+        async def start(self, ev: StartEvent) -> None:
+            return None
+
+        @step
+        async def finish(self, ev: ContinueEvent) -> StopEvent:
+            return StopEvent(result=ev.value)
+
+    workflow = BufferedTickWorkflow(timeout=2.0)
+    step_workers = {}
+    for name, step_func in workflow._get_steps().items():
+        unbound = getattr(step_func, "__func__", step_func)
+        step_workers[name] = as_step_worker_function(unbound)
+
+    run_id = str(uuid.uuid4())
+    mock_runtime = MockRuntime()
+    test_plugin.set_state_store(InMemoryStateStore(DictState()))
+    mock_runtime.set_adapter(run_id, test_plugin)
+    workflow._runtime = mock_runtime
+    with setting_run_id(run_id):
+        ctx = Context._create_internal(workflow=workflow)
+
+    state = BrokerState.from_workflow(workflow)
+    state.is_running = True
+    runner = _ControlLoopRunner(workflow, test_plugin, ctx, step_workers, state)
+    runner.tick_buffer = [
+        TickIdleCheck(),
+        TickAddEvent(event=ContinueEvent(value="done")),
+    ]
+
+    with setting_run_id(run_id):
+        run_ctx = RunContext(
+            workflow=workflow,
+            run_adapter=test_plugin,
+            context=ctx,
+            steps=step_workers,
+        )
+        with run_context(run_ctx):
+            result = await runner.run(start_event=None)
+
+    assert result.result == "done"
+    seen: list[Event] = []
+    while True:
+        ev = await test_plugin.get_stream_event(timeout=1.0)
+        seen.append(ev)
+        if isinstance(ev, StopEvent):
+            break
+    assert not any(isinstance(ev, WorkflowIdleEvent) for ev in seen)
 
 
 @pytest.mark.asyncio
