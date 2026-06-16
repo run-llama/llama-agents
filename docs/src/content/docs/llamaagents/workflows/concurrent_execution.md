@@ -158,9 +158,7 @@ class ConcurrentFlow(Workflow):
         return StopEvent(result=[a.result, b.result, c.result])
 ```
 
-`step_a`, `step_b`, and `step_c` all run from the same `StartEvent`, so they run at the same time. `assemble` takes one parameter for each, so it fires once all three have arrived. The diagram for this workflow is easy to read:
-
-![A concurrent workflow](./assets/different_events.png)
+`step_a`, `step_b`, and `step_c` all run from the same `StartEvent`, so they run at the same time. `assemble` takes one parameter for each, so it fires once all three have arrived.
 
 ## Nesting
 
