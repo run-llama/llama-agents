@@ -62,6 +62,8 @@ class ConcurrentFlow(Workflow):
 
 `fan_out` returns `list[Task]` and `join` takes `list[Done]`, so the framework knows the batch from the types alone and fires `join` once it's complete.
 
+The events in the list are in completion order, which is the order each worker finished. This is not the order `fan_out` sent them. If you need a fixed order, sort the list yourself, as `join` does here with `sorted`.
+
 A worker can drop its own branch by returning `None`. The framework tracks which branches still return a value, so `join` still fires once, with only those branches:
 
 ```python
