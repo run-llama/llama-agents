@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 from typing import Any
 
@@ -13,8 +15,9 @@ MODEL_T = TypeVar("MODEL_T", bound=BaseModel, default=DictState)  # type: ignore
 # Serialization format version.
 #   v0: legacy nested-JSON-string format (SerializedContextV0).
 #   v1: structured format; per-worker ``in_progress`` was a list of event strings.
-#   v2: ``in_progress`` carries full attempts (retry counts and timestamps), so
-#       a resumed run does not silently restart in-flight work from attempt 0.
+#   v2: per-worker ``in_progress`` carries full attempts (retry counts and
+#       timestamps); collection stream attempts carry ``scope_path`` and collect
+#       invocations carry explicit release payloads.
 CURRENT_SERIALIZED_VERSION = 2
 
 
@@ -92,6 +95,20 @@ class SerializedEventAttempt(BaseModel):
     # be dispatched (retry delay), or None if eligible immediately. Additive:
     # older payloads validate with the default.
     not_before: float | None = None
+    # Collection stream scope path (innermost stream id last).
+    scope_path: list[str] = Field(default_factory=list)
+    # Explicit collect invocation payload, serialized only for queued/in-progress
+    # list[E] collect executions.
+    collection_release_payload: SerializedCollectionReleasePayload | None = None
+
+
+class SerializedCollectionReleasePayload(BaseModel):
+    """Serialized list-collect invocation payload."""
+
+    binding_id: str
+    stream_id: str
+    events: list[str] = Field(default_factory=list)
+    output_scope_path: list[str] = Field(default_factory=list)
 
 
 class SerializedWaiter(BaseModel):
@@ -109,6 +126,11 @@ class SerializedWaiter(BaseModel):
     has_requirements: bool = Field(default=False)
     # Resolved event if available (serialized), None otherwise
     resolved_event: str | None = None
+    # Originating work record: collection stream scope of the suspended work
+    # item (innermost stream id last).
+    scope_path: list[str] = Field(default_factory=list)
+    # For a suspended collect invocation, the release batch to re-invoke with.
+    collection_release_payload: SerializedCollectionReleasePayload | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -128,8 +150,8 @@ class SerializedStepWorkerState(BaseModel):
 
     # Queue of events waiting to be processed (with retry info)
     queue: list[SerializedEventAttempt] = Field(default_factory=list)
-    # Events currently being processed. Serialized with full retry info so a
-    # resumed run re-queues them without losing attempt counts or fan-in bindings.
+    # Events currently being processed. Serialized with full retry + stream scope
+    # so a resumed run re-queues them without losing collection liveness.
     in_progress: list[SerializedEventAttempt] = Field(default_factory=list)
     # Collected events for ctx.collect_events(), keyed by buffer_id -> [event, ...]
     # Events are serialized strings
@@ -138,6 +160,25 @@ class SerializedStepWorkerState(BaseModel):
     static_collect_events: list[str] = Field(default_factory=list)
     # Active waiters created by ctx.wait_for_event()
     collected_waiters: list[SerializedWaiter] = Field(default_factory=list)
+
+
+class SerializedCollectionStreamInstance(BaseModel):
+    """Serialized representation of an open collection stream."""
+
+    stream_id: str
+    source_step: str
+    scope_path: list[str] = Field(default_factory=list)
+    open_work_items: int = 0
+    accepting_binding_ids: list[str] = Field(default_factory=list)
+
+
+class SerializedCollectionReleaseState(BaseModel):
+    """Serialized release state for one binding inside one stream."""
+
+    binding_id: str
+    stream_id: str
+    buffer: list[str] = Field(default_factory=list)
+    released: bool = False
 
 
 class SerializedContext(BaseModel):
@@ -158,6 +199,14 @@ class SerializedContext(BaseModel):
     # Per-step worker state with queues, in-progress events, collected events, and waiters
     # Maps step_name -> SerializedStepWorkerState
     workers: dict[str, SerializedStepWorkerState] = Field(default_factory=dict)
+
+    # Monotonic stream-id counter. Persisted so a resumed run keeps minting
+    # unique, deterministic stream ids.
+    stream_seq: int = Field(default=0)
+    streams: dict[str, SerializedCollectionStreamInstance] = Field(default_factory=dict)
+    collection_release_states: dict[str, SerializedCollectionReleaseState] = Field(
+        default_factory=dict
+    )
 
     @staticmethod
     def from_v0(v0: SerializedContextV0) -> "SerializedContext":
@@ -233,7 +282,7 @@ class SerializedContext(BaseModel):
 
         v1 serialized each worker's ``in_progress`` as a list of event strings.
         v2 serializes them as full SerializedEventAttempt entries so a resumed
-        run keeps retry counts.
+        run keeps retry counts and stream scope.
         """
         migrated = dict(data)
         migrated["version"] = CURRENT_SERIALIZED_VERSION
@@ -257,7 +306,7 @@ class SerializedContext(BaseModel):
         A missing ``version`` routes to the legacy V0 parser. An unrecognized
         version, newer than this library supports, or not an int, fails
         loudly: routing it to an older parser would "succeed" while silently
-        dropping state.
+        dropping state (workers, streams).
         """
         version = data.get("version")
         if version is None:

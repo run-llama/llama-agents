@@ -34,12 +34,8 @@ class CommandRunWorker:
 class CommandQueueEvent:
     event: Event
     step_id: StepId | None = None
-    bound_events: dict[str, Event] | None = None
-    attempts: int | None = None
-    first_attempt_at: float | None = None
-    last_exception: Exception | None = None
-    last_failed_at: float | None = None
     recovery_counts: dict[str, int] = field(default_factory=dict)
+    scope_path: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -89,7 +85,7 @@ class CommandScheduleIdleCheck:
     Returned by the reducer when state looks quiescent after processing a tick.
     The runner appends a TickIdleCheck to tick_buffer so that idle is confirmed
     on the next loop iteration, after an asyncio.sleep(0) yield gives in-flight
-    ctx.send_event() calls a chance to drain.
+    ctx.send_event() calls a chance to deliver.
     """
 
     pass

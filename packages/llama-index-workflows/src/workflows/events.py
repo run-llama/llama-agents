@@ -374,8 +374,11 @@ class WorkflowFailedEvent(StopEvent):
         step_name: The name of the step that failed.
         exception: The raised exception. ``__traceback__`` is present only
             in-process; ``None`` after a replay.
-        attempts: The total number of attempts made before giving up.
-        elapsed_seconds: Time in seconds from first attempt to final failure.
+        attempts: The total number of attempts made before giving up, or
+            ``None`` when the failure is not an exhausted step attempt (e.g.
+            a runtime-detected stuck run).
+        elapsed_seconds: Time in seconds from first attempt to final failure,
+            or ``None`` when not applicable.
 
     Examples:
         ```python
@@ -388,8 +391,26 @@ class WorkflowFailedEvent(StopEvent):
 
     step_name: str
     exception: SerializableException
-    attempts: int
-    elapsed_seconds: float
+    attempts: int | None = None
+    elapsed_seconds: float | None = None
+
+
+class CollectionReleaseEvent(Event):
+    """Internal: invokes a collect step with one released batch.
+
+    This is the trigger event of a collect-step invocation work item — never a
+    member of the stream itself. The authoritative record of the batch is the
+    work item's collection release payload; the runtime derives this event from
+    that payload at every (re)delivery so the two cannot diverge.
+
+    Surfaces publicly as `StepFailedEvent.input_event` when a collect step
+    fails into a `@catch_error` handler: ``events`` is the real released batch
+    (possibly empty for an empty stream).
+    """
+
+    events: list[SerializableEvent] = Field(default_factory=list)
+    stream_id: str = ""
+    binding_id: str = ""
 
 
 class StepFailedEvent(Event):

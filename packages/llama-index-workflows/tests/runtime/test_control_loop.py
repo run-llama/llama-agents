@@ -441,7 +441,9 @@ async def test_control_loop_step_failure_publishes_stop_event(
         "Failed event exception should carry the message"
     )
     assert stop_event.attempts == 1, "Failed event should contain the attempt count"
-    assert stop_event.elapsed_seconds >= 0, "Failed event should contain elapsed time"
+    assert stop_event.elapsed_seconds is not None and stop_event.elapsed_seconds >= 0, (
+        "Failed event should contain elapsed time"
+    )
 
 
 @pytest.mark.asyncio
