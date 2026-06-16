@@ -32,6 +32,14 @@ class BodyChild(Body):
     pass
 
 
+class Ping(Event):
+    value: str = ""
+
+
+class Done(Event):
+    pass
+
+
 @pytest.mark.asyncio
 async def test_three_param_heterogeneous_join_fires_once() -> None:
     class AssembleWorkflow(Workflow):
@@ -216,6 +224,71 @@ async def test_collect_mode_does_not_call_collect_events(
 
     result = await StaticFanInWorkflow(timeout=10).run()
     assert result == "hb"
+
+
+@pytest.mark.asyncio
+async def test_collect_mode_waiter_resume_preserves_static_bindings() -> None:
+    class WaiterWorkflow(Workflow):
+        @step
+        async def emit(
+            self, ctx: Context, ev: StartEvent
+        ) -> Header | Body | Ping | None:
+            ctx.send_event(Header(value="a"))
+            ctx.send_event(Body(value="b"))
+            ctx.send_event(Ping(value="p"))
+            return None
+
+        @step
+        async def join(self, ctx: Context, a: Header, b: Body) -> StopEvent:
+            ping = await ctx.wait_for_event(Ping)
+            return StopEvent(result=f"{a.value}{b.value}{ping.value}")
+
+    result = await WaiterWorkflow(timeout=10, disable_validation=True).run()
+    assert result == "abp"
+
+
+@pytest.mark.asyncio
+async def test_completed_run_clears_static_collect_events() -> None:
+    mode = {"run": 1}
+    joined: list[tuple[str, str]] = []
+
+    class CompletionWorkflow(Workflow):
+        @step
+        async def emit(
+            self, ctx: Context, ev: StartEvent
+        ) -> Header | Body | Done | None:
+            if mode["run"] == 1:
+                ctx.send_event(Header(value="old-h"))
+            else:
+                ctx.send_event(Body(value="new-b"))
+            ctx.send_event(Done())
+            return None
+
+        @step
+        async def incomplete_join(self, h: Header, b: Body) -> None:
+            joined.append((h.value, b.value))
+            return None
+
+        @step
+        async def finish(self, ev: Done) -> StopEvent:
+            return StopEvent(result=f"done-{mode['run']}")
+
+    workflow = CompletionWorkflow(timeout=10)
+    first = workflow.run()
+    assert await first == "done-1"
+    first_static_events = first.ctx.to_dict()["workers"]["incomplete_join"][
+        "static_collect_events"
+    ]
+    assert first_static_events == []
+
+    mode["run"] = 2
+    second = workflow.run(ctx=first.ctx)
+    assert await second == "done-2"
+    assert joined == []
+    second_static_events = second.ctx.to_dict()["workers"]["incomplete_join"][
+        "static_collect_events"
+    ]
+    assert second_static_events == []
 
 
 def test_collect_mode_state_serializes_static_buffers() -> None:

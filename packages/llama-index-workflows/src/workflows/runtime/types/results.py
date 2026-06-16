@@ -99,6 +99,8 @@ class StepWorkerWaiter(Generic[EventType]):
     has_requirements: bool
     # set to true when the waiting event has been resolved, such that the step can retrieve it
     resolved_event: EventType | None
+    # pre-bound fan-in parameters from the original worker invocation
+    bound_events: dict[str, Event] | None = None
     # set to true when the waiter has timed out, such that the step raises asyncio.TimeoutError
     timed_out: bool = False
 

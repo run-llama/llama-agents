@@ -101,6 +101,8 @@ class SerializedWaiter(BaseModel):
     waiter_id: str
     # The original event that triggered the wait (serialized)
     event: str
+    # Pre-bound fan-in parameters from the original worker invocation.
+    bound_events: dict[str, str] | None = None
     # Fully qualified name of the event type being waited for (e.g. "mymodule.MyEvent")
     waiting_for_event: str
     # Requirements dict for matching the waited-for event

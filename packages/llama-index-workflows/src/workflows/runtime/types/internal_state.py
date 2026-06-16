@@ -101,7 +101,11 @@ class BrokerState:
             ):
                 if waiter.has_requirements and not waiter.requirements:
                     commands.append(
-                        TickAddEvent(event=waiter.event, step_id=StepId.root(step_name))
+                        TickAddEvent(
+                            event=waiter.event,
+                            step_id=StepId.root(step_name),
+                            bound_events=waiter.bound_events,
+                        )
                     )
         return commands
 
@@ -160,6 +164,12 @@ class BrokerState:
                 SerializedWaiter(
                     waiter_id=waiter.waiter_id,
                     event=serializer.serialize(waiter.event),
+                    bound_events={
+                        name: serializer.serialize(event)
+                        for name, event in waiter.bound_events.items()
+                    }
+                    if waiter.bound_events is not None
+                    else None,
                     waiting_for_event=f"{waiter.waiting_for_event.__module__}.{waiter.waiting_for_event.__name__}",
                     has_requirements=bool(len(waiter.requirements))
                     or waiter.has_requirements,
@@ -253,6 +263,12 @@ class BrokerState:
                     StepWorkerWaiter(
                         waiter_id=waiter_data.waiter_id,
                         event=serializer.deserialize(waiter_data.event),
+                        bound_events={
+                            name: serializer.deserialize(event)
+                            for name, event in waiter_data.bound_events.items()
+                        }
+                        if waiter_data.bound_events is not None
+                        else None,
                         waiting_for_event=waiting_for_event,
                         requirements={},
                         has_requirements=waiter_data.has_requirements,

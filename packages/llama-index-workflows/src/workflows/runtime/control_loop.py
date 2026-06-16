@@ -904,6 +904,7 @@ def _process_step_result_tick(
                 # Clear collected_events and collected_waiters since workflow is complete
                 for worker in state.workers.values():
                     worker.collected_events.clear()
+                    worker.static_collect_events.clear()
                     worker.collected_waiters.clear()
                 commands.append(CommandCompleteRun(result=result.result))
             elif isinstance(result.result, Event):
@@ -1058,6 +1059,7 @@ def _process_step_result_tick(
                     CommandRunWorker(
                         step_id=step_id,
                         event=result.event,
+                        bound_events=this_execution.bound_events,
                         id=this_execution.worker_id,
                     )
                 )
@@ -1080,6 +1082,7 @@ def _process_step_result_tick(
             new_waiter = StepWorkerWaiter(
                 waiter_id=result.waiter_id,
                 event=this_execution.event,
+                bound_events=this_execution.bound_events,
                 waiting_for_event=result.event_type,
                 requirements=result.requirements,
                 has_requirements=bool(len(result.requirements)),
@@ -1301,7 +1304,10 @@ def _process_add_event_tick(
                 waiter_resolved_steps.add(step_name)
                 wait_condition.resolved_event = tick.event
                 subcommands = _add_or_enqueue_event(
-                    EventAttempt(event=wait_condition.event),
+                    EventAttempt(
+                        event=wait_condition.event,
+                        bound_events=wait_condition.bound_events,
+                    ),
                     step_id,
                     state.workers[step_name],
                     now_seconds,
@@ -1484,7 +1490,7 @@ def _process_waiter_timeout_tick(
         return state, commands
     waiter.timed_out = True
     subcommands = _add_or_enqueue_event(
-        EventAttempt(event=waiter.event),
+        EventAttempt(event=waiter.event, bound_events=waiter.bound_events),
         step_id,
         worker_state,
         now_seconds,
