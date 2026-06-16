@@ -179,7 +179,7 @@ def _close_collection_stream(
         return []
     commands: list[WorkflowCommand] = []
     for binding in state.config.bindings_for_source(stream.source_step):
-        worker_state = state.workers.get(binding.target_step)
+        worker_state = state.workers.get(StepId.root(binding.target_step))
         if worker_state is None or worker_state.config.collection_param is None:
             continue
         key = _release_state_key(stream_id, binding.id)

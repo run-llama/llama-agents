@@ -34,6 +34,9 @@ class CommandRunWorker:
 class CommandQueueEvent:
     event: Event
     step_id: StepId | None = None
+    # Namespace of the step (or boundary) that emitted this event; threaded into
+    # the resulting TickAddEvent so type-routing stays scoped to the namespace.
+    origin_namespace: tuple[str, ...] = ()
     recovery_counts: dict[str, int] = field(default_factory=dict)
     scope_path: tuple[str, ...] = field(default_factory=tuple)
 
@@ -57,6 +60,10 @@ class CommandFailWorkflow:
 @dataclass(frozen=True)
 class CommandPublishEvent:
     event: Event
+    # Namespace of the child execution that produced this event. Stamped onto
+    # the event at publish time so the stream can be filtered to root-only by
+    # default; ``()`` (the default) is the root/parent stream.
+    origin_namespace: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -76,6 +83,20 @@ class CommandScheduleWakeup:
     """
 
     at_time: float
+
+
+@dataclass(frozen=True)
+class CommandScheduleNamespaceTimeout:
+    """Schedule a per-child-namespace timeout via TickNamespaceTimeout.
+
+    Emitted when the first event routes into a child namespace that declares a
+    ``timeout``. ``started_at`` is the routing time; the tick fires at
+    ``started_at + timeout`` and is pinned to this activation.
+    """
+
+    namespace: tuple[str, ...]
+    timeout: float
+    started_at: float
 
 
 @dataclass(frozen=True)
@@ -101,6 +122,7 @@ WorkflowCommand = (
     | CommandScheduleIdleCheck
     | CommandScheduleWaiterTimeout
     | CommandScheduleWakeup
+    | CommandScheduleNamespaceTimeout
 )
 
 

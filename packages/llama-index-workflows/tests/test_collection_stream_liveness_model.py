@@ -190,7 +190,7 @@ def test_unreleased_release_buffer_serializes_and_fires_on_close() -> None:
     commands = _close_collection_stream(restored, stream.stream_id, 0.0)
     assert _release_targets(commands) == ["collect_a", "collect_b"]
     payload = (
-        restored.workers["collect_a"]
+        restored.workers[StepId.root("collect_a")]
         .in_progress[0]
         .shared_state.collection_release_payload
     )

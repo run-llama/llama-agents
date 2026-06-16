@@ -20,8 +20,9 @@ from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import (
     InMemoryStateStore,
     StateStore,
-    infer_state_type,
     is_durable_serialized_state,
+    namespaced_seed_payload,
+    namespaced_underlying_state_type,
 )
 from workflows.errors import WorkflowRuntimeError
 from workflows.events import Event, StartEvent, StopEvent
@@ -288,12 +289,16 @@ class BasicRuntime(Runtime):
                     f"BasicRuntime cannot restore durable state store '{store_type}'. "
                     "Use the matching durable runtime or pass an in-memory context snapshot."
                 )
+            seed = namespaced_seed_payload(
+                serialized_state,
+                active_serializer,
+                child_ful=len(registered.workflow._namespace_instances()) > 1,
+            )
             state_store = InMemoryStateStore.from_dict(
-                serialized_state, active_serializer
+                seed or serialized_state, active_serializer
             )
         else:
-            # Infer state type from workflow step configs
-            state_type = infer_state_type(registered.workflow)
+            state_type = namespaced_underlying_state_type(registered.workflow)
             state_store = InMemoryStateStore(state_type())
         # might want to lock this better. Unlikely race condition if you spam with the same run_id.
         queues = self._get_or_create_queues(run_id, init_state)

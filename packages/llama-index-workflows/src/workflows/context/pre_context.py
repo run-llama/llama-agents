@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from workflows.context.context_types import MODEL_T, SerializedContext
 from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import (
+    CHILD_STATES_KEY,
     InMemoryStateStore,
     StateStore,
     infer_state_type,
@@ -104,7 +105,14 @@ class PreContext(Generic[MODEL_T]):
         unchanged, avoiding unnecessary work.
         """
         if self._store is not None:
-            return self._store.to_dict(self._serializer)
+            payload = self._store.to_dict(self._serializer)
+            # The staging store only holds root state; carry any child-namespace
+            # payloads through unchanged so a resumed tree's child state isn't
+            # dropped when the root store is touched before run().
+            child_states = self._init_snapshot.state.get(CHILD_STATES_KEY)
+            if child_states:
+                payload[CHILD_STATES_KEY] = child_states
+            return payload
         return self._init_snapshot.state
 
     @property

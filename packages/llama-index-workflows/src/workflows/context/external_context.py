@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Coroutine, Generic
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Coroutine, Generic, cast
 
 from typing_extensions import TypeVar
 
 from workflows.context.context_types import MODEL_T
 from workflows.context.serializers import JsonSerializer
-from workflows.context.state_store import StateStore
+from workflows.context.state_store import StateStore, build_namespaced_state
 from workflows.errors import WorkflowRuntimeError
 from workflows.events import StopEvent
 from workflows.runtime.types.internal_state import BrokerState
@@ -112,7 +112,10 @@ class ExternalContext(Generic[MODEL_T, RunResultT]):
         state_store = self._external_adapter.get_state_store()
         if state_store is None:
             raise RuntimeError("State store not available from adapter")
-        return state_store  # type: ignore[return-value]
+        namespaced = build_namespaced_state(
+            self._workflow, state_store, self._serializer
+        )
+        return cast("StateStore[MODEL_T]", namespaced.view(()))
 
     def send_event(self, message: Event, step: str | None = None) -> None:
         """Send an event into the workflow."""
@@ -132,7 +135,9 @@ class ExternalContext(Generic[MODEL_T, RunResultT]):
         """Get list of currently running step names."""
         state = self._state
         return [
-            step for step in state.workers.keys() if state.workers[step].in_progress
+            str(step)
+            for step in state.workers.keys()
+            if state.workers[step].in_progress
         ]
 
     def _require_v2_runtime_compatibility(self) -> V2RuntimeCompatibilityShim:
@@ -164,7 +169,10 @@ class ExternalContext(Generic[MODEL_T, RunResultT]):
         state_data = {}
         state_store = self._external_adapter.get_state_store()
         if state_store is not None:
-            state_data = state_store.to_dict(active_serializer)
+            namespaced = build_namespaced_state(
+                self._workflow, state_store, active_serializer
+            )
+            state_data = namespaced.serialize_tree(active_serializer)
 
         # Get the broker state
         broker_state = self._state

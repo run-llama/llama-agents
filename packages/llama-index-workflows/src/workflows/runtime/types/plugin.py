@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from workflows.context.serializers import BaseSerializer
     from workflows.runtime.types.internal_state import BrokerState
     from workflows.runtime.types.step_function import StepWorkerFunction
+    from workflows.runtime.types.step_id import StepId
     from workflows.workflow import Workflow
 from workflows.runtime.types.ticks import TickCancelRun, WorkflowTick
 
@@ -75,7 +76,7 @@ class WaitForNextTaskResult:
 class RegisteredWorkflow:
     workflow: Workflow
     workflow_run_fn: WorkflowRunFunction
-    steps: dict[str, StepWorkerFunction]
+    steps: dict[StepId, StepWorkerFunction]
 
 
 class InternalRunAdapter(ABC):
@@ -353,7 +354,7 @@ class RunContext:
     workflow: Workflow
     run_adapter: InternalRunAdapter
     context: Context
-    steps: dict[str, StepWorkerFunction]
+    steps: dict[StepId, StepWorkerFunction]
 
 
 @dataclass

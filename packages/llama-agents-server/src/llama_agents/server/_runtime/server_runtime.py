@@ -17,10 +17,12 @@ from llama_agents.client.protocol.serializable_events import (
     EventEnvelopeWithMetadata,
 )
 from typing_extensions import override
-from workflows.context.serializers import BaseSerializer
+from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import (
+    DictState,
     StateStore,
     infer_state_type,
+    namespaced_seed_payload,
 )
 from workflows.events import (
     Event,
@@ -31,6 +33,7 @@ from workflows.events import (
     WorkflowTimedOutEvent,
 )
 from workflows.runtime.runtime_decorators import (
+    BaseExternalRunAdapterDecorator,
     BaseInternalRunAdapterDecorator,
     BaseRuntimeDecorator,
 )
@@ -68,26 +71,42 @@ class _ServerInternalRunAdapter(BaseInternalRunAdapterDecorator):
         runtime: ServerRuntimeDecorator,
         *,
         state_type: type[Any] | None = None,
+        is_child_ful: bool = False,
     ) -> None:
         super().__init__(decorated)
         self._runtime = runtime
         self._store = runtime._store
         self._state_type = state_type
+        self._is_child_ful = is_child_ful
         self._state_store: StateStore[Any] | None = None
         self._write_lock: asyncio.Lock | None = None
 
     @override
     def get_state_store(self) -> StateStore[Any]:
+        """Vend the single per-run durable store; core's lens routes namespaces.
+
+        A child-ful run gets one ``DictState`` blob row (seeded from a portable
+        nested ``ctx.to_dict`` payload on resume); a childless run gets the typed
+        root store (flat format). No namespace awareness lives here.
+        """
         if self._state_store is not None:
             return self._state_store
         initial = self._runtime._initial_state.pop(self.run_id, None)
-        if initial is not None:
-            serialized_state, serializer = initial
+        serialized_state, serializer = initial if initial is not None else (None, None)
+        if self._is_child_ful:
+            active = serializer or JsonSerializer()
+            seed = (
+                namespaced_seed_payload(serialized_state, active, child_ful=True)
+                if serialized_state
+                else None
+            )
+            store = self._store.create_state_store(
+                self.run_id, DictState, seed, active if seed else None
+            )
+        else:
             store = self._store.create_state_store(
                 self.run_id, self._state_type, serialized_state, serializer
             )
-        else:
-            store = self._store.create_state_store(self.run_id, self._state_type)
         self._state_store = store
         return store
 
@@ -146,6 +165,39 @@ class _ServerInternalRunAdapter(BaseInternalRunAdapterDecorator):
 
             # Always forward to inner adapter (e.g. idle detection, DBOS stream)
             await super().write_to_event_stream(event)
+
+
+# ---------------------------------------------------------------------------
+# _ServerExternalRunAdapter
+# ---------------------------------------------------------------------------
+
+
+class _ServerExternalRunAdapter(BaseExternalRunAdapterDecorator):
+    """External adapter that reconnects the run's single durable store.
+
+    The base (basic) external adapter only knows the in-memory queues; under the
+    server, state lives in the durable row. Reconnecting it here (by ``run_id``)
+    lets ``Context.to_dict`` rebuild core's namespace lens and serialize the whole
+    tree without a shared cache.
+    """
+
+    def __init__(
+        self,
+        decorated: ExternalRunAdapter,
+        store: AbstractWorkflowStore,
+        run_id: str,
+        underlying_state_type: type[Any],
+    ) -> None:
+        super().__init__(decorated)
+        self._store = store
+        self._run_id = run_id
+        self._underlying_state_type = underlying_state_type
+
+    @override
+    def get_state_store(self) -> StateStore[Any] | None:
+        # Reconnect to the existing durable row (no seed); the lens is rebuilt by
+        # the caller. DictState for a child-ful blob, the typed root otherwise.
+        return self._store.create_state_store(self._run_id, self._underlying_state_type)
 
 
 # ---------------------------------------------------------------------------
@@ -244,14 +296,15 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
         serialized_state: dict[str, Any] | None = None,
         serializer: BaseSerializer | None = None,
     ) -> ExternalRunAdapter:
-        # Intercept serialized state: we handle seeding ourselves in get_state_store
-        # so non-InMemory formats don't leak to the base runtime.
+        # Intercept serialized state: get_state_store seeds the durable
+        # store itself, so non-InMemory formats don't leak to the base runtime.
         passthrough_state = serialized_state
         if serialized_state and serializer:
             self._initial_state[run_id] = (serialized_state, serializer)
             store_type = serialized_state.get("store_type")
             if store_type is not None and store_type != "in_memory":
                 passthrough_state = None
+
         return super().run_workflow(
             run_id,
             workflow,
@@ -265,7 +318,19 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
         """Wraps the inner runtime's adapter in _ServerInternalRunAdapter."""
         inner_adapter = self._decorated.get_internal_adapter(workflow)
         state_type = infer_state_type(workflow)
-        return _ServerInternalRunAdapter(inner_adapter, self, state_type=state_type)
+        is_child_ful = len(workflow._namespace_instances()) > 1
+        return _ServerInternalRunAdapter(
+            inner_adapter, self, state_type=state_type, is_child_ful=is_child_ful
+        )
+
+    @override
+    def get_external_adapter(self, run_id: str) -> ExternalRunAdapter:
+        inner = self._decorated.get_external_adapter(run_id)
+        # Reconnect the durable row as a DictState blob: this serves the
+        # child-ful tree directly and yields a type-independent reference for
+        # ``to_dict`` (resume reconnects with the correct typed store via the
+        # internal adapter, which knows the workflow).
+        return _ServerExternalRunAdapter(inner, self._store, run_id, DictState)
 
     # ------------------------------------------------------------------
     # Handler persistence

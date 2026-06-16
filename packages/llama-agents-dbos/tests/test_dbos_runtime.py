@@ -9,6 +9,7 @@ particularly around run_id matching and state store availability.
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import suppress
 from types import SimpleNamespace
 from typing import Any, Generator, cast
@@ -23,11 +24,18 @@ from llama_agents.dbos.journal.task_journal import TaskJournal
 from llama_agents.dbos.runtime import InternalDBOSAdapter
 from llama_agents.server._pool import PoolProvider
 from llama_agents.server._store.postgres_state_store import PostgresStateStore
+from llama_agents.server._store.sqlite.sqlite_state_store import SqliteStateStore
 from pydantic import Field
 from sqlalchemy.engine import Engine
 from workflows.context import Context
 from workflows.context.serializers import JsonSerializer
-from workflows.context.state_store import DictState, InMemoryStateStore, StateStore
+from workflows.context.state_store import (
+    CHILD_STATES_KEY,
+    DictState,
+    InMemoryStateStore,
+    StateStore,
+    build_namespaced_state,
+)
 from workflows.decorators import step
 from workflows.events import Event, StartEvent, StopEvent
 from workflows.runtime.types.internal_state import BrokerState
@@ -557,3 +565,342 @@ def test_register_forwards_max_recovery_attempts() -> None:
     with patch("llama_agents.dbos.runtime.DBOS.workflow", _capture):
         runtime.register(_W())
     assert captured["max_recovery_attempts"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Child-workflow durable state (single nested blob)
+# ---------------------------------------------------------------------------
+
+
+class _GrandStart(StartEvent):
+    pass
+
+
+class _GrandStop(StopEvent):
+    pass
+
+
+class _MidStart(StartEvent):
+    pass
+
+
+class _MidStop(StopEvent):
+    pass
+
+
+class _StateGrandchild(Workflow):
+    @step
+    async def run_grand(self, ctx: Context, ev: _GrandStart) -> _GrandStop:
+        await ctx.store.set("grand_marker", "from-grand")
+        return _GrandStop()
+
+
+class _StateMid(Workflow):
+    grand: _StateGrandchild
+
+    @step
+    async def begin(self, ctx: Context, ev: _MidStart) -> _GrandStart:
+        await ctx.store.set("mid_marker", "from-mid")
+        return _GrandStart()
+
+    @step
+    async def finish(self, ev: _GrandStop) -> _MidStop:
+        return _MidStop()
+
+
+class _TopWithGrandchild(Workflow):
+    mid: _StateMid
+
+    @step
+    async def begin(self, ctx: Context, ev: StartEvent) -> _MidStart:
+        await ctx.store.set("top_marker", "from-top")
+        return _MidStart()
+
+    @step
+    async def finish(self, ev: _MidStop) -> StopEvent:
+        return StopEvent(result="ok")
+
+
+async def _assert_child_state_durable_round_trip(
+    runtime: DBOSRuntime,
+    read_blob: Any,
+) -> None:
+    """Run a top -> mid -> grandchild tree and assert each namespace's
+    ``ctx.store`` write persists, isolated, in its own slot of the single
+    durable blob row.
+
+    The workflow is constructed (so children attach and the runtime tracks it)
+    BEFORE ``launch()`` -- DBOS applies its workflow/step decorators at launch,
+    so child step workers must be registered then. ``read_blob`` is an async
+    callable taking the run_id and returning the persisted ``DictState`` row.
+    """
+    wf = _TopWithGrandchild(mid=_StateMid(grand=_StateGrandchild()), runtime=runtime)
+    await runtime.launch()
+
+    handler = wf.run()
+    run_id = handler.run_id
+    result = await handler
+    assert result == "ok"
+
+    blob = await read_blob(run_id)
+
+    def _data(payload: dict[str, Any]) -> dict[str, Any]:
+        return payload["_data"]
+
+    root_data = _data(blob)
+    child_states = blob.get(CHILD_STATES_KEY)
+    assert child_states is not None
+    mid_data = _data(child_states["mid"])
+    grand_data = _data(child_states["mid/grand"])
+
+    assert root_data["top_marker"] == '"from-top"'
+    assert mid_data["mid_marker"] == '"from-mid"'
+    assert grand_data["grand_marker"] == '"from-grand"'
+    # No cross-namespace leakage.
+    assert "grand_marker" not in root_data and "grand_marker" not in mid_data
+    assert "mid_marker" not in root_data and "mid_marker" not in grand_data
+    assert "top_marker" not in mid_data and "top_marker" not in grand_data
+
+
+@pytest.mark.asyncio
+async def test_child_state_durable_in_nested_blob_sqlite(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """A child/grandchild's ``ctx.store`` write persists into the single durable
+    ``workflow_state`` row, nested under ``__child_states__`` and isolated from
+    the parent's root namespace (sqlite backend, no docker).
+
+    Uses a dedicated DBOS instance so the child workflow is tracked before
+    launch (DBOS registers child step workers at launch time)."""
+    db_file = tmp_path_factory.mktemp("dbos_child") / "child_state.sqlite3"
+    system_db_url = f"sqlite+pysqlite:///{db_file}?check_same_thread=false"
+    DBOS.destroy()
+    DBOS(
+        config={
+            "name": "workflows-dbos-child-sqlite",
+            "system_database_url": system_db_url,
+            "run_admin_server": False,
+        }  # type: ignore[arg-type]
+    )
+    runtime = DBOSRuntime(polling_interval_sec=0.01)
+    try:
+        db_path = str(db_file)
+
+        async def _read_blob(run_id: str) -> Any:
+            store = SqliteStateStore(
+                db_path=db_path, run_id=run_id, state_type=DictState
+            )
+            record = await cast(Any, store)._storage.load()
+            assert record is not None
+            return json.loads(record.data)
+
+        await _assert_child_state_durable_round_trip(runtime, _read_blob)
+    finally:
+        with suppress(Exception):
+            await runtime.destroy()
+        DBOS.destroy()
+
+
+@pytest.mark.asyncio
+async def test_child_ful_external_serialization_surfaces_whole_tree_sqlite(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """The DBOS external adapter surfaces the whole child tree for serialization.
+
+    Previously ``ExternalDBOSAdapter`` exposed no state store, so a child-ful
+    run's portable ``Context.to_dict`` dropped every child slot. Now it vends the
+    run's single durable store, and core's lens serializes the whole tree: the
+    root payload plus a per-namespace entry under ``__child_states__``.
+    """
+    db_file = tmp_path_factory.mktemp("dbos_ext_tree") / "ext_tree.sqlite3"
+    system_db_url = f"sqlite+pysqlite:///{db_file}?check_same_thread=false"
+    DBOS.destroy()
+    DBOS(
+        config={
+            "name": "workflows-dbos-ext-tree-sqlite",
+            "system_database_url": system_db_url,
+            "run_admin_server": False,
+        }  # type: ignore[arg-type]
+    )
+    runtime = DBOSRuntime(polling_interval_sec=0.01)
+    try:
+        wf = _TopWithGrandchild(
+            mid=_StateMid(grand=_StateGrandchild()), runtime=runtime
+        )
+        await runtime.launch()
+        handler = wf.run()
+        run_id = handler.run_id
+        assert await handler == "ok"
+
+        external = runtime.get_external_adapter(run_id)
+        underlying = external.get_state_store()
+        assert underlying is not None
+        serializer = JsonSerializer()
+        tree = build_namespaced_state(wf, underlying, serializer).serialize_tree(
+            serializer
+        )
+        # The whole tree is surfaced: a child-ful run nests every child namespace.
+        child_states = tree[CHILD_STATES_KEY]
+        assert set(child_states) == {"mid", "mid/grand"}
+    finally:
+        with suppress(Exception):
+            await runtime.destroy()
+        DBOS.destroy()
+
+
+@pytest.mark.docker
+@pytest.mark.asyncio
+async def test_child_state_durable_in_nested_blob_postgres(
+    postgres_dsn: str,
+) -> None:
+    """Postgres mirror of the child-state durability round-trip: the whole child
+    tree persists in one ``workflow_state`` row, partitioned per namespace."""
+    system_db_url = postgres_dsn.replace("postgresql://", "postgresql+psycopg://")
+    DBOS.destroy()
+    DBOS(
+        config={
+            "name": "workflows-dbos-child-postgres",
+            "system_database_url": system_db_url,
+            "run_admin_server": False,
+        }  # type: ignore[arg-type]
+    )
+    runtime = DBOSRuntime(polling_interval_sec=0.01)
+    try:
+
+        async def _read_blob(run_id: str) -> Any:
+            pool = await runtime._ensure_pool()
+            store = PostgresStateStore(
+                pool=pool,
+                run_id=run_id,
+                state_type=DictState,
+                schema=runtime._schema,
+            )
+            record = await cast(Any, store)._storage.load()
+            assert record is not None
+            return json.loads(record.data)
+
+        await _assert_child_state_durable_round_trip(runtime, _read_blob)
+    finally:
+        with suppress(Exception):
+            await runtime.destroy()
+        DBOS.destroy()
+
+
+# ---------------------------------------------------------------------------
+# Post-launch construction of a child-ful parent (init-ordering repro)
+#
+# A parent-with-children constructed AFTER launch() used to freeze a
+# parent-only step set -- registration fired from the innermost
+# Workflow.__init__, before the subclass attached its children -- and then
+# KeyError'd on the child's first step at run. WorkflowMeta.__call__ now defers
+# tracking to _finalize_construction (after the outermost __init__ returns), so
+# the full child tree is registered regardless of launch timing or init style.
+# ---------------------------------------------------------------------------
+
+
+class _TopUserInit(Workflow):
+    """Hand-written __init__ variant: children assigned as plain attributes."""
+
+    mid: _StateMid
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.mid = _StateMid(grand=_StateGrandchild())
+
+    @step
+    async def begin(self, ctx: Context, ev: StartEvent) -> _MidStart:
+        await ctx.store.set("top_marker", "from-top")
+        return _MidStart()
+
+    @step
+    async def finish(self, ev: _MidStop) -> StopEvent:
+        return StopEvent(result="ok")
+
+
+def _make_sqlite_dbos(db_file: Any, name: str) -> DBOSRuntime:
+    system_db_url = f"sqlite+pysqlite:///{db_file}?check_same_thread=false"
+    DBOS.destroy()
+    DBOS(
+        config={
+            "name": name,
+            "system_database_url": system_db_url,
+            "run_admin_server": False,
+        }  # type: ignore[arg-type]
+    )
+    return DBOSRuntime(polling_interval_sec=0.01)
+
+
+@pytest.mark.asyncio
+async def test_post_launch_synthesized_child_runs_sqlite(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """Synthesized-init parent constructed AFTER launch runs its child tree
+    without KeyError (the prior init-ordering bug)."""
+    db_file = tmp_path_factory.mktemp("dbos_post_launch") / "syn.sqlite3"
+    runtime = _make_sqlite_dbos(db_file, "wf-dbos-postlaunch-syn")
+    try:
+        await runtime.launch()
+        wf = _TopWithGrandchild(
+            mid=_StateMid(grand=_StateGrandchild()), runtime=runtime
+        )
+        result = await wf.run()
+        assert result == "ok"
+    finally:
+        with suppress(Exception):
+            await runtime.destroy()
+        DBOS.destroy()
+
+
+@pytest.mark.asyncio
+async def test_post_launch_user_init_child_runs_sqlite(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """User-defined-init parent constructed AFTER launch runs its child tree
+    without KeyError."""
+    db_file = tmp_path_factory.mktemp("dbos_post_launch") / "user.sqlite3"
+    runtime = _make_sqlite_dbos(db_file, "wf-dbos-postlaunch-user")
+    try:
+        await runtime.launch()
+        wf = _TopUserInit(runtime=runtime)
+        result = await wf.run()
+        assert result == "ok"
+    finally:
+        with suppress(Exception):
+            await runtime.destroy()
+        DBOS.destroy()
+
+
+@pytest.mark.docker
+@pytest.mark.asyncio(loop_scope="function")
+async def test_post_launch_synthesized_child_runs_postgres(
+    postgres_dsn: str,
+) -> None:
+    """Postgres mirror of the post-launch construction repro.
+
+    Runs on a function-scoped event loop: this module's other postgres docker
+    test tears its DBOS instance down on the shared module loop, shutting down
+    that loop's default executor (asyncpg resolves the host through it), so a
+    second postgres test on the same loop would fail to connect. A fresh loop
+    sidesteps that teardown coupling.
+    """
+    system_db_url = postgres_dsn.replace("postgresql://", "postgresql+psycopg://")
+    DBOS.destroy()
+    DBOS(
+        config={
+            "name": "wf-dbos-postlaunch-pg",
+            "system_database_url": system_db_url,
+            "run_admin_server": False,
+        }  # type: ignore[arg-type]
+    )
+    runtime = DBOSRuntime(polling_interval_sec=0.01)
+    try:
+        await runtime.launch()
+        wf = _TopWithGrandchild(
+            mid=_StateMid(grand=_StateGrandchild()), runtime=runtime
+        )
+        result = await wf.run()
+        assert result == "ok"
+    finally:
+        with suppress(Exception):
+            await runtime.destroy()
+        DBOS.destroy()

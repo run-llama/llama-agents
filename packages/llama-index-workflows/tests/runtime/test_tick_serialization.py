@@ -338,3 +338,22 @@ def test_workflow_tick_discriminated_union_roundtrip() -> None:
         roundtripped = json.loads(json.dumps(dumped))
         restored = adapter.validate_python(roundtripped)
         assert type(restored) is type(tick)
+
+
+def test_legacy_step_name_key_deserializes_to_step_id() -> None:
+    """Pre-StepId journals used a ``step_name`` key; it must still decode.
+
+    The wire format now serializes a root step id as the bare name under the
+    ``step_id`` key. The ``step_name`` alias keeps old journals readable: a
+    legacy dict deserializes to a tick whose ``step_id`` is the root StepId.
+    """
+    legacy = {
+        "type": "step_result",
+        "step_name": "foo",
+        "worker_id": 0,
+        "event": _serialize_event(StartEvent()),
+        "result": [],
+    }
+    restored = WorkflowTickAdapter.validate_python(legacy)
+    assert isinstance(restored, TickStepResult)
+    assert restored.step_id == StepId.root("foo")

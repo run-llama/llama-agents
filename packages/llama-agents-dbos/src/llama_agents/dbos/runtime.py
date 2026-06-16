@@ -57,9 +57,13 @@ from sqlalchemy.engine import Engine
 from typing_extensions import Unpack
 from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import (
+    DictState,
     StateStore,
     StateStoreFacade,
     infer_state_type,
+    is_child_ful,
+    namespaced_seed_payload,
+    namespaced_underlying_state_type,
 )
 from workflows.events import Event, StartEvent, StopEvent
 from workflows.runtime.types.internal_state import BrokerState
@@ -85,6 +89,7 @@ from workflows.runtime.types.step_function import (
     as_step_worker_functions,
     create_workflow_run_function,
 )
+from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import WorkflowTick
 from workflows.workflow import Workflow
 
@@ -420,9 +425,9 @@ class DBOSRuntime(Runtime):
             return await workflow_run_fn(init_state, start_event, tags)
 
         # Wrap steps with stable names
-        wrapped_steps: dict[str, StepWorkerFunction] = {
-            step_name: DBOS.step(name=f"{name}.{step_name}")(step)
-            for step_name, step in as_step_worker_functions(workflow).items()
+        wrapped_steps: dict[StepId, StepWorkerFunction] = {
+            step_id: DBOS.step(name=f"{name}.{step_id}")(step)
+            for step_id, step in as_step_worker_functions(workflow).items()
         }
 
         registered = RegisteredWorkflow(
@@ -594,16 +599,32 @@ class DBOSRuntime(Runtime):
         # Capture values needed in the async task closure
         active_serializer = serializer or JsonSerializer()
 
+        # Child-ful runs persist the whole tree in one DictState blob; their seed
+        # is lifted into the root/child slots (and a flat childless checkpoint is
+        # carried forward into the root slot). Topology, not the seed's presence,
+        # decides the underlying store type. Core owns the reconvert.
+        child_ful = is_child_ful(workflow)
+        seed_payload = (
+            namespaced_seed_payload(
+                serialized_state, active_serializer, child_ful=child_ful
+            )
+            if serialized_state
+            else None
+        )
+
         async def _run_workflow() -> WorkflowHandleAsync[Any]:
             with SetWorkflowID(run_id):
                 # Write initial state to DB before starting workflow (non-blocking to caller)
                 if serialized_state:
                     workflow_store = self.create_workflow_store()
                     await workflow_store.start()
+                    seed_state_type = (
+                        DictState if child_ful else infer_state_type(workflow)
+                    )
                     store = workflow_store.create_state_store(
                         run_id,
-                        infer_state_type(workflow),
-                        serialized_state,
+                        seed_state_type,
+                        seed_payload or serialized_state,
                         active_serializer,
                     )
                     # Materialize the seed before the workflow starts so the
@@ -649,8 +670,10 @@ class DBOSRuntime(Runtime):
                 "No current run id. Must be called within a workflow run."
             )
 
-        # Infer state_type from the workflow for typed state support
-        state_type = infer_state_type(workflow)
+        # The single underlying durable store's type: a DictState blob for a
+        # child-ful run (core's lens slices it per namespace), the inferred root
+        # type for a childless run (flat format).
+        state_type = namespaced_underlying_state_type(workflow)
 
         engine = self._get_sql_engine()
         return InternalDBOSAdapter(
@@ -676,7 +699,15 @@ class DBOSRuntime(Runtime):
             raise RuntimeError(
                 "DBOS runtime not launched. Call runtime.launch() before running workflows."
             )
-        return ExternalDBOSAdapter(run_id, self.config.get("polling_interval_sec", 1.0))
+        # Pass the resolved DB handles so the external adapter can reconnect the
+        # run's durable store for ``Context.to_dict`` (the whole child tree).
+        return ExternalDBOSAdapter(
+            run_id,
+            self.config.get("polling_interval_sec", 1.0),
+            resolved_pool=self._pool,
+            db_path=self._db_path,
+            schema=self._schema,
+        )
 
     def create_workflow_store(self) -> AbstractWorkflowStore:
         """Return the cached workflow store, creating it on first call.
@@ -1157,6 +1188,12 @@ class InternalDBOSAdapter(InternalRunAdapter):
         return self._state_store
 
     def get_state_store(self) -> StateStore[Any] | None:
+        """Vend the single per-run durable store; core's lens routes namespaces.
+
+        The store's type was resolved by the runtime: a ``DictState`` blob row for
+        a child-ful run, the typed root store for a childless run. For postgres
+        the pool is resolved by the control loop before any step runs.
+        """
         return self._get_or_create_state_store()
 
     def is_replaying(self) -> bool:
@@ -1307,16 +1344,46 @@ class ExternalDBOSAdapter(ExternalRunAdapter):
         run_id: str,
         polling_interval_sec: float = 1.0,
         startup_task: asyncio.Task[WorkflowHandleAsync[Any]] | None = None,
+        resolved_pool: asyncpg.Pool | None = None,
+        db_path: str | None = None,
+        schema: str | None = None,
     ) -> None:
         self._run_id = run_id
         self._polling_interval_sec = polling_interval_sec
         self._startup_task = startup_task  # None means workflow already started
         self._handle: WorkflowHandleAsync[Any] | None = None
+        self._resolved_pool = resolved_pool
+        self._db_path = db_path
+        self._schema = schema
 
     @property
     def run_id(self) -> str:
         """Get the workflow run ID."""
         return self._run_id
+
+    def get_state_store(self) -> StateStore[Any] | None:
+        """Reconnect the run's single durable store for ``Context.to_dict``.
+
+        Reconnects the ``workflow_state`` row as a ``DictState`` blob: for a
+        child-ful run that surfaces the whole tree to core's lens (closing the
+        previous gap where DBOS dropped child slots from a portable checkpoint);
+        for a childless run the durable ``to_dict`` is a type-independent
+        reference. Returns ``None`` if no backend handle is available.
+        """
+        if self._resolved_pool is not None:
+            return PostgresStateStore(
+                pool=self._resolved_pool,
+                run_id=self._run_id,
+                state_type=DictState,
+                schema=self._schema,
+            )
+        if self._db_path is not None:
+            return SqliteStateStore(
+                db_path=self._db_path,
+                run_id=self._run_id,
+                state_type=DictState,
+            )
+        return None
 
     async def send_event(self, tick: WorkflowTick) -> None:
         await self._ensure_workflow_started()

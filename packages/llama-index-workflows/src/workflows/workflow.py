@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import warnings
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -98,6 +99,24 @@ def _validate_includable_child(child: Workflow, slot_name: str) -> None:
             "custom StopEvent subclass; a bare StopEvent cannot be routed back "
             "to the parent unambiguously."
         )
+
+
+def _warn_ignored_child_config(child: Workflow, slot_name: str) -> None:
+    ignored: list[str] = []
+    if child._verbose:
+        ignored.append("verbose=True")
+    if child._num_concurrent_runs is not None:
+        ignored.append(f"num_concurrent_runs={child._num_concurrent_runs!r}")
+    if child._workflow_name is not None:
+        ignored.append(f"workflow_name={child._workflow_name!r}")
+    if not ignored:
+        return
+    warnings.warn(
+        f"Child workflow slot '{slot_name}' on '{type(child).__name__}' has "
+        f"run-level config ignored when nested: {', '.join(ignored)}.",
+        UserWarning,
+        stacklevel=3,
+    )
 
 
 def _config_field(*, alias: str, default: Any = None) -> Any:
@@ -399,6 +418,7 @@ class Workflow(metaclass=WorkflowMeta):
                 f"{expected.__name__}, got {type(child).__name__}."
             )
         _validate_includable_child(child, name)
+        _warn_ignored_child_config(child, name)
         child._switch_runtime(self._runtime)
         child._runtime_locked = True
         setattr(self, name, child)
@@ -694,8 +714,23 @@ class Workflow(metaclass=WorkflowMeta):
         )
 
         step_configs = self._step_configs()
+        # A child is "triggered" when some parent step emits its StartEvent; only
+        # then does it form a boundary in the parent graph (StartEvent crosses
+        # out, StopEvent crosses back in). Children attached but never triggered
+        # are inert and excluded so they don't trip reachability.
+        parent_return_types: set[type] = set()
+        for cfg in step_configs.values():
+            parent_return_types.update(cfg.return_types)
+        child_boundaries = [
+            (child._start_event_class, child._stop_event_class)
+            for child in self._child_workflows.values()
+            if child._start_event_class in parent_return_types
+        ]
         result = _validate_workflow(
-            step_configs, self.__class__.__name__, self._skip_graph_checks
+            step_configs,
+            self.__class__.__name__,
+            self._skip_graph_checks,
+            child_boundaries=child_boundaries,
         )
         self._start_event_class = result.start_event_class
         self._stop_event_class = result.stop_event_class
