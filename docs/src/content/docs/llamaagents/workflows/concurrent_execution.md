@@ -119,21 +119,8 @@ A batch does not have to be one event type. `list[A | B]` collects a flat batch 
 If you want to wait for one of each type instead of a list, give the step one parameter per event. The step fires once each parameter has received its event. Each parameter is matched by its type:
 
 ```python
-import asyncio
 from workflows import Workflow, step
 from workflows.events import Event, StartEvent, StopEvent
-
-
-class StepAEvent(Event):
-    query: str
-
-
-class StepBEvent(Event):
-    query: str
-
-
-class StepCEvent(Event):
-    query: str
 
 
 class StepACompleteEvent(Event):
@@ -150,26 +137,16 @@ class StepCCompleteEvent(Event):
 
 class ConcurrentFlow(Workflow):
     @step
-    async def start(
-        self, ev: StartEvent
-    ) -> list[StepAEvent | StepBEvent | StepCEvent]:
-        return [
-            StepAEvent(query="Query 1"),
-            StepBEvent(query="Query 2"),
-            StepCEvent(query="Query 3"),
-        ]
+    async def step_a(self, ev: StartEvent) -> StepACompleteEvent:
+        return StepACompleteEvent(result="Query 1")
 
     @step
-    async def step_a(self, ev: StepAEvent) -> StepACompleteEvent:
-        return StepACompleteEvent(result=ev.query)
+    async def step_b(self, ev: StartEvent) -> StepBCompleteEvent:
+        return StepBCompleteEvent(result="Query 2")
 
     @step
-    async def step_b(self, ev: StepBEvent) -> StepBCompleteEvent:
-        return StepBCompleteEvent(result=ev.query)
-
-    @step
-    async def step_c(self, ev: StepCEvent) -> StepCCompleteEvent:
-        return StepCCompleteEvent(result=ev.query)
+    async def step_c(self, ev: StartEvent) -> StepCCompleteEvent:
+        return StepCCompleteEvent(result="Query 3")
 
     @step
     async def assemble(
@@ -181,7 +158,7 @@ class ConcurrentFlow(Workflow):
         return StopEvent(result=[a.result, b.result, c.result])
 ```
 
-`start` fans out three different events and `assemble` takes one parameter for each, so it fires once all three have arrived. The diagram for this workflow is easy to read:
+`step_a`, `step_b`, and `step_c` all run from the same `StartEvent`, so they run at the same time. `assemble` takes one parameter for each, so it fires once all three have arrived. The diagram for this workflow is easy to read:
 
 ![A concurrent workflow](./assets/different_events.png)
 
