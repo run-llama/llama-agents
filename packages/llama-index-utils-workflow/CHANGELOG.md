@@ -1,5 +1,15 @@
 # llama-index-utils-workflow
 
+## 0.11.0
+
+### Minor Changes
+
+- aee5fda: Add typed runtime step identities.
+
+### Patch Changes
+
+- 44887eb: Sanitize slashes in Mermaid execution diagram step IDs.
+
 ## 0.10.1
 
 ### Patch Changes

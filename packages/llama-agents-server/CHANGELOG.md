@@ -1,5 +1,19 @@
 # llama-agents-server
 
+## 0.6.1
+
+### Patch Changes
+
+- 71a1aac: Fix startup resume incorrectly failing newly-created handlers before their first persisted tick
+- Updated dependencies [34e166c]
+- Updated dependencies [cb89120]
+- Updated dependencies [fd223e8]
+- Updated dependencies [5724404]
+- Updated dependencies [58e0174]
+- Updated dependencies [aee5fda]
+  - llama-index-workflows@2.22.0
+  - llama-agents-client@0.3.9
+
 ## 0.6.0
 
 ### Minor Changes

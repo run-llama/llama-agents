@@ -19,7 +19,7 @@ dev = [
 
 [project]
 name = "llama-agents-server"
-version = "0.6.0"
+version = "0.6.1"
 description = "HTTP server for deploying and serving LlamaIndex workflows as web services"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -1,5 +1,19 @@
 # llama-index-workflows
 
+## 2.22.0
+
+### Minor Changes
+
+- cb89120: Add `list[E]` fan-out returns and `list[E]` fan-in joins.
+- fd223e8: Steps can declare multiple single-event parameters to fire once when one of each has arrived.
+- aee5fda: Add typed runtime step identities.
+
+### Patch Changes
+
+- 34e166c: Fix idle checks racing buffered events and stale `ctx.collect_events()` firings.
+- 5724404: Preserve retry state for in-progress workflow steps across serialized context resume.
+- 58e0174: Fix ctx.store.get() returning bound dict methods instead of stored values for state keys named items, keys, values, or get
+
 ## 2.21.0
 
 ### Minor Changes
