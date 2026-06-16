@@ -16,6 +16,7 @@ from workflows.decorators import step
 from workflows.errors import WorkflowValidationError
 from workflows.events import Event, StartEvent, StopEvent
 from workflows.utils import (
+    _event_list_element_types,
     _flatten_return_annotation,
     _get_param_types,
     _get_return_types,
@@ -125,24 +126,23 @@ def test_validate_step_signature_no_events() -> None:
         validate_step_signature(inspect_signature(f))
 
 
-def test_validate_step_signature_too_many_params() -> None:
+def test_validate_step_signature_multiple_single_event_params_is_collect_mode() -> None:
     def f1(self, ev: OneTestEvent, foo: OneTestEvent) -> None:  # noqa: ANN001
         pass
 
     def f2(ev: OneTestEvent, foo: OneTestEvent) -> None:
         pass
 
-    with pytest.raises(
-        WorkflowValidationError,
-        match="Step signature must contain exactly one parameter of type Event but found 2.",
-    ):
-        validate_step_signature(inspect_signature(f1))
+    validate_step_signature(inspect_signature(f1))
+    validate_step_signature(inspect_signature(f2))
 
-    with pytest.raises(
-        WorkflowValidationError,
-        match="Step signature must contain exactly one parameter of type Event but found 2.",
-    ):
-        validate_step_signature(inspect_signature(f2))
+
+def test_validate_step_signature_union_collect_param_rejected() -> None:
+    def f(ev: OneTestEvent, foo: AnotherTestEvent | OneTestEvent) -> StopEvent:
+        return StopEvent()
+
+    with pytest.raises(WorkflowValidationError, match="single event type"):
+        validate_step_signature(inspect_signature(f))
 
 
 def test_get_steps_from() -> None:
@@ -315,6 +315,26 @@ def test_validate_step_signature_accepts_list_return() -> None:
     spec = inspect_signature(f)
     # Should not raise: list[E] flattens to a real event return type.
     validate_step_signature(spec)
+
+
+def test_step_rejects_list_event_param_with_explicit_message() -> None:
+    with pytest.raises(WorkflowValidationError, match="not supported yet"):
+
+        @step
+        async def f(events: list[_EventA], ev: _EventB) -> StopEvent:  # type: ignore[unused-ignore]
+            return StopEvent(result="x")
+
+
+def test_event_list_element_types_union_without_event_members_returns_none() -> None:
+    assert _event_list_element_types(list[int | str]) is None
+
+
+def test_event_list_element_types_mixed_members_returns_none() -> None:
+    assert _event_list_element_types(list[StartEvent | int]) is None
+
+
+def test_event_list_element_types_pure_event_list_is_recognized() -> None:
+    assert _event_list_element_types(list[StartEvent]) == [StartEvent]
 
 
 def test_flatten_return_annotation_unparameterized_collection_returns_empty() -> None:

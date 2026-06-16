@@ -122,6 +122,19 @@ def inspect_signature(
             context_parameter = name
             continue
 
+        # A ``list[E]`` parameter is reserved for collection fan-in over
+        # ``list[E]`` returns, which is not supported yet. Reject it with a
+        # pointer at the supported alternatives instead of falling through to
+        # the misleading "no Event parameter" error.
+        if _event_list_element_types(annotation) is not None:
+            msg = (
+                f"Parameter {name!r} is annotated as list[E] of Event types. "
+                "Collection fan-in parameters are not supported yet; declare "
+                "multiple single-event parameters for a multi-slot join, or "
+                "use ctx.collect_events() to gather events."
+            )
+            raise WorkflowValidationError(msg)
+
         # Collect name and types of the event param
         param_types = _get_param_types(t, type_hints)
         if all(
@@ -143,6 +156,37 @@ def inspect_signature(
     )
 
 
+def _event_list_element_types(annotation: Any) -> list[Any] | None:
+    """Element event types of a ``list[E]`` annotation, or None if not one."""
+    if get_origin(annotation) in (Union, UnionType):
+        members = [a for a in get_args(annotation) if a is not type(None)]
+        list_members = [a for a in members if get_origin(a) is list]
+        # Only unwrap the unambiguous ``list[E] | None`` shape: exactly one list
+        # member and no other non-None members.
+        if len(list_members) == 1 and len(members) == 1:
+            annotation = list_members[0]
+    if get_origin(annotation) is not list:
+        return None
+
+    element_types: list[Any] = []
+    for arg in get_args(annotation):
+        if get_origin(arg) in (Union, UnionType):
+            members = [a for a in get_args(arg) if a is not type(None)]
+        else:
+            members = [arg]
+        for member in members:
+            if member not in element_types:
+                element_types.append(member)
+    if not element_types:
+        return None
+    if all(
+        et is Event or (inspect.isclass(et) and issubclass(et, Event))
+        for et in element_types
+    ):
+        return element_types
+    return None
+
+
 def validate_step_signature(spec: StepSignatureSpec) -> None:
     """
     Validate that a step signature specification meets workflow requirements.
@@ -158,9 +202,20 @@ def validate_step_signature(spec: StepSignatureSpec) -> None:
     if num_of_events == 0:
         msg = "Step signature must have at least one parameter annotated as type Event"
         raise WorkflowValidationError(msg)
-    elif num_of_events > 1:
-        msg = f"Step signature must contain exactly one parameter of type Event but found {num_of_events}."
-        raise WorkflowValidationError(msg)
+    if num_of_events > 1:
+        # Collect-mode (multi-slot fan-in): a step with more than one
+        # event-shaped parameter fires once every declared slot is filled. Each
+        # parameter must name exactly one concrete event type; union-typed
+        # collect parameters (e.g. ``x: A | B``) are rejected.
+        for name, param_types in spec.accepted_events.items():
+            if len(param_types) != 1:
+                msg = (
+                    "Collect-mode steps (more than one event parameter) require "
+                    f"each event parameter to declare a single event type, but "
+                    f"parameter {name!r} declares {len(param_types)}. Union-typed "
+                    "collect parameters are not supported."
+                )
+                raise WorkflowValidationError(msg)
 
     if not spec.return_types:
         msg = "Return types of workflows step functions must be annotated with their type."

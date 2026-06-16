@@ -27,12 +27,14 @@ class CommandRunWorker:
     step_id: StepId
     event: Event
     id: int
+    bound_events: dict[str, Event] | None = None
 
 
 @dataclass(frozen=True)
 class CommandQueueEvent:
     event: Event
     step_id: StepId | None = None
+    bound_events: dict[str, Event] | None = None
     attempts: int | None = None
     first_attempt_at: float | None = None
     last_exception: Exception | None = None

@@ -230,6 +230,7 @@ class _ControlLoopRunner:
                     step_name=step_name,
                     event=command.event,
                     workflow=self.workflow,
+                    bound_events=command.bound_events,
                     retry=RetryAttempt(
                         retry_number=worker.attempts,
                         first_attempt_at=worker.first_attempt_at,
@@ -313,6 +314,7 @@ class _ControlLoopRunner:
                 TickAddEvent(
                     event=command.event,
                     step_id=command.step_id,
+                    bound_events=command.bound_events,
                     attempts=command.attempts,
                     first_attempt_at=command.first_attempt_at,
                     last_exception=command.last_exception,
@@ -824,6 +826,7 @@ def rewind_in_progress(
                 0,
                 EventAttempt(
                     event=in_progress.event,
+                    bound_events=in_progress.bound_events,
                     attempts=in_progress.attempts,
                     first_attempt_at=in_progress.first_attempt_at,
                     last_exception=in_progress.last_exception,
@@ -900,7 +903,10 @@ def _process_step_result_tick(
                 state.is_running = False
                 # Clear collected_events and collected_waiters since workflow is complete
                 for worker in state.workers.values():
+                    worker.queue.clear()
+                    worker.in_progress.clear()
                     worker.collected_events.clear()
+                    worker.static_collect_events.clear()
                     worker.collected_waiters.clear()
                 commands.append(CommandCompleteRun(result=result.result))
             elif isinstance(result.result, Event):
@@ -960,6 +966,7 @@ def _process_step_result_tick(
                     0,
                     EventAttempt(
                         event=tick.event,
+                        bound_events=this_execution.bound_events,
                         attempts=this_execution.attempts + 1,
                         first_attempt_at=first_attempt_at,
                         last_exception=result.exception,
@@ -1054,6 +1061,7 @@ def _process_step_result_tick(
                     CommandRunWorker(
                         step_id=step_id,
                         event=result.event,
+                        bound_events=this_execution.bound_events,
                         id=this_execution.worker_id,
                     )
                 )
@@ -1076,6 +1084,7 @@ def _process_step_result_tick(
             new_waiter = StepWorkerWaiter(
                 waiter_id=result.waiter_id,
                 event=this_execution.event,
+                bound_events=this_execution.bound_events,
                 waiting_for_event=result.event_type,
                 requirements=result.requirements,
                 has_requirements=bool(len(result.requirements)),
@@ -1121,12 +1130,74 @@ def _process_step_result_tick(
                 )
             ),
         )
-        worker_state.in_progress.remove(this_execution)
+        if this_execution in worker_state.in_progress:
+            worker_state.in_progress.remove(this_execution)
     # enqueue next events if there are any
     if not is_completed:
         commands.extend(_drain_eligible_queue(step_id, worker_state, now_seconds))
 
     return state, commands
+
+
+def _static_collect_events(
+    event: Event,
+    worker_state: InternalStepWorkerState,
+) -> dict[str, Event] | None:
+    """Buffer a statically routed fan-in event until every declared slot is filled."""
+    collect_params = worker_state.config.collect_params
+    if collect_params is None:
+        return None
+
+    worker_state.static_collect_events.append(event)
+    selected_indices = _select_static_collect_batch(
+        events=worker_state.static_collect_events,
+        collect_params=collect_params,
+        allow_subclasses=worker_state.config.accept_event_subclasses,
+    )
+    if selected_indices is None:
+        return None
+
+    binding = {
+        param_name: worker_state.static_collect_events[event_index]
+        for (param_name, _), event_index in zip(collect_params, selected_indices)
+    }
+    selected = set(selected_indices)
+    worker_state.static_collect_events = [
+        pending
+        for index, pending in enumerate(worker_state.static_collect_events)
+        if index not in selected
+    ]
+    return binding
+
+
+def _select_static_collect_batch(
+    events: list[Event],
+    collect_params: list[tuple[str, Any]],
+    allow_subclasses: bool,
+) -> list[int] | None:
+    def search(param_index: int, used: set[int]) -> list[int] | None:
+        if param_index == len(collect_params):
+            return []
+
+        _, event_type = collect_params[param_index]
+        for event_index, candidate in enumerate(events):
+            if event_index in used:
+                continue
+            if not event_matches(
+                candidate,
+                event_type,
+                allow_subclasses=allow_subclasses,
+            ):
+                continue
+
+            used.add(event_index)
+            rest = search(param_index + 1, used)
+            used.remove(event_index)
+            if rest is not None:
+                return [event_index, *rest]
+        return None
+
+    return search(0, set())
 
 
 def _add_or_enqueue_event(
@@ -1161,6 +1232,7 @@ def _add_or_enqueue_event(
         state.in_progress.append(
             InProgressState(
                 event=event.event,
+                bound_events=event.bound_events,
                 worker_id=id,
                 shared_state=shared_state,
                 attempts=event.attempts or 0,
@@ -1170,7 +1242,14 @@ def _add_or_enqueue_event(
                 recovery_counts=dict(event.recovery_counts),
             )
         )
-        commands.append(CommandRunWorker(step_id=step_id, event=event.event, id=id))
+        commands.append(
+            CommandRunWorker(
+                step_id=step_id,
+                event=event.event,
+                id=id,
+                bound_events=event.bound_events,
+            )
+        )
         commands.append(
             CommandPublishEvent(
                 StepStateChanged(
@@ -1228,7 +1307,10 @@ def _process_add_event_tick(
                 waiter_resolved_steps.add(step_name)
                 wait_condition.resolved_event = tick.event
                 subcommands = _add_or_enqueue_event(
-                    EventAttempt(event=wait_condition.event),
+                    EventAttempt(
+                        event=wait_condition.event,
+                        bound_events=wait_condition.bound_events,
+                    ),
                     step_id,
                     state.workers[step_name],
                     now_seconds,
@@ -1251,9 +1333,18 @@ def _process_add_event_tick(
         ):
             handled = True
             _consume_superseded_delayed_attempt(tick, state.workers[step_name])
+            bound_events = tick.bound_events
+            if bound_events is None and state.workers[step_name].config.collect_params:
+                bound_events = _static_collect_events(
+                    event=tick.event,
+                    worker_state=state.workers[step_name],
+                )
+                if bound_events is None:
+                    continue
             subcommands = _add_or_enqueue_event(
                 EventAttempt(
                     event=tick.event,
+                    bound_events=bound_events,
                     attempts=tick.attempts,
                     first_attempt_at=tick.first_attempt_at,
                     last_exception=tick.last_exception,
@@ -1402,7 +1493,7 @@ def _process_waiter_timeout_tick(
         return state, commands
     waiter.timed_out = True
     subcommands = _add_or_enqueue_event(
-        EventAttempt(event=waiter.event),
+        EventAttempt(event=waiter.event, bound_events=waiter.bound_events),
         step_id,
         worker_state,
         now_seconds,

@@ -45,6 +45,7 @@ class TickAddEvent(BaseModel):
     type: Literal["add_event"] = "add_event"
     event: SerializableEvent
     step_id: StepId | None = Field(default=None, validation_alias="step_name")
+    bound_events: dict[str, SerializableEvent] | None = None
     attempts: int | None = None
     first_attempt_at: float | None = None
     last_exception: SerializableOptionalException = None
