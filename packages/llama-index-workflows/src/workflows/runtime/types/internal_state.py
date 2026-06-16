@@ -8,8 +8,14 @@ import importlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from workflows._event_matching import step_accepts_type
+from workflows._stream_levels import event_types, stream_level_types_by_producer
+from workflows.collect import Collect, Take
 from workflows.context.context_types import (
     CURRENT_SERIALIZED_VERSION,
+    SerializedCollectionReleasePayload,
+    SerializedCollectionReleaseState,
+    SerializedCollectionStreamInstance,
     SerializedContext,
     SerializedEventAttempt,
     SerializedStepWorkerState,
@@ -19,14 +25,73 @@ from workflows.context.serializers import JsonSerializer
 from workflows.decorators import CatchErrorHandler, StepConfig
 from workflows.events import Event
 from workflows.retry_policy import RetryPolicy
-from workflows.runtime.types.results import StepWorkerState, StepWorkerWaiter
+from workflows.runtime.types.results import (
+    CollectionReleasePayload,
+    StepWorkerState,
+    StepWorkerWaiter,
+)
 from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import TickAddEvent, WorkflowTick
 from workflows.workflow import Workflow
 
 if TYPE_CHECKING:
-    from workflows.context.context_types import SerializedContext
     from workflows.context.serializers import BaseSerializer
+
+
+@dataclass(frozen=True)
+class CollectionBinding:
+    """
+    Static typed stream binding from a finite list source to a collect step.
+
+    Bindings are computed once from step signatures and stored in BrokerConfig.
+    At runtime, each CollectionStreamInstance records the binding ids that may
+    accept events produced inside that stream.
+    """
+
+    id: str
+    source_step: str
+    target_step: str
+    item_types: tuple[type[Event], ...]
+    policy: Collect
+
+
+@dataclass()
+class CollectionStreamInstance:
+    """
+    One execution of a collection-producing step.
+
+    A returned ``list[E]`` opens one stream instance. Work emitted inside that
+    stream carries ``scope_path`` so downstream completions can decrement the
+    right open-work counter and close the nearest enclosing stream.
+    """
+
+    stream_id: str
+    source_step: str
+    scope_path: tuple[str, ...]
+    open_work_items: int = 0
+    accepting_binding_ids: tuple[str, ...] = ()
+
+    def _copy(self) -> CollectionStreamInstance:
+        return dataclasses.replace(self)
+
+
+@dataclass()
+class CollectionReleaseState:
+    """
+    Release state for one binding within one stream instance.
+
+    ``buffer`` stores member events until the binding's Collect policy releases
+    them. ``released`` makes the release fire-once: Take(n) sets it on the
+    n-th arrival, and stream close sets it for All() (or an unmet Take).
+    """
+
+    binding_id: str
+    stream_id: str
+    buffer: list[Event] = field(default_factory=list)
+    released: bool = False
+
+    def _copy(self) -> CollectionReleaseState:
+        return dataclasses.replace(self, buffer=list(self.buffer))
 
 
 @dataclass()
@@ -40,11 +105,19 @@ class BrokerState:
     Attributes:
         config: Immutable configuration for the workflow and all steps
         workers: Mutable state for each step's worker pool, queues, and in-progress executions
+        stream_seq: Monotonic counter used to mint deterministic collection stream ids
+        streams: Open collection streams keyed by stream id
+        collection_release_states: Per-binding release buffers keyed by stream and binding
     """
 
     is_running: bool
     config: BrokerConfig
     workers: dict[str, InternalStepWorkerState]
+    stream_seq: int = 0
+    streams: dict[str, CollectionStreamInstance] = field(default_factory=dict)
+    collection_release_states: dict[str, CollectionReleaseState] = field(
+        default_factory=dict
+    )
 
     def deepcopy(self) -> BrokerState:
         """
@@ -56,6 +129,12 @@ class BrokerState:
             workers={
                 name: worker_state._deepcopy()
                 for name, worker_state in self.workers.items()
+            },
+            stream_seq=self.stream_seq,
+            streams={sid: stream._copy() for sid, stream in self.streams.items()},
+            collection_release_states={
+                key: state._copy()
+                for key, state in self.collection_release_states.items()
             },
         )
 
@@ -76,6 +155,7 @@ class BrokerState:
                 timeout=workflow._timeout,
                 catch_error_handlers=dict(workflow._catch_error_handlers),
                 handler_for_step=dict(workflow._handler_for_step),
+                collection_bindings=_compute_collection_bindings(workflow),
             ),
             workers={
                 name: InternalStepWorkerState(
@@ -100,11 +180,16 @@ class BrokerState:
                 worker_state.collected_waiters, key=lambda x: x.waiter_id
             ):
                 if waiter.has_requirements and not waiter.requirements:
+                    # Re-ping the step with its whole work record so the
+                    # re-registered waiter keeps its stream scope and any
+                    # collect batch.
                     commands.append(
                         TickAddEvent(
                             event=waiter.event,
                             step_id=StepId.root(step_name),
                             bound_events=waiter.bound_events,
+                            scope_path=waiter.scope_path,
+                            collection_release_payload=waiter.collection_release_payload,
                         )
                     )
         return commands
@@ -114,7 +199,7 @@ class BrokerState:
 
         workers_dict = {}
         for step_name, worker_state in self.workers.items():
-            # Serialize queue with retry info
+            # Serialize queue with retry and stream scope info
             queue = [
                 SerializedEventAttempt(
                     event=serializer.serialize(attempt.event),
@@ -130,11 +215,14 @@ class BrokerState:
                     last_failed_at=attempt.last_failed_at,
                     recovery_counts=dict(attempt.recovery_counts),
                     not_before=attempt.not_before,
+                    scope_path=list(attempt.scope_path),
+                    collection_release_payload=_serialize_release_payload(
+                        attempt.collection_release_payload, serializer
+                    ),
                 )
                 for attempt in worker_state.queue
             ]
-
-            # Serialize in-progress attempts, including retry and fan-in binding state.
+            # Serialize in-progress attempts so they can be re-queued on resume.
             in_progress = [
                 SerializedEventAttempt(
                     event=serializer.serialize(ip.event),
@@ -149,6 +237,10 @@ class BrokerState:
                     last_exception=ip.last_exception,
                     last_failed_at=ip.last_failed_at,
                     recovery_counts=dict(ip.recovery_counts),
+                    scope_path=list(ip.scope_path),
+                    collection_release_payload=_serialize_release_payload(
+                        ip.shared_state.collection_release_payload, serializer
+                    ),
                 )
                 for ip in worker_state.in_progress
             ]
@@ -176,6 +268,10 @@ class BrokerState:
                     resolved_event=serializer.serialize(waiter.resolved_event)
                     if waiter.resolved_event
                     else None,
+                    scope_path=list(waiter.scope_path),
+                    collection_release_payload=_serialize_release_payload(
+                        waiter.collection_release_payload, serializer
+                    ),
                 )
                 for waiter in worker_state.collected_waiters
             ]
@@ -196,6 +292,26 @@ class BrokerState:
             state={},  # State is filled separately by the state store
             is_running=self.is_running,
             workers=workers_dict,
+            stream_seq=self.stream_seq,
+            streams={
+                sid: SerializedCollectionStreamInstance(
+                    stream_id=stream.stream_id,
+                    source_step=stream.source_step,
+                    scope_path=list(stream.scope_path),
+                    open_work_items=stream.open_work_items,
+                    accepting_binding_ids=list(stream.accepting_binding_ids),
+                )
+                for sid, stream in self.streams.items()
+            },
+            collection_release_states={
+                key: SerializedCollectionReleaseState(
+                    binding_id=release.binding_id,
+                    stream_id=release.stream_id,
+                    buffer=[serializer.serialize(ev) for ev in release.buffer],
+                    released=release.released,
+                )
+                for key, release in self.collection_release_states.items()
+            },
         )
 
     @staticmethod
@@ -213,6 +329,26 @@ class BrokerState:
         # Unfortunately, important to preserve this state, since the workflow needs to know this to decide
         # whether to create a start_event from kwargs (it only constructs and passes a start event if not already running)
         base_state.is_running = serialized.is_running
+        base_state.stream_seq = serialized.stream_seq
+        base_state.streams = {
+            sid: CollectionStreamInstance(
+                stream_id=stream.stream_id,
+                source_step=stream.source_step,
+                scope_path=tuple(stream.scope_path),
+                open_work_items=stream.open_work_items,
+                accepting_binding_ids=tuple(stream.accepting_binding_ids),
+            )
+            for sid, stream in serialized.streams.items()
+        }
+        base_state.collection_release_states = {
+            key: CollectionReleaseState(
+                binding_id=release.binding_id,
+                stream_id=release.stream_id,
+                buffer=[serializer.deserialize(ev) for ev in release.buffer],
+                released=release.released,
+            )
+            for key, release in serialized.collection_release_states.items()
+        }
 
         # Restore worker state (queues, collected events, waiters)
         # We do this regardless of is_running state so workflows can resume from where they left off
@@ -222,25 +358,11 @@ class BrokerState:
 
             worker = base_state.workers[step_name]
 
-            # Restore queue with retry info.
+            # Restore queue with retry and stream scope info.
             # in_progress events are moved to the queue on deserialization;
             # they will be restarted when the workflow runs.
             worker.queue = [
-                EventAttempt(
-                    event=serializer.deserialize(attempt.event),
-                    bound_events={
-                        name: serializer.deserialize(event)
-                        for name, event in attempt.bound_events.items()
-                    }
-                    if attempt.bound_events is not None
-                    else None,
-                    attempts=attempt.attempts,
-                    first_attempt_at=attempt.first_attempt_at,
-                    last_exception=attempt.last_exception,
-                    last_failed_at=attempt.last_failed_at,
-                    recovery_counts=dict(attempt.recovery_counts),
-                    not_before=attempt.not_before,
-                )
+                _deserialize_event_attempt(attempt, serializer)
                 for attempt in [*worker_data.queue, *worker_data.in_progress]
             ]
 
@@ -256,20 +378,27 @@ class BrokerState:
             # Restore waiters
             worker.collected_waiters = []
             for waiter_data in worker_data.collected_waiters:
-                # Import the event type
-                waiting_for_event = _import_event_type(waiter_data.waiting_for_event)
-
+                waiter_payload = _deserialize_release_payload(
+                    waiter_data.collection_release_payload, serializer
+                )
                 worker.collected_waiters.append(
                     StepWorkerWaiter(
                         waiter_id=waiter_data.waiter_id,
-                        event=serializer.deserialize(waiter_data.event),
                         bound_events={
                             name: serializer.deserialize(event)
                             for name, event in waiter_data.bound_events.items()
                         }
                         if waiter_data.bound_events is not None
                         else None,
-                        waiting_for_event=waiting_for_event,
+                        # For a suspended collect invocation the payload is the
+                        # authoritative record; the trigger event is derived
+                        # from it so the two cannot diverge on resume.
+                        event=waiter_payload.as_event()
+                        if waiter_payload is not None
+                        else serializer.deserialize(waiter_data.event),
+                        waiting_for_event=_import_event_type(
+                            waiter_data.waiting_for_event
+                        ),
                         requirements={},
                         has_requirements=waiter_data.has_requirements,
                         resolved_event=serializer.deserialize(
@@ -277,10 +406,45 @@ class BrokerState:
                         )
                         if waiter_data.resolved_event
                         else None,
+                        scope_path=tuple(waiter_data.scope_path),
+                        collection_release_payload=waiter_payload,
                     )
                 )
 
         return base_state
+
+
+def _deserialize_event_attempt(
+    attempt: SerializedEventAttempt, serializer: BaseSerializer
+) -> EventAttempt:
+    """Restore one queued work item.
+
+    For a collect invocation the persisted payload is the authoritative
+    record; the trigger event is derived from it so the two cannot diverge
+    across a serialize/resume boundary.
+    """
+    payload = _deserialize_release_payload(
+        attempt.collection_release_payload, serializer
+    )
+    return EventAttempt(
+        event=payload.as_event()
+        if payload is not None
+        else serializer.deserialize(attempt.event),
+        bound_events={
+            name: serializer.deserialize(event)
+            for name, event in attempt.bound_events.items()
+        }
+        if attempt.bound_events is not None
+        else None,
+        attempts=attempt.attempts,
+        first_attempt_at=attempt.first_attempt_at,
+        last_exception=attempt.last_exception,
+        last_failed_at=attempt.last_failed_at,
+        recovery_counts=dict(attempt.recovery_counts),
+        not_before=attempt.not_before,
+        scope_path=tuple(attempt.scope_path),
+        collection_release_payload=payload,
+    )
 
 
 def _import_event_type(qualified_name: str) -> type[Event]:
@@ -295,6 +459,62 @@ def _import_event_type(qualified_name: str) -> type[Event]:
     return getattr(module, class_name)
 
 
+def _binding_id(
+    source_step: str,
+    target_step: str,
+    item_types: tuple[type[Event], ...],
+    policy: Collect,
+) -> str:
+    """Build a stable id for one static source-to-collect-step binding."""
+    type_names = ",".join(f"{t.__module__}.{t.__qualname__}" for t in item_types)
+    card = policy.cardinality
+    card_repr = f"Take({card.n})" if isinstance(card, Take) else type(card).__name__
+    return f"{source_step}->{target_step}:{type_names}:{card_repr}:nearest"
+
+
+def _compute_collection_bindings(workflow: Workflow) -> dict[str, CollectionBinding]:
+    """
+    Compute static list[E] stream bindings from the workflow graph.
+
+    A fan-out source binds to a collection step when the collection step's item
+    type appears at the same stream level reachable from the source (see
+    :mod:`workflows._stream_levels` for the level traversal, shared with static
+    validation).
+    """
+    steps = {name: fn._step_config for name, fn in workflow._get_steps().items()}
+    collects: dict[str, tuple[Any, ...]] = {
+        name: cfg.collection_param[1]
+        for name, cfg in steps.items()
+        if cfg.collection_param is not None
+    }
+
+    bindings: dict[str, CollectionBinding] = {}
+    for source_step, level_types in stream_level_types_by_producer(steps).items():
+        for target_step, collect_types in collects.items():
+            item_types = tuple(event_types(collect_types))
+            if not any(
+                step_accepts_type(
+                    produced,
+                    item_types,
+                    allow_subclasses=steps[target_step].accept_event_subclasses,
+                )
+                for produced in level_types
+            ):
+                continue
+            policy = steps[target_step].collection_policy
+            if policy is None:
+                continue
+            binding = CollectionBinding(
+                id=_binding_id(source_step, target_step, item_types, policy),
+                source_step=source_step,
+                target_step=target_step,
+                item_types=item_types,
+                policy=policy,
+            )
+            bindings[binding.id] = binding
+    return bindings
+
+
 @dataclass(frozen=True)
 class BrokerConfig:
     """
@@ -307,12 +527,36 @@ class BrokerConfig:
         timeout: Maximum seconds before the workflow times out, or None for no timeout
         catch_error_handlers: handler step name -> CatchErrorHandler descriptor
         handler_for_step: step name -> handler step name that owns it
+        collection_bindings: Static list[E] stream bindings keyed by binding id
     """
 
     steps: dict[str, InternalStepConfig]
     timeout: float | None
     catch_error_handlers: dict[str, CatchErrorHandler] = field(default_factory=dict)
     handler_for_step: dict[str, str] = field(default_factory=dict)
+    collection_bindings: dict[str, CollectionBinding] = field(default_factory=dict)
+
+    def bindings_for_source(self, source_step: str) -> tuple[CollectionBinding, ...]:
+        return tuple(
+            binding
+            for binding in self.collection_bindings.values()
+            if binding.source_step == source_step
+        )
+
+    def binding_for_target(
+        self,
+        stream_id: str,
+        target_step: str,
+        streams: dict[str, CollectionStreamInstance],
+    ) -> CollectionBinding | None:
+        stream = streams.get(stream_id)
+        if stream is None:
+            return None
+        for binding_id in stream.accepting_binding_ids:
+            binding = self.collection_bindings.get(binding_id)
+            if binding is not None and binding.target_step == target_step:
+                return binding
+        return None
 
 
 @dataclass()
@@ -347,6 +591,9 @@ class EventAttempt:
         last_failed_at: Unix timestamp of the most recent failure, or None.
         not_before: Absolute adapter-get_now time before which this attempt
             must not be dispatched (retry delay), or None if eligible now.
+        recovery_counts: Per-handler recovery counts on this event's lineage.
+        scope_path: Collection stream scope path, innermost stream id last.
+        collection_release_payload: Explicit payload for queued list[E] collect invocations.
     """
 
     event: Event
@@ -357,6 +604,8 @@ class EventAttempt:
     last_failed_at: float | None = None
     recovery_counts: dict[str, int] = field(default_factory=dict)
     not_before: float | None = None
+    scope_path: tuple[str, ...] = field(default_factory=tuple)
+    collection_release_payload: CollectionReleasePayload | None = None
 
 
 @dataclass()
@@ -411,6 +660,8 @@ class InProgressState:
         first_attempt_at: Unix timestamp when this event was first attempted
         last_exception: Most recent exception from the prior attempt, or None if this is the first attempt.
         last_failed_at: Unix timestamp of the most recent failure, or None.
+        recovery_counts: Per-handler recovery counts on this event's lineage.
+        scope_path: Collection stream scope path for the worker's current event.
     """
 
     event: Event
@@ -422,6 +673,7 @@ class InProgressState:
     last_failed_at: float | None = None
     recovery_counts: dict[str, int] = field(default_factory=dict)
     bound_events: dict[str, Event] | None = None
+    scope_path: tuple[str, ...] = field(default_factory=tuple)
 
     def _deepcopy(self) -> InProgressState:
         return InProgressState(
@@ -434,4 +686,33 @@ class InProgressState:
             last_exception=self.last_exception,
             last_failed_at=self.last_failed_at,
             recovery_counts=dict(self.recovery_counts),
+            scope_path=self.scope_path,
         )
+
+
+def _serialize_release_payload(
+    payload: CollectionReleasePayload | None, serializer: BaseSerializer
+) -> SerializedCollectionReleasePayload | None:
+    """Serialize a queued list[E] collect invocation payload."""
+    if payload is None:
+        return None
+    return SerializedCollectionReleasePayload(
+        binding_id=payload.binding_id,
+        stream_id=payload.stream_id,
+        events=[serializer.serialize(ev) for ev in payload.events],
+        output_scope_path=list(payload.output_scope_path),
+    )
+
+
+def _deserialize_release_payload(
+    payload: SerializedCollectionReleasePayload | None, serializer: BaseSerializer
+) -> CollectionReleasePayload | None:
+    """Deserialize a queued list[E] collect invocation payload."""
+    if payload is None:
+        return None
+    return CollectionReleasePayload(
+        binding_id=payload.binding_id,
+        stream_id=payload.stream_id,
+        events=[serializer.deserialize(ev) for ev in payload.events],
+        output_scope_path=tuple(payload.output_scope_path),
+    )

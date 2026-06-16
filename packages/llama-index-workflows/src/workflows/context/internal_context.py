@@ -160,9 +160,8 @@ class InternalContext(Generic[MODEL_T]):
 
         recovery_counts: dict[str, int] = {}
         try:
-            recovery_counts = dict(
-                StepWorkerStateContextVar.get().retry.recovery_counts
-            )
+            step_ctx = StepWorkerStateContextVar.get()
+            recovery_counts = dict(step_ctx.retry.recovery_counts)
         except LookupError:
             pass
 

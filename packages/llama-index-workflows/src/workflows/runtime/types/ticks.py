@@ -19,7 +19,10 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, TypeAdapter
 from workflows.events import SerializableEvent, SerializableOptionalException
-from workflows.runtime.types.results import StepFunctionResult
+from workflows.runtime.types.results import (
+    SerializableCollectionReleasePayload,
+    StepFunctionResult,
+)
 from workflows.runtime.types.step_id import StepId
 
 
@@ -51,6 +54,11 @@ class TickAddEvent(BaseModel):
     last_exception: SerializableOptionalException = None
     last_failed_at: float | None = None
     recovery_counts: dict[str, int] = Field(default_factory=dict)
+    scope_path: tuple[str, ...] = Field(default_factory=tuple)
+    # Collect-invocation work record. A payload-carrying tick is routed
+    # directly to the binding's target step, before waiter matching and the
+    # member-arrival path.
+    collection_release_payload: SerializableCollectionReleasePayload = None
 
 
 class TickCancelRun(BaseModel):
@@ -93,11 +101,11 @@ class TickWaiterTimeout(BaseModel):
 
 
 class TickIdleCheck(BaseModel):
-    """Scheduled after state appears idle, to re-check after async events drain.
+    """Scheduled after state appears idle, to re-check after async sends run.
 
     Appended to tick_buffer when the reducer sees quiescent state. Processed
     on the next loop iteration after asyncio.sleep(0), giving in-flight
-    ctx.send_event() calls a chance to deliver via the pull task.
+    ctx.send_event() calls a chance to deliver.
     """
 
     model_config = ConfigDict(frozen=True)

@@ -16,6 +16,7 @@ from workflows.decorators import step
 from workflows.errors import WorkflowValidationError
 from workflows.events import Event, StartEvent, StopEvent
 from workflows.utils import (
+    StepSignatureSpec,
     _event_list_element_types,
     _flatten_return_annotation,
     _get_param_types,
@@ -317,8 +318,24 @@ def test_validate_step_signature_accepts_list_return() -> None:
     validate_step_signature(spec)
 
 
-def test_step_rejects_list_event_param_with_explicit_message() -> None:
-    with pytest.raises(WorkflowValidationError, match="not supported yet"):
+def test_validate_step_signature_rejects_stream_param_with_other_events() -> None:
+    # A list[E] collection parameter cannot be combined with additional event params.
+    spec = StepSignatureSpec(
+        accepted_events={"a": [StartEvent], "b": [StopEvent]},
+        return_types=[StopEvent],
+        context_parameter=None,
+        context_state_type=None,
+        resources=[],
+        collection_param=("a", (StartEvent,)),
+        collection_policy=None,
+        is_fan_out=False,
+    )
+    with pytest.raises(WorkflowValidationError, match="cannot be combined with other"):
+        validate_step_signature(spec)
+
+
+def test_step_rejects_stream_param_with_other_event_params() -> None:
+    with pytest.raises(WorkflowValidationError, match="cannot be combined with other"):
 
         @step
         async def f(events: list[_EventA], ev: _EventB) -> StopEvent:  # type: ignore[unused-ignore]

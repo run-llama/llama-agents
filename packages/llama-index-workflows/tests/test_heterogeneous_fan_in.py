@@ -5,12 +5,12 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from workflows import Context, Workflow, step
+from workflows import Context, Workflow, catch_error, step
 from workflows.context.internal_context import InternalContext
 from workflows.context.serializers import JsonSerializer
 from workflows.decorators import step as free_step
 from workflows.errors import WorkflowValidationError
-from workflows.events import Event, StartEvent, StopEvent
+from workflows.events import Event, StartEvent, StepFailedEvent, StopEvent
 from workflows.runtime.types.internal_state import BrokerState, EventAttempt
 
 
@@ -250,6 +250,32 @@ async def test_collect_mode_waiter_resume_preserves_static_bindings() -> None:
 
 
 @pytest.mark.asyncio
+async def test_collect_mode_catch_error_does_not_carry_static_bindings() -> None:
+    recovered: list[str] = []
+
+    class RecoverWorkflow(Workflow):
+        @step
+        async def emit(self, ctx: Context, ev: StartEvent) -> Header | Body | None:
+            ctx.send_event(Header(value="h"))
+            ctx.send_event(Body(value="b"))
+            return None
+
+        @step
+        async def assemble(self, h: Header, b: Body) -> StopEvent:
+            raise RuntimeError(f"{h.value}{b.value}")
+
+        @catch_error(for_steps=["assemble"])
+        async def recover(self, ev: StepFailedEvent) -> StopEvent:
+            assert isinstance(ev.input_event, Body)
+            recovered.append(str(ev.exception))
+            return StopEvent(result="recovered")
+
+    result = await RecoverWorkflow(timeout=10).run()
+    assert result == "recovered"
+    assert recovered == ["hb"]
+
+
+@pytest.mark.asyncio
 async def test_completed_run_clears_static_collect_events() -> None:
     mode = {"run": 1}
     joined: list[tuple[str, str]] = []
@@ -387,12 +413,37 @@ def test_union_collect_param_rejected() -> None:
             return StopEvent(result="x")
 
 
-def test_list_event_param_rejected_with_forward_pointing_error() -> None:
+def test_list_event_param_accepted_as_collection_param() -> None:
+    """A single ``list[E]`` parameter is a collection-collect step."""
+
     class _ListWorkflow(Workflow):
         pass
 
-    with pytest.raises(WorkflowValidationError, match="not supported yet"):
+    @free_step(workflow=_ListWorkflow)
+    async def collect(events: list[Header]) -> StopEvent:  # type: ignore[unused-ignore]
+        return StopEvent(result="x")
 
-        @free_step(workflow=_ListWorkflow)
-        async def collect(events: list[Header]) -> StopEvent:  # type: ignore[unused-ignore]
-            return StopEvent(result="x")
+    cfg = collect._step_config
+    assert cfg.collection_param is not None
+    assert cfg.collection_param[0] == "events"
+    assert cfg.collection_param[1] == (Header,)
+    # The step routes on the element event type.
+    assert Header in cfg.accepted_events
+
+
+def test_list_union_event_param_accepted_as_flat_stream() -> None:
+    """A ``list[A | B]`` collect parameter is a flat heterogeneous stream."""
+
+    class _ListUnionWorkflow(Workflow):
+        pass
+
+    @free_step(workflow=_ListUnionWorkflow)
+    async def collect(events: list[Header | Body]) -> StopEvent:  # type: ignore[unused-ignore]
+        return StopEvent(result="x")
+
+    cfg = collect._step_config
+    assert cfg.collection_param is not None
+    assert cfg.collection_param[1] == (Header, Body)
+    # Both member types route to the step.
+    assert Header in cfg.accepted_events
+    assert Body in cfg.accepted_events

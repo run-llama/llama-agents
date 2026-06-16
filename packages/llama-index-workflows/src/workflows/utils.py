@@ -27,6 +27,7 @@ from typing import Union
 
 from pydantic import BaseModel
 
+from .collect import All, Collect, Take
 from .errors import WorkflowValidationError
 from .events import Event, EventType
 from .resource import ResourceDefinition, ResourceDescriptor
@@ -42,6 +43,15 @@ class StepSignatureSpec(BaseModel):
     context_parameter: str | None
     context_state_type: Any | None
     resources: list[Any]
+    # Collection-stream fan-in: ``(parameter_name, element_event_types)`` when
+    # the step declares a single ``list[E]`` collect parameter, else None. The
+    # element types are a tuple — ``list[Done]`` -> ``(Done,)``; a union flat list
+    # ``list[A | B]`` -> ``(A, B)``.
+    collection_param: tuple[str, tuple[Any, ...]] | None = None
+    # The resolved ``Collect`` marker for the collection parameter. A bare
+    # ``list[E]`` parameter resolves to ``Collect()`` (``All`` cardinality).
+    # None for steps without a collection parameter.
+    collection_policy: Any | None = None
     # Fan-out producer: True when the return annotation is ``list[E]``.
     is_fan_out: bool = False
     # Non-list members of a fan-out return union (``-> list[A] | B`` -> [B]).
@@ -80,6 +90,8 @@ def inspect_signature(
     context_parameter = None
     context_state_type = None
     resources = []
+    collection_param: tuple[str, tuple[Any, ...]] | None = None
+    collection_policy: Collect | None = None
 
     # Inspect function parameters
     for name, t in sig.parameters.items():
@@ -102,12 +114,18 @@ def inspect_signature(
                     context_state_type = args[0]
                 continue
 
-        # Handle Annotated types for resources
+        # Handle Annotated types: resource descriptors and Collect markers. A
+        # ``Collect`` marker unwraps to the inner ``list[E]`` annotation and is
+        # carried forward to the collection-collect handling below; everything else
+        # (unknown metadata) is ignored.
+        collect_marker: Collect | None = None
         if get_origin(annotation) is Annotated:
             args = get_args(annotation)
             type_annotation = args[0] if args else None
-            descriptor = args[1] if len(args) > 1 else None
-            if descriptor is not None and isinstance(descriptor, ResourceDescriptor):
+            descriptor = next(
+                (a for a in args[1:] if isinstance(a, ResourceDescriptor)), None
+            )
+            if descriptor is not None:
                 # Pass localns to resource for nested annotation resolution
                 descriptor.set_localns(localns)
                 resources.append(
@@ -115,23 +133,43 @@ def inspect_signature(
                         name=name, resource=descriptor, type_annotation=type_annotation
                     )
                 )
-            continue
+                continue
+            collect_marker = next((a for a in args[1:] if isinstance(a, Collect)), None)
+            if collect_marker is None:
+                # Unknown Annotated metadata — ignore as before.
+                continue
+            annotation = type_annotation
 
         # Get name and type of the Context param (without state type)
         if getattr(annotation, "__name__", None) == "Context":
             context_parameter = name
             continue
 
-        # A ``list[E]`` parameter is reserved for collection fan-in over
-        # ``list[E]`` returns, which is not supported yet. Reject it with a
-        # pointer at the supported alternatives instead of falling through to
-        # the misleading "no Event parameter" error.
-        if _event_list_element_types(annotation) is not None:
+        # Collection-stream fan-in: a ``list[E]`` parameter (e.g.
+        # ``events: list[Done]``) is a collect step. It buffers incoming ``E`` by
+        # stream id and releases per its ``Collect`` cardinality. ``E`` may be a
+        # union (``list[A | B]``) — every member type routes to the step. A bare
+        # ``list[E]`` is exactly ``Annotated[list[E], Collect(All())]``.
+        element_types = _event_list_element_types(annotation)
+        if element_types is not None:
+            marker = collect_marker if collect_marker is not None else Collect()
+            _validate_collect_marker(marker, name)
+            if collection_param is not None:
+                msg = (
+                    "A step may declare at most one list[E] collection parameter, "
+                    f"but found both {collection_param[0]!r} and {name!r}. "
+                    "Multi-slot collects are not supported."
+                )
+                raise WorkflowValidationError(msg)
+            collection_param = (name, tuple(element_types))
+            collection_policy = marker
+            accepted_events[name] = list(element_types)
+            continue
+        if collect_marker is not None:
             msg = (
-                f"Parameter {name!r} is annotated as list[E] of Event types. "
-                "Collection fan-in parameters are not supported yet; declare "
-                "multiple single-event parameters for a multi-slot join, or "
-                "use ctx.collect_events() to gather events."
+                f"Parameter {name!r} carries a Collect marker but is not annotated "
+                "as list[E] of an Event subclass. Collect markers apply only to "
+                "collection fan-in (list[Event]) parameters."
             )
             raise WorkflowValidationError(msg)
 
@@ -151,13 +189,26 @@ def inspect_signature(
         context_parameter=context_parameter,
         context_state_type=context_state_type,
         resources=resources,
+        collection_param=collection_param,
+        collection_policy=collection_policy,
         is_fan_out=_is_fan_out_return(fn, localns=localns),
         bare_return_types=_bare_return_types(fn, localns=localns),
     )
 
 
 def _event_list_element_types(annotation: Any) -> list[Any] | None:
-    """Element event types of a ``list[E]`` annotation, or None if not one."""
+    """Element event types of a ``list[E]`` annotation, or None if not one.
+
+    ``list[Done]`` -> ``[Done]``; ``list[A | B]`` -> ``[A, B]`` (the single arg is
+    itself a union). ``None`` is dropped. Returns None when ``annotation`` is not
+    a ``list`` of ``Event`` subclasses (so the caller falls through to other
+    parameter handling). Order is preserved; duplicates are removed.
+
+    ``Optional[list[E]]`` / ``list[E] | None`` unwraps to the inner ``list[E]``,
+    mirroring the fan-out *return* side (which already unwraps Optional) so a
+    collect parameter declared optional is recognized rather than rejected with a
+    misleading "no Event parameter" error.
+    """
     if get_origin(annotation) in (Union, UnionType):
         members = [a for a in get_args(annotation) if a is not type(None)]
         list_members = [a for a in members if get_origin(a) is list]
@@ -187,6 +238,15 @@ def _event_list_element_types(annotation: Any) -> list[Any] | None:
     return None
 
 
+def _validate_collect_marker(marker: Collect, name: str) -> None:
+    """Reject Collect cardinalities outside the supported contract."""
+    if not isinstance(marker.cardinality, (All, Take)):
+        raise WorkflowValidationError(
+            f"Collect cardinality on {name!r} must be All() or Take(n). "
+            "Other cardinalities are not supported."
+        )
+
+
 def validate_step_signature(spec: StepSignatureSpec) -> None:
     """
     Validate that a step signature specification meets workflow requirements.
@@ -201,6 +261,15 @@ def validate_step_signature(spec: StepSignatureSpec) -> None:
     num_of_events = len(spec.accepted_events)
     if num_of_events == 0:
         msg = "Step signature must have at least one parameter annotated as type Event"
+        raise WorkflowValidationError(msg)
+    if spec.collection_param is not None and num_of_events > 1:
+        # A list[E] collection parameter alongside other event params is a
+        # multi-slot collect, which this contract does not support.
+        msg = (
+            "A list[E] collection parameter cannot be combined with other "
+            "event parameters. Use a single list[E] parameter, or multiple "
+            "single-event parameters for a multi-slot join."
+        )
         raise WorkflowValidationError(msg)
     if num_of_events > 1:
         # Collect-mode (multi-slot fan-in): a step with more than one
@@ -384,10 +453,10 @@ def _reject_async_iterator_return(func: Callable, return_hint: Any) -> None:
 
 
 def _is_fan_out_return(func: Callable, localns: dict[str, Any] | None = None) -> bool:
-    """True if the return annotation declares per-element list emission.
+    """True if the return annotation emits a finite collection stream.
 
     A fan-out producer returns ``list[E]``. ``Optional[list[E]]``
-    (``list[E] | None``) also counts — it may emit a list or nothing. A plain
+    (``list[E] | None``) also counts — it may emit a stream or nothing. A plain
     single-event or union-of-single-events return is NOT fan-out.
     """
     type_hints = _resolve_type_hints(func, localns=localns)
@@ -417,7 +486,7 @@ def _bare_return_types(
     """Non-list members of the return annotation.
 
     For ``-> list[A] | B`` this is ``[B]``: a bare ``B`` return from a fan-out
-    step is ordinary dispatch rather than list emission. A pure ``-> list[A]``
+    step is ordinary dispatch rather than stream emission. A pure ``-> list[A]``
     has none, so any bare event return is a runtime error there. ``NoneType``
     is dropped (a ``None`` return is the no-emission path).
     """

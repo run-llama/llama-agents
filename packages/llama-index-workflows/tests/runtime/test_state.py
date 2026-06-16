@@ -23,7 +23,7 @@ def _v1_payload(in_progress: list[str], queue: list[str]) -> dict:
     """A version-1 serialized context with one worker.
 
     v1 stored ``in_progress`` as bare event strings (queue entries were already
-    structured attempts).
+    structured attempts) and had none of the collection-stream fields.
     """
     return {
         "version": 1,
@@ -75,6 +75,11 @@ def test_from_dict_auto_migrates_v1_in_progress_strings() -> None:
     assert attempt.event == event
     assert attempt.attempts == 0
     assert attempt.not_before is None
+    # New stream fields fall back to empty defaults.
+    assert attempt.scope_path == []
+    assert result.stream_seq == 0
+    assert result.streams == {}
+    assert result.collection_release_states == {}
 
 
 def test_from_dict_auto_migrates_v1_with_empty_in_progress() -> None:
@@ -105,17 +110,23 @@ def test_from_dict_auto_passes_current_version_through() -> None:
                         "event": event,
                         "attempts": 1,
                         "first_attempt_at": None,
+                        "scope_path": ["b0"],
                     }
                 ],
                 "collected_events": {},
                 "collected_waiters": [],
             }
         },
+        "stream_seq": 3,
+        "streams": {},
+        "collection_release_states": {},
     }
     result = SerializedContext.from_dict_auto(payload)
 
     assert result.version == CURRENT_SERIALIZED_VERSION
+    assert result.stream_seq == 3
     attempt = result.workers["middle_step"].in_progress[0]
+    assert attempt.scope_path == ["b0"]
     assert attempt.attempts == 1
 
 

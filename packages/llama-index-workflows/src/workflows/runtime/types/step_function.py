@@ -121,9 +121,14 @@ async def partial(
     context: Context,
     workflow: Workflow,
     collected_events: dict[str, Event] | None = None,
+    collection_events: dict[str, list[Event]] | None = None,
 ) -> Callable[[], Any]:
     kwargs: dict[str, Any] = {}
-    if collected_events is not None:
+    if collection_events is not None:
+        kwargs.update(collection_events)
+    elif collected_events is not None:
+        # Collect-mode (multi-slot fan-in): bind each declared event
+        # parameter to its collected event instead of a single trigger event.
         kwargs.update(collected_events)
     else:
         kwargs[step_config.event_name] = event
@@ -187,6 +192,24 @@ def as_step_worker_function(
 
         try:
             config = workflow._get_steps()[step_name]._step_config
+            collected_binding: dict[str, Event] | None = None
+            collection_binding: dict[str, list[Event]] | None = None
+            if config.collection_param is not None:
+                param_name, _ = config.collection_param
+                payload = state.collection_release_payload
+                if payload is None:
+                    # A collect invocation without its release payload is
+                    # corrupt state — fail loudly instead of re-running the
+                    # step with a fabricated empty batch.
+                    raise WorkflowRuntimeError(
+                        f"Collect step {step_name!r} was invoked without a "
+                        "collection release payload. This indicates a lost "
+                        "work record (runtime bug or corrupted serialized "
+                        "state)."
+                    )
+                collection_binding = {param_name: list(payload.events)}
+            else:
+                collected_binding = bound_events
             # Resolve callable at call time:
             # - If the workflow has an attribute with the step name, use it
             #   (this yields a bound method for instance-defined steps).
@@ -253,7 +276,8 @@ def as_step_worker_function(
                 event=event,
                 context=internal_context,
                 workflow=workflow,
-                collected_events=bound_events,
+                collected_events=collected_binding,
+                collection_events=collection_binding,
             )
 
             try:
@@ -279,8 +303,9 @@ def as_step_worker_function(
                         raise captured_waiting
                 if isinstance(result, list) and config.is_fan_out:
                     # A step that actually returned a list fans out: each
-                    # element is emitted as its own event. An empty list means
-                    # "no emission".
+                    # element is emitted as its own event into a fresh stream.
+                    # An empty list emits nothing but still opens (and
+                    # immediately closes) the stream, so joins fire with [].
                     for item in result:
                         if not isinstance(item, Event):
                             msg = (
@@ -291,9 +316,13 @@ def as_step_worker_function(
                             raise WorkflowRuntimeError(msg)
                     if result:
                         for item in result:
-                            returns.return_values.append(StepWorkerResult(result=item))
+                            returns.return_values.append(
+                                StepWorkerResult(result=item, fanned_out=True)
+                            )
                     else:
-                        returns.return_values.append(StepWorkerResult(result=None))
+                        returns.return_values.append(
+                            StepWorkerResult(result=None, fanned_out=True)
+                        )
                 elif result is not None and not isinstance(result, Event):
                     msg = f"Step function {step_name} returned {type(result).__name__} instead of an Event instance."
                     raise WorkflowRuntimeError(msg)
@@ -309,7 +338,7 @@ def as_step_worker_function(
                     # declared as a non-list union member (-> list[A] | B
                     # returning B) is ordinary dispatch and handled below; an
                     # undeclared bare element is an error, not a silent
-                    # one-element emission.
+                    # one-member stream.
                     msg = (
                         f"Step function {step_name} returned a bare "
                         f"{type(result).__name__} but its return annotation only "
@@ -320,7 +349,8 @@ def as_step_worker_function(
                     raise WorkflowRuntimeError(msg)
                 else:
                     # Ordinary dispatch — including a fan-out step's declared
-                    # non-list branch and its None (no emission) branch.
+                    # non-list branch and its None (no emission, no stream)
+                    # branch.
                     returns.return_values.append(StepWorkerResult(result=result))
             except WaitingForEvent as e:
                 await asyncio.sleep(0)
