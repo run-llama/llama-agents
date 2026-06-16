@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from typing import Protocol, TypeVar, cast
 
 from workflows._event_matching import is_subclass, step_accepts_type, type_matches
 from workflows._stream_levels import (
@@ -26,6 +27,25 @@ from workflows.resource import ResourceDescriptor, ResourceManager, _ResourceCon
 
 # Graph nodes: step names (str) for steps, event classes (type) for events.
 GraphNode = str | type
+WORKFLOW_T = TypeVar("WORKFLOW_T", bound="_WorkflowForValidation")
+
+
+class _WorkflowClassForValidation(Protocol):
+    __name__: str
+
+    @classmethod
+    def _get_child_workflow_slots(cls) -> dict[str, type]: ...
+
+
+class _WorkflowForValidation(Protocol):
+    @classmethod
+    def _get_child_workflow_slots(cls) -> dict[str, type]: ...
+
+    @property
+    def _start_event_class(self) -> type[StartEvent]: ...
+
+    @property
+    def _child_workflows(self) -> dict[str, WORKFLOW_T]: ...
 
 
 @dataclass
@@ -743,6 +763,55 @@ def _validate_multi_slot_levels(
         )
     if errors:
         raise WorkflowValidationError("\n".join(errors))
+
+
+def _validate_child_workflow_declarations(
+    workflow: _WorkflowForValidation,
+) -> None:
+    """Validate child workflow declarations that need the workflow tree.
+
+    Per-workflow graph validation runs from step configs. These checks sit one
+    level up: they validate the declared child type graph and event routing
+    boundary between a parent instance and its direct children.
+    """
+    root = cast("type[_WorkflowClassForValidation]", type(workflow))
+    _validate_child_type_graph(root)
+    _validate_child_start_events(workflow)
+
+
+def _validate_child_type_graph(root: type[_WorkflowClassForValidation]) -> None:
+    """Reject cycles in the declared child-workflow type graph."""
+
+    def walk(
+        node: type[_WorkflowClassForValidation],
+        path: tuple[type[_WorkflowClassForValidation], ...],
+    ) -> None:
+        for child_type in node._get_child_workflow_slots().values():
+            child_cls = cast("type[_WorkflowClassForValidation]", child_type)
+            if child_cls in path:
+                chain = " -> ".join(c.__name__ for c in (*path, child_cls))
+                raise WorkflowValidationError(
+                    f"Child workflow type cycle detected: {chain}. A child "
+                    "workflow cannot transitively declare itself as a child."
+                )
+            walk(child_cls, (*path, child_cls))
+
+    walk(root, (root,))
+
+
+def _validate_child_start_events(workflow: _WorkflowForValidation) -> None:
+    """Each direct child's ``StartEvent`` type must be unique."""
+    seen: dict[type[StartEvent], str] = {}
+    for field_name, child in workflow._child_workflows.items():
+        start_cls = child._start_event_class
+        if start_cls in seen:
+            raise WorkflowValidationError(
+                f"Child workflows '{seen[start_cls]}' and '{field_name}' on "
+                f"'{type(workflow).__name__}' both accept StartEvent type "
+                f"'{start_cls.__name__}'; each child's StartEvent type must "
+                "be unique so the parent can route to exactly one child."
+            )
+        seen[start_cls] = field_name
 
 
 def _validate_workflow(

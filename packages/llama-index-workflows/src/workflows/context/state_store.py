@@ -21,7 +21,7 @@ from typing import (
     runtime_checkable,
 )
 
-from pydantic import BaseModel, ValidationError, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 from typing_extensions import TypeVar
 
 from workflows.decorators import StepConfig
@@ -36,6 +36,11 @@ MAX_DEPTH = 1000
 
 # Keys set by pre-built workflows that are known to be unserializable in some cases.
 KNOWN_UNSERIALIZABLE_KEYS: tuple[str, ...] = ("memory",)
+
+CHILD_STATES_KEY = "children"
+BUNDLE_ROOT_KEY = "root"
+BUNDLE_VERSION = 1
+BUNDLE_VERSION_KEY = "state_bundle_version"
 
 
 class InMemorySerializedState(BaseModel):
@@ -757,10 +762,17 @@ class StateStoreFacade(Generic[MODEL_T]):
                 assert self._durable is not None
                 await self._durable.copy_from_handle(seed.handle)
             else:
-                state = decode_seed_state(seed.payload, seed.serializer)
                 # Bypass _save_state: its ensure_seeded re-entry would
                 # deadlock on the seed lock we hold.
-                await self._write_state(state)
+                if seed.payload.get(CHILD_STATES_KEY):
+                    await self._write_record(
+                        _record_from_payload_bundle(
+                            seed.payload, durable=self._durable is not None
+                        )
+                    )
+                else:
+                    state = decode_seed_state(seed.payload, seed.serializer)
+                    await self._write_state(state)
             # Popped only after success so a failed materialization stays
             # pending; concurrent readers block on the seed lock above
             # until the seed is committed. Identity-checked: sync add_seed
@@ -802,6 +814,12 @@ class StateStoreFacade(Generic[MODEL_T]):
         await (storage or self._storage).save(
             string_record_from_state(state, self._serializer)
         )
+
+    async def _write_record(
+        self, record: StateRecord, storage: _StateStorage | None = None
+    ) -> None:
+        """Persist a pre-encoded raw state record."""
+        await (storage or self._storage).save(record)
 
     async def _load_state_for_edit(
         self, storage: _StateStorage | None = None
@@ -1019,7 +1037,12 @@ class InMemoryStateStore(StateStoreFacade[MODEL_T]):
         record = self._memory_storage.load_sync()
         # Records always hold a live model here (see _write_state); when the
         # storage is empty, snapshot a default without persisting it.
-        state = cast(MODEL_T, record.data) if record is not None else self.state_type()
+        if record is None:
+            state = self.state_type()
+        elif isinstance(record.data, BaseModel):
+            state = cast(MODEL_T, record.data)
+        else:
+            state = cast(MODEL_T, decode_state(record.data, serializer))
         return create_in_memory_payload(state, serializer).model_dump()
 
     async def _write_state(
@@ -1049,6 +1072,13 @@ class InMemoryStateStore(StateStoreFacade[MODEL_T]):
         """
         if not serialized_state:
             return cls(DictState())  # type: ignore[arg-type]
+
+        if serialized_state.get(CHILD_STATES_KEY):
+            store = cls(DictState())  # type: ignore[arg-type]
+            store._memory_storage._record = _record_from_payload_bundle(
+                serialized_state
+            )
+            return store
 
         state_instance = decode_seed_state(serialized_state, serializer)
         return cls(state_instance)  # type: ignore[arg-type]
@@ -1196,3 +1226,359 @@ def _find_most_derived_state_type(state_types: set[type[BaseModel]]) -> type[Bas
         )
 
     return most_derived
+
+
+def _namespace_key(namespace: tuple[str, ...]) -> str:
+    return "/".join(namespace)
+
+
+class _StateBundle(BaseModel):
+    """One root state record plus raw child namespace state data."""
+
+    root: StateRecord
+    children: dict[str, Any] = Field(default_factory=dict)
+
+
+def _json_object_from_data(data: Any) -> tuple[dict[str, Any] | None, bool]:
+    """Return a JSON object plus whether it came from a string payload."""
+    if isinstance(data, dict):
+        return dict(data), False
+    if isinstance(data, str):
+        try:
+            parsed = json.loads(data)
+        except ValueError:
+            return None, True
+        if isinstance(parsed, dict):
+            return dict(parsed), True
+    return None, isinstance(data, str)
+
+
+def _restore_data_shape(data: dict[str, Any], *, was_string: bool) -> Any:
+    return json.dumps(data) if was_string else data
+
+
+def _child_data_from_raw(raw: Any) -> Any:
+    if isinstance(raw, StateRecord):
+        return raw.data
+    if isinstance(raw, dict):
+        if "data" in raw and ("state_type" in raw or "state_module" in raw):
+            return StateRecord.model_validate(raw).data
+        if "state_data" in raw and set(raw) <= {
+            "store_type",
+            "state_type",
+            "state_module",
+            "state_data",
+        }:
+            return parse_in_memory_state(raw).state_data
+    return raw
+
+
+def _children_from_raw(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    return {namespace: _child_data_from_raw(data) for namespace, data in raw.items()}
+
+
+def _child_data_from_record(record: StateRecord) -> Any:
+    obj, _ = _json_object_from_data(record.data)
+    if obj is not None:
+        return obj
+    return record.data
+
+
+def _with_default_record_metadata(record: StateRecord) -> StateRecord:
+    if record.state_type is not None and record.state_module is not None:
+        return record
+    return record.model_copy(
+        update={
+            "state_type": record.state_type or "DictState",
+            "state_module": record.state_module or "workflows.context.state_store",
+        }
+    )
+
+
+def split_state_bundle(record: StateRecord | None) -> _StateBundle:
+    """Split a stored record into root and child namespace records.
+
+    Root-only records are the normal shape. Childful records either append
+    ``children`` to an object-shaped root payload or, for opaque root payloads,
+    use a small wrapper with ``state_bundle_version`` and ``root``.
+    """
+    if record is None:
+        return _StateBundle(root=StateRecord(data=None))
+
+    obj, was_string = _json_object_from_data(record.data)
+    if obj is None:
+        return _StateBundle(root=record)
+
+    if obj.get(BUNDLE_VERSION_KEY) == BUNDLE_VERSION and BUNDLE_ROOT_KEY in obj:
+        return _StateBundle(
+            root=StateRecord(
+                data=obj[BUNDLE_ROOT_KEY],
+                state_type=record.state_type,
+                state_module=record.state_module,
+            ),
+            children=_children_from_raw(obj.get(CHILD_STATES_KEY)),
+        )
+
+    children_raw = obj.pop(CHILD_STATES_KEY, None)
+    if children_raw is None:
+        return _StateBundle(root=record)
+
+    return _StateBundle(
+        root=StateRecord(
+            data=_restore_data_shape(obj, was_string=was_string),
+            state_type=record.state_type,
+            state_module=record.state_module,
+        ),
+        children=_children_from_raw(children_raw),
+    )
+
+
+def join_state_bundle(bundle: _StateBundle) -> StateRecord:
+    """Join root and child records back into one stored record."""
+    root = _with_default_record_metadata(bundle.root)
+    if not bundle.children:
+        return root
+
+    children = dict(bundle.children)
+    obj, was_string = _json_object_from_data(root.data)
+    if obj is not None:
+        obj[CHILD_STATES_KEY] = children
+        return StateRecord(
+            data=_restore_data_shape(obj, was_string=was_string),
+            state_type=root.state_type,
+            state_module=root.state_module,
+        )
+
+    wrapper = {
+        BUNDLE_VERSION_KEY: BUNDLE_VERSION,
+        BUNDLE_ROOT_KEY: root.data,
+        CHILD_STATES_KEY: children,
+    }
+    return StateRecord(
+        data=wrapper if isinstance(root.data, BaseModel) else json.dumps(wrapper),
+        state_type=root.state_type,
+        state_module=root.state_module,
+    )
+
+
+def _record_from_payload(payload: dict[str, Any]) -> StateRecord:
+    parsed = parse_in_memory_state(payload)
+    return StateRecord(
+        data=parsed.state_data,
+        state_type=parsed.state_type,
+        state_module=parsed.state_module,
+    )
+
+
+def _record_from_payload_bundle(
+    payload: dict[str, Any],
+    *,
+    durable: bool = False,
+) -> StateRecord:
+    root_payload = dict(payload)
+    children_raw = root_payload.pop(CHILD_STATES_KEY, None) or {}
+    root = _record_from_payload(root_payload)
+    bundle = _StateBundle(
+        root=root,
+        children={
+            namespace: _child_data_from_raw(child_payload)
+            for namespace, child_payload in children_raw.items()
+        },
+    )
+    record = join_state_bundle(bundle)
+    if durable and not isinstance(record.data, str):
+        record = record.model_copy(update={"data": json.dumps(record.data)})
+    return record
+
+
+def _payload_from_record(
+    record: StateRecord | None,
+    serializer: BaseSerializer,
+    state_type: type[BaseModel],
+) -> dict[str, Any]:
+    if record is None or record.data is None:
+        state = create_cleared_state(state_type)
+    else:
+        state = decode_state(record.data, serializer)
+    return create_in_memory_payload(state, serializer).model_dump()
+
+
+class _NamespaceStateStorage:
+    """Raw storage view over one namespace inside a bundled root record."""
+
+    def __init__(
+        self,
+        root_storage: _StateStorage,
+        namespace: tuple[str, ...],
+        bundle_lock: asyncio.Lock,
+        *,
+        locked: bool = False,
+    ) -> None:
+        self._root_storage = root_storage
+        self._namespace = namespace
+        self._bundle_lock = bundle_lock
+        self._locked = locked
+
+    async def load(self) -> StateRecord | None:
+        bundle = split_state_bundle(await self._root_storage.load())
+        if self._namespace == ():
+            return bundle.root
+        namespace_key = _namespace_key(self._namespace)
+        if namespace_key not in bundle.children:
+            return None
+        return StateRecord(data=bundle.children[namespace_key])
+
+    @asynccontextmanager
+    async def session(self) -> AsyncGenerator[_NamespaceStateStorage, None]:
+        if self._locked:
+            yield self
+            return
+        async with self._bundle_lock:
+            async with self._root_storage.session() as root_storage:
+                yield _NamespaceStateStorage(
+                    root_storage,
+                    self._namespace,
+                    self._bundle_lock,
+                    locked=True,
+                )
+
+    async def save(self, record: StateRecord) -> None:
+        if not self._locked:
+            async with self.session() as storage:
+                await storage.save(record)
+            return
+
+        bundle = split_state_bundle(await self._root_storage.load())
+        if self._namespace == ():
+            bundle.root = record
+        else:
+            bundle.children[_namespace_key(self._namespace)] = _child_data_from_record(
+                record
+            )
+        await self._root_storage.save(join_state_bundle(bundle))
+
+
+class NamespacedStateStores:
+    """Per-namespace StateStore views over one backing store."""
+
+    def __init__(
+        self,
+        underlying: StateStore[Any],
+        serializer: BaseSerializer,
+        state_types: dict[tuple[str, ...], type[BaseModel]],
+    ) -> None:
+        self.underlying = underlying
+        self.serializer = serializer
+        self.state_types = state_types
+        self._views: dict[tuple[str, ...], StateStoreFacade[Any]] = {}
+        self._bundle_lock = asyncio.Lock()
+
+    @property
+    def is_single_namespace(self) -> bool:
+        return len(self.state_types) <= 1
+
+    def view(self, namespace: tuple[str, ...]) -> StateStore[Any]:
+        if self.is_single_namespace:
+            return self.underlying
+        view = self._views.get(namespace)
+        if view is None:
+            if not isinstance(self.underlying, StateStoreFacade):
+                raise TypeError(
+                    "Namespaced state requires a StateStoreFacade-backed store"
+                )
+            state_type = self.state_types.get(namespace, DictState)
+            view = StateStoreFacade[Any](
+                _NamespaceStateStorage(
+                    self.underlying._storage,
+                    namespace,
+                    self._bundle_lock,
+                ),
+                state_type,
+                self.serializer,
+            )
+            self._views[namespace] = view
+        return view
+
+    def serialize_tree(self, serializer: BaseSerializer) -> dict[str, Any]:
+        if self.is_single_namespace:
+            return self.underlying.to_dict(serializer)
+
+        if not isinstance(self.underlying, StateStoreFacade):
+            raise TypeError("Namespaced state requires a StateStoreFacade-backed store")
+
+        load_sync = getattr(self.underlying._storage, "load_sync", None)
+        if not callable(load_sync):
+            return self.underlying.to_dict(serializer)
+
+        bundle = split_state_bundle(cast(StateRecord | None, load_sync()))
+        result = _payload_from_record(
+            bundle.root,
+            serializer,
+            self.state_types.get((), DictState),
+        )
+        children = {
+            namespace: _payload_from_record(
+                StateRecord(data=data),
+                serializer,
+                self.state_types.get(tuple(namespace.split("/")), DictState),
+            )["state_data"]
+            for namespace, data in bundle.children.items()
+        }
+        if children:
+            result[CHILD_STATES_KEY] = children
+        return result
+
+
+def namespaced_seed_blob(
+    serialized_state: dict[str, Any] | None, *, child_ful: bool
+) -> dict[str, Any] | None:
+    if not serialized_state:
+        return None
+    if serialized_state.get("store_type") not in (None, "in_memory"):
+        return None
+    if not child_ful:
+        return None
+    return dict(serialized_state)
+
+
+def namespaced_seed_payload(
+    serialized_state: dict[str, Any] | None,
+    serializer: BaseSerializer,
+    *,
+    child_ful: bool,
+) -> dict[str, Any] | None:
+    blob = namespaced_seed_blob(serialized_state, child_ful=child_ful)
+    if blob is None:
+        return None
+    return blob
+
+
+def namespaced_state_types(
+    root_workflow: "Workflow",
+) -> dict[tuple[str, ...], type[BaseModel]]:
+    return {
+        namespace: infer_state_type(instance)
+        for namespace, instance in root_workflow._namespace_instances().items()
+    }
+
+
+def is_child_ful(root_workflow: "Workflow") -> bool:
+    return len(root_workflow._namespace_instances()) > 1
+
+
+def namespaced_underlying_state_type(root_workflow: "Workflow") -> type[BaseModel]:
+    return infer_state_type(root_workflow)
+
+
+def build_namespaced_state(
+    root_workflow: "Workflow",
+    underlying: StateStore[Any],
+    serializer: BaseSerializer,
+) -> NamespacedStateStores:
+    return NamespacedStateStores(
+        underlying=underlying,
+        serializer=serializer,
+        state_types=namespaced_state_types(root_workflow),
+    )
