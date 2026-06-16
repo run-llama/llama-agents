@@ -15,7 +15,8 @@ import logging
 from typing import Annotated, Callable
 
 import pytest
-from workflows import Collect, Context, Take, Workflow, catch_error, step
+from workflows import Context, Workflow, catch_error, step
+from workflows.collect import Collect, Take
 from workflows.errors import WorkflowValidationError
 from workflows.events import Event, StartEvent, StepFailedEvent, StopEvent
 from workflows.retry_policy import retry_policy, stop_after_attempt, wait_fixed

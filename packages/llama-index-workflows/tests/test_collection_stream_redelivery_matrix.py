@@ -20,7 +20,8 @@ import asyncio
 from typing import Annotated
 
 import pytest
-from workflows import Collect, Context, Take, Workflow, catch_error, step
+from workflows import Context, Workflow, catch_error, step
+from workflows.collect import Collect, Take
 from workflows.events import (
     CollectionReleaseEvent,
     Event,

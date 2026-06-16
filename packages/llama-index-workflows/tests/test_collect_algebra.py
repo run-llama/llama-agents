@@ -13,7 +13,8 @@ from __future__ import annotations
 from typing import Annotated, Any, Callable, cast
 
 import pytest
-from workflows import All, Cardinality, Collect, Context, Take, Workflow, step
+from workflows import Context, Workflow, step
+from workflows.collect import All, Cardinality, Collect, Take
 from workflows.decorators import StepConfig, StepFunction
 from workflows.decorators import step as free_step
 from workflows.errors import (
