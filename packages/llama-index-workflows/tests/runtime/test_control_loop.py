@@ -560,6 +560,65 @@ async def test_control_loop_collect_events_same_type(
 
 
 @pytest.mark.asyncio
+async def test_control_loop_reruns_stale_collect_events_firing(
+    test_plugin: MockRunAdapter,
+) -> None:
+    class Item(Event):
+        n: int
+
+    class Pair(Event):
+        nums: list[int]
+
+    seeded = asyncio.Event()
+    racing_workers: set[int] = set()
+    release_race = asyncio.Event()
+
+    class StaleCollectWorkflow(Workflow):
+        @step
+        async def start(self, ctx: Context, ev: StartEvent) -> None:
+            ctx.send_event(Item(n=1))
+
+        @step(num_workers=2)
+        async def collect(self, ctx: Context, ev: Item) -> Pair | None:
+            if ev.n in {2, 3}:
+                racing_workers.add(ev.n)
+                if racing_workers == {2, 3}:
+                    release_race.set()
+                await release_race.wait()
+
+            events = ctx.collect_events(ev, [Item, Item])
+            if events is None:
+                if ev.n == 1:
+                    seeded.set()
+                return None
+            return Pair(nums=sorted(e.n for e in events))
+
+        @step(num_workers=1)
+        async def finish(self, ctx: Context, ev: Pair) -> StopEvent | None:
+            pairs = ctx.collect_events(ev, [Pair, Pair])
+            if pairs is None:
+                return None
+            return StopEvent(result=sorted(pair.nums for pair in pairs))
+
+    task = asyncio.create_task(
+        run_control_loop(
+            workflow=StaleCollectWorkflow(timeout=5.0),
+            start_event=StartEvent(),
+            test_runtime=test_plugin,
+        )
+    )
+
+    await asyncio.wait_for(seeded.wait(), timeout=1.0)
+    await test_plugin.send_event(TickAddEvent(event=Item(n=2)))
+    await test_plugin.send_event(TickAddEvent(event=Item(n=3)))
+    await test_plugin.send_event(TickAddEvent(event=Item(n=4)))
+
+    result = await asyncio.wait_for(task, timeout=2.0)
+
+    assert result.result == [[1, 2], [3, 4]]
+
+
+@pytest.mark.asyncio
 async def test_control_loop_collect_events_multiple_types(
     test_plugin: MockRunAdapter,
 ) -> None:
@@ -955,6 +1014,42 @@ async def test_control_loop_stop_before_delay_uses_upcoming_sleep(
         )
 
     assert wf.attempt_count == 3
+
+
+@pytest.mark.asyncio
+async def test_control_loop_defers_idle_until_buffered_send_event_settles(
+    test_plugin: MockRunAdapter,
+) -> None:
+    class ContinueEvent(Event):
+        value: str
+
+    class BufferedSendWorkflow(Workflow):
+        @step
+        async def start(self, ctx: Context, ev: StartEvent) -> None:
+            ctx.send_event(ContinueEvent(value="done"))
+
+        @step
+        async def finish(self, ev: ContinueEvent) -> StopEvent:
+            return StopEvent(result=ev.value)
+
+    task = asyncio.create_task(
+        run_control_loop(
+            workflow=BufferedSendWorkflow(timeout=2.0),
+            start_event=StartEvent(),
+            test_runtime=test_plugin,
+        )
+    )
+
+    seen: list[Event] = []
+    while True:
+        ev = await test_plugin.get_stream_event(timeout=1.0)
+        seen.append(ev)
+        if isinstance(ev, StopEvent):
+            break
+
+    result = await asyncio.wait_for(task, timeout=1.0)
+    assert result.result == "done"
+    assert not any(isinstance(ev, WorkflowIdleEvent) for ev in seen)
 
 
 @pytest.mark.asyncio

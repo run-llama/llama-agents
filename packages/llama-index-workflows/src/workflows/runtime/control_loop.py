@@ -106,15 +106,12 @@ def _is_shutdown_error(e: BaseException) -> bool:
     )
 
 
-async def _single_pull(adapter: InternalRunAdapter) -> WorkflowTick | None:
-    """Single-iteration pull: calls wait_receive once and returns the tick.
-
-    Returns None if timeout (shouldn't happen with unbounded wait).
-    """
+async def _single_pull(adapter: InternalRunAdapter) -> list[WorkflowTick]:
+    """Block for the next tick."""
     wait_result = await adapter.wait_receive(None)
-    if isinstance(wait_result, WaitResultTick):
-        return wait_result.tick
-    return None
+    if not isinstance(wait_result, WaitResultTick):
+        return []
+    return [wait_result.tick]
 
 
 if TYPE_CHECKING:
@@ -445,6 +442,20 @@ class _ControlLoopRunner:
                 while self.tick_buffer:
                     tick = self.tick_buffer.pop(0)
                     if isinstance(tick, TickIdleCheck):
+                        # Confirm idleness only after earlier buffered work has
+                        # settled. Delayed retries also keep the run non-idle.
+                        if pull_task is not None and pull_task.done():
+                            self.tick_buffer.append(tick)
+                            break
+                        if self.tick_buffer:
+                            self.tick_buffer.append(tick)
+                            continue
+                        if any(
+                            isinstance(scheduled, TickAddEvent)
+                            for _, _, scheduled in self.scheduled_wakeups
+                        ):
+                            self._idle_check_pending = False
+                            continue
                         self._idle_check_pending = False
                     result = await self._process_tick(tick)
                     if result is not None:
@@ -512,7 +523,7 @@ class _ControlLoopRunner:
                 if completed_task is pull_task:
                     # Pull task completed
                     try:
-                        pull_tick = completed_task.result()
+                        pull_ticks = completed_task.result()
                     except asyncio.CancelledError:
                         pull_task = None
                     except Exception:
@@ -520,8 +531,7 @@ class _ControlLoopRunner:
                         pull_task = None
                     else:
                         pull_task = None
-                        if pull_tick is not None:
-                            self.tick_buffer.append(pull_tick)
+                        self.tick_buffer.extend(pull_ticks)
                 else:
                     # Worker task completed
                     self.worker_tasks.discard(completed_task)
@@ -864,6 +874,11 @@ def _check_idle_state(state: BrokerState) -> bool:
     return True
 
 
+def _collect_buffer_diverged(live: list[Event], snapshot: list[Event]) -> bool:
+    """True when a live ctx.collect_events() buffer no longer matches a snapshot."""
+    return len(live) != len(snapshot) or any(a is not b for a, b in zip(live, snapshot))
+
+
 def _process_step_result_tick(
     tick: TickStepResult,
     init: BrokerState,
@@ -885,6 +900,35 @@ def _process_step_result_tick(
     if this_execution is None:
         # this should not happen unless there's a logic bug in the control loop
         raise ValueError(f"Worker {tick.worker_id} not found in in_progress")
+
+    # Legacy ctx.collect_events() buffers are optimistic snapshots. If another
+    # worker changed the live buffer before this invocation consumed it, rerun
+    # the same work item against fresh state.
+    stale_firing = any(
+        isinstance(r, DeleteCollectedEvent)
+        and _collect_buffer_diverged(
+            worker_state.collected_events.get(r.event_id, []),
+            this_execution.shared_state.collected_events.get(r.event_id, []),
+        )
+        for r in tick.result
+    )
+    if stale_firing:
+        this_execution.shared_state = replace(
+            this_execution.shared_state,
+            collected_events={
+                x: list(y) for x, y in worker_state.collected_events.items()
+            },
+        )
+        commands.append(
+            CommandRunWorker(
+                step_id=step_id,
+                event=this_execution.event,
+                bound_events=this_execution.bound_events,
+                id=this_execution.worker_id,
+            )
+        )
+        return state, commands
+
     output_event_name: str | None = None
 
     did_complete_step = bool(
