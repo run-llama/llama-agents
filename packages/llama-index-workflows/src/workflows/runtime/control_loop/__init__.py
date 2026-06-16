@@ -53,7 +53,7 @@ from workflows.runtime.control_loop.runner import (
 )
 from workflows.runtime.control_loop.streams import (
     WorkDisposition,
-    _apply_stream_work_delta,
+    _adjust_open_work_items,
     _classify_work_item,
     _clear_collection_state,
     _close_collection_stream,
@@ -66,13 +66,16 @@ from workflows.runtime.control_loop.streams import (
     _release_state_for,
 )
 
+# Re-export the prior single-module surface (public API + the private symbols
+# that tests and sibling packages import) so static analyzers treat them as
+# exported from this package.
 __all__ = [
     "ExitCommand",
     "ReplayResult",
     "WorkDisposition",
     "_ControlLoopRunner",
     "_add_or_enqueue_event",
-    "_apply_stream_work_delta",
+    "_adjust_open_work_items",
     "_check_idle_state",
     "_classify_work_item",
     "_clear_collection_state",

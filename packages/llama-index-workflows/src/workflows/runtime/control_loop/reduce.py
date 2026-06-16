@@ -39,7 +39,7 @@ from workflows.events import (
 from workflows.retry_policy import RetryPolicy
 from workflows.runtime.control_loop.streams import (
     WorkDisposition,
-    _apply_stream_work_delta,
+    _adjust_open_work_items,
     _classify_work_item,
     _clear_collection_state,
     _close_collection_stream,
@@ -75,6 +75,7 @@ from workflows.runtime.types.results import (
     AddWaiter,
     DeleteCollectedEvent,
     DeleteWaiter,
+    StepFunctionResult,
     StepWorkerFailed,
     StepWorkerResult,
     StepWorkerState,
@@ -398,31 +399,69 @@ def _queue_catch_error_event(
     )
 
 
-def _process_step_result_tick(
-    tick: TickStepResult,
-    init: BrokerState,
-    now_seconds: float,
-    run_id: str | None = None,
-) -> tuple[BrokerState, list[WorkflowCommand]]:
-    """
-    processes the results from a step function execution
-    """
-    state = init.deepcopy()
-    commands: list[WorkflowCommand] = []
-    step_id = tick.step_id
-    step_name = _root_step_key(step_id)
-    worker_state = state.workers[step_name]
-    # get the current execution details and mark it as no longer in progress
-    this_execution = next(
-        (w for w in worker_state.in_progress if w.worker_id == tick.worker_id), None
-    )
-    if this_execution is None:
-        # this should not happen unless there's a logic bug in the control loop
-        raise ValueError(f"Worker {tick.worker_id} not found in in_progress")
+@dataclass
+class _StepResultAcc:
+    """Mutable accumulator threaded through one step-result reduction.
 
-    # Legacy ctx.collect_events() buffers are optimistic snapshots. If another
-    # worker changed the live buffer before this invocation consumed it, rerun
-    # the same work item against fresh state.
+    Holds the commands emitted so far plus the per-result flags that the
+    apply-results phase sets and the stream-accounting / finalize phases read.
+    """
+
+    commands: list[WorkflowCommand]
+    output_event_name: str | None = None
+    # Cleared when a worker is re-run mid-flight (stale collect buffer): the
+    # execution stays in_progress and must not emit a NOT_RUNNING transition.
+    step_no_longer_in_progress: bool = True
+    # The failed work item was re-delivered (retry queued or routed to a
+    # catch_error handler) rather than consumed.
+    redelivery_scheduled: bool = False
+
+
+@dataclass(frozen=True)
+class _FanOutScope:
+    """Collection-stream scope for the events this execution emits.
+
+    Streams are runtime facts: an execution that actually returned a list
+    (worker-reported via ``fanned_out``) mints ONE fresh stream id, stamps
+    every event it emits with it, then closes the stream. A fan-out-annotated
+    step that took a non-list branch (None or a declared bare union member)
+    mints nothing. A 1:1 step's outputs inherit the trigger stack verbatim.
+    """
+
+    # The trigger path carried on the in-progress execution.
+    trigger_stack: tuple[str, ...]
+    fanned_out: bool
+    fan_out_stream_id: str | None
+    # Scope stamped onto emitted events: trigger_stack, plus the fresh stream
+    # id when this execution fanned out.
+    emit_stack: tuple[str, ...]
+
+
+def _find_in_progress(
+    worker_state: InternalStepWorkerState, worker_id: int
+) -> InProgressState:
+    execution = next(
+        (w for w in worker_state.in_progress if w.worker_id == worker_id), None
+    )
+    if execution is None:
+        # this should not happen unless there's a logic bug in the control loop
+        raise ValueError(f"Worker {worker_id} not found in in_progress")
+    return execution
+
+
+def _rerun_for_stale_collect_buffer(
+    tick: TickStepResult,
+    worker_state: InternalStepWorkerState,
+    this_execution: InProgressState,
+) -> list[WorkflowCommand] | None:
+    """Re-run the work item against fresh state if its collect snapshot is stale.
+
+    Legacy ctx.collect_events() buffers are optimistic snapshots. If another
+    worker changed the live buffer before this invocation consumed it, the
+    invocation's result is invalid; re-run the same work item. Returns the
+    re-run command (and refreshes the execution's snapshot), or None when the
+    snapshot is still current.
+    """
     stale_firing = any(
         isinstance(r, DeleteCollectedEvent)
         and _collect_buffer_diverged(
@@ -431,293 +470,335 @@ def _process_step_result_tick(
         )
         for r in tick.result
     )
-    if stale_firing:
-        this_execution.shared_state = replace(
-            this_execution.shared_state,
-            collected_events={
-                x: list(y) for x, y in worker_state.collected_events.items()
-            },
-        )
-        commands.append(
-            CommandRunWorker(
-                step_id=step_id,
-                event=this_execution.event,
-                bound_events=this_execution.bound_events,
-                id=this_execution.worker_id,
-            )
-        )
-        return state, commands
-
-    output_event_name: str | None = None
-
-    did_complete_step = any(isinstance(x, StepWorkerResult) for x in tick.result)
-    step_no_longer_in_progress = True
-    redelivery_scheduled = False
-
-    # Collection stream scope. The trigger path is carried on the in-progress
-    # state. Streams are runtime facts: an execution that actually returned a
-    # list (worker-reported via ``fanned_out``) mints ONE fresh stream id,
-    # stamps every event it emits, then closes the stream. An execution of a
-    # fan-out-annotated step that took a non-list branch (None or a declared
-    # bare union member) mints nothing. A 1:1 step's outputs inherit the
-    # trigger stack verbatim.
-    trigger_stack = this_execution.scope_path
-    fanned_out = any(
-        isinstance(x, StepWorkerResult) and x.fanned_out for x in tick.result
+    if not stale_firing:
+        return None
+    this_execution.shared_state = replace(
+        this_execution.shared_state,
+        collected_events={x: list(y) for x, y in worker_state.collected_events.items()},
     )
-    fan_out_stream_id: str | None = None
-    if fanned_out:
-        fan_out_stream_id = _mint_stream_id(state, trigger_stack, step_name)
-    if fan_out_stream_id is not None:
-        emit_stack: tuple[str, ...] = trigger_stack + (fan_out_stream_id,)
-    else:
-        emit_stack = trigger_stack
+    return [
+        CommandRunWorker(
+            step_id=tick.step_id,
+            event=this_execution.event,
+            bound_events=this_execution.bound_events,
+            id=this_execution.worker_id,
+        )
+    ]
 
-    for result in tick.result:
-        if isinstance(result, StepWorkerResult):
-            output_event_name = str(type(result.result))
-            if isinstance(result.result, StopEvent):
-                # huzzah! The workflow has completed
-                commands.append(
-                    CommandPublishEvent(event=result.result)
-                )  # stop event always published to the stream
-                state.is_running = False
-                # Clear collected_events and collected_waiters since workflow is complete
-                for worker in state.workers.values():
-                    worker.queue.clear()
-                    worker.in_progress.clear()
-                    worker.collected_events.clear()
-                    worker.static_collect_events.clear()
-                    worker.collected_waiters.clear()
-                # Drop open collection state; no release can fire after the run ends.
-                _clear_collection_state(state)
-                commands.append(CommandCompleteRun(result=result.result))
-            elif isinstance(result.result, Event):
-                # queue any subsequent events
-                # human input required are automatically published to the stream
-                if isinstance(result.result, InputRequiredEvent):
-                    commands.append(CommandPublishEvent(event=result.result))
-                commands.append(
-                    CommandQueueEvent(
-                        event=result.result,
-                        recovery_counts=dict(this_execution.recovery_counts),
-                        scope_path=emit_stack,
-                    )
-                )
-            elif result.result is None:
-                # None means skip
-                pass
-            else:
-                logger.warning(
-                    f"Unknown result type returned from step function ({step_name}): {type(result.result)}"
-                )
-        elif isinstance(result, StepWorkerFailed):
-            # Schedule a retry if permitted, otherwise fail the workflow.
-            # Prefer the journaled dispatch time: rebuilds re-stamp
-            # this_execution.first_attempt_at with the rebuild clock, which
-            # would silently restart elapsed-based retry budgets on resume.
-            first_attempt_at = (
-                result.first_attempt_at
-                if result.first_attempt_at is not None
-                else this_execution.first_attempt_at
-            )
-            if result.retry_decision is not None:
-                # The decision was journaled inside the failure tick; replay
-                # consumes it as data and never re-invokes policy code, so a
-                # policy whose parameters changed between the live run and a
-                # replay cannot diverge from the journaled TickWakeup.due.
-                delay = result.retry_decision.delay
-            else:
-                # Legacy tick (journaled before decisions were recorded):
-                # recompute via the policy, seeding jitter from the run id so
-                # replay samples the same delay the live run did.
-                delay = _decide_retry_delay(
-                    worker_state.config.retry_policy,
-                    elapsed_time=result.failed_at - first_attempt_at,
-                    failures=this_execution.attempts + 1,
-                    exception=result.exception,
-                    run_id=run_id,
-                    step_name=step_name,
-                )
-            if delay is not None:
-                # Re-queue the attempt directly into persisted state, carrying
-                # an absolute eligibility time. not_before derives from the
-                # journaled failure timestamp (not the current clock) so replay
-                # computes the identical value. Dropping the wakeup never loses
-                # work: resume re-arms it from the queue (rewind_in_progress).
-                not_before = result.failed_at + delay if delay > 0 else None
-                worker_state.queue.insert(
-                    0,
-                    EventAttempt(
-                        event=this_execution.event,
-                        bound_events=this_execution.bound_events,
-                        attempts=this_execution.attempts + 1,
-                        first_attempt_at=first_attempt_at,
-                        last_exception=result.exception,
-                        last_failed_at=result.failed_at,
-                        recovery_counts=dict(this_execution.recovery_counts),
-                        not_before=not_before,
-                        scope_path=this_execution.scope_path,
-                        collection_release_payload=this_execution.shared_state.collection_release_payload,
-                    ),
-                )
-                if not_before is not None:
-                    commands.append(CommandScheduleWakeup(at_time=not_before))
-                redelivery_scheduled = True
-            else:
-                exception = result.exception
-                total_attempts = this_execution.attempts + 1
-                elapsed = result.failed_at - first_attempt_at
 
-                handler_name = state.config.handler_for_step.get(step_name)
-                handler = (
-                    state.config.catch_error_handlers.get(handler_name)
-                    if handler_name is not None
-                    else None
+def _fan_out_scope(
+    state: BrokerState,
+    step_name: str,
+    this_execution: InProgressState,
+    *,
+    fanned_out: bool,
+) -> _FanOutScope:
+    trigger_stack = this_execution.scope_path
+    fan_out_stream_id = (
+        _mint_stream_id(state, trigger_stack, step_name) if fanned_out else None
+    )
+    emit_stack = (
+        trigger_stack + (fan_out_stream_id,)
+        if fan_out_stream_id is not None
+        else trigger_stack
+    )
+    return _FanOutScope(
+        trigger_stack=trigger_stack,
+        fanned_out=fanned_out,
+        fan_out_stream_id=fan_out_stream_id,
+        emit_stack=emit_stack,
+    )
+
+
+def _apply_step_result(
+    result: StepFunctionResult,
+    *,
+    tick: TickStepResult,
+    state: BrokerState,
+    worker_state: InternalStepWorkerState,
+    this_execution: InProgressState,
+    scope: _FanOutScope,
+    acc: _StepResultAcc,
+    did_complete_step: bool,
+    run_id: str | None,
+) -> None:
+    """Apply a single result item from a step execution to the state."""
+    step_id = tick.step_id
+    step_name = _root_step_key(step_id)
+    if isinstance(result, StepWorkerResult):
+        acc.output_event_name = str(type(result.result))
+        if isinstance(result.result, StopEvent):
+            # huzzah! The workflow has completed
+            acc.commands.append(
+                CommandPublishEvent(event=result.result)
+            )  # stop event always published to the stream
+            state.is_running = False
+            # Clear collected_events and collected_waiters since workflow is complete
+            for worker in state.workers.values():
+                worker.queue.clear()
+                worker.in_progress.clear()
+                worker.collected_events.clear()
+                worker.static_collect_events.clear()
+                worker.collected_waiters.clear()
+            # Drop open collection state; no release can fire after the run ends.
+            _clear_collection_state(state)
+            acc.commands.append(CommandCompleteRun(result=result.result))
+        elif isinstance(result.result, Event):
+            # queue any subsequent events
+            # human input required are automatically published to the stream
+            if isinstance(result.result, InputRequiredEvent):
+                acc.commands.append(CommandPublishEvent(event=result.result))
+            acc.commands.append(
+                CommandQueueEvent(
+                    event=result.result,
+                    recovery_counts=dict(this_execution.recovery_counts),
+                    scope_path=scope.emit_stack,
                 )
-                current_count = (
-                    this_execution.recovery_counts.get(handler.step_name, 0)
-                    if handler is not None
-                    else 0
-                )
-                new_count = current_count + 1
-                should_route = (
-                    handler is not None and new_count <= handler.max_recoveries
-                )
-                if should_route and handler is not None:
-                    # Route to the catch-error handler. Keep workflow running so
-                    # the handler can produce either a StopEvent or a new failure.
-                    step_failed_event = StepFailedEvent(
-                        step_name=step_name,
-                        input_event=tick.event,
-                        exception=exception,
-                        attempts=total_attempts,
-                        elapsed_seconds=elapsed,
-                        failed_at=datetime.fromtimestamp(
-                            result.failed_at, tz=timezone.utc
-                        ),
-                    )
-                    # The recovered branch continues at the same stream level:
-                    # the handler event inherits the failing work item's scope
-                    # so its output stays in-stream and the stream can still
-                    # close. It routes to the handler step, so it must not
-                    # carry the collect payload.
-                    commands.append(
-                        _queue_catch_error_event(
-                            this_execution,
-                            event=step_failed_event,
-                            step_id=StepId.root(handler.step_name),
-                            recovery_counts={
-                                **this_execution.recovery_counts,
-                                handler.step_name: new_count,
-                            },
-                        )
-                    )
-                    redelivery_scheduled = True
-                else:
-                    # Publish a WorkflowFailedEvent to inform stream consumers about the failure
-                    state.is_running = False
-                    commands.append(
-                        CommandPublishEvent(
-                            event=WorkflowFailedEvent(
-                                step_name=step_name,
-                                exception=exception,
-                                attempts=total_attempts,
-                                elapsed_seconds=elapsed,
-                            )
-                        )
-                    )
-                    commands.append(
-                        CommandFailWorkflow(step_id=step_id, exception=exception)
-                    )
-        elif isinstance(result, AddCollectedEvent):
-            # The current state of collected events.
-            collected_events = state.workers[step_name].collected_events.setdefault(
-                result.event_id, []
             )
-            # the events snapshot that was sent with the step function execution that yielded this result
-            snapshot_events = this_execution.shared_state.collected_events.get(
-                result.event_id, []
+        elif result.result is None:
+            # None means skip
+            pass
+        else:
+            logger.warning(
+                f"Unknown result type returned from step function ({step_name}): {type(result.result)}"
             )
-            if len(collected_events) > len(snapshot_events):
-                # rerun it, and don't append now to ensure serializability
-                # updating the run state
-                step_no_longer_in_progress = False
-                updated_state = replace(
-                    this_execution.shared_state,
-                    collected_events={
-                        x: list(y)
-                        for x, y in state.workers[step_name].collected_events.items()
-                    },
+    elif isinstance(result, StepWorkerFailed):
+        _schedule_retry_or_route_failure(
+            result,
+            tick=tick,
+            state=state,
+            worker_state=worker_state,
+            this_execution=this_execution,
+            acc=acc,
+            run_id=run_id,
+        )
+    elif isinstance(result, AddCollectedEvent):
+        # The current state of collected events.
+        collected_events = state.workers[step_name].collected_events.setdefault(
+            result.event_id, []
+        )
+        # the events snapshot that was sent with the step function execution that yielded this result
+        snapshot_events = this_execution.shared_state.collected_events.get(
+            result.event_id, []
+        )
+        if len(collected_events) > len(snapshot_events):
+            # rerun it, and don't append now to ensure serializability
+            # updating the run state
+            acc.step_no_longer_in_progress = False
+            updated_state = replace(
+                this_execution.shared_state,
+                collected_events={
+                    x: list(y)
+                    for x, y in state.workers[step_name].collected_events.items()
+                },
+            )
+            this_execution.shared_state = updated_state
+            acc.commands.append(
+                CommandRunWorker(
+                    step_id=step_id,
+                    event=result.event,
+                    bound_events=this_execution.bound_events,
+                    id=this_execution.worker_id,
                 )
-                this_execution.shared_state = updated_state
-                commands.append(
-                    CommandRunWorker(
+            )
+        else:
+            collected_events.append(result.event)
+    elif isinstance(result, DeleteCollectedEvent):
+        if did_complete_step:  # allow retries to grab the events
+            # indicates that a run has successfully collected its events, and they can be deleted from the collected events state
+            state.workers[step_name].collected_events.pop(result.event_id, None)
+    elif isinstance(result, AddWaiter):
+        # indicates that a run has added a waiter to the collected waiters state
+        existing = next(
+            (
+                (i)
+                for i, x in enumerate(worker_state.collected_waiters)
+                if x.waiter_id == result.waiter_id
+            ),
+            None,
+        )
+        new_waiter = StepWorkerWaiter(
+            waiter_id=result.waiter_id,
+            event=this_execution.event,
+            bound_events=this_execution.bound_events,
+            waiting_for_event=result.event_type,
+            requirements=result.requirements,
+            has_requirements=bool(len(result.requirements)),
+            resolved_event=None,
+            # Store the suspended work item's record so resume re-delivers
+            # it whole: same stream scope, same collect batch.
+            scope_path=this_execution.scope_path,
+            collection_release_payload=this_execution.shared_state.collection_release_payload,
+        )
+        if existing is not None:
+            worker_state.collected_waiters[existing] = new_waiter
+        else:
+            worker_state.collected_waiters.append(new_waiter)
+            if result.waiter_event:
+                acc.commands.append(CommandPublishEvent(event=result.waiter_event))
+            if result.timeout is not None:
+                acc.commands.append(
+                    CommandScheduleWaiterTimeout(
                         step_id=step_id,
-                        event=result.event,
-                        bound_events=this_execution.bound_events,
-                        id=this_execution.worker_id,
+                        waiter_id=result.waiter_id,
+                        timeout=result.timeout,
                     )
                 )
-            else:
-                collected_events.append(result.event)
-        elif isinstance(result, DeleteCollectedEvent):
-            if did_complete_step:  # allow retries to grab the events
-                # indicates that a run has successfully collected its events, and they can be deleted from the collected events state
-                state.workers[step_name].collected_events.pop(result.event_id, None)
-        elif isinstance(result, AddWaiter):
-            # indicates that a run has added a waiter to the collected waiters state
-            existing = next(
-                (
-                    (i)
-                    for i, x in enumerate(worker_state.collected_waiters)
-                    if x.waiter_id == result.waiter_id
-                ),
-                None,
-            )
-            new_waiter = StepWorkerWaiter(
-                waiter_id=result.waiter_id,
+    elif isinstance(result, DeleteWaiter):
+        if did_complete_step:  # allow retries to grab the waiter events
+            # indicates that a run has obtained the waiting event, and it can be deleted from the collected waiters state
+            to_remove = result.waiter_id
+            waiters = state.workers[step_name].collected_waiters
+            item = next(filter(lambda w: w.waiter_id == to_remove, waiters), None)
+            if item is not None:
+                waiters.remove(item)
+    else:
+        raise ValueError(f"Unknown result type: {type(result)}")
+
+
+def _schedule_retry_or_route_failure(
+    result: StepWorkerFailed,
+    *,
+    tick: TickStepResult,
+    state: BrokerState,
+    worker_state: InternalStepWorkerState,
+    this_execution: InProgressState,
+    acc: _StepResultAcc,
+    run_id: str | None,
+) -> None:
+    """Handle a failed execution: schedule a retry if permitted, route to a
+    catch_error handler if one applies, otherwise fail the workflow."""
+    step_id = tick.step_id
+    step_name = _root_step_key(step_id)
+    # Prefer the journaled dispatch time: rebuilds re-stamp
+    # this_execution.first_attempt_at with the rebuild clock, which
+    # would silently restart elapsed-based retry budgets on resume.
+    first_attempt_at = (
+        result.first_attempt_at
+        if result.first_attempt_at is not None
+        else this_execution.first_attempt_at
+    )
+    if result.retry_decision is not None:
+        # The decision was journaled inside the failure tick; replay
+        # consumes it as data and never re-invokes policy code, so a
+        # policy whose parameters changed between the live run and a
+        # replay cannot diverge from the journaled TickWakeup.due.
+        delay = result.retry_decision.delay
+    else:
+        # Legacy tick (journaled before decisions were recorded):
+        # recompute via the policy, seeding jitter from the run id so
+        # replay samples the same delay the live run did.
+        delay = _decide_retry_delay(
+            worker_state.config.retry_policy,
+            elapsed_time=result.failed_at - first_attempt_at,
+            failures=this_execution.attempts + 1,
+            exception=result.exception,
+            run_id=run_id,
+            step_name=step_name,
+        )
+    if delay is not None:
+        # Re-queue the attempt directly into persisted state, carrying
+        # an absolute eligibility time. not_before derives from the
+        # journaled failure timestamp (not the current clock) so replay
+        # computes the identical value. Dropping the wakeup never loses
+        # work: resume re-arms it from the queue (rewind_in_progress).
+        not_before = result.failed_at + delay if delay > 0 else None
+        worker_state.queue.insert(
+            0,
+            EventAttempt(
                 event=this_execution.event,
                 bound_events=this_execution.bound_events,
-                waiting_for_event=result.event_type,
-                requirements=result.requirements,
-                has_requirements=bool(len(result.requirements)),
-                resolved_event=None,
-                # Store the suspended work item's record so resume re-delivers
-                # it whole: same stream scope, same collect batch.
+                attempts=this_execution.attempts + 1,
+                first_attempt_at=first_attempt_at,
+                last_exception=result.exception,
+                last_failed_at=result.failed_at,
+                recovery_counts=dict(this_execution.recovery_counts),
+                not_before=not_before,
                 scope_path=this_execution.scope_path,
                 collection_release_payload=this_execution.shared_state.collection_release_payload,
+            ),
+        )
+        if not_before is not None:
+            acc.commands.append(CommandScheduleWakeup(at_time=not_before))
+        acc.redelivery_scheduled = True
+        return
+
+    exception = result.exception
+    total_attempts = this_execution.attempts + 1
+    elapsed = result.failed_at - first_attempt_at
+
+    handler_name = state.config.handler_for_step.get(step_name)
+    handler = (
+        state.config.catch_error_handlers.get(handler_name)
+        if handler_name is not None
+        else None
+    )
+    current_count = (
+        this_execution.recovery_counts.get(handler.step_name, 0)
+        if handler is not None
+        else 0
+    )
+    new_count = current_count + 1
+    should_route = handler is not None and new_count <= handler.max_recoveries
+    if should_route and handler is not None:
+        # Route to the catch-error handler. Keep workflow running so
+        # the handler can produce either a StopEvent or a new failure.
+        step_failed_event = StepFailedEvent(
+            step_name=step_name,
+            input_event=tick.event,
+            exception=exception,
+            attempts=total_attempts,
+            elapsed_seconds=elapsed,
+            failed_at=datetime.fromtimestamp(result.failed_at, tz=timezone.utc),
+        )
+        # The recovered branch continues at the same stream level:
+        # the handler event inherits the failing work item's scope
+        # so its output stays in-stream and the stream can still
+        # close. It routes to the handler step, so it must not
+        # carry the collect payload.
+        acc.commands.append(
+            _queue_catch_error_event(
+                this_execution,
+                event=step_failed_event,
+                step_id=StepId.root(handler.step_name),
+                recovery_counts={
+                    **this_execution.recovery_counts,
+                    handler.step_name: new_count,
+                },
             )
-            if existing is not None:
-                worker_state.collected_waiters[existing] = new_waiter
-            else:
-                worker_state.collected_waiters.append(new_waiter)
-                if result.waiter_event:
-                    commands.append(CommandPublishEvent(event=result.waiter_event))
-                if result.timeout is not None:
-                    commands.append(
-                        CommandScheduleWaiterTimeout(
-                            step_id=step_id,
-                            waiter_id=result.waiter_id,
-                            timeout=result.timeout,
-                        )
-                    )
+        )
+        acc.redelivery_scheduled = True
+    else:
+        # Publish a WorkflowFailedEvent to inform stream consumers about the failure
+        state.is_running = False
+        acc.commands.append(
+            CommandPublishEvent(
+                event=WorkflowFailedEvent(
+                    step_name=step_name,
+                    exception=exception,
+                    attempts=total_attempts,
+                    elapsed_seconds=elapsed,
+                )
+            )
+        )
+        acc.commands.append(CommandFailWorkflow(step_id=step_id, exception=exception))
 
-        elif isinstance(result, DeleteWaiter):
-            if did_complete_step:  # allow retries to grab the waiter events
-                # indicates that a run has obtained the waiting event, and it can be deleted from the collected waiters state
-                to_remove = result.waiter_id
-                waiters = state.workers[step_name].collected_waiters
-                item = next(filter(lambda w: w.waiter_id == to_remove, waiters), None)
-                if item is not None:
-                    waiters.remove(item)
-        else:
-            raise ValueError(f"Unknown result type: {type(result)}")
 
-    # Resolve this work item in its enclosing stream. Completion removes this
-    # item and adds same-scope successors. Stream close is driven only by
-    # source exhaustion plus ``open_work_items == 0``. Classification happens
-    # once, before any counter mutation.
+def _resolve_work_item_in_stream(
+    tick: TickStepResult,
+    state: BrokerState,
+    scope: _FanOutScope,
+    acc: _StepResultAcc,
+    now_seconds: float,
+) -> list[WorkflowCommand]:
+    """Resolve this execution's work item in its enclosing collection stream.
+
+    Completion removes this item and adds same-scope successors. Stream close
+    is driven only by source exhaustion plus ``open_work_items == 0``.
+    Classification happens once, before any counter mutation.
+    """
+    step_name = _root_step_key(tick.step_id)
+    commands: list[WorkflowCommand] = []
     emitted_non_stop = [
         x.result
         for x in tick.result
@@ -725,35 +806,38 @@ def _process_step_result_tick(
         and isinstance(x.result, Event)
         and not isinstance(x.result, StopEvent)
     ]
-    enclosing = trigger_stack[-1] if trigger_stack else None
+    enclosing = scope.trigger_stack[-1] if scope.trigger_stack else None
     disposition = _classify_work_item(
         tick,
-        commands,
-        rerun_scheduled=not step_no_longer_in_progress,
-        redelivery_scheduled=redelivery_scheduled,
-        fanned_out=fanned_out,
+        acc.commands,
+        rerun_scheduled=not acc.step_no_longer_in_progress,
+        redelivery_scheduled=acc.redelivery_scheduled,
+        fanned_out=scope.fanned_out,
     )
 
-    if disposition is WorkDisposition.FANNED_OUT and fan_out_stream_id is not None:
+    if (
+        disposition is WorkDisposition.FANNED_OUT
+        and scope.fan_out_stream_id is not None
+    ):
         bindings = state.config.bindings_for_source(step_name)
         accepting_binding_ids = tuple(binding.id for binding in bindings)
         seed = sum(_count_accepting_steps(state, type(m)) for m in emitted_non_stop)
-        state.streams[fan_out_stream_id] = CollectionStreamInstance(
-            stream_id=fan_out_stream_id,
+        state.streams[scope.fan_out_stream_id] = CollectionStreamInstance(
+            stream_id=scope.fan_out_stream_id,
             source_step=step_name,
-            scope_path=trigger_stack,
+            scope_path=scope.trigger_stack,
             accepting_binding_ids=accepting_binding_ids,
             open_work_items=seed,
         )
         # The parent work item now waits for each child collection release.
         commands.extend(
-            _apply_stream_work_delta(
+            _adjust_open_work_items(
                 state, enclosing, len(accepting_binding_ids) - 1, now_seconds
             )
         )
         if seed == 0:
             commands.extend(
-                _close_collection_stream(state, fan_out_stream_id, now_seconds)
+                _close_collection_stream(state, scope.fan_out_stream_id, now_seconds)
             )
     elif disposition is WorkDisposition.COMPLETED:
         # Same-level resolution (1:1 step, or a collect step firing its
@@ -764,24 +848,74 @@ def _process_step_result_tick(
             _count_accepting_steps(state, type(ev)) for ev in emitted_non_stop
         )
         commands.extend(
-            _apply_stream_work_delta(state, enclosing, successors - 1, now_seconds)
+            _adjust_open_work_items(state, enclosing, successors - 1, now_seconds)
         )
     elif disposition is WorkDisposition.ABSORBED:
         # Consumed once per work item, no matter how many slot buffers the
         # invocation touched.
-        commands.extend(_apply_stream_work_delta(state, enclosing, -1, now_seconds))
+        commands.extend(_adjust_open_work_items(state, enclosing, -1, now_seconds))
     # STILL_LIVE re-delivers and resolves later; RUN_ENDING needs no accounting.
+    return commands
 
-    is_completed = any(indicates_exit(c) for c in commands)
-    if step_no_longer_in_progress:
-        commands.insert(
+
+def _process_step_result_tick(
+    tick: TickStepResult,
+    init: BrokerState,
+    now_seconds: float,
+    run_id: str | None = None,
+) -> tuple[BrokerState, list[WorkflowCommand]]:
+    """Process the results from a step function execution.
+
+    Reads top to bottom as the lifecycle of one finished execution:
+    locate it, bail out to a re-run if its collect snapshot went stale,
+    apply each returned result, resolve the work item in its stream, then
+    finalize (emit the NOT_RUNNING transition, drop it from in_progress,
+    dispatch any newly-eligible queued work).
+    """
+    state = init.deepcopy()
+    step_id = tick.step_id
+    step_name = _root_step_key(step_id)
+    worker_state = state.workers[step_name]
+    this_execution = _find_in_progress(worker_state, tick.worker_id)
+
+    rerun = _rerun_for_stale_collect_buffer(tick, worker_state, this_execution)
+    if rerun is not None:
+        return state, rerun
+
+    fanned_out = any(
+        isinstance(x, StepWorkerResult) and x.fanned_out for x in tick.result
+    )
+    scope = _fan_out_scope(state, step_name, this_execution, fanned_out=fanned_out)
+
+    did_complete_step = any(isinstance(x, StepWorkerResult) for x in tick.result)
+    acc = _StepResultAcc(commands=[])
+    for result in tick.result:
+        _apply_step_result(
+            result,
+            tick=tick,
+            state=state,
+            worker_state=worker_state,
+            this_execution=this_execution,
+            scope=scope,
+            acc=acc,
+            did_complete_step=did_complete_step,
+            run_id=run_id,
+        )
+
+    acc.commands.extend(
+        _resolve_work_item_in_stream(tick, state, scope, acc, now_seconds)
+    )
+
+    is_completed = any(indicates_exit(c) for c in acc.commands)
+    if acc.step_no_longer_in_progress:
+        acc.commands.insert(
             0,
             CommandPublishEvent(
                 StepStateChanged(
                     step_state=StepState.NOT_RUNNING,
                     name=step_name,
                     input_event_name=str(type(tick.event)),
-                    output_event_name=output_event_name,
+                    output_event_name=acc.output_event_name,
                     worker_id=str(tick.worker_id),
                 )
             ),
@@ -790,9 +924,9 @@ def _process_step_result_tick(
             worker_state.in_progress.remove(this_execution)
     # enqueue next events if there are any
     if not is_completed:
-        commands.extend(_drain_eligible_queue(step_id, worker_state, now_seconds))
+        acc.commands.extend(_drain_eligible_queue(step_id, worker_state, now_seconds))
 
-    return state, commands
+    return state, acc.commands
 
 
 def _static_collect_events(
@@ -936,53 +1070,67 @@ def _add_or_enqueue_event(
     return commands
 
 
-def _process_add_event_tick(
-    tick: TickAddEvent, init: BrokerState, now_seconds: float
-) -> tuple[BrokerState, list[WorkflowCommand]]:
-    state = init.deepcopy()
-    # iterate through the steps, and add to steps work queue if it's accepted.
-    commands: list[WorkflowCommand] = []
-    handled = False
-    if isinstance(tick.event, StartEvent):
-        state.is_running = True
+@dataclass
+class _RouteResult:
+    """Outcome of routing an added event to accepting steps."""
 
-    # A payload-carrying tick is a re-delivered collect invocation (retry,
-    # waiter re-ping after resume, serialized requeue). It routes directly to
-    # the binding's target step — before waiter matching, before the
-    # member-arrival path — so it can never be swallowed as a stream member or
-    # resolve an unrelated waiter. The event is derived from the payload, the
-    # authoritative work record.
-    if tick.collection_release_payload is not None:
-        payload = tick.collection_release_payload
-        binding = state.config.collection_bindings.get(payload.binding_id)
-        if binding is None:
-            raise WorkflowRuntimeError(
-                f"Collect invocation re-delivered for unknown binding "
-                f"{payload.binding_id!r} (stream {payload.stream_id!r}). "
-                "Workflow state is corrupt."
-            )
-        commands.extend(
-            _add_or_enqueue_event(
-                EventAttempt(
-                    event=payload.as_event(),
-                    attempts=tick.attempts,
-                    first_attempt_at=tick.first_attempt_at,
-                    last_exception=tick.last_exception,
-                    last_failed_at=tick.last_failed_at,
-                    recovery_counts=dict(tick.recovery_counts),
-                    scope_path=tuple(tick.scope_path),
-                    collection_release_payload=payload,
-                ),
-                StepId.root(binding.target_step),
-                state.workers[binding.target_step],
-                now_seconds,
-            )
+    commands: list[WorkflowCommand]
+    # At least one step accepted (and was targeted by) the event.
+    handled: bool = False
+    # The run was failed (a targeted send to a collect step); the caller must
+    # return immediately rather than emit further commands.
+    failed: bool = False
+
+
+def _redeliver_collection_payload(
+    tick: TickAddEvent, state: BrokerState, now_seconds: float
+) -> list[WorkflowCommand] | None:
+    """Re-deliver a payload-carrying tick straight to its collect target.
+
+    A payload-carrying tick is a re-delivered collect invocation (retry,
+    waiter re-ping after resume, serialized requeue). It routes directly to
+    the binding's target step — before waiter matching, before the
+    member-arrival path — so it can never be swallowed as a stream member or
+    resolve an unrelated waiter. The event is derived from the payload, the
+    authoritative work record. Returns None when this is not a payload tick.
+    """
+    if tick.collection_release_payload is None:
+        return None
+    payload = tick.collection_release_payload
+    binding = state.config.collection_bindings.get(payload.binding_id)
+    if binding is None:
+        raise WorkflowRuntimeError(
+            f"Collect invocation re-delivered for unknown binding "
+            f"{payload.binding_id!r} (stream {payload.stream_id!r}). "
+            "Workflow state is corrupt."
         )
-        return state, commands
+    return _add_or_enqueue_event(
+        EventAttempt(
+            event=payload.as_event(),
+            attempts=tick.attempts,
+            first_attempt_at=tick.first_attempt_at,
+            last_exception=tick.last_exception,
+            last_failed_at=tick.last_failed_at,
+            recovery_counts=dict(tick.recovery_counts),
+            scope_path=tuple(tick.scope_path),
+            collection_release_payload=payload,
+        ),
+        StepId.root(binding.target_step),
+        state.workers[binding.target_step],
+        now_seconds,
+    )
 
-    # First, check if the event resolves any waiters. Track which steps were
-    # woken via waiter resolution so we don't also route the event to them
-    # as a normal accepted event (which would cause duplicate processing).
+
+def _resolve_waiters(
+    tick: TickAddEvent, state: BrokerState, now_seconds: float
+) -> tuple[list[WorkflowCommand], set[str]]:
+    """Resolve any waiters the event satisfies, resuming their work items.
+
+    Returns the emitted commands plus the set of steps woken via waiter
+    resolution, so the routing pass can skip them and avoid double-processing
+    the same delivery as a normally-accepted event.
+    """
+    commands: list[WorkflowCommand] = []
     waiter_resolved_steps: set[str] = set()
     for step_name, step_config in state.config.steps.items():
         step_id = StepId.root(step_name)
@@ -998,26 +1146,122 @@ def _process_add_event_tick(
                 for k, v in wait_condition.requirements.items()
             )
             if is_match:
-                handled = True
                 waiter_resolved_steps.add(step_name)
                 wait_condition.resolved_event = tick.event
                 # Resume re-delivers the suspended work item whole from the
                 # waiter record: original trigger, stream scope, collect batch.
-                subcommands = _add_or_enqueue_event(
-                    EventAttempt(
-                        event=wait_condition.event,
-                        bound_events=wait_condition.bound_events,
-                        scope_path=wait_condition.scope_path,
-                        collection_release_payload=wait_condition.collection_release_payload,
-                    ),
-                    step_id,
-                    state.workers[step_name],
+                commands.extend(
+                    _add_or_enqueue_event(
+                        EventAttempt(
+                            event=wait_condition.event,
+                            bound_events=wait_condition.bound_events,
+                            scope_path=wait_condition.scope_path,
+                            collection_release_payload=wait_condition.collection_release_payload,
+                        ),
+                        step_id,
+                        state.workers[step_name],
+                        now_seconds,
+                    )
+                )
+    return commands, waiter_resolved_steps
+
+
+def _route_member_to_collect_step(
+    tick: TickAddEvent,
+    state: BrokerState,
+    step_name: str,
+    worker_state: InternalStepWorkerState,
+    now_seconds: float,
+) -> tuple[list[WorkflowCommand], bool]:
+    """Route an accepted event into a collect step's batch buffer.
+
+    A collect step only ever receives members emitted inside a fan-out stream.
+    Returns ``(commands, failed)`` where ``failed`` signals the run was failed
+    (a targeted send to a collect step, which the runtime cannot honor).
+    """
+    commands: list[WorkflowCommand] = []
+    if not tick.scope_path:
+        # Scope-less events (ctx.send_event, external sends) can
+        # never join a collect batch — members reach a collect step
+        # only by being emitted inside a fan-out stream.
+        if tick.step_id is not None:
+            # A targeted send is an explicit instruction the
+            # runtime cannot honor; dropping it silently loses
+            # data, so fail the run loudly instead.
+            error = WorkflowRuntimeError(
+                f"{type(tick.event).__name__} was sent to collect "
+                f"step {step_name!r} via send_event(step=...), but "
+                "a collect step cannot receive targeted events: it "
+                "only collects events emitted inside a fan-out "
+                "stream."
+            )
+            state.is_running = False
+            commands.append(
+                CommandPublishEvent(
+                    event=WorkflowFailedEvent(step_name=step_name, exception=error)
+                )
+            )
+            commands.append(
+                CommandFailWorkflow(step_id=StepId.root(step_name), exception=error)
+            )
+            return commands, True
+        # An untargeted send may be legitimate traffic for other
+        # steps that merely overlaps an open stream — warn.
+        logger.warning(
+            "Ignoring %s for collect step %r: it was sent "
+            "outside any collection stream (e.g. via "
+            "ctx.send_event) so it cannot join a batch.",
+            type(tick.event).__name__,
+            step_name,
+        )
+        return commands, False
+    stream_id = tick.scope_path[-1]
+    binding = state.config.binding_for_target(stream_id, step_name, state.streams)
+    if binding is None:
+        # Dropped member: its nearest stream has no binding to this
+        # collect step. Balance the stream accounting for the dead
+        # work item and say so.
+        logger.warning(
+            "Dropping %s for collect step %r: its enclosing "
+            "stream %r has no collection binding targeting that "
+            "step, so it can never join a batch.",
+            type(tick.event).__name__,
+            step_name,
+            stream_id,
+        )
+        commands.extend(_adjust_open_work_items(state, stream_id, -1, now_seconds))
+        return commands, False
+    release_state = _release_state_for(state, stream_id, binding)
+    if not release_state.released:
+        release_state.buffer.append(tick.event)
+        release = _release_on_item(binding, release_state)
+        if release is not None:
+            commands.extend(
+                _fire_collection_release(
+                    binding,
+                    stream_id,
+                    worker_state,
+                    release,
+                    tuple(tick.scope_path[:-1]),
                     now_seconds,
                 )
-                commands.extend(subcommands)
+            )
+    commands.extend(_adjust_open_work_items(state, stream_id, -1, now_seconds))
+    return commands, False
 
-    # Then route to accepting steps, skipping any that were already woken
-    # via waiter resolution above.
+
+def _route_to_accepting_steps(
+    tick: TickAddEvent,
+    state: BrokerState,
+    waiter_resolved_steps: set[str],
+    now_seconds: float,
+) -> _RouteResult:
+    """Route the event to every step that accepts (and is targeted by) it.
+
+    Steps already woken via waiter resolution are skipped — only their stream
+    accounting is balanced for the delivery the waiter swallowed.
+    """
+    result = _RouteResult(commands=[])
     for step_name, step_config in state.config.steps.items():
         step_id = StepId.root(step_name)
         is_accepted = step_accepts_event(
@@ -1035,108 +1279,40 @@ def _process_add_event_tick(
                 # parked on wait_for_event of their own member type (the
                 # swallowed member never joins the batch; the waiter consumed
                 # it).
-                commands.extend(
-                    _apply_stream_work_delta(
-                        state, tick.scope_path[-1], -1, now_seconds
-                    )
+                result.commands.extend(
+                    _adjust_open_work_items(state, tick.scope_path[-1], -1, now_seconds)
                 )
             continue
-        if is_accepted and is_targeted:
-            handled = True
-            worker_state = state.workers[step_name]
-            if worker_state.config.collection_param is not None:
-                if not tick.scope_path:
-                    # Scope-less events (ctx.send_event, external sends) can
-                    # never join a collect batch — members reach a collect step
-                    # only by being emitted inside a fan-out stream.
-                    if tick.step_id is not None:
-                        # A targeted send is an explicit instruction the
-                        # runtime cannot honor; dropping it silently loses
-                        # data, so fail the run loudly instead.
-                        error = WorkflowRuntimeError(
-                            f"{type(tick.event).__name__} was sent to collect "
-                            f"step {step_name!r} via send_event(step=...), but "
-                            "a collect step cannot receive targeted events: it "
-                            "only collects events emitted inside a fan-out "
-                            "stream."
+        if not (is_accepted and is_targeted):
+            continue
+        result.handled = True
+        worker_state = state.workers[step_name]
+        if worker_state.config.collection_param is not None:
+            member_commands, failed = _route_member_to_collect_step(
+                tick, state, step_name, worker_state, now_seconds
+            )
+            result.commands.extend(member_commands)
+            if failed:
+                result.failed = True
+                return result
+            continue
+        _consume_superseded_delayed_attempt(tick, worker_state)
+        bound_events = tick.bound_events
+        if bound_events is None and worker_state.config.collect_params:
+            bound_events = _static_collect_events(
+                event=tick.event,
+                worker_state=worker_state,
+            )
+            if bound_events is None:
+                if tick.scope_path:
+                    result.commands.extend(
+                        _adjust_open_work_items(
+                            state, tick.scope_path[-1], -1, now_seconds
                         )
-                        state.is_running = False
-                        commands.append(
-                            CommandPublishEvent(
-                                event=WorkflowFailedEvent(
-                                    step_name=step_name, exception=error
-                                )
-                            )
-                        )
-                        commands.append(
-                            CommandFailWorkflow(step_id=step_id, exception=error)
-                        )
-                        return state, commands
-                    # An untargeted send may be legitimate traffic for other
-                    # steps that merely overlaps an open stream — warn.
-                    logger.warning(
-                        "Ignoring %s for collect step %r: it was sent "
-                        "outside any collection stream (e.g. via "
-                        "ctx.send_event) so it cannot join a batch.",
-                        type(tick.event).__name__,
-                        step_name,
                     )
-                    continue
-                stream_id = tick.scope_path[-1]
-                binding = state.config.binding_for_target(
-                    stream_id, step_name, state.streams
-                )
-                if binding is None:
-                    # Dropped member: its nearest stream has no binding to this
-                    # collect step. Balance the stream accounting for the dead
-                    # work item and say so.
-                    logger.warning(
-                        "Dropping %s for collect step %r: its enclosing "
-                        "stream %r has no collection binding targeting that "
-                        "step, so it can never join a batch.",
-                        type(tick.event).__name__,
-                        step_name,
-                        stream_id,
-                    )
-                    commands.extend(
-                        _apply_stream_work_delta(state, stream_id, -1, now_seconds)
-                    )
-                    continue
-                release_state = _release_state_for(state, stream_id, binding)
-                if not release_state.released:
-                    release_state.buffer.append(tick.event)
-                    release = _release_on_item(binding, release_state)
-                    if release is not None:
-                        commands.extend(
-                            _fire_collection_release(
-                                binding,
-                                stream_id,
-                                worker_state,
-                                release,
-                                tuple(tick.scope_path[:-1]),
-                                now_seconds,
-                            )
-                        )
-                commands.extend(
-                    _apply_stream_work_delta(state, stream_id, -1, now_seconds)
-                )
                 continue
-            _consume_superseded_delayed_attempt(tick, worker_state)
-            bound_events = tick.bound_events
-            if bound_events is None and worker_state.config.collect_params:
-                bound_events = _static_collect_events(
-                    event=tick.event,
-                    worker_state=worker_state,
-                )
-                if bound_events is None:
-                    if tick.scope_path:
-                        commands.extend(
-                            _apply_stream_work_delta(
-                                state, tick.scope_path[-1], -1, now_seconds
-                            )
-                        )
-                    continue
-            subcommands = _add_or_enqueue_event(
+        result.commands.extend(
+            _add_or_enqueue_event(
                 EventAttempt(
                     event=tick.event,
                     bound_events=bound_events,
@@ -1151,23 +1327,59 @@ def _process_add_event_tick(
                 state.workers[step_name],
                 now_seconds,
             )
-            commands.extend(subcommands)
-    if not handled:
-        # InputRequiredEvent subclasses are intentionally designed to be handled
-        # externally by human consumers, not by workflow steps. Don't emit
-        # UnhandledEvent for these since they're working as intended.
-        if not isinstance(tick.event, InputRequiredEvent):
-            event_cls = type(tick.event)
-            commands.append(
-                CommandPublishEvent(
-                    UnhandledEvent(
-                        event_type=event_cls.__name__,
-                        qualified_name=f"{event_cls.__module__}.{event_cls.__name__}",
-                        step_name=str(tick.step_id) if tick.step_id else None,
-                        idle=_check_idle_state(state),
-                    )
-                )
+        )
+    return result
+
+
+def _unhandled_event_commands(
+    tick: TickAddEvent, state: BrokerState
+) -> list[WorkflowCommand]:
+    # InputRequiredEvent subclasses are intentionally designed to be handled
+    # externally by human consumers, not by workflow steps. Don't emit
+    # UnhandledEvent for these since they're working as intended.
+    if isinstance(tick.event, InputRequiredEvent):
+        return []
+    event_cls = type(tick.event)
+    return [
+        CommandPublishEvent(
+            UnhandledEvent(
+                event_type=event_cls.__name__,
+                qualified_name=f"{event_cls.__module__}.{event_cls.__name__}",
+                step_name=str(tick.step_id) if tick.step_id else None,
+                idle=_check_idle_state(state),
             )
+        )
+    ]
+
+
+def _process_add_event_tick(
+    tick: TickAddEvent, init: BrokerState, now_seconds: float
+) -> tuple[BrokerState, list[WorkflowCommand]]:
+    """Add an incoming event to the workflow.
+
+    Three phases: re-deliver a payload-carrying collect invocation straight to
+    its target (and stop), else resolve any waiters the event satisfies, then
+    route it to every accepting step. An event nothing handled is published as
+    an UnhandledEvent.
+    """
+    state = init.deepcopy()
+    if isinstance(tick.event, StartEvent):
+        state.is_running = True
+
+    payload_commands = _redeliver_collection_payload(tick, state, now_seconds)
+    if payload_commands is not None:
+        return state, payload_commands
+
+    commands, waiter_resolved_steps = _resolve_waiters(tick, state, now_seconds)
+
+    routed = _route_to_accepting_steps(tick, state, waiter_resolved_steps, now_seconds)
+    commands.extend(routed.commands)
+    if routed.failed:
+        return state, commands
+
+    handled = bool(waiter_resolved_steps) or routed.handled
+    if not handled:
+        commands.extend(_unhandled_event_commands(tick, state))
     return state, commands
 
 

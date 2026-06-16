@@ -140,7 +140,7 @@ def _count_accepting_steps(state: BrokerState, event_type: type) -> int:
     )
 
 
-def _apply_stream_work_delta(
+def _adjust_open_work_items(
     state: BrokerState, stream_id: str | None, delta: int, now_seconds: float
 ) -> list[WorkflowCommand]:
     if stream_id is None:
