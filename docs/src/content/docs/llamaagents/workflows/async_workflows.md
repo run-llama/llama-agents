@@ -1,6 +1,6 @@
 ---
 sidebar:
-  order: 15
+  order: 4
 title: Writing async workflows
 ---
 
