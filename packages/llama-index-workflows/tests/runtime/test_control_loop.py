@@ -50,6 +50,7 @@ from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import (
     TickAddEvent,
     TickCancelRun,
+    TickIdleCheck,
     TickWakeup,
     WorkflowTick,
 )
@@ -616,6 +617,64 @@ async def test_control_loop_reruns_stale_collect_events_firing(
     result = await asyncio.wait_for(task, timeout=2.0)
 
     assert result.result == [[1, 2], [3, 4]]
+
+
+@pytest.mark.asyncio
+async def test_control_loop_defers_idle_behind_buffered_tick(
+    test_plugin: MockRunAdapter,
+) -> None:
+    class ContinueEvent(Event):
+        value: str
+
+    class BufferedTickWorkflow(Workflow):
+        @step
+        async def start(self, ev: StartEvent) -> None:
+            return None
+
+        @step
+        async def finish(self, ev: ContinueEvent) -> StopEvent:
+            return StopEvent(result=ev.value)
+
+    workflow = BufferedTickWorkflow(timeout=2.0)
+    step_workers = {}
+    for name, step_func in workflow._get_steps().items():
+        unbound = getattr(step_func, "__func__", step_func)
+        step_workers[name] = as_step_worker_function(unbound)
+
+    run_id = str(uuid.uuid4())
+    mock_runtime = MockRuntime()
+    test_plugin.set_state_store(InMemoryStateStore(DictState()))
+    mock_runtime.set_adapter(run_id, test_plugin)
+    workflow._runtime = mock_runtime
+    with setting_run_id(run_id):
+        ctx = Context._create_internal(workflow=workflow)
+
+    state = BrokerState.from_workflow(workflow)
+    state.is_running = True
+    runner = _ControlLoopRunner(workflow, test_plugin, ctx, step_workers, state)
+    runner.tick_buffer = [
+        TickIdleCheck(),
+        TickAddEvent(event=ContinueEvent(value="done")),
+    ]
+
+    with setting_run_id(run_id):
+        run_ctx = RunContext(
+            workflow=workflow,
+            run_adapter=test_plugin,
+            context=ctx,
+            steps=step_workers,
+        )
+        with run_context(run_ctx):
+            result = await runner.run(start_event=None)
+
+    assert result.result == "done"
+    seen: list[Event] = []
+    while True:
+        ev = await test_plugin.get_stream_event(timeout=1.0)
+        seen.append(ev)
+        if isinstance(ev, StopEvent):
+            break
+    assert not any(isinstance(ev, WorkflowIdleEvent) for ev in seen)
 
 
 @pytest.mark.asyncio
