@@ -33,6 +33,7 @@ from workflows.events import Event, StartEvent, StopEvent
 from workflows.runtime.types.internal_state import BrokerState
 from workflows.runtime.types.named_task import WorkerTask
 from workflows.runtime.types.plugin import RegisteredWorkflow
+from workflows.runtime.types.step_id import StepId
 from workflows.testing import WorkflowTestRunner
 from workflows.workflow import Workflow
 
@@ -397,7 +398,7 @@ async def test_replay_wait_for_next_task_timeout_returns_none(
 
     try:
         result = await adapter.wait_for_next_task(
-            [WorkerTask("step_a", 0, task)],
+            [WorkerTask(StepId.root("step_a"), 0, task)],
             [],
             timeout=0.01,
         )

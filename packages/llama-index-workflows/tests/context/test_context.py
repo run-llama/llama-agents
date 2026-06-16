@@ -204,7 +204,7 @@ async def test_get_not_found(internal_ctx: Context) -> None:
 
 @pytest.mark.asyncio
 async def test_send_event_step_is_none() -> None:
-    """Test that external events create TickAddEvent with step_name=None.
+    """Test that external events create TickAddEvent with step_id=None.
 
     Uses a workflow that waits for the external event so we can verify
     the tick is logged before the workflow completes.
@@ -227,7 +227,7 @@ async def test_send_event_step_is_none() -> None:
         assert isinstance(external_face, ExternalContext)
 
         # Wait for event to appear in tick log (up to 1 second)
-        expected_tick = TickAddEvent(event=ev, step_name=None)
+        expected_tick = TickAddEvent(event=ev, step_id=None)
         for _ in range(100):
             if expected_tick in external_face._tick_log:
                 break

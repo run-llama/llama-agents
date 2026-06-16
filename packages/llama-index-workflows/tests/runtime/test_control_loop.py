@@ -46,6 +46,7 @@ from workflows.runtime.control_loop import _ControlLoopRunner, control_loop
 from workflows.runtime.types.internal_state import BrokerState
 from workflows.runtime.types.plugin import RunContext, run_context
 from workflows.runtime.types.step_function import as_step_worker_function
+from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import (
     TickAddEvent,
     TickCancelRun,
@@ -636,7 +637,9 @@ async def test_control_loop_per_step_routing(test_plugin: MockRunAdapter) -> Non
     )
 
     # Route explicitly to the 'second' step with an accepted event type
-    await test_plugin.send_event(TickAddEvent(event=SomeEvent(), step_name="second"))
+    await test_plugin.send_event(
+        TickAddEvent(event=SomeEvent(), step_id=StepId.root("second"))
+    )
 
     result = await asyncio.wait_for(task, timeout=2.0)
     assert isinstance(result, StopEvent)

@@ -16,6 +16,7 @@ from workflows.decorators import step
 from workflows.events import StartEvent, StopEvent
 from workflows.resource import Resource, ResourceConfig
 from workflows.runtime.types.results import StepWorkerResult
+from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import TickStepResult
 from workflows.workflow import Workflow
 
@@ -322,7 +323,7 @@ async def test_draw_most_recent_execution_mermaid_sanitizes_slash_step_ids(
     adapter = cast(Any, handler.ctx._face)._external_adapter
     adapter._queues.ticks = [
         TickStepResult(
-            step_name="parent/child",
+            step_id=StepId.from_str("parent/child"),
             worker_id=0,
             event=StartEvent(),
             result=[StepWorkerResult(result=StopEvent())],
