@@ -4,9 +4,9 @@ sidebar:
 title: Concurrent execution of workflows
 ---
 
-Workflows can run steps concurrently. When several steps are independent and spend their time `await`ing something slow, running them in parallel speeds things up.
+Workflows can run steps at the same time. When several steps are independent and each one waits on something slow, running them in parallel is faster.
 
-The usual shape is fan-out / fan-in: split the work into pieces, run them at once, then join the results back together. You write it directly in the step signatures. Return a `list` from a step and it fans out, one event per element. Take a `list` parameter and it fans in, firing once on the whole batch. The `@step` decorator reads those types, so the validator and the [visualization](/python/llamaagents/workflows/drawing) wire the producer to its consumers for free. When you need to emit events that don't follow from the signature, drop to `ctx.send_event`, covered as an [escape hatch](#the-dynamic-api) at the end.
+The usual pattern is fan-out and fan-in. You split the work into pieces, run them at the same time, then join the results back together. You write this directly in the step signatures. Return a `list` from a step and it fans out, with one event per element. Take a `list` parameter and it fans in, firing once on the whole batch. The `@step` decorator reads those types. The validator and the [visualization](/python/llamaagents/workflows/drawing) then connect each producer step to the steps that consume its events, with no extra work from you. When you need to emit events that do not follow from the signature, you can send them yourself with `ctx.send_event`. The [dynamic API](#the-dynamic-api) at the end of this page covers that.
 
 ## Fan-out: return a list
 
@@ -62,7 +62,7 @@ class ConcurrentFlow(Workflow):
 
 `fan_out` returns `list[Task]` and `join` takes `list[Done]`, so the framework knows the batch from the types alone and fires `join` once it's complete.
 
-A worker can drop its own branch by returning `None`. The batch tracks which branches are still alive, so `join` still fires once, just with the survivors:
+A worker can drop its own branch by returning `None`. The framework tracks which branches still return a value, so `join` still fires once, with only those branches:
 
 ```python
     @step(num_workers=5)
@@ -72,11 +72,11 @@ A worker can drop its own branch by returning `None`. The batch tracks which bra
         return Done(n=ev.n)
 ```
 
-Here the even-numbered tasks bow out and `join` sees only the odd `Done`s.
+Here the even-numbered tasks return `None`, so `join` receives only the odd `Done` events.
 
 ## Releasing early
 
-By default a `list` join waits for the whole batch. To act on the first result instead, wrap the parameter in `Collect`. `Take(n)` fires on the *n*-th arrival with the first `n` events, which is what you want for quorum or first-wins:
+By default a `list` join waits for the whole batch. To act on the first result instead, wrap the parameter in `Collect`. `Take(n)` fires on the n-th arrival with the first `n` events. This is what you want when you only need the first few results, or the first one to finish:
 
 ```python
 from typing import Annotated
@@ -100,11 +100,11 @@ class FastestWins(Workflow):
         return StopEvent(result=events[0].n)
 ```
 
-`Take(1)` stops after whichever task finishes first. The losers keep running, there's no cancellation, they just never reach the join. A plain `list[Done]` parameter is the same as `Annotated[list[Done], Collect(All())]`, and `Collect()` with no argument is a more greppable way to spell that default.
+`Take(1)` stops after whichever task finishes first. The other tasks keep running. Nothing cancels them. They just never reach the join. A plain `list[Done]` parameter is the same as `Annotated[list[Done], Collect(All())]`. `Collect()` with no argument writes that same default in a way that is easier to search for in code.
 
-## Heterogeneous fan-in
+## Fan-in with mixed event types
 
-A batch doesn't have to be one event type. `list[A | B]` collects a flat batch of both, and either type routes to the step:
+A batch does not have to be one event type. `list[A | B]` collects a flat batch of both types, and the step receives either one:
 
 ```python
     @step
@@ -114,7 +114,7 @@ A batch doesn't have to be one event type. `list[A | B]` collects a flat batch o
         ...
 ```
 
-If you'd rather wait for *one of each* type than a list, give the step one parameter per event. It fires once when each parameter has its event, bound by type:
+If you want to wait for one of each type instead of a list, give the step one parameter per event. The step fires once each parameter has received its event. Each parameter is matched by its type:
 
 ```python
 import asyncio
@@ -179,13 +179,13 @@ class ConcurrentFlow(Workflow):
         return StopEvent(result=[a.result, b.result, c.result])
 ```
 
-`start` fans out three distinct events and `assemble` takes one parameter each, so it fires once all three have landed. This one draws nicely:
+`start` fans out three different events and `assemble` takes one parameter for each, so it fires once all three have arrived. The diagram for this workflow is easy to read:
 
 ![A concurrent workflow](./assets/different_events.png)
 
 ## Nesting
 
-Fan-out composes. Fan out inside a fan-out and you get a nested batch: the inner join fires once per outer member, then the outer join fires once over all the inner results:
+You can nest fan-out. Fan out inside another fan-out and you get a nested batch. The inner join fires once for each outer element. Then the outer join fires once over all the inner results:
 
 ```python
 class InnerTask(Event):
@@ -229,9 +229,9 @@ Each join stays at its own level. `per_inner` runs three times, once per outer `
 
 ## The dynamic API
 
-When the events you emit don't follow from the step's shape, send them yourself with `ctx.send_event` and collect them with `ctx.collect_events`. Reach for this when emission is conditional or open-ended, or when you want to emit incrementally rather than in one batch.
+When the events you emit do not follow from the step's signature, send them yourself with `ctx.send_event` and collect them with `ctx.collect_events`. Use this when you only emit some events depending on a condition, when you do not know in advance how many events you will emit, or when you want to emit them one at a time instead of in one batch.
 
-The trade-off is atomicity. A `list` return is all or nothing: it goes out as one batch when the step returns, so if the step raises first, nothing is emitted. `ctx.send_event` fires the moment you call it, so downstream steps can start before the producer is done, but anything already sent stays out even if the step later fails.
+There is a trade-off here. A `list` return is all or nothing. It goes out as one batch when the step returns, so if the step raises an error first, nothing is emitted. `ctx.send_event` fires the moment you call it. Downstream steps can start before the producer step is done. But anything you already sent stays out even if the step later fails.
 
 `ctx.send_event` emits one event at a time:
 
@@ -260,7 +260,7 @@ class ParallelFlow(Workflow):
         return StopEvent(result=ev.query)
 ```
 
-`start` emits through a side channel, so its return type is `StepTwoEvent | None` and the fan-out never shows up in the signature. The flip side: nothing links `start` to what it sends, so it draws as a disconnected node. To wait on several of these events before moving on, use `ctx.collect_events`:
+`start` emits the events with `ctx.send_event` instead of returning them, so its return type is `StepTwoEvent | None` and the fan-out never appears in the signature. The downside is that nothing links `start` to the events it sends, so it appears as a disconnected node in the diagram. To wait for several of these events before moving on, use `ctx.collect_events`:
 
 ```python
 import asyncio
@@ -304,9 +304,9 @@ class ConcurrentFlow(Workflow):
         return StopEvent(result="Done")
 ```
 
-`ctx.collect_events` takes the triggering event and a list of types to wait for. `step_three` runs on every `StepThreeEvent`, but `collect_events` returns `None` until all three have arrived, then hands them back as a list in the order they came in. The count of expected events is on you to track, here the `3`.
+`ctx.collect_events` takes the triggering event and a list of the types to wait for. `step_three` runs on every `StepThreeEvent`, but `collect_events` returns `None` until all three have arrived. Then it returns them as a list, in the order they arrived. You have to track the number of events to expect yourself, which is the `3` here.
 
-You can wait on any mix of types, not just one repeated. The order you pass them is the order they come back, no matter when each arrived:
+You can wait for any mix of types, not just one type repeated. The order you pass them in is the order they come back in, no matter when each one arrived:
 
 ```python
     @step
