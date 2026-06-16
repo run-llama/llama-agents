@@ -903,6 +903,8 @@ def _process_step_result_tick(
                 state.is_running = False
                 # Clear collected_events and collected_waiters since workflow is complete
                 for worker in state.workers.values():
+                    worker.queue.clear()
+                    worker.in_progress.clear()
                     worker.collected_events.clear()
                     worker.static_collect_events.clear()
                     worker.collected_waiters.clear()
@@ -1128,7 +1130,8 @@ def _process_step_result_tick(
                 )
             ),
         )
-        worker_state.in_progress.remove(this_execution)
+        if this_execution in worker_state.in_progress:
+            worker_state.in_progress.remove(this_execution)
     # enqueue next events if there are any
     if not is_completed:
         commands.extend(_drain_eligible_queue(step_id, worker_state, now_seconds))

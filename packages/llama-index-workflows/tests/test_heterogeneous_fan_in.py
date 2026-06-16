@@ -2,6 +2,8 @@
 # Copyright (c) 2026 LlamaIndex Inc.
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from workflows import Context, Workflow, step
 from workflows.context.internal_context import InternalContext
@@ -289,6 +291,50 @@ async def test_completed_run_clears_static_collect_events() -> None:
         "static_collect_events"
     ]
     assert second_static_events == []
+
+
+@pytest.mark.asyncio
+async def test_completed_run_clears_queued_and_in_progress_static_batches() -> None:
+    mode = {"run": 1}
+    joined: list[tuple[int, str, str]] = []
+
+    class CompletionWorkflow(Workflow):
+        @step
+        async def emit(
+            self, ctx: Context, ev: StartEvent
+        ) -> Header | Body | Done | None:
+            if mode["run"] == 1:
+                ctx.send_event(Header(value="h1"))
+                ctx.send_event(Body(value="b1"))
+                ctx.send_event(Header(value="h2"))
+                ctx.send_event(Body(value="b2"))
+            ctx.send_event(Done())
+            return None
+
+        @step(num_workers=1)
+        async def join(self, h: Header, b: Body) -> None:
+            joined.append((mode["run"], h.value, b.value))
+            await asyncio.sleep(0.05)
+            return None
+
+        @step
+        async def finish(self, ev: Done) -> StopEvent:
+            return StopEvent(result=f"done-{mode['run']}")
+
+    workflow = CompletionWorkflow(timeout=10)
+    first = workflow.run()
+    assert await first == "done-1"
+    first_worker = first.ctx.to_dict()["workers"]["join"]
+    assert first_worker["queue"] == []
+    assert first_worker["in_progress"] == []
+
+    mode["run"] = 2
+    second = workflow.run(ctx=first.ctx)
+    assert await second == "done-2"
+    assert joined == [(1, "h1", "b1")]
+    second_worker = second.ctx.to_dict()["workers"]["join"]
+    assert second_worker["queue"] == []
+    assert second_worker["in_progress"] == []
 
 
 def test_collect_mode_state_serializes_static_buffers() -> None:
