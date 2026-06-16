@@ -1,6 +1,6 @@
 ---
 sidebar:
-  order: 18
+  order: 15
 title: Drawing a Workflow
 ---
 
