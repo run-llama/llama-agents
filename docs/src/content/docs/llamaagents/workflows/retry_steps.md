@@ -1,6 +1,6 @@
 ---
 sidebar:
-  order: 10
+  order: 11
 title: Error handling
 ---
 

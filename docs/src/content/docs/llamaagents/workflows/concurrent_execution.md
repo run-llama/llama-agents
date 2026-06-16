@@ -1,6 +1,6 @@
 ---
 sidebar:
-  order: 5
+  order: 3
 title: Concurrent execution of workflows
 ---
 
