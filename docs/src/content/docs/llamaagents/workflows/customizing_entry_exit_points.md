@@ -1,11 +1,11 @@
 ---
 sidebar:
   order: 9
-title: Customizing entry and exit points
+title: Custom start and stop events
 ---
 
-Most of the times, relying on the default entry and exit points we have seen in the [Getting Started](/python/llamaagents/workflows/) section is enough.
-However, workflows support custom events where you normally would expect `StartEvent` and `StopEvent`, let's see how.
+Most of the time, the default `StartEvent` and `StopEvent` we have seen in the [Getting Started](/python/llamaagents/workflows/) section are enough.
+But you can define your own start and stop events where you would normally expect `StartEvent` and `StopEvent`, let's see how.
 
 ## Using a custom `StartEvent`
 
