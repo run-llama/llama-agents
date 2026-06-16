@@ -51,6 +51,37 @@ llama-agents-server my_server.py
 - Human-in-the-loop support for interactive workflows
 - Persistence with built-in SQLite store (or bring your own via `AbstractWorkflowStore`)
 
+## Pressure Diagnostics
+
+Pressure diagnostics are opt-in instrumentation for incident debugging. They
+record workflow step intervals alongside event-loop lag and process RSS
+threshold events, then emit structured log records through
+`llama_agents.server.diagnostics.pressure`.
+
+```python
+from llama_agents.server import PressureDiagnosticsConfig, WorkflowServer
+
+server = WorkflowServer(
+    diagnostics=PressureDiagnosticsConfig(
+        enabled=True,
+        sample_interval=1.0,
+        event_loop_lag_threshold_ms=250,
+        memory_rss_threshold_mb=3000,
+        memory_growth_threshold_mb=500,
+        memory_growth_window_seconds=60,
+        capture_lag_stacks=True,
+    )
+)
+```
+
+Example log payloads include `memory_rss_threshold_exceeded`,
+`memory_growth_threshold_exceeded`, and
+`event_loop_lag_threshold_exceeded`. Each pressure event includes the active or
+overlapping workflow intervals at the time of the sample. Treat those intervals
+as temporal context, not proof that a step caused memory growth or lag. Pair
+these logs with process profilers such as py-spy or Memray when an incident
+needs allocation or CPU attribution.
+
 ## Client
 
 Use [`llama-agents-client`](https://pypi.org/project/llama-agents-client/) to interact with deployed servers programmatically.
