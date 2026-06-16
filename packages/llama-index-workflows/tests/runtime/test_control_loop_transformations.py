@@ -377,9 +377,7 @@ def test_stale_collect_events_firing_reruns_without_deleting_buffer(
         ],
     )
 
-    new_state, commands = _process_step_result_tick(
-        tick, base_state, now_seconds=110.0
-    )
+    new_state, commands = _process_step_result_tick(tick, base_state, now_seconds=110.0)
 
     assert new_state.workers["test_step"].collected_events["buf1"] == [live]
     run_cmds = [c for c in commands if isinstance(c, CommandRunWorker)]
