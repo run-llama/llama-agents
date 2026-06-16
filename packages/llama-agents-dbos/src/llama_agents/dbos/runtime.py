@@ -1070,6 +1070,10 @@ class InternalDBOSAdapter(InternalRunAdapter):
     async def get_now(self) -> float:
         return _durable_time()
 
+    @property
+    def defer_idle_check_for_completed_pull(self) -> bool:
+        return False
+
     async def send_event(self, tick: WorkflowTick) -> None:
         await DBOS.send_async(self._run_id, tick, topic=_IO_STREAM_TICK_TOPIC)
 

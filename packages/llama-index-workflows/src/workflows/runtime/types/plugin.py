@@ -128,6 +128,17 @@ class InternalRunAdapter(ABC):
         """
         ...
 
+    @property
+    def defer_idle_check_for_completed_pull(self) -> bool:
+        """
+        Whether the runner should defer an idle check behind a completed pull
+        task that has not yet been reduced.
+
+        Durable adapters may return False when changing the order of idle
+        stream writes and time reads would break replay of existing runs.
+        """
+        return True
+
     @abstractmethod
     async def send_event(self, tick: WorkflowTick) -> None:
         """

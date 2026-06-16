@@ -443,18 +443,16 @@ class _ControlLoopRunner:
                     tick = self.tick_buffer.pop(0)
                     if isinstance(tick, TickIdleCheck):
                         # Confirm idleness only after earlier buffered work has
-                        # settled. Delayed retries also keep the run non-idle.
-                        if pull_task is not None and pull_task.done():
+                        # settled into the local tick buffer.
+                        if (
+                            self.adapter.defer_idle_check_for_completed_pull
+                            and pull_task is not None
+                            and pull_task.done()
+                        ):
                             self.tick_buffer.append(tick)
                             break
                         if self.tick_buffer:
                             self.tick_buffer.append(tick)
-                            continue
-                        if any(
-                            isinstance(scheduled, TickAddEvent)
-                            for _, _, scheduled in self.scheduled_wakeups
-                        ):
-                            self._idle_check_pending = False
                             continue
                         self._idle_check_pending = False
                     result = await self._process_tick(tick)
