@@ -106,12 +106,15 @@ def _is_shutdown_error(e: BaseException) -> bool:
     )
 
 
-async def _single_pull(adapter: InternalRunAdapter) -> list[WorkflowTick]:
-    """Block for the next tick."""
+async def _single_pull(adapter: InternalRunAdapter) -> WorkflowTick | None:
+    """Single-iteration pull: calls wait_receive once and returns the tick.
+
+    Returns None if timeout (shouldn't happen with unbounded wait).
+    """
     wait_result = await adapter.wait_receive(None)
-    if not isinstance(wait_result, WaitResultTick):
-        return []
-    return [wait_result.tick]
+    if isinstance(wait_result, WaitResultTick):
+        return wait_result.tick
+    return None
 
 
 if TYPE_CHECKING:
@@ -442,15 +445,6 @@ class _ControlLoopRunner:
                 while self.tick_buffer:
                     tick = self.tick_buffer.pop(0)
                     if isinstance(tick, TickIdleCheck):
-                        # Confirm idleness only after earlier buffered work has
-                        # settled into the local tick buffer.
-                        if (
-                            self.adapter.defer_idle_check_for_completed_pull
-                            and pull_task is not None
-                            and pull_task.done()
-                        ):
-                            self.tick_buffer.append(tick)
-                            break
                         if self.tick_buffer:
                             self.tick_buffer.append(tick)
                             continue
@@ -521,7 +515,7 @@ class _ControlLoopRunner:
                 if completed_task is pull_task:
                     # Pull task completed
                     try:
-                        pull_ticks = completed_task.result()
+                        pull_tick = completed_task.result()
                     except asyncio.CancelledError:
                         pull_task = None
                     except Exception:
@@ -529,7 +523,8 @@ class _ControlLoopRunner:
                         pull_task = None
                     else:
                         pull_task = None
-                        self.tick_buffer.extend(pull_ticks)
+                        if pull_tick is not None:
+                            self.tick_buffer.append(pull_tick)
                 else:
                     # Worker task completed
                     self.worker_tasks.discard(completed_task)

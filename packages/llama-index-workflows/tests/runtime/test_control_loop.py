@@ -1017,42 +1017,6 @@ async def test_control_loop_stop_before_delay_uses_upcoming_sleep(
 
 
 @pytest.mark.asyncio
-async def test_control_loop_defers_idle_until_buffered_send_event_settles(
-    test_plugin: MockRunAdapter,
-) -> None:
-    class ContinueEvent(Event):
-        value: str
-
-    class BufferedSendWorkflow(Workflow):
-        @step
-        async def start(self, ctx: Context, ev: StartEvent) -> None:
-            ctx.send_event(ContinueEvent(value="done"))
-
-        @step
-        async def finish(self, ev: ContinueEvent) -> StopEvent:
-            return StopEvent(result=ev.value)
-
-    task = asyncio.create_task(
-        run_control_loop(
-            workflow=BufferedSendWorkflow(timeout=2.0),
-            start_event=StartEvent(),
-            test_runtime=test_plugin,
-        )
-    )
-
-    seen: list[Event] = []
-    while True:
-        ev = await test_plugin.get_stream_event(timeout=1.0)
-        seen.append(ev)
-        if isinstance(ev, StopEvent):
-            break
-
-    result = await asyncio.wait_for(task, timeout=1.0)
-    assert result.result == "done"
-    assert not any(isinstance(ev, WorkflowIdleEvent) for ev in seen)
-
-
-@pytest.mark.asyncio
 async def test_control_loop_emits_idle_event_when_waiting(
     test_plugin: MockRunAdapter,
 ) -> None:

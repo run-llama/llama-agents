@@ -1,5 +1,4 @@
 ---
-"llama-agents-dbos": patch
 "llama-index-workflows": patch
 ---
 
