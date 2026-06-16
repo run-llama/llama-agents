@@ -19,7 +19,7 @@ import pytest
 from workflows import Context, Workflow, step
 from workflows.errors import WorkflowRuntimeError
 from workflows.events import Event, StartEvent, StopEvent, WorkflowIdleEvent
-from workflows.runtime.control_loop import _reduce_tick
+from workflows.runtime.control_loop.reduce import _reduce_tick
 from workflows.runtime.types.commands import (
     CommandFailWorkflow,
     CommandPublishEvent,

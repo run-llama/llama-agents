@@ -36,7 +36,7 @@ from workflows.retry_policy import (
     wait_exponential_jitter,
     wait_fixed,
 )
-from workflows.runtime.control_loop import (
+from workflows.runtime.control_loop.reduce import (
     _add_or_enqueue_event,
     _check_idle_state,
     _process_add_event_tick,

@@ -42,7 +42,7 @@ from workflows.retry_policy import (
     stop_before_delay,
     wait_fixed,
 )
-from workflows.runtime.control_loop import _ControlLoopRunner, control_loop
+from workflows.runtime.control_loop.runner import _ControlLoopRunner, control_loop
 from workflows.runtime.types.internal_state import BrokerState
 from workflows.runtime.types.plugin import RunContext, run_context
 from workflows.runtime.types.step_function import as_step_worker_function
