@@ -1,6 +1,6 @@
 ---
 sidebar:
-  order: 5.5
+  order: 8
 title: Child workflows
 ---
 

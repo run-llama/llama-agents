@@ -1,6 +1,6 @@
 ---
 sidebar:
-  order: 9
+  order: 7
 title: Resource Objects
 ---
 

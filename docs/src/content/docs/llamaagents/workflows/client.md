@@ -1,6 +1,6 @@
 ---
 sidebar:
-  order: 13
+  order: 16
 title: Python Client
 ---
 
