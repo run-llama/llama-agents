@@ -10,10 +10,8 @@ hard-to-reason-about process — fan out over a hundred documents, call an LLM p
 results. That's exactly the kind of run you don't want to start over from zero when the process is
 killed halfway through.
 
-This page shows how to make such a workflow **best-effort checkpoint and resume across a restart —
-in a few lines, with no external durable runtime.** If you'd rather not write any checkpoint code
-at all and can afford a backing database, skip to [DBOS](/python/llamaagents/workflows/dbos); this
-page is the lightweight path.
+This page shows how to make such a workflow **best-effort checkpoint and resume across a restart**,
+in a few lines.
 
 ## The mental model: events are the state
 
