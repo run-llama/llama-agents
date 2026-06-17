@@ -11,37 +11,7 @@ don't want to start over from zero when the process is killed halfway through.
 
 This page shows how to checkpoint that run and resume it after a restart.
 
-## Three strategies, increasing durability
-
-| Strategy | Persists over `run()` calls | Survives process restart | Survives a crash mid-run |
-|---|---|---|---|
-| Data on the workflow instance | ✅ | ❌ | ❌ |
-| `Context.to_dict()` once at the end | ✅ | ✅ | ❌ |
-| Checkpoint loop: snapshot at each step boundary | ✅ | ✅ | ✅ |
-
-The first two are quick to show. The checkpoint loop is the one that survives a crash mid-run, and
-it is most of this page.
-
-### Data on the workflow instance
-
-A workflow is a regular Python class, so you can keep data in instance variables and reuse it across
-`run()` calls on the same instance:
-
-```python
-class CounterWorkflow(Workflow):
-    def __init__(self):
-        super().__init__()
-        self.run_count = 0
-
-    @step
-    async def count(self, ev: StartEvent) -> StopEvent:
-        self.run_count += 1
-        return StopEvent(result=self.run_count)
-```
-
-This is shared state between runs. It survives neither a restart nor a crash.
-
-### Snapshot the context
+## Snapshot the context
 
 A run advances by reducing events in a controlled way, so its state is well defined at every step
 boundary. That state is the events still in flight plus the
@@ -182,7 +152,11 @@ safe to repeat.
 
 ## Keeping snapshots cheap and correct
 
-The snapshot is only as cheap and reliable as what you put in events and state. Two rules.
+The snapshot is only as cheap and reliable as what you put in events and state.
+
+Workflow instance attributes are not part of the snapshot. They can be useful for ordinary Python
+objects that live as long as the workflow instance does, but they are not durable state. If a value
+needs to survive restart, put it in an event or the state store.
 
 Keep heavy or non-serializable inputs in a [Resource](/python/llamaagents/workflows/resources), not
 in events or state. A `Resource` factory is resolved once, cached on the workflow, and never
