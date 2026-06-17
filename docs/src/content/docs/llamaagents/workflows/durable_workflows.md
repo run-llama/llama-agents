@@ -9,7 +9,7 @@ starts fresh. But a workflow is often where you've written an ad hoc concurrent 
 over a hundred documents, call an LLM per chunk, and collect the results. That is the kind of run you
 don't want to start over from zero when the process is killed halfway through.
 
-This page shows how to checkpoint such a workflow and resume it after a restart, in a few lines.
+This page shows how to checkpoint that run and resume it after a restart.
 
 ## Three strategies, increasing durability
 
@@ -63,16 +63,12 @@ result = await w.run(ctx=ctx)   # continues with the restored state
 ```
 
 This survives a restart, but not a crash during the run. You only have the state as of the last
-`to_dict()`. To survive a crash, snapshot as the run progresses. That is the next section.
+`to_dict()`. To survive a crash, snapshot as the run progresses.
 
 On resume, the restored run re-dispatches the events that were still pending and rebuilds the partial
 fan-in buffers. Completed steps don't re-run, because their output is already in the restored state.
-A step that was mid-execution when you captured the state is rewound and runs again from the top. So
-resume is at-least-once, and step side effects need to be safe to repeat.
-
-Snapshotting the state yourself is one way to make it durable. The state can also be persisted as the
-event journal, which is what a durable backend or a server runtime does for you. Either way it
-rebuilds to the same state. This page covers the snapshot path.
+A step that was mid-execution when you captured the state is rewound and runs again from the top.
+Resume is at-least-once, and step side effects need to be safe to repeat.
 
 ## The checkpoint loop
 
@@ -91,8 +87,7 @@ async for ev in handler.stream_events(expose_internal=True):
 result = await handler
 ```
 
-That is the whole mechanism. You observe step boundaries and snapshot the context at each one. To
-resume after a crash, load the last snapshot and pass it to `run()`:
+To resume after a crash, load the last snapshot and pass it to `run()`:
 
 ```python
 w = MyWorkflow()
@@ -100,18 +95,12 @@ ctx = Context.from_dict(w, json.loads(db.load("my-run")))
 result = await w.run(ctx=ctx)
 ```
 
-How the checkpoints behave in a concurrent run:
+In a busy run, you usually don't need to write on every boundary. Each snapshot is a serialize and a
+write, so throttle it if the workflow is noisy. A crash then costs you at most that interval of
+redone work.
 
-- Checkpointing is naturally granular. `NOT_RUNNING` fires per step execution, not per logical step,
-  so a `@step(num_workers=N)` step or a fan-out gives you a checkpoint per item finished. `ev.name`
-  and `ev.worker_id` tell you which one.
-- The snapshot is the state at the moment you take it, not a freeze of the instant that step
-  finished. Other concurrent workers may have advanced. It is still a consistent, resumable
-  checkpoint. It just isn't a deterministic per-step freeze unless the workflow runs one worker at a
-  time.
-- Each snapshot is a serialize and a write, so in a busy run you don't need one on every boundary.
-  Throttle to a fixed interval, and a crash costs you at most that interval of redone work. Skip the
-  snapshot if you took one in the last 10 seconds, for example.
+The snapshot is the state at the moment you take it. Other workers may have advanced since the event
+that triggered the write, but the state is still consistent and resumable.
 
 ## A concurrent fan-out that survives a restart
 
@@ -119,10 +108,10 @@ A workflow that fans out work, runs items concurrently, and collects the results
 kill mid-run doesn't redo completed items:
 
 ```python
-import asyncio, json, os
+import json, os
 from typing import Annotated
-from workflows import Workflow, Context, step
-from workflows.events import Event, StartEvent, StopEvent, StepStateChanged, StepState
+from workflows import Context, Workflow, step
+from workflows.events import Event, StartEvent, StepState, StepStateChanged, StopEvent
 from workflows.resource import Resource
 
 
@@ -142,26 +131,21 @@ def get_client() -> MyApiClient:
 
 class EnrichBatch(Workflow):
     @step
-    async def dispatch(self, ctx: Context, ev: StartEvent) -> WorkItem | None:
-        await ctx.store.set("n", len(ev.item_ids))
-        for item_id in ev.item_ids:
-            ctx.send_event(WorkItem(item_id=item_id))
+    async def dispatch(self, ev: StartEvent) -> list[WorkItem]:
+        return [WorkItem(item_id=item_id) for item_id in ev.item_ids]
 
     @step(num_workers=8)
     async def enrich(
-        self, ctx: Context, ev: WorkItem,
+        self,
+        ev: WorkItem,
         client: Annotated[MyApiClient, Resource(get_client)],
     ) -> WorkDone:
         result = await client.enrich(ev.item_id)   # the expensive, repeatable work
         return WorkDone(item_id=ev.item_id, result=result)
 
     @step
-    async def collect(self, ctx: Context, ev: WorkDone) -> StopEvent | None:
-        n = await ctx.store.get("n")
-        done = ctx.collect_events(ev, [WorkDone] * n)
-        if done is None:
-            return None
-        return StopEvent(result={d.item_id: d.result for d in done})
+    async def collect(self, events: list[WorkDone]) -> StopEvent:
+        return StopEvent(result={ev.item_id: ev.result for ev in events})
 ```
 
 Drive it with the checkpoint loop, and resume from the last snapshot if the process died:
@@ -172,8 +156,8 @@ CKPT = "enrich-batch.json"
 async def run_batch(item_ids):
     wf = EnrichBatch()
     if os.path.exists(CKPT):
-        # Resume from the snapshot. Don't re-send the StartEvent; dispatch
-        # already ran, and completed items are in the collect buffer.
+        # Resume from the snapshot. The pending work and partial fan-in state
+        # are already in the context, so don't send the StartEvent again.
         handler = wf.run(ctx=Context.from_dict(wf, json.load(open(CKPT))))
     else:
         handler = wf.run(item_ids=item_ids)
@@ -185,10 +169,10 @@ async def run_batch(item_ids):
     return await handler
 ```
 
-Say this is killed after 60 of 100 items. The 60 finished `enrich` calls have their `WorkDone`
-events in the collect buffer, which is part of the snapshot. On resume, `dispatch` does not re-run,
-the 60 done items are not re-enriched, and only the remaining `WorkItem` events get processed. The
-collect step fires once all 100 `WorkDone`s are present, across both runs, so the result is correct.
+Say this is killed after 60 of 100 items. The finished `enrich` calls are part of the restored
+workflow state, and the pending `WorkItem`s are still pending. On resume, `dispatch` does not re-run,
+the completed items are not re-enriched, and the list fan-in fires once all 100 `WorkDone`s are
+present across both runs.
 
 The in-flight work does get repeated. At any moment up to `num_workers` `enrich` calls are running
 but not finished, and each of those is rewound and re-enriched on resume. With `num_workers=8` that

@@ -30,7 +30,7 @@ async for ev in handler.stream_events(expose_internal=True):
 emits one event per item.
 
 The [durable workflows](/python/llamaagents/workflows/durable_workflows) checkpoint loop uses this
-event, snapshotting `handler.ctx.to_dict()` on each `NOT_RUNNING`.
+event to snapshot after step executions finish.
 
 ## OpenTelemetry Integration
 
