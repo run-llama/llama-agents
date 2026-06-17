@@ -13,34 +13,6 @@ killed halfway through.
 This page shows how to make such a workflow **best-effort checkpoint and resume across a restart**,
 in a few lines.
 
-## The mental model: events are the state
-
-What makes checkpointing cheap here is that a workflow's runtime state *is* its in-flight events.
-At any instant, "where the workflow is" comes down to: which events sit in step input queues, which
-events a fan-in is still collecting, which steps are mid-execution, and the contents of the
-[state store](/python/llamaagents/workflows/managing_state).
-
-`Context.to_dict()` captures all of that as a single **point-in-time snapshot** — the pending event
-queues, the `collect_events` buffers, any `wait_for_event` waiters, and the state store.
-`Context.from_dict()` rebuilds a context from that snapshot, and passing it to `run()` resumes from
-there. It's a snapshot, **not** a journal: it carries the events that are *currently relevant*, not
-a log of everything that ever happened.
-
-Resume has two behaviors worth internalizing, because together they make a snapshot safe to restart
-from:
-
-- **Completed steps don't re-run.** A step that already finished consumed its triggering event; that
-  event is no longer in the snapshot, so it's never re-dispatched. Its output already lives
-  downstream (in the next step's queue or a collect buffer), so the work is preserved.
-- **In-flight steps are rewound and re-run.** A step that had consumed its event but hadn't finished
-  when the snapshot was taken is rewound — its event goes back on the queue, and on resume the
-  **entire step body executes again from the top.**
-
-The consequence, and the one rule you must design around: **resume re-executes in-flight steps, so
-steps must be safe to repeat.** This is at-least-once execution. If a step performs an external side
-effect (a DB write, a payment, an email) before it returns, that effect can happen again on resume.
-Make those effects idempotent, or guard them with a marker in the state store.
-
 ## Three strategies, increasing durability
 
 | Strategy | Persists over `run()` calls | Survives process restart | Survives a crash mid-run |
@@ -72,8 +44,10 @@ This survives neither a process restart nor a crash — it's just shared state b
 
 ### Snapshot the context
 
-The context's [state store](/python/llamaagents/workflows/managing_state) is async-safe and, unlike
-instance variables, **serializable**. Snapshot it after a run and restore it later — even in a
+A run advances by reducing events in a controlled way, so its state is well-defined at every step
+boundary: the events still in flight (pending in step queues, partial fan-in buffers, waiters) plus
+the [state store](/python/llamaagents/workflows/managing_state). `Context.to_dict()` serializes that
+state; `Context.from_dict()` rebuilds it and `run(ctx=...)` continues from there — even in a
 different process:
 
 ```python
@@ -91,7 +65,16 @@ result = await w.run(ctx=ctx)   # continues with the restored state
 ```
 
 This survives a restart, but not a crash *during* the run — you only have the state as of the last
-explicit `to_dict()`. To survive a crash, snapshot as the run progresses.
+explicit `to_dict()`. To survive a crash, snapshot as the run progresses (next section).
+
+**How resume behaves.** A restored run re-dispatches the events that were still pending and rebuilds
+the partial fan-in buffers, so completed steps are *not* re-run — their output is already in the
+restored state. Any step that was mid-execution when you captured the state is rewound and runs
+again from the top. That makes resume at-least-once: keep step side effects safe to repeat.
+
+(Snapshotting the state yourself is one way to make it durable. The same state can instead be
+persisted as the event journal — what a durable backend or server runtime does for you — and
+rebuilt the same way. This page covers the do-it-yourself snapshot path.)
 
 ## The checkpoint loop
 
@@ -231,8 +214,8 @@ JSON serializer (Pydantic models included); if it hits a value it can't encode, 
 and the *whole* snapshot fails — not just that field. So don't put raw bytes, open connections, or
 arbitrary objects on events.
 
-And the rule from the mental model, restated because it's the one that bites: **steps re-run on
-resume if they were in flight, so make their side effects safe to repeat.**
+And the rule that bites, once more: **steps re-run on resume if they were in flight, so make their
+side effects safe to repeat.**
 
 ## When to reach for DBOS instead
 
