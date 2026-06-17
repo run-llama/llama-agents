@@ -136,10 +136,6 @@ def _warn_ignored_child_config(child: Workflow, slot_name: str) -> None:
     )
 
 
-def _runtime_supports_child_workflows(runtime: Runtime) -> bool:
-    return bool(getattr(runtime, "_supports_child_workflows", True))
-
-
 def _has_custom_workflow_init(cls: type) -> bool:
     return bool(getattr(cls, "_custom_workflow_init", False))
 
@@ -495,12 +491,6 @@ class Workflow(metaclass=WorkflowMeta):
 
     def _switch_runtime(self, new_runtime: Runtime, *, register: bool = True) -> None:
         """Reassign this workflow's runtime, propagating into children."""
-        if self._child_workflows and not _runtime_supports_child_workflows(new_runtime):
-            raise WorkflowValidationError(
-                f"Runtime {type(new_runtime).__name__} does not support child "
-                "workflows. Child workflows require a runtime with namespaced "
-                "child state support."
-            )
         if new_runtime is not self._runtime:
             if self._runtime_locked:
                 raise RuntimeError(
@@ -553,12 +543,6 @@ class Workflow(metaclass=WorkflowMeta):
                 f"{expected.__name__}, got {type(child).__name__}."
             )
         _validate_includable_child(child, name)
-        if not _runtime_supports_child_workflows(self._runtime):
-            raise WorkflowValidationError(
-                f"Runtime {type(self._runtime).__name__} does not support child "
-                f"workflow slot '{name}' on '{type(self).__name__}'. Child "
-                "workflows require a runtime with namespaced child state support."
-            )
         _warn_ignored_child_config(child, name)
         register_child = getattr(self._runtime, "_register_child_workflows", True)
         if child._runtime is self._runtime:

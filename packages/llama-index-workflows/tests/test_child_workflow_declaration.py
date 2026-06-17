@@ -222,7 +222,7 @@ class _RecordingRuntime(BasicRuntime):
         super().track_workflow(workflow)
 
 
-class _NoChildRuntime(BasicRuntime):
+class _LegacyRuntime(BasicRuntime):
     _supports_child_workflows = False
 
 
@@ -300,20 +300,25 @@ def test_track_fires_once_per_workflow_in_tree() -> None:
     assert len(_steps_at_track(rt, child)) == 1
 
 
-def test_runtime_without_child_support_rejects_child_declaration() -> None:
-    rt = _NoChildRuntime()
+def test_runtime_without_child_marker_allows_child_declaration() -> None:
+    rt = _LegacyRuntime()
     child = Child(runtime=BasicRuntime())
     with rt.registering():
-        with pytest.raises(
-            WorkflowValidationError, match="does not support child workflow"
-        ):
-            Parent(child=child)
+        parent = Parent(child=child)
+
+    assert parent.runtime is rt
+    assert parent.child.runtime is rt
+    assert parent.child._runtime_locked is True
 
 
-def test_switching_parent_to_runtime_without_child_support_rejected() -> None:
+def test_switching_parent_to_runtime_without_child_marker_allowed() -> None:
     parent = Parent(child=Child())
-    with pytest.raises(WorkflowValidationError, match="does not support child"):
-        parent._switch_runtime(_NoChildRuntime())
+    rt = _LegacyRuntime()
+
+    parent._switch_runtime(rt)
+
+    assert parent.runtime is rt
+    assert parent.child.runtime is rt
 
 
 def test_init_raises_skips_finalize() -> None:
