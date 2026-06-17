@@ -24,7 +24,7 @@ dependencies = [
   "boto3>=1.42.75",
   "llama-agents-core>=0.5.0",
   "llama-agents-appserver>=0.5.0",
-  "llama-agents-server>=0.2.0",
+  "llama-agents-server>=0.6.1",
   "llama-index-workflows>=2.22.0,<3.0.0",
   "click>=8.3.1"
 ]

@@ -37,7 +37,7 @@ dependencies = [
 # Optionals are now just an alias to additionally install
 # a less pinned version of the client/server packages.
 [project.optional-dependencies]
-server = ["llama-agents-server>=0.1.0,<1.0.0"]
+server = ["llama-agents-server>=0.6.1,<1.0.0"]
 client = ["llama-agents-client>=0.1.0,<1.0.0"]
 
 [tool.basedpyright]
