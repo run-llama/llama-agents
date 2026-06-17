@@ -27,9 +27,12 @@ from workflows.context.serializers import JsonSerializer, PickleSerializer
 from workflows.context.state_store import (
     DictState,
     InMemoryStateStore,
+    build_namespaced_state,
     decode_state,
     deserialize_state_from_dict,
     encode_state,
+    in_memory_namespace_factory,
+    namespaced_state_types,
 )
 from workflows.decorators import step
 from workflows.errors import ContextSerdeError, ContextStateError, WorkflowRuntimeError
@@ -64,11 +67,15 @@ def internal_ctx(workflow: Workflow) -> Context:
     runtime = BasicRuntime()
     run_id = "test-run"
     init_state = BrokerState.from_workflow(workflow)
-    # Create queues with state store so get_internal_adapter() returns adapter with store
+    # Per-namespace stores so get_internal_adapter() returns an adapter with state
     queues = AsyncioAdapterQueues(
         run_id=run_id,
         init_state=init_state,
-        state_store=InMemoryStateStore(DictState()),
+        namespaced=build_namespaced_state(
+            workflow,
+            in_memory_namespace_factory(namespaced_state_types(workflow)),
+            JsonSerializer(),
+        ),
     )
     runtime._queues[run_id] = queues
     workflow._runtime = runtime

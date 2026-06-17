@@ -77,7 +77,7 @@ class _ServerInternalRunAdapter(BaseInternalRunAdapterDecorator):
         self._write_lock: asyncio.Lock | None = None
 
     @override
-    def get_state_store(self) -> StateStore[Any]:
+    def get_state_store(self, namespace: tuple[str, ...] = ()) -> StateStore[Any]:
         if self._state_store is not None:
             return self._state_store
         initial = self._runtime._initial_state.pop(self.run_id, None)

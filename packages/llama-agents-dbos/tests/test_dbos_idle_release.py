@@ -75,7 +75,9 @@ class StubInternalAdapter(InternalRunAdapter):
     async def close(self) -> None:
         self.closed = True
 
-    def get_state_store(self) -> StateStore[Any] | None:
+    def get_state_store(
+        self, namespace: tuple[str, ...] = ()
+    ) -> StateStore[Any] | None:
         return None
 
 
@@ -102,7 +104,9 @@ class StubExternalAdapter(ExternalRunAdapter):
     async def get_result(self) -> StopEvent:
         return self._result
 
-    def get_state_store(self) -> StateStore[Any] | None:
+    def get_state_store(
+        self, namespace: tuple[str, ...] = ()
+    ) -> StateStore[Any] | None:
         return None
 
 

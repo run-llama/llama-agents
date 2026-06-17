@@ -6,6 +6,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import warnings
+from inspect import Parameter, Signature
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -39,6 +41,22 @@ logger = logging.getLogger(__name__)
 
 # Default run timeout. Referenced by the constructor and type-checker field.
 DEFAULT_TIMEOUT = 45.0
+
+
+class _UnsetTimeout:
+    """Sentinel for an unspecified ``timeout``.
+
+    Lets the constructor tell "user passed nothing" apart from "user passed a
+    value" without knowing yet whether this instance is a root or a child. A
+    root resolves an unset timeout to ``DEFAULT_TIMEOUT``; a child defers to its
+    parent and gets no deadline of its own.
+    """
+
+    def __repr__(self) -> str:
+        return "<unset>"
+
+
+_UNSET_TIMEOUT = _UnsetTimeout()
 
 
 def _resolve_child_slots(cls: type) -> dict[str, type]:
@@ -100,6 +118,28 @@ def _validate_includable_child(child: Workflow, slot_name: str) -> None:
         )
 
 
+def _warn_ignored_child_config(child: Workflow, slot_name: str) -> None:
+    ignored: list[str] = []
+    if child._verbose:
+        ignored.append("verbose=True")
+    if child._num_concurrent_runs is not None:
+        ignored.append(f"num_concurrent_runs={child._num_concurrent_runs!r}")
+    if child._workflow_name is not None:
+        ignored.append(f"workflow_name={child._workflow_name!r}")
+    if not ignored:
+        return
+    warnings.warn(
+        f"Child workflow slot '{slot_name}' on '{type(child).__name__}' has "
+        f"run-level config ignored when nested: {', '.join(ignored)}.",
+        UserWarning,
+        stacklevel=3,
+    )
+
+
+def _has_custom_workflow_init(cls: type) -> bool:
+    return bool(getattr(cls, "_custom_workflow_init", False))
+
+
 def _config_field(*, alias: str, default: Any = None) -> Any:
     """dataclass_transform field specifier for Workflow config params."""
     return default
@@ -131,10 +171,17 @@ class WorkflowMeta(type):
     def __init__(cls, name: str, bases: tuple[type, ...], dct: dict[str, Any]) -> None:
         super().__init__(name, bases, dct)
         cls._step_functions: dict[str, StepFunction] = {}
+        cls._custom_workflow_init = False
 
         # A user-defined __init__ always wins.
         workflow_cls = globals().get("Workflow")
-        if workflow_cls is None or "__init__" in dct:
+        if workflow_cls is None:
+            return
+        if "__init__" in dct:
+            cls._custom_workflow_init = cls is not workflow_cls
+            return
+        if any(getattr(base, "_custom_workflow_init", False) for base in bases):
+            cls._custom_workflow_init = True
             return
         if not _resolve_child_slots(cls):
             return
@@ -144,6 +191,72 @@ class WorkflowMeta(type):
             or inherited_init is _synthesized_workflow_init
         ):
             setattr(cls, "__init__", _synthesized_workflow_init)
+            cls.__signature__ = _child_slot_signature(cls)
+
+
+def _child_slot_signature(cls: type) -> Signature:
+    params = [
+        Parameter(
+            name,
+            kind=Parameter.KEYWORD_ONLY,
+            default=Parameter.empty,
+            annotation=slot_type,
+        )
+        for name, slot_type in _resolve_child_slots(cls).items()
+    ]
+    params.extend(
+        [
+            Parameter(
+                "timeout",
+                kind=Parameter.KEYWORD_ONLY,
+                default=_UNSET_TIMEOUT,
+                annotation=float | None | _UnsetTimeout,
+            ),
+            Parameter(
+                "disable_validation",
+                kind=Parameter.KEYWORD_ONLY,
+                default=False,
+                annotation=bool,
+            ),
+            Parameter(
+                "verbose",
+                kind=Parameter.KEYWORD_ONLY,
+                default=False,
+                annotation=bool,
+            ),
+            Parameter(
+                "resource_manager",
+                kind=Parameter.KEYWORD_ONLY,
+                default=None,
+                annotation=ResourceManager | None,
+            ),
+            Parameter(
+                "num_concurrent_runs",
+                kind=Parameter.KEYWORD_ONLY,
+                default=None,
+                annotation=int | None,
+            ),
+            Parameter(
+                "runtime",
+                kind=Parameter.KEYWORD_ONLY,
+                default=None,
+                annotation=Any,
+            ),
+            Parameter(
+                "workflow_name",
+                kind=Parameter.KEYWORD_ONLY,
+                default=None,
+                annotation=str | None,
+            ),
+            Parameter(
+                "skip_graph_checks",
+                kind=Parameter.KEYWORD_ONLY,
+                default=None,
+                annotation=set[WorkflowGraphCheck] | None,
+            ),
+        ]
+    )
+    return Signature(params)
 
 
 class Workflow(metaclass=WorkflowMeta):
@@ -200,7 +313,7 @@ class Workflow(metaclass=WorkflowMeta):
     _child_workflow_slots_cache: ClassVar[dict[str, type] | None] = None
 
     # Phantom dataclass_transform fields for typed subclass constructors.
-    _timeout_arg: float | None = _config_field(alias="timeout", default=DEFAULT_TIMEOUT)
+    _timeout_arg: float | None = _config_field(alias="timeout", default=_UNSET_TIMEOUT)
     _disable_validation_arg: bool = _config_field(
         alias="disable_validation", default=False
     )
@@ -219,7 +332,7 @@ class Workflow(metaclass=WorkflowMeta):
 
     def __init__(
         self,
-        timeout: float | None = DEFAULT_TIMEOUT,
+        timeout: float | None | _UnsetTimeout = _UNSET_TIMEOUT,
         disable_validation: bool = False,
         verbose: bool = False,
         resource_manager: ResourceManager | None = None,
@@ -233,7 +346,10 @@ class Workflow(metaclass=WorkflowMeta):
 
         Args:
             timeout (float | None): Max seconds to wait for completion. `None`
-                disables the timeout.
+                disables the timeout. When unset, a root workflow defaults to
+                45s; a child workflow defaults to no timeout of its own and is
+                bounded by its parent. An explicit value (including `None`) is
+                always honored.
             disable_validation (bool): Skip pre-run validation of the event graph
                 (not recommended).
             verbose (bool): If True, print step activity.
@@ -261,8 +377,16 @@ class Workflow(metaclass=WorkflowMeta):
             _ensure_stop_event_class,
         )
 
-        # Configuration
-        self._timeout = timeout
+        # Configuration. Resolve an unset timeout to the root default so the
+        # runner and `_timeout` readers see a concrete value; `_timeout_set`
+        # records whether the user supplied one, which lets a child suppress its
+        # own deadline (see `_child_namespace_timeout`).
+        if isinstance(timeout, _UnsetTimeout):
+            self._timeout_set = False
+            self._timeout: float | None = DEFAULT_TIMEOUT
+        else:
+            self._timeout_set = True
+            self._timeout = timeout
         self._verbose = verbose
         self._disable_validation = disable_validation
         self._num_concurrent_runs = num_concurrent_runs
@@ -324,21 +448,41 @@ class Workflow(metaclass=WorkflowMeta):
         self._runtime.track_workflow(self)
 
     def _validate_valid_step_message(self, step: str, message: Event) -> None:
-        """Validate that a step name exists in the workflow."""
-        if step not in self._get_steps():
-            raise WorkflowRuntimeError(f"Step {step} does not exist")
+        """Validate that a step name exists in the workflow and accepts ``message``."""
+        self._resolve_target_step(step, message)
 
-        step_func = self._get_steps()[step]
+    def _resolve_target_step(
+        self, step: str, message: Event, base_namespace: tuple[str, ...] = ()
+    ) -> StepId:
+        """Resolve a ``send_event(step=...)`` target to a validated ``StepId``.
+
+        ``step`` is resolved relative to ``base_namespace`` — root (``()``) for
+        external sends, the emitting step's namespace for internal sends — so a
+        bare name lands in that namespace and a ``"child/answer"`` path descends
+        from it. The single resolver shared by ``Context.send_event`` and
+        ``ExternalContext.send_event``: it validates against the full namespaced
+        step set (not the root-only one) and that the target accepts the message,
+        naming the valid steps when it rejects.
+        """
+        parsed = StepId.from_str(step)
+        target = StepId(base_namespace + parsed.namespace, parsed.name)
+        namespaced = self._get_namespaced_steps()
+        step_func = namespaced.get(target)
+        if step_func is None:
+            valid = ", ".join(sorted(str(s) for s in namespaced))
+            raise WorkflowRuntimeError(
+                f"Step {step} does not exist. Valid steps: {valid}"
+            )
         step_config = step_func._step_config
-        is_accepted = step_accepts_event(
+        if not step_accepts_event(
             message,
             step_config.accepted_events,
             allow_subclasses=step_config.accept_event_subclasses,
-        )
-        if not is_accepted:
+        ):
             raise WorkflowRuntimeError(
                 f"Step {step} does not accept event of type {type(message)}"
             )
+        return target
 
     @property
     def runtime(self) -> Runtime:
@@ -399,19 +543,75 @@ class Workflow(metaclass=WorkflowMeta):
                 f"{expected.__name__}, got {type(child).__name__}."
             )
         _validate_includable_child(child, name)
-        child._switch_runtime(self._runtime)
+        _warn_ignored_child_config(child, name)
+        register_child = getattr(self._runtime, "_register_child_workflows", True)
+        if child._runtime is self._runtime:
+            if not register_child:
+                child._runtime.untrack_workflow(child)
+        else:
+            child._runtime.untrack_workflow(child)
+            child._switch_runtime(self._runtime, register=register_child)
         child._runtime_locked = True
         setattr(self, name, child)
         self._child_workflows[name] = child
 
     def _ensure_children_attached(self) -> None:
         """Attach any declared child instances not yet wired in."""
-        for name in type(self)._get_child_workflow_slots():
+        for name, expected in type(self)._get_child_workflow_slots().items():
             if name in self._child_workflows:
                 continue
+            if name not in self.__dict__ and isinstance(
+                getattr(type(self), name, None), Workflow
+            ):
+                raise WorkflowValidationError(
+                    f"Child workflow slot '{name}' on '{type(self).__name__}' uses "
+                    "a shared class-body Workflow instance. Pass a fresh child "
+                    "instance to the constructor instead."
+                )
             child = getattr(self, name, None)
+            if child is None:
+                if _has_custom_workflow_init(type(self)) and not (
+                    self._missing_child_is_used(name, expected)
+                ):
+                    continue
+                # Inline import: representation validation imports Workflow.
+                from .representation.validate import _validate_child_type_graph
+
+                _validate_child_type_graph(cast(Any, type(self)))
+                raise WorkflowValidationError(
+                    f"Missing child workflow for slot '{name}' on "
+                    f"'{type(self).__name__}'. Pass a {expected.__name__} "
+                    "instance to the constructor."
+                )
             if isinstance(child, Workflow):
+                if _has_custom_workflow_init(type(self)) and (
+                    child._start_event_class is StartEvent
+                    or child._stop_event_class is StopEvent
+                ):
+                    continue
                 self._attach_child(name, child)
+
+    def _missing_child_is_used(self, name: str, expected: type) -> bool:
+        """Whether a missing declared child forms a parent graph boundary."""
+        # Inline import: representation validation imports Workflow.
+        from .representation.validate import (
+            _ensure_start_event_class,
+            _ensure_stop_event_class,
+        )
+
+        expected_workflow = cast("type[Workflow]", expected)
+        child_step_configs = {
+            step_name: step_func._step_config
+            for step_name, step_func in expected_workflow._get_steps_from_class().items()
+        }
+        child_start = _ensure_start_event_class(child_step_configs, expected.__name__)
+        child_stop = _ensure_stop_event_class(child_step_configs, expected.__name__)
+        if child_start is StartEvent or child_stop is StopEvent:
+            return False
+        for cfg in self._step_configs().values():
+            if child_start in cfg.return_types or child_stop in cfg.accepted_events:
+                return True
+        return False
 
     @property
     def workflow_name(self) -> str:
@@ -518,6 +718,14 @@ class Workflow(metaclass=WorkflowMeta):
             for child_id, func in child._get_namespaced_steps().items():
                 result[StepId((field_name, *child_id.namespace), child_id.name)] = func
         return result
+
+    def _child_namespace_timeout(self) -> float | None:
+        """Per-namespace deadline to arm when this instance runs as a child.
+
+        An unset child defers to its parent and gets no deadline of its own; an
+        explicit timeout — including ``None`` (no deadline) — is honored.
+        """
+        return self._timeout if self._timeout_set else None
 
     def _namespace_instances(self) -> dict[tuple[str, ...], Workflow]:
         """Map each namespace path to the workflow instance that owns it."""
@@ -694,8 +902,23 @@ class Workflow(metaclass=WorkflowMeta):
         )
 
         step_configs = self._step_configs()
+        # A child is "triggered" when some parent step emits its StartEvent; only
+        # then does it form a boundary in the parent graph (StartEvent crosses
+        # out, StopEvent crosses back in). Children attached but never triggered
+        # are inert and excluded so they don't trip reachability.
+        parent_return_types: set[type] = set()
+        for cfg in step_configs.values():
+            parent_return_types.update(cfg.return_types)
+        child_boundaries = [
+            (child._start_event_class, child._stop_event_class)
+            for child in self._child_workflows.values()
+            if child._start_event_class in parent_return_types
+        ]
         result = _validate_workflow(
-            step_configs, self.__class__.__name__, self._skip_graph_checks
+            step_configs,
+            self.__class__.__name__,
+            self._skip_graph_checks,
+            child_boundaries=child_boundaries,
         )
         self._start_event_class = result.start_event_class
         self._stop_event_class = result.stop_event_class

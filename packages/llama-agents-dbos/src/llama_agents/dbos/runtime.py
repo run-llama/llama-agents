@@ -85,6 +85,7 @@ from workflows.runtime.types.step_function import (
     as_step_worker_functions,
     create_workflow_run_function,
 )
+from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import WorkflowTick
 from workflows.workflow import Workflow
 
@@ -420,7 +421,7 @@ class DBOSRuntime(Runtime):
             return await workflow_run_fn(init_state, start_event, tags)
 
         # Wrap steps with stable names
-        wrapped_steps: dict[str, StepWorkerFunction] = {
+        wrapped_steps: dict[StepId, StepWorkerFunction] = {
             step_name: DBOS.step(name=f"{name}.{step_name}")(step)
             for step_name, step in as_step_worker_functions(workflow).items()
         }
@@ -1156,7 +1157,9 @@ class InternalDBOSAdapter(InternalRunAdapter):
                 )
         return self._state_store
 
-    def get_state_store(self) -> StateStore[Any] | None:
+    def get_state_store(
+        self, namespace: tuple[str, ...] = ()
+    ) -> StateStore[Any] | None:
         return self._get_or_create_state_store()
 
     def is_replaying(self) -> bool:

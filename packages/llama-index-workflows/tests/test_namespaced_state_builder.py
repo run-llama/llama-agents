@@ -17,7 +17,6 @@ from workflows.context.state_store import (
     in_memory_namespace_factory,
     namespaced_seed_payloads,
     namespaced_state_types,
-    namespaced_underlying_state_type,
 )
 from workflows.decorators import step
 from workflows.events import StartEvent, StopEvent
@@ -76,17 +75,18 @@ def _namespaced(wf: Workflow, serializer: JsonSerializer) -> NamespacedStateStor
     return build_namespaced_state(wf, in_memory_namespace_factory(types), serializer)
 
 
-def test_state_types_and_underlying_type_for_childless() -> None:
+def test_state_types_for_childless() -> None:
     wf = Childless()
-    assert set(namespaced_state_types(wf)) == {()}
-    assert namespaced_underlying_state_type(wf) is RootState
+    types = namespaced_state_types(wf)
+    assert types == {(): RootState}
 
 
-def test_state_types_and_underlying_type_for_child_ful() -> None:
+def test_state_types_for_child_ful() -> None:
     wf = Parent(child=Child())
     types = namespaced_state_types(wf)
     assert set(types) == {(), ("child",)}
-    assert namespaced_underlying_state_type(wf) is DictState
+    # Each namespace carries its own inferred type; an untyped child is DictState.
+    assert types[("child",)] is DictState
 
 
 def test_single_namespace_router_is_flat() -> None:

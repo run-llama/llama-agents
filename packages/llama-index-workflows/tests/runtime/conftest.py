@@ -192,7 +192,9 @@ class MockRunAdapter(
     def has_stream_events(self) -> bool:
         return not self._event_stream.empty()
 
-    def get_state_store(self) -> "InMemoryStateStore[Any] | None":
+    def get_state_store(
+        self, namespace: tuple[str, ...] = ()
+    ) -> "InMemoryStateStore[Any] | None":
         return self._state_store
 
     def set_state_store(self, state_store: "InMemoryStateStore[Any]") -> None:
