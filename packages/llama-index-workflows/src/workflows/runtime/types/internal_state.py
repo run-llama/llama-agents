@@ -154,10 +154,11 @@ class BrokerState:
         # names, preserving the pre-namespace wire format.
         catch_error_handlers: dict[StepId, CatchErrorHandler] = {}
         handler_for_step: dict[StepId, StepId] = {}
-        # Per-child-namespace timeouts from each child instance's ``_timeout``.
+        # Per-child-namespace timeouts from each child instance. A child only
+        # arms its own deadline when it was given an explicit, non-None timeout;
+        # an unset child defers to its parent (see ``_child_namespace_timeout``).
         # The root timeout (namespace ()) stays the single global deadline
-        # scheduled in the control loop's ``run()``; only child namespaces get a
-        # per-namespace deadline here.
+        # scheduled in the control loop's ``run()``.
         namespace_timeouts: dict[tuple[str, ...], float] = {}
         for namespace, instance in workflow._namespace_instances().items():
             for name, handler in instance._catch_error_handlers.items():
@@ -166,8 +167,10 @@ class BrokerState:
                 handler_for_step[StepId(namespace, step_name)] = StepId(
                     namespace, handler_name
                 )
-            if namespace != () and instance._timeout is not None:
-                namespace_timeouts[namespace] = instance._timeout
+            if namespace != ():
+                child_timeout = instance._child_namespace_timeout()
+                if child_timeout is not None:
+                    namespace_timeouts[namespace] = child_timeout
         return BrokerState(
             is_running=False,
             config=BrokerConfig(

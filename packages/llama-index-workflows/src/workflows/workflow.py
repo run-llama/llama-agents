@@ -42,6 +42,22 @@ logger = logging.getLogger(__name__)
 DEFAULT_TIMEOUT = 45.0
 
 
+class _UnsetTimeout:
+    """Sentinel for an unspecified ``timeout``.
+
+    Lets the constructor tell "user passed nothing" apart from "user passed a
+    value" without knowing yet whether this instance is a root or a child. A
+    root resolves an unset timeout to ``DEFAULT_TIMEOUT``; a child defers to its
+    parent and gets no deadline of its own.
+    """
+
+    def __repr__(self) -> str:
+        return "<unset>"
+
+
+_UNSET_TIMEOUT = _UnsetTimeout()
+
+
 def _resolve_child_slots(cls: type) -> dict[str, type]:
     """Resolve workflow-typed annotations from ``cls`` and its bases."""
     workflow_cls = globals().get("Workflow")
@@ -219,7 +235,7 @@ class Workflow(metaclass=WorkflowMeta):
     _child_workflow_slots_cache: ClassVar[dict[str, type] | None] = None
 
     # Phantom dataclass_transform fields for typed subclass constructors.
-    _timeout_arg: float | None = _config_field(alias="timeout", default=DEFAULT_TIMEOUT)
+    _timeout_arg: float | None = _config_field(alias="timeout", default=_UNSET_TIMEOUT)
     _disable_validation_arg: bool = _config_field(
         alias="disable_validation", default=False
     )
@@ -238,7 +254,7 @@ class Workflow(metaclass=WorkflowMeta):
 
     def __init__(
         self,
-        timeout: float | None = DEFAULT_TIMEOUT,
+        timeout: float | None | _UnsetTimeout = _UNSET_TIMEOUT,
         disable_validation: bool = False,
         verbose: bool = False,
         resource_manager: ResourceManager | None = None,
@@ -252,7 +268,10 @@ class Workflow(metaclass=WorkflowMeta):
 
         Args:
             timeout (float | None): Max seconds to wait for completion. `None`
-                disables the timeout.
+                disables the timeout. When unset, a root workflow defaults to
+                45s; a child workflow defaults to no timeout of its own and is
+                bounded by its parent. An explicit value (including `None`) is
+                always honored.
             disable_validation (bool): Skip pre-run validation of the event graph
                 (not recommended).
             verbose (bool): If True, print step activity.
@@ -280,8 +299,16 @@ class Workflow(metaclass=WorkflowMeta):
             _ensure_stop_event_class,
         )
 
-        # Configuration
-        self._timeout = timeout
+        # Configuration. Resolve an unset timeout to the root default so the
+        # runner and `_timeout` readers see a concrete value; `_timeout_set`
+        # records whether the user supplied one, which lets a child suppress its
+        # own deadline (see `_child_namespace_timeout`).
+        if isinstance(timeout, _UnsetTimeout):
+            self._timeout_set = False
+            self._timeout: float | None = DEFAULT_TIMEOUT
+        else:
+            self._timeout_set = True
+            self._timeout = timeout
         self._verbose = verbose
         self._disable_validation = disable_validation
         self._num_concurrent_runs = num_concurrent_runs
@@ -538,6 +565,14 @@ class Workflow(metaclass=WorkflowMeta):
             for child_id, func in child._get_namespaced_steps().items():
                 result[StepId((field_name, *child_id.namespace), child_id.name)] = func
         return result
+
+    def _child_namespace_timeout(self) -> float | None:
+        """Per-namespace deadline to arm when this instance runs as a child.
+
+        An unset child defers to its parent and gets no deadline of its own; an
+        explicit timeout — including ``None`` (no deadline) — is honored.
+        """
+        return self._timeout if self._timeout_set else None
 
     def _namespace_instances(self) -> dict[tuple[str, ...], Workflow]:
         """Map each namespace path to the workflow instance that owns it."""

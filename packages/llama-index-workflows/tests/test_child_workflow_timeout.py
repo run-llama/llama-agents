@@ -18,6 +18,8 @@ from workflows import Workflow
 from workflows.decorators import catch_error, step
 from workflows.errors import WorkflowTimeoutError
 from workflows.events import StartEvent, StepFailedEvent, StopEvent
+from workflows.runtime.types.internal_state import BrokerState
+from workflows.workflow import DEFAULT_TIMEOUT
 
 
 class ChildStart(StartEvent):
@@ -166,6 +168,38 @@ class TopOfSlowGrand(Workflow):
     @step
     async def finish(self, ev: MidStop) -> StopEvent:
         return StopEvent(result="never")
+
+
+# --- Default resolution: root keeps 45s, an unset child gets no deadline -------
+
+
+def test_unset_child_arms_no_deadline_root_keeps_default() -> None:
+    # A child constructed without a timeout defers to its parent: no per-namespace
+    # deadline is armed, while the root still resolves to the 45s default.
+    state = BrokerState.from_workflow(ParentOfSlowChild(child=SlowChild()))
+    assert state.config.namespace_timeouts == {}
+    assert state.config.timeout == DEFAULT_TIMEOUT
+
+
+def test_explicit_child_timeout_arms_namespace_deadline() -> None:
+    state = BrokerState.from_workflow(ParentOfSlowChild(child=SlowChild(timeout=0.1)))
+    assert state.config.namespace_timeouts == {("child",): 0.1}
+
+
+def test_explicit_child_none_timeout_arms_no_deadline() -> None:
+    # Explicit None means "no deadline" — same armed state as unset, but chosen.
+    state = BrokerState.from_workflow(ParentOfSlowChild(child=SlowChild(timeout=None)))
+    assert state.config.namespace_timeouts == {}
+
+
+def test_root_timeout_resolution() -> None:
+    # Unset root → 45s default; explicit None → no root deadline.
+    assert (
+        BrokerState.from_workflow(ParentOfSlowChild(child=SlowChild())).config.timeout
+        == DEFAULT_TIMEOUT
+    )
+    explicit_none = ParentOfSlowChild(child=SlowChild(), timeout=None)
+    assert BrokerState.from_workflow(explicit_none).config.timeout is None
 
 
 @pytest.mark.asyncio
