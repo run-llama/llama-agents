@@ -161,6 +161,8 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
     workflow run state.
     """
 
+    _supports_child_workflows = False
+
     def __init__(
         self,
         decorated: Runtime,

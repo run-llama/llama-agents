@@ -287,6 +287,8 @@ class DBOSRuntime(Runtime):
     enabling state recovery across process restarts.
     """
 
+    _supports_child_workflows = False
+
     def __init__(self, **kwargs: Unpack[DBOSRuntimeConfig]) -> None:
         """Initialize the DBOS runtime.
 

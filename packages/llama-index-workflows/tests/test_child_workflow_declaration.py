@@ -222,6 +222,10 @@ class _RecordingRuntime(BasicRuntime):
         super().track_workflow(workflow)
 
 
+class _NoChildRuntime(BasicRuntime):
+    _supports_child_workflows = False
+
+
 def _steps_at_track(rt: _RecordingRuntime, wf: Workflow) -> list[frozenset[StepId]]:
     """The step sets captured each time ``wf`` was tracked (one per call)."""
     return [steps for wf_id, steps in rt.track_calls if wf_id == id(wf)]
@@ -294,6 +298,22 @@ def test_track_fires_once_per_workflow_in_tree() -> None:
     # _attach_child re-homing a same-runtime child.
     assert len(_steps_at_track(rt, parent)) == 1
     assert len(_steps_at_track(rt, child)) == 1
+
+
+def test_runtime_without_child_support_rejects_child_declaration() -> None:
+    rt = _NoChildRuntime()
+    child = Child(runtime=BasicRuntime())
+    with rt.registering():
+        with pytest.raises(
+            WorkflowValidationError, match="does not support child workflow"
+        ):
+            Parent(child=child)
+
+
+def test_switching_parent_to_runtime_without_child_support_rejected() -> None:
+    parent = Parent(child=Child())
+    with pytest.raises(WorkflowValidationError, match="does not support child"):
+        parent._switch_runtime(_NoChildRuntime())
 
 
 def test_init_raises_skips_finalize() -> None:

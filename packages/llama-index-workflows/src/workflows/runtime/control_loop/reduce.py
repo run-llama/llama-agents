@@ -591,8 +591,9 @@ def _apply_step_result(
             # still in flight, so a child that stops while a sibling runs cannot
             # surface a second StopEvent. The run keeps running; only the root
             # StopEvent above completes it. The event is NOT published to the
-            # stream — that would signal completion to root stream consumers
-            # (Phase 5 adds opt-in child streaming).
+            # root stream by default because root consumers treat StopEvent as
+            # completion; stream_events(include_children=True) opts into child
+            # events separately.
             parent_namespace = step_id.namespace[:-1]
             terminate_namespace(state, step_id.namespace)
             acc.commands.append(CommandCancelNamespace(namespace=step_id.namespace))

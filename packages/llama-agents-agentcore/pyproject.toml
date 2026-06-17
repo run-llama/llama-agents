@@ -25,6 +25,7 @@ dependencies = [
   "llama-agents-core>=0.5.0",
   "llama-agents-appserver>=0.5.0",
   "llama-agents-server>=0.2.0",
+  "llama-index-workflows>=2.22.0,<3.0.0",
   "click>=8.3.1"
 ]
 
@@ -34,3 +35,4 @@ module-name = "llama_agents.agentcore"
 [tool.uv.sources]
 llama-agents-core = {workspace = true}
 llama-agents-appserver = {workspace = true}
+llama-index-workflows = {workspace = true}
