@@ -20,7 +20,7 @@ from dbos import DBOS, DBOSConfig
 from llama_agents.dbos import DBOSRuntime
 from llama_agents.dbos.journal.crud import SqliteJournalCrud
 from llama_agents.dbos.journal.task_journal import TaskJournal
-from llama_agents.dbos.runtime import InternalDBOSAdapter
+from llama_agents.dbos.runtime import ExternalDBOSAdapter, InternalDBOSAdapter
 from llama_agents.server._pool import PoolProvider
 from llama_agents.server._store.postgres_state_store import PostgresStateStore
 from llama_agents.server._store.sqlite.sqlite_state_store import SqliteStateStore
@@ -55,6 +55,32 @@ def _fake_sqlite_engine() -> Engine:
     )
 
 
+class _TrackedChildStart(StartEvent):
+    pass
+
+
+class _TrackedChildStop(StopEvent):
+    pass
+
+
+class _TrackedChild(Workflow):
+    @step
+    async def run_child(self, ev: _TrackedChildStart) -> _TrackedChildStop:
+        return _TrackedChildStop()
+
+
+class _TrackedParent(Workflow):
+    child: _TrackedChild
+
+    @step
+    async def start(self, ev: StartEvent) -> _TrackedChildStart:
+        return _TrackedChildStart()
+
+    @step
+    async def finish(self, ev: _TrackedChildStop) -> StopEvent:
+        return StopEvent(result="done")
+
+
 def test_postgres_adapter_uses_resolved_pool_for_sync_state_store() -> None:
     pool = cast(asyncpg.Pool, object())
 
@@ -77,6 +103,48 @@ def test_postgres_adapter_uses_resolved_pool_for_sync_state_store() -> None:
     # The async factory raising above proves the resolved pool was used
     # synchronously; confirm it reached the storage layer.
     assert cast(Any, state_store)._storage._pool is pool
+
+
+@pytest.mark.asyncio
+async def test_external_postgres_adapter_resolves_pool_lazily_for_state_store() -> None:
+    pool = cast(asyncpg.Pool, object())
+    calls = 0
+
+    async def factory() -> asyncpg.Pool:
+        nonlocal calls
+        calls += 1
+        return pool
+
+    adapter = ExternalDBOSAdapter(
+        run_id="run-1",
+        pool=PoolProvider.borrowed(factory),
+        schema="dbos",
+    )
+
+    state_store = adapter.get_state_store(("child",))
+
+    assert state_store is not None
+    assert state_store.to_dict(JsonSerializer()) == {
+        "store_type": "postgres",
+        "run_id": "run-1",
+    }
+    assert calls == 0
+
+    concrete = await cast(Any, state_store)._get_store()
+
+    assert isinstance(concrete, PostgresStateStore)
+    assert cast(Any, concrete)._storage._pool is pool
+    assert cast(Any, concrete)._storage._namespace == ("child",)
+    assert calls == 1
+
+
+def test_child_workflows_are_not_tracked_as_standalone_dbos_workflows() -> None:
+    runtime = DBOSRuntime()
+    child = _TrackedChild(runtime=runtime)
+    parent = _TrackedParent(child=child, runtime=runtime)
+
+    assert cast(Any, runtime)._tracked_workflows == [parent]
+    assert cast(Any, runtime)._tracked_workflow_ids == {id(parent)}
 
 
 @pytest.fixture(scope="module")

@@ -7,6 +7,7 @@ import asyncio
 import logging
 import sys
 import warnings
+from inspect import Parameter, Signature
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -135,6 +136,10 @@ def _warn_ignored_child_config(child: Workflow, slot_name: str) -> None:
     )
 
 
+def _has_custom_workflow_init(cls: type) -> bool:
+    return bool(getattr(cls, "_custom_workflow_init", False))
+
+
 def _config_field(*, alias: str, default: Any = None) -> Any:
     """dataclass_transform field specifier for Workflow config params."""
     return default
@@ -166,10 +171,17 @@ class WorkflowMeta(type):
     def __init__(cls, name: str, bases: tuple[type, ...], dct: dict[str, Any]) -> None:
         super().__init__(name, bases, dct)
         cls._step_functions: dict[str, StepFunction] = {}
+        cls._custom_workflow_init = False
 
         # A user-defined __init__ always wins.
         workflow_cls = globals().get("Workflow")
-        if workflow_cls is None or "__init__" in dct:
+        if workflow_cls is None:
+            return
+        if "__init__" in dct:
+            cls._custom_workflow_init = cls is not workflow_cls
+            return
+        if any(getattr(base, "_custom_workflow_init", False) for base in bases):
+            cls._custom_workflow_init = True
             return
         if not _resolve_child_slots(cls):
             return
@@ -179,6 +191,72 @@ class WorkflowMeta(type):
             or inherited_init is _synthesized_workflow_init
         ):
             setattr(cls, "__init__", _synthesized_workflow_init)
+            cls.__signature__ = _child_slot_signature(cls)
+
+
+def _child_slot_signature(cls: type) -> Signature:
+    params = [
+        Parameter(
+            name,
+            kind=Parameter.KEYWORD_ONLY,
+            default=Parameter.empty,
+            annotation=slot_type,
+        )
+        for name, slot_type in _resolve_child_slots(cls).items()
+    ]
+    params.extend(
+        [
+            Parameter(
+                "timeout",
+                kind=Parameter.KEYWORD_ONLY,
+                default=_UNSET_TIMEOUT,
+                annotation=float | None | _UnsetTimeout,
+            ),
+            Parameter(
+                "disable_validation",
+                kind=Parameter.KEYWORD_ONLY,
+                default=False,
+                annotation=bool,
+            ),
+            Parameter(
+                "verbose",
+                kind=Parameter.KEYWORD_ONLY,
+                default=False,
+                annotation=bool,
+            ),
+            Parameter(
+                "resource_manager",
+                kind=Parameter.KEYWORD_ONLY,
+                default=None,
+                annotation=ResourceManager | None,
+            ),
+            Parameter(
+                "num_concurrent_runs",
+                kind=Parameter.KEYWORD_ONLY,
+                default=None,
+                annotation=int | None,
+            ),
+            Parameter(
+                "runtime",
+                kind=Parameter.KEYWORD_ONLY,
+                default=None,
+                annotation=Any,
+            ),
+            Parameter(
+                "workflow_name",
+                kind=Parameter.KEYWORD_ONLY,
+                default=None,
+                annotation=str | None,
+            ),
+            Parameter(
+                "skip_graph_checks",
+                kind=Parameter.KEYWORD_ONLY,
+                default=None,
+                annotation=set[WorkflowGraphCheck] | None,
+            ),
+        ]
+    )
+    return Signature(params)
 
 
 class Workflow(metaclass=WorkflowMeta):
@@ -466,19 +544,74 @@ class Workflow(metaclass=WorkflowMeta):
             )
         _validate_includable_child(child, name)
         _warn_ignored_child_config(child, name)
-        child._switch_runtime(self._runtime)
+        register_child = getattr(self._runtime, "_register_child_workflows", True)
+        if child._runtime is self._runtime:
+            if not register_child:
+                child._runtime.untrack_workflow(child)
+        else:
+            child._runtime.untrack_workflow(child)
+            child._switch_runtime(self._runtime, register=register_child)
         child._runtime_locked = True
         setattr(self, name, child)
         self._child_workflows[name] = child
 
     def _ensure_children_attached(self) -> None:
         """Attach any declared child instances not yet wired in."""
-        for name in type(self)._get_child_workflow_slots():
+        for name, expected in type(self)._get_child_workflow_slots().items():
             if name in self._child_workflows:
                 continue
+            if name not in self.__dict__ and isinstance(
+                getattr(type(self), name, None), Workflow
+            ):
+                raise WorkflowValidationError(
+                    f"Child workflow slot '{name}' on '{type(self).__name__}' uses "
+                    "a shared class-body Workflow instance. Pass a fresh child "
+                    "instance to the constructor instead."
+                )
             child = getattr(self, name, None)
+            if child is None:
+                if _has_custom_workflow_init(type(self)) and not (
+                    self._missing_child_is_used(name, expected)
+                ):
+                    continue
+                # Inline import: representation validation imports Workflow.
+                from .representation.validate import _validate_child_type_graph
+
+                _validate_child_type_graph(cast(Any, type(self)))
+                raise WorkflowValidationError(
+                    f"Missing child workflow for slot '{name}' on "
+                    f"'{type(self).__name__}'. Pass a {expected.__name__} "
+                    "instance to the constructor."
+                )
             if isinstance(child, Workflow):
+                if _has_custom_workflow_init(type(self)) and (
+                    child._start_event_class is StartEvent
+                    or child._stop_event_class is StopEvent
+                ):
+                    continue
                 self._attach_child(name, child)
+
+    def _missing_child_is_used(self, name: str, expected: type) -> bool:
+        """Whether a missing declared child forms a parent graph boundary."""
+        # Inline import: representation validation imports Workflow.
+        from .representation.validate import (
+            _ensure_start_event_class,
+            _ensure_stop_event_class,
+        )
+
+        expected_workflow = cast("type[Workflow]", expected)
+        child_step_configs = {
+            step_name: step_func._step_config
+            for step_name, step_func in expected_workflow._get_steps_from_class().items()
+        }
+        child_start = _ensure_start_event_class(child_step_configs, expected.__name__)
+        child_stop = _ensure_stop_event_class(child_step_configs, expected.__name__)
+        if child_start is StartEvent or child_stop is StopEvent:
+            return False
+        for cfg in self._step_configs().values():
+            if child_start in cfg.return_types or child_stop in cfg.accepted_events:
+                return True
+        return False
 
     @property
     def workflow_name(self) -> str:

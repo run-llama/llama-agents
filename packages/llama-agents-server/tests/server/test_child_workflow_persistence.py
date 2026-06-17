@@ -16,16 +16,32 @@ confirm:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import cast
+
 import pytest
 from llama_agents.server import (
     HandlerQuery,
+    MemoryWorkflowStore,
     PersistentHandler,
     SqliteWorkflowStore,
     WorkflowServer,
 )
+from llama_agents.server._runtime.server_runtime import (
+    ServerRuntimeDecorator,
+    _ServerInternalRunAdapter,
+)
 from server_test_fixtures import wait_for_passing  # type: ignore[import]
 from workflows import Context, Workflow, step
-from workflows.events import Event, StartEvent, StopEvent
+from workflows.context.serializers import JsonSerializer
+from workflows.context.state_store import (
+    DictState,
+    InMemoryStateStore,
+    build_namespaced_state,
+)
+from workflows.events import Event, StartEvent, StopEvent, get_event_origin_namespace
+from workflows.runtime.types.plugin import InternalRunAdapter, WaitResultTimeout
+from workflows.runtime.types.ticks import WorkflowTick
 
 # Counts child step executions across the (in-process) server restart so we can
 # prove resume does not re-run an already-completed child step. A module global
@@ -43,6 +59,62 @@ class ChildStop(StopEvent):
 
 class HumanGo(Event):
     answer: str
+
+
+class StreamChildStart(StartEvent):
+    pass
+
+
+class StreamChildStop(StopEvent):
+    pass
+
+
+class StreamChildPing(Event):
+    msg: str = ""
+
+
+class StreamParentPing(Event):
+    msg: str = ""
+
+
+class StreamingChild(Workflow):
+    @step
+    async def run_child(self, ctx: Context, ev: StreamChildStart) -> StreamChildStop:
+        ctx.write_event_to_stream(StreamChildPing(msg="child"))
+        return StreamChildStop()
+
+
+class StreamingParent(Workflow):
+    child: StreamingChild
+
+    @step
+    async def start(self, ctx: Context, ev: StartEvent) -> StreamChildStart:
+        ctx.write_event_to_stream(StreamParentPing(msg="parent"))
+        return StreamChildStart()
+
+    @step
+    async def finish(self, ev: StreamChildStop) -> StopEvent:
+        return StopEvent(result="done")
+
+
+class _FakeInternalAdapter(InternalRunAdapter):
+    @property
+    def run_id(self) -> str:
+        return "seed-run"
+
+    async def write_to_event_stream(self, event: Event) -> None:
+        pass
+
+    async def get_now(self) -> float:
+        return 0.0
+
+    async def send_event(self, tick: WorkflowTick) -> None:
+        pass
+
+    async def wait_receive(
+        self, timeout_seconds: float | None = None
+    ) -> WaitResultTimeout:
+        return WaitResultTimeout()
 
 
 class StateChild(Workflow):
@@ -105,6 +177,98 @@ async def _wait_handler_idle(
         return found[0]
 
     return await wait_for_passing(check, max_duration=max_duration, interval=0.05)
+
+
+@pytest.mark.asyncio
+async def test_persisted_child_event_origin_survives_server_store_boundary(
+    sqlite_store: SqliteWorkflowStore,
+) -> None:
+    """Child-origin metadata survives SQLite event persistence and stream filtering.
+
+    The in-process handler tags child stream events before the server persists
+    them. The persisted envelope must keep that tag so HTTP/default consumers
+    can hide child events, while opt-in consumers can still see and attribute
+    them.
+    """
+    handler_id = "child-origin-stream-1"
+    server = WorkflowServer(workflow_store=sqlite_store)
+    server.add_workflow("stream", StreamingParent(child=StreamingChild()))
+
+    async with server.contextmanager():
+        wf = server._service._runtime.get_workflow("stream")
+        assert wf is not None
+        await server._service.start_workflow(wf, handler_id)
+        handler = await _wait_handler_status(sqlite_store, handler_id, "completed")
+
+        assert handler.run_id is not None
+        stored = await sqlite_store.query_events(handler.run_id)
+        child_envelope = next(
+            event.event
+            for event in stored
+            if event.event.type == StreamChildPing.__name__
+        )
+        assert child_envelope.origin_namespace == ("child",)
+        loaded_child = child_envelope.load_event([StreamChildPing])
+        assert get_event_origin_namespace(loaded_child) == ("child",)
+
+        default_gen = await server._api._resolve_event_stream(
+            handler_id,
+            after_sequence=-1,
+            include_internal=False,
+            include_children=False,
+            include_qualified_name=True,
+        )
+        assert default_gen is not None
+        default_events = [event async for _, event in default_gen]
+        assert [event.type for event in default_events] == [
+            StreamParentPing.__name__,
+            StopEvent.__name__,
+        ]
+
+        child_gen = await server._api._resolve_event_stream(
+            handler_id,
+            after_sequence=-1,
+            include_internal=False,
+            include_children=True,
+            include_qualified_name=True,
+        )
+        assert child_gen is not None
+        child_events = [event async for _, event in child_gen]
+        assert [event.type for event in child_events] == [
+            StreamParentPing.__name__,
+            StreamChildPing.__name__,
+            StopEvent.__name__,
+        ]
+        assert child_events[1].origin_namespace == ("child",)
+
+
+def test_in_memory_child_seeds_are_staged_even_if_child_store_is_never_requested() -> (
+    None
+):
+    serializer = JsonSerializer()
+    workflow = StreamingParent(child=StreamingChild())
+
+    def make_store(namespace: tuple[str, ...]) -> InMemoryStateStore[DictState]:
+        label = "/".join(namespace) if namespace else "root"
+        return InMemoryStateStore(DictState(_data={"marker": label}))
+
+    serialized = build_namespaced_state(
+        workflow, make_store, serializer
+    ).serialize_tree(serializer)
+    store = MemoryWorkflowStore()
+    runtime = SimpleNamespace(
+        _store=store,
+        _initial_state={"seed-run": (serialized, serializer)},
+    )
+    adapter = _ServerInternalRunAdapter(
+        _FakeInternalAdapter(),
+        cast(ServerRuntimeDecorator, runtime),
+    )
+
+    adapter.get_state_store(())
+
+    child_store = store.state_stores[("seed-run", ("child",))]
+    assert child_store.to_dict(serializer)["state_data"]["_data"]["marker"] == '"child"'
 
 
 def _make_server(store: SqliteWorkflowStore) -> WorkflowServer:

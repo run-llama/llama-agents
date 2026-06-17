@@ -1738,9 +1738,8 @@ def _process_namespace_timeout_tick(
             ]
         # Recovery budget exhausted: fall through and fail the run.
 
-    # Uncaught (or budget-exhausted) child timeout: fail the whole run (no
-    # CommandHalt — that is for the root timeout only). Report the child's own
-    # namespace, not the whole run.
+    # Uncaught (or budget-exhausted) child timeout: fail the whole run. Publish
+    # on the root stream so default clients see the failure.
     state.is_running = False
     failing_step_id = next(
         (sid for sid in state.workers if sid.namespace == namespace),
@@ -1753,7 +1752,7 @@ def _process_namespace_timeout_tick(
                 timeout=tick.timeout,
                 active_steps=active_steps,
             ),
-            origin_namespace=namespace,
+            origin_namespace=(),
         ),
         CommandFailWorkflow(step_id=failing_step_id, exception=timeout_error),
     ]

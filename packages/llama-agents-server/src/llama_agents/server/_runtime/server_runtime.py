@@ -32,6 +32,7 @@ from workflows.events import (
     WorkflowCancelledEvent,
     WorkflowFailedEvent,
     WorkflowTimedOutEvent,
+    get_event_origin_namespace,
 )
 from workflows.runtime.runtime_decorators import (
     BaseExternalRunAdapterDecorator,
@@ -98,6 +99,15 @@ class _ServerInternalRunAdapter(BaseInternalRunAdapterDecorator):
         serialized_state, serializer = initial if initial is not None else (None, None)
         self._serializer = serializer or JsonSerializer()
         self._seeds = namespaced_seed_payloads(serialized_state, self._state_types)
+        if self._seeds is not None:
+            for namespace, seed in list(self._seeds.items()):
+                self._store.create_state_store(
+                    self.run_id,
+                    self._state_types.get(namespace, DictState),
+                    seed,
+                    self._serializer,
+                    namespace=namespace,
+                )
         if self._seeds is None and serialized_state:
             self._root_handle = serialized_state
         self._seed_resolved = True
@@ -168,7 +178,9 @@ class _ServerInternalRunAdapter(BaseInternalRunAdapterDecorator):
                     await self._runtime._handle_status_update(
                         run_id=self.run_id, status="cancelled"
                     )
-                elif isinstance(event, StopEvent):
+                elif isinstance(event, StopEvent) and not get_event_origin_namespace(
+                    event
+                ):
                     await self._runtime._handle_status_update(
                         run_id=self.run_id,
                         status="completed",

@@ -17,7 +17,14 @@ import pytest
 from workflows import Workflow
 from workflows.decorators import catch_error, step
 from workflows.errors import WorkflowTimeoutError
-from workflows.events import StartEvent, StepFailedEvent, StopEvent
+from workflows.events import (
+    Event,
+    StartEvent,
+    StepFailedEvent,
+    StopEvent,
+    WorkflowTimedOutEvent,
+    get_event_origin_namespace,
+)
 from workflows.runtime.types.internal_state import BrokerState
 from workflows.workflow import DEFAULT_TIMEOUT
 
@@ -57,6 +64,20 @@ async def test_child_times_out_on_its_own_clock_and_fails_run_when_uncaught() ->
     handler = ParentOfSlowChild(child=SlowChild(timeout=0.1), timeout=30).run()
     with pytest.raises(WorkflowTimeoutError):
         await handler
+
+
+@pytest.mark.asyncio
+async def test_uncaught_child_timeout_is_visible_on_default_stream() -> None:
+    handler = ParentOfSlowChild(child=SlowChild(timeout=0.1), timeout=30).run()
+    collected: list[Event] = []
+    async for ev in handler.stream_events():
+        collected.append(ev)
+
+    with pytest.raises(WorkflowTimeoutError):
+        await handler
+
+    timeout = next(ev for ev in collected if isinstance(ev, WorkflowTimedOutEvent))
+    assert get_event_origin_namespace(timeout) == ()
 
 
 class RecoveringSlowChild(Workflow):

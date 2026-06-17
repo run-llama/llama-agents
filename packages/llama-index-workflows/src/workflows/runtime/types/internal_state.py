@@ -6,7 +6,7 @@ from __future__ import annotations
 import dataclasses
 import importlib
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Mapping, TypeVar
 
 from workflows._event_matching import step_accepts_type
 from workflows._stream_levels import event_types, stream_level_types_by_producer
@@ -36,6 +36,17 @@ from workflows.workflow import Workflow
 
 if TYPE_CHECKING:
     from workflows.context.serializers import BaseSerializer
+
+
+T = TypeVar("T")
+
+
+def _normalize_step_id(value: Any) -> StepId:
+    return value if isinstance(value, StepId) else StepId.from_str(value)
+
+
+def _normalize_step_id_keys(mapping: Mapping[Any, T]) -> dict[StepId, T]:
+    return {_normalize_step_id(step_id): value for step_id, value in mapping.items()}
 
 
 @dataclass(frozen=True)
@@ -124,6 +135,18 @@ class BrokerState:
     # (StopEvent boundary) or is expired, so a re-triggered child re-arms. Not
     # serialized — runtime scheduling state, like waiter timeouts.
     namespace_started: dict[tuple[str, ...], float] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self._normalize_worker_keys()
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        if "namespace_started" not in state:
+            self.namespace_started = {}
+        self._normalize_worker_keys()
+
+    def _normalize_worker_keys(self) -> None:
+        self.workers = _normalize_step_id_keys(self.workers)
 
     def deepcopy(self) -> BrokerState:
         """
@@ -602,6 +625,29 @@ class BrokerConfig:
     # Root (``()``) is absent: its deadline is the global ``timeout`` above.
     namespace_timeouts: dict[tuple[str, ...], float] = field(default_factory=dict)
     collection_bindings: dict[str, CollectionBinding] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self._normalize_step_id_maps()
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self._normalize_step_id_maps()
+
+    def _normalize_step_id_maps(self) -> None:
+        object.__setattr__(self, "steps", _normalize_step_id_keys(self.steps))
+        object.__setattr__(
+            self,
+            "catch_error_handlers",
+            _normalize_step_id_keys(self.catch_error_handlers),
+        )
+        object.__setattr__(
+            self,
+            "handler_for_step",
+            {
+                _normalize_step_id(step_id): _normalize_step_id(handler_id)
+                for step_id, handler_id in self.handler_for_step.items()
+            },
+        )
 
     def bindings_for_source(self, source_step: StepId) -> tuple[CollectionBinding, ...]:
         return tuple(

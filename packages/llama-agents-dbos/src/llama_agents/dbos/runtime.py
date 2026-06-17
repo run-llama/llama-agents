@@ -15,7 +15,8 @@ import sqlite3
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any, AsyncGenerator, TypedDict, cast
+from contextlib import asynccontextmanager
+from typing import Any, AsyncContextManager, AsyncGenerator, TypedDict, cast
 
 import asyncpg
 from llama_agents.client.protocol.serializable_events import (
@@ -41,7 +42,10 @@ from llama_agents.server._store.abstract_workflow_store import (
 from llama_agents.server._store.postgres.migrate import (
     run_migrations as pg_run_migrations,
 )
-from llama_agents.server._store.postgres_state_store import PostgresStateStore
+from llama_agents.server._store.postgres_state_store import (
+    PostgresSerializedState,
+    PostgresStateStore,
+)
 from llama_agents.server._store.postgres_workflow_store import (
     PostgresWorkflowStore,
 )
@@ -341,6 +345,7 @@ class DBOSRuntime(Runtime):
         self._tracked_workflows: list[Workflow] = []
         self._tracked_workflow_ids: set[int] = set()  # Track by id for dedup
         self._registered: dict[int, RegisteredWorkflow] = {}  # keyed by id(workflow)
+        self._register_child_workflows = False
 
         self._dbos_launched = False
         # Signaled once DBOS is launched and config (engine, schema, etc.) is
@@ -381,6 +386,14 @@ class DBOSRuntime(Runtime):
             if wf_id not in self._tracked_workflow_ids:
                 self._tracked_workflows.append(workflow)
                 self._tracked_workflow_ids.add(wf_id)
+
+    def untrack_workflow(self, workflow: Workflow) -> None:
+        wf_id = id(workflow)
+        self._tracked_workflow_ids.discard(wf_id)
+        self._tracked_workflows = [
+            tracked for tracked in self._tracked_workflows if id(tracked) != wf_id
+        ]
+        self._registered.pop(wf_id, None)
 
     def get_registered(self, workflow: Workflow) -> RegisteredWorkflow | None:
         """Get the registered workflow if available."""
@@ -659,6 +672,12 @@ class DBOSRuntime(Runtime):
             run_id,
             self.config.get("polling_interval_sec", 1.0),
             startup_task,
+            resolved_pool=self._pool,
+            pool=PoolProvider.borrowed(self._ensure_pool)
+            if self._dsn is not None
+            else None,
+            db_path=self._db_path,
+            schema=self._schema,
         )
 
     def get_internal_adapter(self, workflow: Workflow) -> InternalRunAdapter:
@@ -708,6 +727,9 @@ class DBOSRuntime(Runtime):
             run_id,
             self.config.get("polling_interval_sec", 1.0),
             resolved_pool=self._pool,
+            pool=PoolProvider.borrowed(self._ensure_pool)
+            if self._dsn is not None
+            else None,
             db_path=self._db_path,
             schema=self._schema,
         )
@@ -1342,6 +1364,68 @@ class InternalDBOSAdapter(InternalRunAdapter):
         return WaitForNextTaskResult(completed, started)
 
 
+class _LazyPostgresStateStore:
+    """External Postgres store that resolves the DBOS pool on first async use."""
+
+    state_type: type[DictState] = DictState
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        pool: PoolProvider,
+        schema: str | None,
+        namespace: tuple[str, ...],
+    ) -> None:
+        self._run_id = run_id
+        self._pool_provider = pool
+        self._schema = schema
+        self._namespace = namespace
+        self._store: PostgresStateStore[Any] | None = None
+
+    @property
+    def run_id(self) -> str:
+        return self._run_id
+
+    async def _get_store(self) -> PostgresStateStore[Any]:
+        if self._store is None:
+            pool = await self._pool_provider.get()
+            self._store = PostgresStateStore(
+                pool=pool,
+                run_id=self._run_id,
+                state_type=DictState,
+                schema=self._schema,
+                namespace=self._namespace,
+            )
+        return self._store
+
+    async def get_state(self) -> DictState:
+        return await (await self._get_store()).get_state()
+
+    async def set_state(self, state: DictState) -> None:
+        await (await self._get_store()).set_state(state)
+
+    async def get(self, path: str, default: Any = ...) -> Any:
+        return await (await self._get_store()).get(path, default)
+
+    async def set(self, path: str, value: Any) -> None:
+        await (await self._get_store()).set(path, value)
+
+    async def clear(self) -> None:
+        await (await self._get_store()).clear()
+
+    def edit_state(self) -> AsyncContextManager[DictState]:
+        @asynccontextmanager
+        async def _edit() -> AsyncIterator[DictState]:
+            async with (await self._get_store()).edit_state() as state:
+                yield state
+
+        return _edit()
+
+    def to_dict(self, serializer: BaseSerializer) -> dict[str, Any]:
+        return PostgresSerializedState(run_id=self._run_id).model_dump()
+
+
 class ExternalDBOSAdapter(ExternalRunAdapter):
     """
     External DBOS adapter for workflow interaction.
@@ -1357,6 +1441,7 @@ class ExternalDBOSAdapter(ExternalRunAdapter):
         polling_interval_sec: float = 1.0,
         startup_task: asyncio.Task[WorkflowHandleAsync[Any]] | None = None,
         resolved_pool: asyncpg.Pool | None = None,
+        pool: PoolProvider | None = None,
         db_path: str | None = None,
         schema: str | None = None,
     ) -> None:
@@ -1365,6 +1450,7 @@ class ExternalDBOSAdapter(ExternalRunAdapter):
         self._startup_task = startup_task  # None means workflow already started
         self._handle: WorkflowHandleAsync[Any] | None = None
         self._resolved_pool = resolved_pool
+        self._pool_provider = pool
         self._db_path = db_path
         self._schema = schema
 
@@ -1388,6 +1474,13 @@ class ExternalDBOSAdapter(ExternalRunAdapter):
                 pool=self._resolved_pool,
                 run_id=self._run_id,
                 state_type=DictState,
+                schema=self._schema,
+                namespace=namespace,
+            )
+        if self._pool_provider is not None:
+            return _LazyPostgresStateStore(
+                run_id=self._run_id,
+                pool=self._pool_provider,
                 schema=self._schema,
                 namespace=namespace,
             )
