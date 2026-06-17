@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -491,3 +492,83 @@ async def test_sqlite_workflow_store_single_connection_opens_existing_regular_db
 
     await state_store.set("x", 1)
     assert await state_store.get("x") == 1
+
+
+# -- Per-namespace records --
+
+
+@pytest.mark.asyncio
+async def test_namespace_round_trip_and_isolation(db_path: str) -> None:
+    """Root and child namespaces persist as independent rows under one run."""
+    root: SqliteStateStore[DictState] = SqliteStateStore(
+        db_path=db_path, run_id="run-ns"
+    )
+    child: SqliteStateStore[DictState] = SqliteStateStore(
+        db_path=db_path, run_id="run-ns", namespace=("child",)
+    )
+
+    await root.set("k", "root-val")
+    await child.set("k", "child-val")
+
+    # Fresh facades read straight from their own row — no cross-namespace bleed.
+    root2: SqliteStateStore[DictState] = SqliteStateStore(
+        db_path=db_path, run_id="run-ns"
+    )
+    child2: SqliteStateStore[DictState] = SqliteStateStore(
+        db_path=db_path, run_id="run-ns", namespace=("child",)
+    )
+    assert await root2.get("k") == "root-val"
+    assert await child2.get("k") == "child-val"
+
+
+@pytest.mark.asyncio
+async def test_pre_migration_root_row_reads_as_root(tmp_path: Path) -> None:
+    """A row written under the pre-namespace schema reads back as root."""
+    path = str(tmp_path / "legacy.db")
+    serializer = JsonSerializer()
+    legacy_state_json = json.dumps({"_data": {"k": serializer.serialize("legacy")}})
+
+    conn = sqlite3.connect(path)
+    try:
+        # Recreate the schema as it stood at migration 4 (single-column PK,
+        # no namespace) and mark migrations 1-4 applied.
+        conn.executescript(
+            """
+            CREATE TABLE schema_migrations (
+                package TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (package, version)
+            );
+            CREATE TABLE workflow_state (
+                run_id TEXT PRIMARY KEY,
+                state_json TEXT NOT NULL DEFAULT '{}',
+                state_type TEXT NOT NULL DEFAULT 'DictState',
+                state_module TEXT NOT NULL DEFAULT 'workflows.context.state_store',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+        for version in range(1, 5):
+            conn.execute(
+                "INSERT INTO schema_migrations (package, version) VALUES ('server', ?)",
+                (version,),
+            )
+        conn.execute(
+            "INSERT INTO workflow_state "
+            "(run_id, state_json, state_type, state_module, created_at, updated_at) "
+            "VALUES (?, ?, 'DictState', 'workflows.context.state_store', '', '')",
+            ("legacy-run", legacy_state_json),
+        )
+        conn.commit()
+        # Apply the pending namespace migration (table rebuild).
+        run_migrations(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    store: SqliteStateStore[DictState] = SqliteStateStore(
+        db_path=path, run_id="legacy-run"
+    )
+    assert await store.get("k") == "legacy"

@@ -478,7 +478,7 @@ async def test_max_completed_cleans_up_events_ticks_and_state() -> None:
     )
     assert "run-old" in store.events
     assert "run-old" in store.ticks
-    assert "run-old" in store.state_stores
+    assert ("run-old", ()) in store.state_stores
 
     await _insert(
         store,
@@ -490,7 +490,7 @@ async def test_max_completed_cleans_up_events_ticks_and_state() -> None:
 
     assert "run-old" not in store.events
     assert "run-old" not in store.ticks
-    assert "run-old" not in store.state_stores
+    assert ("run-old", ()) not in store.state_stores
     remaining = await store.query(HandlerQuery())
     assert len(remaining) == 1
     assert remaining[0].handler_id == "h-new"

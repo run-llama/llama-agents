@@ -607,7 +607,7 @@ async def test_do_resume_carries_over_serialized_state(
 
     # Seed the state store with actual state data
     state_store = InMemoryStateStore(MyState(counter=42))
-    store.state_stores["run-1"] = state_store
+    store.state_stores[("run-1", ())] = state_store
 
     await decorator._do_resume("run-1")
 

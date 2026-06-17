@@ -116,12 +116,14 @@ async def _create_postgres_pool(dsn: str) -> asyncpg.Pool:
         await conn.execute("CREATE SCHEMA IF NOT EXISTS dbos")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS dbos.workflow_state (
-                run_id VARCHAR(255) PRIMARY KEY,
+                run_id VARCHAR(255) NOT NULL,
+                namespace VARCHAR(255) NOT NULL DEFAULT '',
                 state_json TEXT NOT NULL,
                 state_type VARCHAR(255),
                 state_module VARCHAR(255),
                 created_at TIMESTAMPTZ,
-                updated_at TIMESTAMPTZ
+                updated_at TIMESTAMPTZ,
+                PRIMARY KEY (run_id, namespace)
             )
         """)
     return pool

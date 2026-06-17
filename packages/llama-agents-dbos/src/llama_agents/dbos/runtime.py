@@ -144,20 +144,24 @@ class DBOSWorkflowStore(AbstractWorkflowStore):
         state_type: type[Any] | None = None,
         serialized_state: dict[str, Any] | None = None,
         serializer: BaseSerializer | None = None,
+        namespace: tuple[str, ...] = (),
     ) -> StateStore[Any]:
         # Delegate the whole template method so memoization lives in the
         # inner store's single cache (the proxy's own cache stays unused).
         return self._resolve().create_state_store(
-            run_id, state_type, serialized_state, serializer
+            run_id, state_type, serialized_state, serializer, namespace
         )
 
     def _build_state_store(
         self,
         run_id: str,
+        namespace: tuple[str, ...],
         state_type: type[Any] | None,
         serializer: BaseSerializer | None,
     ) -> StateStoreFacade[Any]:
-        return self._resolve()._build_state_store(run_id, state_type, serializer)
+        return self._resolve()._build_state_store(
+            run_id, namespace, state_type, serializer
+        )
 
     async def query(self, query: HandlerQuery) -> list[PersistentHandler]:
         return await self._resolve().query(query)

@@ -298,6 +298,7 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
     def _build_state_store(
         self,
         run_id: str,
+        namespace: tuple[str, ...],
         state_type: type[Any] | None,
         serializer: BaseSerializer | None,
     ) -> PostgresStateStore[Any]:
@@ -308,6 +309,7 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
         return PostgresStateStore(
             pool=self._pool,
             run_id=run_id,
+            namespace=namespace,
             state_type=state_type,
             serializer=serializer,
             schema=self._schema,

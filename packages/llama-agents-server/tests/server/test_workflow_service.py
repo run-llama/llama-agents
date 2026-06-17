@@ -329,8 +329,8 @@ async def test_context_from_handler_id_falls_back_to_legacy_state_snapshot(
             started_at=datetime.now(timezone.utc),
         )
     )
-    state_stores = cast(dict[str, Any], memory_store.state_stores)
-    state_stores["plugin-run"] = ToDictOnlyStateStore()
+    state_stores = cast(dict[Any, Any], memory_store.state_stores)
+    state_stores[("plugin-run", ())] = ToDictOnlyStateStore()
 
     async with server.contextmanager():
         ctx = await server._service._context_from_handler_id(

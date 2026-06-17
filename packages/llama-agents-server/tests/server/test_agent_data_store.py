@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -1028,3 +1029,50 @@ async def test_persist_error_does_not_block_in_memory_delivery(
     await store.append_event("run-1", make_envelope(event=StopEvent(data="done")))
     await asyncio.wait_for(task, timeout=2.0)
     assert len(collected) == 3
+
+
+# ---------------------------------------------------------------------------
+# Per-namespace records
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_namespace_round_trip_and_isolation(
+    backend: FakeAgentDataBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Root and child namespaces persist as independent items under one run."""
+    root = create_agent_data_state_store(backend, monkeypatch, "run-ns")
+    child = create_agent_data_state_store(
+        backend, monkeypatch, "run-ns", namespace=("child",)
+    )
+
+    await root.set("k", "root-val")
+    await child.set("k", "child-val")
+
+    root2 = create_agent_data_state_store(backend, monkeypatch, "run-ns")
+    child2 = create_agent_data_state_store(
+        backend, monkeypatch, "run-ns", namespace=("child",)
+    )
+    assert await root2.get("k") == "root-val"
+    assert await child2.get("k") == "child-val"
+
+
+@pytest.mark.asyncio
+async def test_pre_namespace_item_reads_as_root(
+    backend: FakeAgentDataBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An item written before namespaces (no namespace field) reads as root."""
+    serializer = JsonSerializer()
+    backend.create(
+        "test-deploy",
+        "workflow_state",
+        {
+            "run_id": "legacy-run",
+            "data": json.dumps({"_data": {"k": serializer.serialize("legacy")}}),
+            "state_type": "DictState",
+            "state_module": "workflows.context.state_store",
+        },
+    )
+
+    root = create_agent_data_state_store(backend, monkeypatch, "legacy-run")
+    assert await root.get("k") == "legacy"

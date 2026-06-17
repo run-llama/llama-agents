@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LlamaIndex Inc.
-"""Unit tests for namespaced-state stores and seed conversion."""
+"""Unit tests for the per-namespace state router and seed distribution."""
 
 from __future__ import annotations
 
@@ -9,20 +9,15 @@ from pydantic import BaseModel
 from workflows import Context, Workflow
 from workflows.context.serializers import JsonSerializer
 from workflows.context.state_store import (
-    BUNDLE_ROOT_KEY,
-    BUNDLE_VERSION,
-    BUNDLE_VERSION_KEY,
     CHILD_STATES_KEY,
     DictState,
     InMemoryStateStore,
-    StateRecord,
+    NamespacedStateStores,
     build_namespaced_state,
-    join_state_bundle,
-    namespaced_seed_blob,
-    namespaced_seed_payload,
+    in_memory_namespace_factory,
+    namespaced_seed_payloads,
     namespaced_state_types,
     namespaced_underlying_state_type,
-    split_state_bundle,
 )
 from workflows.decorators import step
 from workflows.events import StartEvent, StopEvent
@@ -75,6 +70,12 @@ class Childless(Workflow):
         return StopEvent(result="done")
 
 
+def _namespaced(wf: Workflow, serializer: JsonSerializer) -> NamespacedStateStores:
+    """Build an in-memory per-namespace router for *wf*."""
+    types = namespaced_state_types(wf)
+    return build_namespaced_state(wf, in_memory_namespace_factory(types), serializer)
+
+
 def test_state_types_and_underlying_type_for_childless() -> None:
     wf = Childless()
     assert set(namespaced_state_types(wf)) == {()}
@@ -88,15 +89,15 @@ def test_state_types_and_underlying_type_for_child_ful() -> None:
     assert namespaced_underlying_state_type(wf) is DictState
 
 
-def test_single_namespace_view_resolves_to_underlying_flat() -> None:
+def test_single_namespace_router_is_flat() -> None:
     wf = Childless()
-    underlying = InMemoryStateStore(RootState(root_value="x"))
-    namespaced = build_namespaced_state(wf, underlying, JsonSerializer())
+    serializer = JsonSerializer()
+    namespaced = _namespaced(wf, serializer)
 
     assert namespaced.is_single_namespace
-    assert namespaced.view(()) is underlying
-    serializer = JsonSerializer()
-    assert namespaced.serialize_tree(serializer) == underlying.to_dict(serializer)
+    # view() is memoized per namespace.
+    assert namespaced.view(()) is namespaced.view(())
+    assert isinstance(namespaced.view(()), InMemoryStateStore)
     assert CHILD_STATES_KEY not in namespaced.serialize_tree(serializer)
 
 
@@ -104,8 +105,7 @@ def test_single_namespace_view_resolves_to_underlying_flat() -> None:
 async def test_multi_namespace_serialize_tree_is_per_slot_nested() -> None:
     wf = Parent(child=Child())
     serializer = JsonSerializer()
-    underlying = InMemoryStateStore(DictState())
-    namespaced = build_namespaced_state(wf, underlying, serializer)
+    namespaced = _namespaced(wf, serializer)
 
     assert not namespaced.is_single_namespace
     await namespaced.view(()).set("root_value", "R")
@@ -115,30 +115,39 @@ async def test_multi_namespace_serialize_tree_is_per_slot_nested() -> None:
     assert tree["state_data"]["_data"]["root_value"] == serializer.serialize("R")
     child_states = tree[CHILD_STATES_KEY]
     assert set(child_states) == {"child"}
-    assert child_states["child"]["_data"]["child_value"] == (serializer.serialize("C"))
+    assert child_states["child"]["_data"]["child_value"] == serializer.serialize("C")
+    # children carry only raw state_data, not a full record/payload.
     assert "data" not in child_states["child"]
     assert "state_type" not in child_states["child"]
     assert "state_module" not in child_states["child"]
 
 
 @pytest.mark.asyncio
+async def test_namespaces_are_isolated() -> None:
+    wf = Parent(child=Child())
+    serializer = JsonSerializer()
+    namespaced = _namespaced(wf, serializer)
+
+    await namespaced.view(()).set("shared_key", "root")
+    await namespaced.view(("child",)).set("shared_key", "child")
+
+    # Same path, different records: no cross-namespace bleed.
+    assert await namespaced.view(()).get("shared_key") == "root"
+    assert await namespaced.view(("child",)).get("shared_key") == "child"
+
+
+@pytest.mark.asyncio
 async def test_seed_round_trip_rebuilds_slots() -> None:
     wf = Parent(child=Child())
     serializer = JsonSerializer()
-    underlying = InMemoryStateStore(DictState())
-    namespaced = build_namespaced_state(wf, underlying, serializer)
+    namespaced = _namespaced(wf, serializer)
     await namespaced.view(()).set("root_value", "R")
     await namespaced.view(("child",)).set("child_value", "C")
 
     tree = namespaced.serialize_tree(serializer)
 
-    seed = namespaced_seed_payload(tree, serializer, child_ful=True)
-    assert seed is not None
-    assert seed == tree
-
-    rebuilt = build_namespaced_state(
-        wf, InMemoryStateStore.from_dict(seed, serializer), serializer
-    )
+    rebuilt = _namespaced(wf, serializer)
+    rebuilt.add_seed_tree(tree, serializer)
     assert await rebuilt.view(()).get("root_value") == "R"
     assert await rebuilt.view(("child",)).get("child_value") == "C"
 
@@ -147,8 +156,7 @@ async def test_seed_round_trip_rebuilds_slots() -> None:
 async def test_typed_root_round_trip_keeps_root_metadata_with_children() -> None:
     wf = TypedParent(child=Child())
     serializer = JsonSerializer()
-    underlying = InMemoryStateStore(RootState(root_value="initial"))
-    namespaced = build_namespaced_state(wf, underlying, serializer)
+    namespaced = _namespaced(wf, serializer)
 
     await namespaced.view(()).set("root_value", "R")
     await namespaced.view(("child",)).set("child_value", "C")
@@ -158,9 +166,8 @@ async def test_typed_root_round_trip_keeps_root_metadata_with_children() -> None
     assert tree["state_module"] == __name__
     assert CHILD_STATES_KEY in tree
 
-    rebuilt = build_namespaced_state(
-        wf, InMemoryStateStore.from_dict(tree, serializer), serializer
-    )
+    rebuilt = _namespaced(wf, serializer)
+    rebuilt.add_seed_tree(tree, serializer)
     root_state = await rebuilt.view(()).get_state()
     assert isinstance(root_state, RootState)
     assert root_state.root_value == "R"
@@ -171,7 +178,7 @@ async def test_typed_root_round_trip_keeps_root_metadata_with_children() -> None
 async def test_child_view_uses_standard_facade_operations() -> None:
     wf = Parent(child=Child())
     serializer = JsonSerializer()
-    namespaced = build_namespaced_state(wf, InMemoryStateStore(DictState()), serializer)
+    namespaced = _namespaced(wf, serializer)
     child_store = namespaced.view(("child",))
 
     await child_store.set_state(DictState(_data={"a": 1}))
@@ -185,16 +192,47 @@ async def test_child_view_uses_standard_facade_operations() -> None:
     assert await child_store.get("b", None) is None
 
 
-def test_seed_helpers_noop_for_childless_and_references() -> None:
-    serializer = JsonSerializer()
-    flat = InMemoryStateStore(RootState(root_value="x")).to_dict(serializer)
-    assert namespaced_seed_blob(flat, child_ful=False) is None
-    assert namespaced_seed_payload(flat, serializer, child_ful=False) is None
+def test_seed_payloads_none_for_empty_and_durable() -> None:
+    types = namespaced_state_types(Parent(child=Child()))
+    assert namespaced_seed_payloads(None, types) is None
+    assert namespaced_seed_payloads({}, types) is None
     assert (
-        namespaced_seed_blob({"store_type": "postgres", "run_id": "r"}, child_ful=True)
+        namespaced_seed_payloads({"store_type": "postgres", "run_id": "r"}, types)
         is None
     )
-    assert namespaced_seed_blob(None, child_ful=True) is None
+
+
+def test_seed_payloads_flat_childless_is_root_only() -> None:
+    serializer = JsonSerializer()
+    flat = InMemoryStateStore(DictState(_data={"counter": 5})).to_dict(serializer)
+    assert CHILD_STATES_KEY not in flat
+
+    seeds = namespaced_seed_payloads(flat, namespaced_state_types(Childless()))
+    assert seeds is not None
+    assert set(seeds) == {()}
+    assert seeds[()] == flat
+
+
+def test_seed_payloads_splits_children_per_namespace() -> None:
+    serializer = JsonSerializer()
+    tree = {
+        "store_type": "in_memory",
+        "state_type": "DictState",
+        "state_module": "workflows.context.state_store",
+        "state_data": {"_data": {"root_value": serializer.serialize("R")}},
+        CHILD_STATES_KEY: {
+            "child": {"_data": {"child_value": serializer.serialize("C")}}
+        },
+    }
+    types = namespaced_state_types(Parent(child=Child()))
+    seeds = namespaced_seed_payloads(tree, types)
+    assert seeds is not None
+    assert set(seeds) == {(), ("child",)}
+    assert CHILD_STATES_KEY not in seeds[()]
+    assert seeds[()]["state_data"]["_data"]["root_value"] == serializer.serialize("R")
+    child_seed = seeds[("child",)]
+    assert child_seed["store_type"] == "in_memory"
+    assert child_seed["state_data"]["_data"]["child_value"] == serializer.serialize("C")
 
 
 @pytest.mark.asyncio
@@ -205,14 +243,9 @@ async def test_flat_childless_checkpoint_carries_root_state_into_child_ful_run()
     flat = InMemoryStateStore(DictState(_data={"counter": 5})).to_dict(serializer)
     assert CHILD_STATES_KEY not in flat
 
-    blob = namespaced_seed_blob(flat, child_ful=True)
-    assert blob is not None
-    assert blob == flat
-
     wf = Parent(child=Child())
-    rebuilt = build_namespaced_state(
-        wf, InMemoryStateStore.from_dict(blob, serializer), serializer
-    )
+    rebuilt = _namespaced(wf, serializer)
+    rebuilt.add_seed_tree(flat, serializer)
     assert await rebuilt.view(()).get("counter") == 5
     assert await rebuilt.view(("child",)).get("child_value", None) is None
 
@@ -251,115 +284,3 @@ async def test_childless_typed_state_to_dict_stays_flat() -> None:
     assert state["state_type"] == "RootState"
     assert CHILD_STATES_KEY not in state
     assert Context.from_dict(wf, ctx.to_dict()) is not None
-
-
-def test_seed_payload_matches_blob_dump() -> None:
-    serializer = JsonSerializer()
-    tree = {
-        "store_type": "in_memory",
-        "state_type": "DictState",
-        "state_module": "workflows.context.state_store",
-        "state_data": {"_data": {"root_value": serializer.serialize("R")}},
-        CHILD_STATES_KEY: {"child": {"_data": {}}},
-    }
-    blob = namespaced_seed_blob(tree, child_ful=True)
-    assert blob == tree
-    payload = namespaced_seed_payload(tree, serializer, child_ful=True)
-    assert payload == tree
-
-
-def test_bundle_split_join_appends_children_to_object_root() -> None:
-    root = StateRecord(
-        data={"_data": {"root_value": '"R"'}},
-        state_type="DictState",
-        state_module="workflows.context.state_store",
-    )
-    child = {"_data": {"child_value": '"C"'}}
-
-    bundle = split_state_bundle(root).model_copy(update={"children": {"child": child}})
-    joined = join_state_bundle(bundle)
-
-    assert joined.state_type == "DictState"
-    assert joined.data["_data"]["root_value"] == '"R"'
-    assert joined.data[CHILD_STATES_KEY]["child"] == child
-    split = split_state_bundle(joined)
-    assert split.root.data == {"_data": {"root_value": '"R"'}}
-    assert split.children["child"] == {"_data": {"child_value": '"C"'}}
-
-
-def test_bundle_split_join_wraps_opaque_root() -> None:
-    root = StateRecord(data="not-json", state_type="Opaque", state_module="app")
-    child = {"_data": {"child_value": '"C"'}}
-
-    bundle = split_state_bundle(root).model_copy(update={"children": {"child": child}})
-    joined = join_state_bundle(bundle)
-
-    assert isinstance(joined.data, str)
-    split = split_state_bundle(joined)
-    assert split.root.data == "not-json"
-    assert split.root.state_type == "Opaque"
-    assert split.children["child"] == {"_data": {"child_value": '"C"'}}
-
-    parsed = JsonSerializer().deserialize(joined.data)
-    assert parsed[BUNDLE_VERSION_KEY] == BUNDLE_VERSION
-    assert parsed[BUNDLE_ROOT_KEY] == "not-json"
-    assert parsed[CHILD_STATES_KEY]["child"] == child
-
-
-def test_bundle_split_accepts_previous_child_record_shape() -> None:
-    root = StateRecord(
-        data={
-            "_data": {"root_value": '"R"'},
-            CHILD_STATES_KEY: {
-                "child": {
-                    "data": {"_data": {"child_value": '"C"'}},
-                    "state_type": "DictState",
-                    "state_module": "workflows.context.state_store",
-                }
-            },
-        },
-        state_type="DictState",
-        state_module="workflows.context.state_store",
-    )
-
-    split = split_state_bundle(root)
-
-    assert split.root.data == {"_data": {"root_value": '"R"'}}
-    assert split.children["child"] == {"_data": {"child_value": '"C"'}}
-
-
-def test_bundle_split_keeps_compact_child_payload_with_state_data_key() -> None:
-    child_data = {"state_data": "user value", "other": "field"}
-    root = StateRecord(
-        data={
-            "_data": {"root_value": '"R"'},
-            CHILD_STATES_KEY: {"child": child_data},
-        },
-        state_type="DictState",
-        state_module="workflows.context.state_store",
-    )
-
-    split = split_state_bundle(root)
-
-    assert split.children["child"] == child_data
-
-
-@pytest.mark.asyncio
-async def test_child_first_write_stores_compact_json_child_and_root_metadata() -> None:
-    wf = Parent(child=Child())
-    serializer = JsonSerializer()
-    namespaced = build_namespaced_state(wf, InMemoryStateStore(DictState()), serializer)
-
-    await namespaced.view(("child",)).set("child_value", "C")
-
-    underlying = namespaced.underlying
-    assert isinstance(underlying, InMemoryStateStore)
-    record = underlying._memory_storage.load_sync()
-    assert record is not None
-    assert record.state_type == "DictState"
-    assert record.state_module == "workflows.context.state_store"
-    bundle = split_state_bundle(record)
-    assert bundle.children["child"]["_data"]["child_value"] == (
-        serializer.serialize("C")
-    )
-    assert "data" not in bundle.children["child"]
