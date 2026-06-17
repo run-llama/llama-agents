@@ -15,7 +15,8 @@ import sqlite3
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any, AsyncGenerator, TypedDict, cast
+from contextlib import asynccontextmanager
+from typing import Any, AsyncContextManager, AsyncGenerator, TypedDict, cast
 
 import asyncpg
 from llama_agents.client.protocol.serializable_events import (
@@ -41,7 +42,10 @@ from llama_agents.server._store.abstract_workflow_store import (
 from llama_agents.server._store.postgres.migrate import (
     run_migrations as pg_run_migrations,
 )
-from llama_agents.server._store.postgres_state_store import PostgresStateStore
+from llama_agents.server._store.postgres_state_store import (
+    PostgresSerializedState,
+    PostgresStateStore,
+)
 from llama_agents.server._store.postgres_workflow_store import (
     PostgresWorkflowStore,
 )
@@ -57,9 +61,11 @@ from sqlalchemy.engine import Engine
 from typing_extensions import Unpack
 from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import (
+    DictState,
     StateStore,
     StateStoreFacade,
-    infer_state_type,
+    namespaced_seed_payloads,
+    namespaced_state_types,
 )
 from workflows.events import Event, StartEvent, StopEvent
 from workflows.runtime.types.internal_state import BrokerState
@@ -287,8 +293,6 @@ class DBOSRuntime(Runtime):
     enabling state recovery across process restarts.
     """
 
-    _supports_child_workflows = False
-
     def __init__(self, **kwargs: Unpack[DBOSRuntimeConfig]) -> None:
         """Initialize the DBOS runtime.
 
@@ -341,6 +345,7 @@ class DBOSRuntime(Runtime):
         self._tracked_workflows: list[Workflow] = []
         self._tracked_workflow_ids: set[int] = set()  # Track by id for dedup
         self._registered: dict[int, RegisteredWorkflow] = {}  # keyed by id(workflow)
+        self._register_child_workflows = False
 
         self._dbos_launched = False
         # Signaled once DBOS is launched and config (engine, schema, etc.) is
@@ -381,6 +386,14 @@ class DBOSRuntime(Runtime):
             if wf_id not in self._tracked_workflow_ids:
                 self._tracked_workflows.append(workflow)
                 self._tracked_workflow_ids.add(wf_id)
+
+    def untrack_workflow(self, workflow: Workflow) -> None:
+        wf_id = id(workflow)
+        self._tracked_workflow_ids.discard(wf_id)
+        self._tracked_workflows = [
+            tracked for tracked in self._tracked_workflows if id(tracked) != wf_id
+        ]
+        self._registered.pop(wf_id, None)
 
     def get_registered(self, workflow: Workflow) -> RegisteredWorkflow | None:
         """Get the registered workflow if available."""
@@ -424,8 +437,8 @@ class DBOSRuntime(Runtime):
 
         # Wrap steps with stable names
         wrapped_steps: dict[StepId, StepWorkerFunction] = {
-            step_name: DBOS.step(name=f"{name}.{step_name}")(step)
-            for step_name, step in as_step_worker_functions(workflow).items()
+            step_id: DBOS.step(name=f"{name}.{step_id}")(step)
+            for step_id, step in as_step_worker_functions(workflow).items()
         }
 
         registered = RegisteredWorkflow(
@@ -597,22 +610,45 @@ class DBOSRuntime(Runtime):
         # Capture values needed in the async task closure
         active_serializer = serializer or JsonSerializer()
 
+        # Each namespace owns its own record. A portable in-memory tree splits
+        # into one seed per namespace; a durable handle can't split, so it seeds
+        # the root, whose copy_from_handle copies every namespace row in one shot.
+        state_types = namespaced_state_types(workflow)
+        seeds = (
+            namespaced_seed_payloads(serialized_state, state_types)
+            if serialized_state
+            else None
+        )
+
+        async def _seed_namespace(
+            workflow_store: AbstractWorkflowStore,
+            namespace: tuple[str, ...],
+            payload: dict[str, Any] | None,
+        ) -> None:
+            store = workflow_store.create_state_store(
+                run_id,
+                state_types.get(namespace, DictState),
+                payload,
+                active_serializer,
+                namespace=namespace,
+            )
+            # Materialize the seed before the workflow starts so the first step
+            # observes the restored state.
+            if isinstance(store, StateStoreFacade):
+                await store.ensure_seeded()
+
         async def _run_workflow() -> WorkflowHandleAsync[Any]:
             with SetWorkflowID(run_id):
                 # Write initial state to DB before starting workflow (non-blocking to caller)
                 if serialized_state:
                     workflow_store = self.create_workflow_store()
                     await workflow_store.start()
-                    store = workflow_store.create_state_store(
-                        run_id,
-                        infer_state_type(workflow),
-                        serialized_state,
-                        active_serializer,
-                    )
-                    # Materialize the seed before the workflow starts so the
-                    # first step observes the restored state.
-                    if isinstance(store, StateStoreFacade):
-                        await store.ensure_seeded()
+                    if seeds is not None:
+                        for namespace, payload in seeds.items():
+                            await _seed_namespace(workflow_store, namespace, payload)
+                    else:
+                        # Durable handle: one root seed copies the whole tree.
+                        await _seed_namespace(workflow_store, (), serialized_state)
 
                 try:
                     return await DBOS.start_workflow_async(
@@ -636,6 +672,12 @@ class DBOSRuntime(Runtime):
             run_id,
             self.config.get("polling_interval_sec", 1.0),
             startup_task,
+            resolved_pool=self._pool,
+            pool=PoolProvider.borrowed(self._ensure_pool)
+            if self._dsn is not None
+            else None,
+            db_path=self._db_path,
+            schema=self._schema,
         )
 
     def get_internal_adapter(self, workflow: Workflow) -> InternalRunAdapter:
@@ -652,14 +694,14 @@ class DBOSRuntime(Runtime):
                 "No current run id. Must be called within a workflow run."
             )
 
-        # Infer state_type from the workflow for typed state support
-        state_type = infer_state_type(workflow)
+        # Per-namespace state types: each namespace owns its own typed record.
+        state_types = namespaced_state_types(workflow)
 
         engine = self._get_sql_engine()
         return InternalDBOSAdapter(
             run_id,
             engine,
-            state_type,
+            state_types,
             schema=self._schema,
             state_table_name=self.config.get(
                 "state_table_name", DEFAULT_STATE_TABLE_NAME
@@ -679,7 +721,18 @@ class DBOSRuntime(Runtime):
             raise RuntimeError(
                 "DBOS runtime not launched. Call runtime.launch() before running workflows."
             )
-        return ExternalDBOSAdapter(run_id, self.config.get("polling_interval_sec", 1.0))
+        # Pass the resolved DB handles so the external adapter can reconnect the
+        # run's durable store for ``Context.to_dict`` (the whole child tree).
+        return ExternalDBOSAdapter(
+            run_id,
+            self.config.get("polling_interval_sec", 1.0),
+            resolved_pool=self._pool,
+            pool=PoolProvider.borrowed(self._ensure_pool)
+            if self._dsn is not None
+            else None,
+            db_path=self._db_path,
+            schema=self._schema,
+        )
 
     def create_workflow_store(self) -> AbstractWorkflowStore:
         """Return the cached workflow store, creating it on first call.
@@ -1043,7 +1096,7 @@ class InternalDBOSAdapter(InternalRunAdapter):
         self,
         run_id: str,
         engine: Engine,
-        state_type: type[BaseModel] | None = None,
+        state_types: dict[tuple[str, ...], type[BaseModel]] | None = None,
         schema: str | None = None,
         state_table_name: str = DEFAULT_STATE_TABLE_NAME,
         journal_table_name: str = DEFAULT_JOURNAL_TABLE_NAME,
@@ -1053,7 +1106,8 @@ class InternalDBOSAdapter(InternalRunAdapter):
     ) -> None:
         self._run_id = run_id
         self._engine = engine
-        self._state_type = state_type
+        default_types: dict[tuple[str, ...], type[BaseModel]] = {(): DictState}
+        self._state_types = state_types or default_types
         self._schema = schema
         self._state_table_name = state_table_name
         self._journal_table_name = journal_table_name
@@ -1062,7 +1116,7 @@ class InternalDBOSAdapter(InternalRunAdapter):
         self._db_path = db_path
         self._closed = False
         self._shutdown_event = asyncio.Event()
-        self._state_store: StateStore[Any] | None = None
+        self._state_stores: dict[tuple[str, ...], StateStore[Any]] = {}
         # Journal for deterministic task ordering - lazily initialized
         self._journal: TaskJournal | None = None
         self._orphan_purge_done = False
@@ -1132,37 +1186,49 @@ class InternalDBOSAdapter(InternalRunAdapter):
         self._resolved_pool = await self._pool_provider.get()
         return self._resolved_pool
 
-    def _get_or_create_state_store(self) -> StateStore[Any]:
-        """Get or lazily create the state store.
+    def _get_or_create_state_store(
+        self, namespace: tuple[str, ...] = ()
+    ) -> StateStore[Any]:
+        """Get or lazily create the namespace's own durable store.
 
         For PostgreSQL, the pool must be resolved first via _resolve_pool().
         Call _ensure_resources() before accessing the state store.
         """
-        if self._state_store is None:
+        store = self._state_stores.get(namespace)
+        if store is None:
+            state_type = cast(type[Any], self._state_types.get(namespace, DictState))
             if self._resolved_pool is not None:
-                self._state_store = PostgresStateStore(
+                store = PostgresStateStore(
                     pool=self._resolved_pool,
                     run_id=self._run_id,
-                    state_type=cast(type[Any], self._state_type),
+                    state_type=state_type,
                     schema=self._schema,
+                    namespace=namespace,
                 )
             elif self._db_path is not None:
-                self._state_store = SqliteStateStore(
+                store = SqliteStateStore(
                     db_path=self._db_path,
                     run_id=self._run_id,
-                    state_type=cast(type[Any], self._state_type),
+                    state_type=state_type,
+                    namespace=namespace,
                 )
             else:
                 raise RuntimeError(
                     "No pool or db_path configured for state store. "
                     "Ensure the runtime pool is initialized before accessing state."
                 )
-        return self._state_store
+            self._state_stores[namespace] = store
+        return store
 
     def get_state_store(
         self, namespace: tuple[str, ...] = ()
     ) -> StateStore[Any] | None:
-        return self._get_or_create_state_store()
+        """Vend the per-namespace durable store; each namespace owns its record.
+
+        The store's type comes from the run's per-namespace topology. For
+        postgres the pool is resolved by the control loop before any step runs.
+        """
+        return self._get_or_create_state_store(namespace)
 
     def is_replaying(self) -> bool:
         if (
@@ -1298,6 +1364,68 @@ class InternalDBOSAdapter(InternalRunAdapter):
         return WaitForNextTaskResult(completed, started)
 
 
+class _LazyPostgresStateStore:
+    """External Postgres store that resolves the DBOS pool on first async use."""
+
+    state_type: type[DictState] = DictState
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        pool: PoolProvider,
+        schema: str | None,
+        namespace: tuple[str, ...],
+    ) -> None:
+        self._run_id = run_id
+        self._pool_provider = pool
+        self._schema = schema
+        self._namespace = namespace
+        self._store: PostgresStateStore[Any] | None = None
+
+    @property
+    def run_id(self) -> str:
+        return self._run_id
+
+    async def _get_store(self) -> PostgresStateStore[Any]:
+        if self._store is None:
+            pool = await self._pool_provider.get()
+            self._store = PostgresStateStore(
+                pool=pool,
+                run_id=self._run_id,
+                state_type=DictState,
+                schema=self._schema,
+                namespace=self._namespace,
+            )
+        return self._store
+
+    async def get_state(self) -> DictState:
+        return await (await self._get_store()).get_state()
+
+    async def set_state(self, state: DictState) -> None:
+        await (await self._get_store()).set_state(state)
+
+    async def get(self, path: str, default: Any = ...) -> Any:
+        return await (await self._get_store()).get(path, default)
+
+    async def set(self, path: str, value: Any) -> None:
+        await (await self._get_store()).set(path, value)
+
+    async def clear(self) -> None:
+        await (await self._get_store()).clear()
+
+    def edit_state(self) -> AsyncContextManager[DictState]:
+        @asynccontextmanager
+        async def _edit() -> AsyncIterator[DictState]:
+            async with (await self._get_store()).edit_state() as state:
+                yield state
+
+        return _edit()
+
+    def to_dict(self, serializer: BaseSerializer) -> dict[str, Any]:
+        return PostgresSerializedState(run_id=self._run_id).model_dump()
+
+
 class ExternalDBOSAdapter(ExternalRunAdapter):
     """
     External DBOS adapter for workflow interaction.
@@ -1312,16 +1440,58 @@ class ExternalDBOSAdapter(ExternalRunAdapter):
         run_id: str,
         polling_interval_sec: float = 1.0,
         startup_task: asyncio.Task[WorkflowHandleAsync[Any]] | None = None,
+        resolved_pool: asyncpg.Pool | None = None,
+        pool: PoolProvider | None = None,
+        db_path: str | None = None,
+        schema: str | None = None,
     ) -> None:
         self._run_id = run_id
         self._polling_interval_sec = polling_interval_sec
         self._startup_task = startup_task  # None means workflow already started
         self._handle: WorkflowHandleAsync[Any] | None = None
+        self._resolved_pool = resolved_pool
+        self._pool_provider = pool
+        self._db_path = db_path
+        self._schema = schema
 
     @property
     def run_id(self) -> str:
         """Get the workflow run ID."""
         return self._run_id
+
+    def get_state_store(
+        self, namespace: tuple[str, ...] = ()
+    ) -> StateStore[Any] | None:
+        """Reconnect the namespace's durable row for ``Context.to_dict``.
+
+        Reconnects the ``workflow_state`` row as a ``DictState`` blob. A durable
+        ``to_dict`` returns the root reconnect handle, which already spans every
+        namespace row, so child rows aren't read here; resume reconnects typed
+        rows via the internal adapter. Returns ``None`` if no backend handle.
+        """
+        if self._resolved_pool is not None:
+            return PostgresStateStore(
+                pool=self._resolved_pool,
+                run_id=self._run_id,
+                state_type=DictState,
+                schema=self._schema,
+                namespace=namespace,
+            )
+        if self._pool_provider is not None:
+            return _LazyPostgresStateStore(
+                run_id=self._run_id,
+                pool=self._pool_provider,
+                schema=self._schema,
+                namespace=namespace,
+            )
+        if self._db_path is not None:
+            return SqliteStateStore(
+                db_path=self._db_path,
+                run_id=self._run_id,
+                state_type=DictState,
+                namespace=namespace,
+            )
+        return None
 
     async def send_event(self, tick: WorkflowTick) -> None:
         await self._ensure_workflow_started()

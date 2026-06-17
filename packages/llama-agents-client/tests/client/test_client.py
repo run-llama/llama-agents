@@ -357,6 +357,23 @@ async def test_reconnect_resumes_from_last_sequence() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_workflow_events_can_include_child_events() -> None:
+    event = _envelope("child")
+    fake = FakeStreamClient([[(0, event)]])
+    wf_client = WorkflowClient(httpx_client=fake)  # type: ignore[arg-type]
+
+    events = [
+        e
+        async for e in wf_client.get_workflow_events(
+            handler_id="h", include_children=True
+        )
+    ]
+
+    assert events == [event]
+    assert fake.captured_params[0]["include_children"] == "true"
+
+
+@pytest.mark.asyncio
 async def test_reconnect_exceeds_max_attempts_raises() -> None:
     with pytest.raises(ConnectionError, match="after 2 attempts"):
         await _collect(

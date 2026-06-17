@@ -85,17 +85,21 @@ class _SqliteStateStorage:
 
     async def load(self) -> StateRecord | None:
         """Load raw state from the database."""
+        return self.load_sync()
+
+    def load_sync(self) -> StateRecord | None:
+        """Load raw state from the database synchronously."""
         with self._connect() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT state_json FROM workflow_state "
+                "SELECT state_json, state_type, state_module FROM workflow_state "
                 "WHERE run_id = ? AND namespace = ?",
                 (self._run_id, self._namespace_key),
             )
             row = cursor.fetchone()
         if row is None:
             return None
-        return StateRecord(data=row[0])
+        return StateRecord(data=row[0], state_type=row[1], state_module=row[2])
 
     async def save(self, record: StateRecord) -> None:
         """Save raw state to the database via upsert."""
