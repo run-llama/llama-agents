@@ -20,7 +20,6 @@ from workflows.runtime.types.plugin import (
     as_snapshottable_adapter,
     as_v2_runtime_compatibility_shim,
 )
-from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import TickAddEvent, TickCancelRun, WorkflowTick
 
 if TYPE_CHECKING:
@@ -118,16 +117,20 @@ class ExternalContext(Generic[MODEL_T, RunResultT]):
         return cast("StateStore[MODEL_T]", namespaced.view(()))
 
     def send_event(self, message: Event, step: str | None = None) -> None:
-        """Send an event into the workflow."""
-        if step is not None:
-            self._workflow._validate_valid_step_message(step, message)
+        """Send an event into the workflow.
+
+        ``step`` is an absolute path from the root: a bare name targets a root
+        step, ``"child/answer"`` targets a step inside a child namespace.
+        """
+        step_id = (
+            self._workflow._resolve_target_step(step, message)
+            if step is not None
+            else None
+        )
 
         self._execute_task(
             self._external_adapter.send_event(
-                TickAddEvent(
-                    event=message,
-                    step_id=StepId.root(step) if step is not None else None,
-                )
+                TickAddEvent(event=message, step_id=step_id)
             )
         )
 

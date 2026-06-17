@@ -45,6 +45,7 @@ from workflows.runtime.control_loop.streams import (
     _close_collection_stream,
     _count_accepting_steps,
     _detect_stuck_streams,
+    _event_routes_to,
     _fire_collection_release,
     _mint_stream_id,
     _release_on_item,
@@ -864,7 +865,7 @@ def _resolve_work_item_in_stream(
         bindings = state.config.bindings_for_source(tick.step_id)
         accepting_binding_ids = tuple(binding.id for binding in bindings)
         seed = sum(
-            _count_accepting_steps(state, type(m), tick.step_id.namespace)
+            _count_accepting_steps(state, m, tick.step_id.namespace)
             for m in emitted_non_stop
         )
         state.streams[scope.fan_out_stream_id] = CollectionStreamInstance(
@@ -890,7 +891,7 @@ def _resolve_work_item_in_stream(
         # work item per accepting step per emitted event. A step that returns
         # None adds zero successors and simply leaves the set.
         successors = sum(
-            _count_accepting_steps(state, type(ev), tick.step_id.namespace)
+            _count_accepting_steps(state, ev, tick.step_id.namespace)
             for ev in emitted_non_stop
         )
         commands.extend(
@@ -1119,31 +1120,6 @@ def _add_or_enqueue_event(
         )
         state.queue.append(event)
     return commands
-
-
-def _event_routes_to(
-    origin_namespace: tuple[str, ...],
-    target_namespace: tuple[str, ...],
-    event: Event,
-) -> bool:
-    """Whether a type-routed event from ``origin_namespace`` reaches a step in
-    ``target_namespace``.
-
-    An event stays within the namespace that emitted it, except that a
-    ``StartEvent`` may cross *down* into a direct child namespace (that is how a
-    parent triggers a child). A child's ``StopEvent`` crossing back *up* is
-    handled by re-injecting it with the parent namespace as its origin, so it is
-    just an ordinary same-namespace route here.
-    """
-    if target_namespace == origin_namespace:
-        return True
-    if (
-        isinstance(event, StartEvent)
-        and len(target_namespace) == len(origin_namespace) + 1
-        and target_namespace[: len(origin_namespace)] == origin_namespace
-    ):
-        return True
-    return False
 
 
 @dataclass

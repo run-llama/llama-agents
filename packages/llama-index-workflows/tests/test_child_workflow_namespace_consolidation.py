@@ -1,3 +1,4 @@
+# ty: ignore[unknown-argument]
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LlamaIndex Inc.
 """Regression tests for the child-workflow namespace consolidation.
@@ -19,8 +20,11 @@ from __future__ import annotations
 import pytest
 from workflows import Workflow
 from workflows.decorators import step
+from workflows.errors import WorkflowRuntimeError
 from workflows.events import (
     Event,
+    HumanResponseEvent,
+    InputRequiredEvent,
     StartEvent,
     StopEvent,
 )
@@ -205,3 +209,94 @@ async def test_grandchild_fan_in_binds_within_its_own_namespace() -> None:
         _GrandParent(mid=_MidChild(grand=_GrandFanChild()))
     ).run()
     assert result.result == 7
+
+
+# --- Phase 2: targeted child human-input round-trip ---------------------------
+
+
+class _HitlChildStart(StartEvent):
+    pass
+
+
+class _HitlChildStop(StopEvent):
+    answer: str = ""
+
+
+class _HitlChild(Workflow):
+    @step
+    async def ask(self, ev: _HitlChildStart) -> InputRequiredEvent:
+        return InputRequiredEvent(prefix="child?")  # type: ignore[reportCallIssue]
+
+    @step
+    async def answer(self, ev: HumanResponseEvent) -> _HitlChildStop:
+        return _HitlChildStop(answer=ev.response)
+
+
+class _HitlParent(Workflow):
+    child: _HitlChild
+
+    @step
+    async def start(self, ev: StartEvent) -> _HitlChildStart:
+        return _HitlChildStart()
+
+    @step
+    async def finish(self, ev: _HitlChildStop) -> StopEvent:
+        return StopEvent(result=ev.answer)
+
+
+@pytest.mark.asyncio
+async def test_child_human_input_resolves_via_targeted_send() -> None:
+    """A child surfaces an InputRequiredEvent; the caller answers it with a
+    targeted ``send_event(resp, step="child/answer")`` that descends into the
+    child namespace, and the run completes instead of timing out.
+    """
+    handler = _HitlParent(child=_HitlChild()).run()
+    saw_request = False
+    async for ev in handler.stream_events(include_children=True):
+        if isinstance(ev, InputRequiredEvent):
+            saw_request = True
+            handler.ctx.send_event(
+                HumanResponseEvent(response="ok"),  # type: ignore[reportCallIssue]
+                step="child/answer",
+            )
+    assert saw_request
+    result = await handler
+    assert result == "ok"
+
+
+def test_resolve_target_rejects_unknown_child_step_with_actionable_error() -> None:
+    """A bad child target names the valid namespaced steps, not just 'does not
+    exist'."""
+    wf = _HitlParent(child=_HitlChild())
+    with pytest.raises(WorkflowRuntimeError) as excinfo:
+        wf._resolve_target_step(
+            "child/nope",
+            HumanResponseEvent(response="x"),  # type: ignore[reportCallIssue]
+        )
+    message = str(excinfo.value)
+    assert "child/nope does not exist" in message
+    assert "child/answer" in message
+
+
+class _RootHitlParent(Workflow):
+    @step
+    async def ask(self, ev: StartEvent) -> InputRequiredEvent:
+        return InputRequiredEvent(prefix="root?")  # type: ignore[reportCallIssue]
+
+    @step
+    async def answer(self, ev: HumanResponseEvent) -> StopEvent:
+        return StopEvent(result=ev.response)
+
+
+@pytest.mark.asyncio
+async def test_root_targeted_send_unchanged() -> None:
+    """A bare step name still targets a root step (no namespace regression)."""
+    handler = _RootHitlParent().run()
+    async for ev in handler.stream_events():
+        if isinstance(ev, InputRequiredEvent):
+            handler.ctx.send_event(
+                HumanResponseEvent(response="root-ok"),  # type: ignore[reportCallIssue]
+                step="answer",
+            )
+    result = await handler
+    assert result == "root-ok"

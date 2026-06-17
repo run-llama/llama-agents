@@ -370,21 +370,41 @@ class Workflow(metaclass=WorkflowMeta):
         self._runtime.track_workflow(self)
 
     def _validate_valid_step_message(self, step: str, message: Event) -> None:
-        """Validate that a step name exists in the workflow."""
-        if step not in self._get_steps():
-            raise WorkflowRuntimeError(f"Step {step} does not exist")
+        """Validate that a step name exists in the workflow and accepts ``message``."""
+        self._resolve_target_step(step, message)
 
-        step_func = self._get_steps()[step]
+    def _resolve_target_step(
+        self, step: str, message: Event, base_namespace: tuple[str, ...] = ()
+    ) -> StepId:
+        """Resolve a ``send_event(step=...)`` target to a validated ``StepId``.
+
+        ``step`` is resolved relative to ``base_namespace`` — root (``()``) for
+        external sends, the emitting step's namespace for internal sends — so a
+        bare name lands in that namespace and a ``"child/answer"`` path descends
+        from it. The single resolver shared by ``Context.send_event`` and
+        ``ExternalContext.send_event``: it validates against the full namespaced
+        step set (not the root-only one) and that the target accepts the message,
+        naming the valid steps when it rejects.
+        """
+        parsed = StepId.from_str(step)
+        target = StepId(base_namespace + parsed.namespace, parsed.name)
+        namespaced = self._get_namespaced_steps()
+        step_func = namespaced.get(target)
+        if step_func is None:
+            valid = ", ".join(sorted(str(s) for s in namespaced))
+            raise WorkflowRuntimeError(
+                f"Step {step} does not exist. Valid steps: {valid}"
+            )
         step_config = step_func._step_config
-        is_accepted = step_accepts_event(
+        if not step_accepts_event(
             message,
             step_config.accepted_events,
             allow_subclasses=step_config.accept_event_subclasses,
-        )
-        if not is_accepted:
+        ):
             raise WorkflowRuntimeError(
                 f"Step {step} does not accept event of type {type(message)}"
             )
+        return target
 
     @property
     def runtime(self) -> Runtime:

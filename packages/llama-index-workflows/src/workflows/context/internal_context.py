@@ -24,7 +24,6 @@ from workflows.runtime.types.results import (
     StepWorkerStateContextVar,
     WaitingForEvent,
 )
-from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import TickAddEvent
 
 if TYPE_CHECKING:
@@ -172,9 +171,6 @@ class InternalContext(Generic[MODEL_T]):
 
     def send_event(self, message: Event, step: str | None = None) -> None:
         """Send an event to trigger another step."""
-        if step is not None:
-            self._workflow._validate_valid_step_message(step, message)
-
         recovery_counts: dict[str, int] = {}
         namespace: tuple[str, ...] = ()
         try:
@@ -187,11 +183,20 @@ class InternalContext(Generic[MODEL_T]):
         except LookupError:
             pass
 
+        # Resolve and validate the target relative to the emitting namespace: a
+        # bare name targets a sibling step in this namespace, a "child/answer"
+        # path descends into a child of it.
+        step_id = (
+            self._workflow._resolve_target_step(step, message, namespace)
+            if step is not None
+            else None
+        )
+
         self._execute_task(
             self._internal_adapter.send_event(
                 TickAddEvent(
                     event=message,
-                    step_id=StepId(namespace, step) if step is not None else None,
+                    step_id=step_id,
                     origin_namespace=namespace,
                     recovery_counts=recovery_counts,
                 )

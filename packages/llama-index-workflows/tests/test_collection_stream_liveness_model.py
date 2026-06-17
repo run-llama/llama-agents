@@ -84,8 +84,8 @@ def _open_stream(state: BrokerState, open_work_items: int) -> CollectionStreamIn
 def test_count_accepting_steps_is_work_item_fan_out_factor() -> None:
     state = _state()
     # Task is accepted by exactly one step (work); Done by two collects.
-    assert _count_accepting_steps(state, Task, ()) == 1
-    assert _count_accepting_steps(state, Done, ()) == 2
+    assert _count_accepting_steps(state, Task(n=0), ()) == 1
+    assert _count_accepting_steps(state, Done(n=0), ()) == 2
 
 
 def _release_targets(commands: list[WorkflowCommand]) -> list[str]:
@@ -118,7 +118,7 @@ def test_full_two_collect_stream_drains_to_close() -> None:
     """
     state = _state()
     members = [Task(n=i) for i in range(3)]
-    seed = sum(_count_accepting_steps(state, type(m), ()) for m in members)
+    seed = sum(_count_accepting_steps(state, m, ()) for m in members)
     _open_stream(state, open_work_items=seed)
     assert seed == 3
 
@@ -126,7 +126,10 @@ def test_full_two_collect_stream_drains_to_close() -> None:
     for _ in range(3):
         assert (
             _adjust_open_work_items(
-                state, "stream-test", _count_accepting_steps(state, Done, ()) - 1, 0.0
+                state,
+                "stream-test",
+                _count_accepting_steps(state, Done(n=0), ()) - 1,
+                0.0,
             )
             == []
         )
