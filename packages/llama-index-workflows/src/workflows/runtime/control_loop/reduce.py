@@ -840,7 +840,6 @@ def _resolve_work_item_in_stream(
     is driven only by source exhaustion plus ``open_work_items == 0``.
     Classification happens once, before any counter mutation.
     """
-    step_name = str(tick.step_id)
     commands: list[WorkflowCommand] = []
     emitted_non_stop = [
         x.result
@@ -862,12 +861,15 @@ def _resolve_work_item_in_stream(
         disposition is WorkDisposition.FANNED_OUT
         and scope.fan_out_stream_id is not None
     ):
-        bindings = state.config.bindings_for_source(step_name)
+        bindings = state.config.bindings_for_source(tick.step_id)
         accepting_binding_ids = tuple(binding.id for binding in bindings)
-        seed = sum(_count_accepting_steps(state, type(m)) for m in emitted_non_stop)
+        seed = sum(
+            _count_accepting_steps(state, type(m), tick.step_id.namespace)
+            for m in emitted_non_stop
+        )
         state.streams[scope.fan_out_stream_id] = CollectionStreamInstance(
             stream_id=scope.fan_out_stream_id,
-            source_step=step_name,
+            source_step=tick.step_id,
             scope_path=scope.trigger_stack,
             accepting_binding_ids=accepting_binding_ids,
             open_work_items=seed,
@@ -888,7 +890,8 @@ def _resolve_work_item_in_stream(
         # work item per accepting step per emitted event. A step that returns
         # None adds zero successors and simply leaves the set.
         successors = sum(
-            _count_accepting_steps(state, type(ev)) for ev in emitted_non_stop
+            _count_accepting_steps(state, type(ev), tick.step_id.namespace)
+            for ev in emitted_non_stop
         )
         commands.extend(
             _adjust_open_work_items(state, enclosing, successors - 1, now_seconds)
@@ -1190,8 +1193,8 @@ def _redeliver_collection_payload(
             scope_path=tuple(tick.scope_path),
             collection_release_payload=payload,
         ),
-        StepId.root(binding.target_step),
-        state.workers[StepId.root(binding.target_step)],
+        binding.target_step,
+        state.workers[binding.target_step],
         now_seconds,
     )
 
@@ -1299,7 +1302,7 @@ def _route_member_to_collect_step(
         )
         return commands, False
     stream_id = tick.scope_path[-1]
-    binding = state.config.binding_for_target(stream_id, step_id.name, state.streams)
+    binding = state.config.binding_for_target(stream_id, step_id, state.streams)
     if binding is None:
         # Dropped member: its nearest stream has no binding to this
         # collect step. Balance the stream accounting for the dead

@@ -49,8 +49,8 @@ class CollectionBinding:
     """
 
     id: str
-    source_step: str
-    target_step: str
+    source_step: StepId
+    target_step: StepId
     item_types: tuple[type[Event], ...]
     policy: Collect
 
@@ -66,7 +66,7 @@ class CollectionStreamInstance:
     """
 
     stream_id: str
-    source_step: str
+    source_step: StepId
     scope_path: tuple[str, ...]
     open_work_items: int = 0
     accepting_binding_ids: tuple[str, ...] = ()
@@ -333,7 +333,9 @@ class BrokerState:
             streams={
                 sid: SerializedCollectionStreamInstance(
                     stream_id=stream.stream_id,
-                    source_step=stream.source_step,
+                    # Wire format keeps the bare string projection (root -> name,
+                    # child -> "ns/name"), byte-identical to the pre-StepId format.
+                    source_step=str(stream.source_step),
                     scope_path=list(stream.scope_path),
                     open_work_items=stream.open_work_items,
                     accepting_binding_ids=list(stream.accepting_binding_ids),
@@ -370,7 +372,7 @@ class BrokerState:
         base_state.streams = {
             sid: CollectionStreamInstance(
                 stream_id=stream.stream_id,
-                source_step=stream.source_step,
+                source_step=StepId.from_str(stream.source_step),
                 scope_path=tuple(stream.scope_path),
                 open_work_items=stream.open_work_items,
                 accepting_binding_ids=tuple(stream.accepting_binding_ids),
@@ -498,12 +500,18 @@ def _import_event_type(qualified_name: str) -> type[Event]:
 
 
 def _binding_id(
-    source_step: str,
-    target_step: str,
+    source_step: StepId,
+    target_step: StepId,
     item_types: tuple[type[Event], ...],
     policy: Collect,
 ) -> str:
-    """Build a stable id for one static source-to-collect-step binding."""
+    """Build a stable id for one static source-to-collect-step binding.
+
+    The id embeds the *string projection* of each StepId, so a root binding
+    (namespace ``()`` -> bare name) keeps the exact pre-StepId id string. This
+    id is serialized by value into stream state, so a changed root id would
+    break snapshot resume.
+    """
     type_names = ",".join(f"{t.__module__}.{t.__qualname__}" for t in item_types)
     card = policy.cardinality
     card_repr = f"Take({card.n})" if isinstance(card, Take) else type(card).__name__
@@ -518,38 +526,50 @@ def _compute_collection_bindings(workflow: Workflow) -> dict[str, CollectionBind
     type appears at the same stream level reachable from the source (see
     :mod:`workflows._stream_levels` for the level traversal, shared with static
     validation).
+
+    Bindings are computed **per-namespace**: each namespace's steps are fed to
+    the stream-level walk on their own, so a binding only ever forms within one
+    namespace. Feeding the flattened whole tree would re-open cross-namespace
+    binding, since the stream-level walk has no StartEvent boundary of its own
+    (that boundary lives in routing, not here). Source/target are keyed by the
+    namespaced StepId.
     """
-    steps = {name: fn._step_config for name, fn in workflow._get_steps().items()}
-    collects: dict[str, tuple[Any, ...]] = {
-        name: cfg.collection_param[1]
-        for name, cfg in steps.items()
-        if cfg.collection_param is not None
-    }
+    by_namespace: dict[tuple[str, ...], dict[str, StepConfig]] = {}
+    for step_id, fn in workflow._get_namespaced_steps().items():
+        by_namespace.setdefault(step_id.namespace, {})[step_id.name] = fn._step_config
 
     bindings: dict[str, CollectionBinding] = {}
-    for source_step, level_types in stream_level_types_by_producer(steps).items():
-        for target_step, collect_types in collects.items():
-            item_types = tuple(event_types(collect_types))
-            if not any(
-                step_accepts_type(
-                    produced,
-                    item_types,
-                    allow_subclasses=steps[target_step].accept_event_subclasses,
+    for namespace, steps in by_namespace.items():
+        collects: dict[str, tuple[Any, ...]] = {
+            name: cfg.collection_param[1]
+            for name, cfg in steps.items()
+            if cfg.collection_param is not None
+        }
+        for source_name, level_types in stream_level_types_by_producer(steps).items():
+            for target_name, collect_types in collects.items():
+                item_types = tuple(event_types(collect_types))
+                if not any(
+                    step_accepts_type(
+                        produced,
+                        item_types,
+                        allow_subclasses=steps[target_name].accept_event_subclasses,
+                    )
+                    for produced in level_types
+                ):
+                    continue
+                policy = steps[target_name].collection_policy
+                if policy is None:
+                    continue
+                source_step = StepId(namespace, source_name)
+                target_step = StepId(namespace, target_name)
+                binding = CollectionBinding(
+                    id=_binding_id(source_step, target_step, item_types, policy),
+                    source_step=source_step,
+                    target_step=target_step,
+                    item_types=item_types,
+                    policy=policy,
                 )
-                for produced in level_types
-            ):
-                continue
-            policy = steps[target_step].collection_policy
-            if policy is None:
-                continue
-            binding = CollectionBinding(
-                id=_binding_id(source_step, target_step, item_types, policy),
-                source_step=source_step,
-                target_step=target_step,
-                item_types=item_types,
-                policy=policy,
-            )
-            bindings[binding.id] = binding
+                bindings[binding.id] = binding
     return bindings
 
 
@@ -583,7 +603,7 @@ class BrokerConfig:
     namespace_timeouts: dict[tuple[str, ...], float] = field(default_factory=dict)
     collection_bindings: dict[str, CollectionBinding] = field(default_factory=dict)
 
-    def bindings_for_source(self, source_step: str) -> tuple[CollectionBinding, ...]:
+    def bindings_for_source(self, source_step: StepId) -> tuple[CollectionBinding, ...]:
         return tuple(
             binding
             for binding in self.collection_bindings.values()
@@ -593,7 +613,7 @@ class BrokerConfig:
     def binding_for_target(
         self,
         stream_id: str,
-        target_step: str,
+        target_step: StepId,
         streams: dict[str, CollectionStreamInstance],
     ) -> CollectionBinding | None:
         stream = streams.get(stream_id)

@@ -35,7 +35,6 @@ from workflows.runtime.types.results import (
     StepWorkerFailed,
     StepWorkerResult,
 )
-from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import (
     TickStepResult,
 )
@@ -70,7 +69,7 @@ def _detect_stuck_streams(
     )
     if orphaned is not None:
         binding = state.config.collection_bindings.get(orphaned.binding_id)
-        step_name = binding.target_step if binding is not None else "<unknown>"
+        step_name = str(binding.target_step) if binding is not None else "<unknown>"
         return step_name, WorkflowRuntimeError(
             f"Workflow is idle with a pending collect release for step "
             f"{step_name!r} (binding {orphaned.binding_id!r}) whose stream "
@@ -91,11 +90,11 @@ def _detect_stuck_streams(
         return None
     first_leaked = next(iter(state.streams.values()))
     details = "; ".join(
-        f"stream {stream.stream_id!r} opened by step {stream.source_step!r} "
+        f"stream {stream.stream_id!r} opened by step {str(stream.source_step)!r} "
         f"with {stream.open_work_items} open work item(s)"
         for stream in state.streams.values()
     )
-    return first_leaked.source_step, WorkflowRuntimeError(
+    return str(first_leaked.source_step), WorkflowRuntimeError(
         "Workflow is idle but collection streams are still open, so the run "
         f"can never complete: {details}. No queued, running, or resumable "
         "scoped work remains that can close the stream. This indicates "
@@ -119,20 +118,27 @@ def _clear_collection_state(state: BrokerState) -> None:
     state.collection_release_states.clear()
 
 
-def _count_accepting_steps(state: BrokerState, event_type: type) -> int:
-    """Number of steps that accept ``event_type`` — the work-item fan-out factor.
+def _count_accepting_steps(
+    state: BrokerState, event_type: type, namespace: tuple[str, ...]
+) -> int:
+    """Number of steps in ``namespace`` that accept ``event_type`` — the
+    work-item fan-out factor.
 
-    An event routed at a stream level becomes one work item per accepting step
-    (1:1 *and* collect steps count). This is the per-emission birth count for the
-    open_work_items set: a single emitted event accepted by N steps is N work
-    items. Must mirror the routing predicate in ``_process_add_event_tick``
-    exactly (including subclass-aware acceptance) — a birth count that differs
-    from the delivery count drifts the stream counter.
+    An event emitted inside a fan-out stream stays in the stream's namespace and
+    becomes one work item per accepting step *in that namespace* (1:1 *and*
+    collect steps count). This is the per-emission birth count for the
+    open_work_items set: a single emitted event accepted by N same-namespace
+    steps is N work items. Must mirror the routing predicate in
+    ``_process_add_event_tick`` exactly (namespace-scoped, subclass-aware
+    acceptance) — a birth count that differs from the delivery count drifts the
+    stream counter, which is exactly what wedged a root stream when a child step
+    happened to accept the same type.
     """
     return sum(
         1
-        for cfg in state.config.steps.values()
-        if step_accepts_type(
+        for step_id, cfg in state.config.steps.items()
+        if step_id.namespace == namespace
+        and step_accepts_type(
             event_type,
             cfg.accepted_events,
             allow_subclasses=cfg.accept_event_subclasses,
@@ -179,7 +185,7 @@ def _close_collection_stream(
         return []
     commands: list[WorkflowCommand] = []
     for binding in state.config.bindings_for_source(stream.source_step):
-        worker_state = state.workers.get(StepId.root(binding.target_step))
+        worker_state = state.workers.get(binding.target_step)
         if worker_state is None or worker_state.config.collection_param is None:
             continue
         key = _release_state_key(stream_id, binding.id)
@@ -351,7 +357,7 @@ def _fire_collection_release(
             scope_path=output_stack,
             collection_release_payload=payload,
         ),
-        StepId.root(binding.target_step),
+        binding.target_step,
         worker_state,
         now_seconds,
     )
