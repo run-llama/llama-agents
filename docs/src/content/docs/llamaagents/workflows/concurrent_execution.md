@@ -305,8 +305,8 @@ You can wait for any mix of types, not just one type repeated. The order you pas
 
 ## Making a fan-out durable
 
-A concurrent fan-out like this is exactly the kind of long, expensive run you don't want to restart
-from zero. Because the partial fan-in buffer and the still-pending events are part of the workflow's
-serializable state, a fan-out can be **checkpointed and resumed** so a kill mid-run doesn't redo
-completed items. See [writing durable workflows](/python/llamaagents/workflows/durable_workflows)
-for the checkpoint loop and a worked fan-out-survives-a-restart example.
+A long fan-out like this is the kind of run you don't want to restart from zero. The partial fan-in
+buffer and the still-pending events are part of the workflow's serializable state, so a fan-out can
+be checkpointed and resumed, and a kill mid-run won't redo completed items. See
+[writing durable workflows](/python/llamaagents/workflows/durable_workflows) for the checkpoint loop
+and a worked example.

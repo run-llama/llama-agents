@@ -4,14 +4,12 @@ sidebar:
 title: Writing durable workflows
 ---
 
-Workflows are ephemeral by default: once `run()` returns, the state is gone, and the next `run()`
-starts fresh. But a workflow is often where you've expressed an ad-hoc, concurrent,
-hard-to-reason-about process — fan out over a hundred documents, call an LLM per chunk, collect the
-results. That's exactly the kind of run you don't want to start over from zero when the process is
-killed halfway through.
+Workflows are ephemeral by default. Once `run()` returns, the state is gone, and the next `run()`
+starts fresh. But a workflow is often where you've written an ad hoc concurrent process. You fan out
+over a hundred documents, call an LLM per chunk, and collect the results. That is the kind of run you
+don't want to start over from zero when the process is killed halfway through.
 
-This page shows how to make such a workflow **best-effort checkpoint and resume across a restart**,
-in a few lines.
+This page shows how to checkpoint such a workflow and resume it after a restart, in a few lines.
 
 ## Three strategies, increasing durability
 
@@ -21,13 +19,13 @@ in a few lines.
 | `Context.to_dict()` once at the end | ✅ | ✅ | ❌ |
 | Checkpoint loop: snapshot at each step boundary | ✅ | ✅ | ✅ |
 
-The first two are below; the third — the one that actually survives a kill mid-run — is the rest of
-this page.
+The first two are quick to show. The checkpoint loop is the one that survives a crash mid-run, and
+it is most of this page.
 
 ### Data on the workflow instance
 
-A workflow is a regular Python class, so you can stash data in instance variables and reuse it
-across `run()` calls on the same instance:
+A workflow is a regular Python class, so you can keep data in instance variables and reuse it across
+`run()` calls on the same instance:
 
 ```python
 class DbWorkflow(Workflow):
@@ -40,15 +38,15 @@ class DbWorkflow(Workflow):
         return StopEvent(result=self.db.exec("select COUNT(*) from t;"))
 ```
 
-This survives neither a process restart nor a crash — it's just shared state between runs.
+This is shared state between runs. It survives neither a restart nor a crash.
 
 ### Snapshot the context
 
-A run advances by reducing events in a controlled way, so its state is well-defined at every step
-boundary: the events still in flight (pending in step queues, partial fan-in buffers, waiters) plus
-the [state store](/python/llamaagents/workflows/managing_state). `Context.to_dict()` serializes that
-state; `Context.from_dict()` rebuilds it and `run(ctx=...)` continues from there — even in a
-different process:
+A run advances by reducing events in a controlled way, so its state is well defined at every step
+boundary. That state is the events still in flight plus the
+[state store](/python/llamaagents/workflows/managing_state). `Context.to_dict()` serializes it,
+`Context.from_dict()` rebuilds it, and `run(ctx=...)` continues from there, even in a different
+process:
 
 ```python
 w = MyWorkflow()
@@ -64,24 +62,24 @@ ctx = Context.from_dict(w, json.loads(db.load("my-run")))
 result = await w.run(ctx=ctx)   # continues with the restored state
 ```
 
-This survives a restart, but not a crash *during* the run — you only have the state as of the last
-explicit `to_dict()`. To survive a crash, snapshot as the run progresses (next section).
+This survives a restart, but not a crash during the run. You only have the state as of the last
+`to_dict()`. To survive a crash, snapshot as the run progresses. That is the next section.
 
-**How resume behaves.** A restored run re-dispatches the events that were still pending and rebuilds
-the partial fan-in buffers, so completed steps are *not* re-run — their output is already in the
-restored state. Any step that was mid-execution when you captured the state is rewound and runs
-again from the top. That makes resume at-least-once: keep step side effects safe to repeat.
+On resume, the restored run re-dispatches the events that were still pending and rebuilds the partial
+fan-in buffers. Completed steps don't re-run, because their output is already in the restored state.
+A step that was mid-execution when you captured the state is rewound and runs again from the top. So
+resume is at-least-once, and step side effects need to be safe to repeat.
 
-(Snapshotting the state yourself is one way to make it durable. The same state can instead be
-persisted as the event journal — what a durable backend or server runtime does for you — and
-rebuilt the same way. This page covers the do-it-yourself snapshot path.)
+Snapshotting the state yourself is one way to make it durable. The state can also be persisted as the
+event journal, which is what a durable backend or a server runtime does for you. Either way it
+rebuilds to the same state. This page covers the snapshot path.
 
 ## The checkpoint loop
 
-There's no built-in checkpointer to enable. Instead, the workflow stream emits an internal event
-every time a step changes state, and you snapshot when you see one finish.
-`stream_events(expose_internal=True)` surfaces these internal events; `StepStateChanged` with
-`StepState.NOT_RUNNING` marks a step instance completing:
+There is no built-in checkpointer to enable. The workflow stream emits an internal event every time
+a step changes state, and you snapshot when you see one finish. `stream_events(expose_internal=True)`
+surfaces those internal events, and `StepStateChanged` with `StepState.NOT_RUNNING` marks a step
+finishing:
 
 ```python
 from workflows.events import StepStateChanged, StepState
@@ -93,8 +91,8 @@ async for ev in handler.stream_events(expose_internal=True):
 result = await handler
 ```
 
-That's the whole mechanism: observe step boundaries, snapshot the context at each one. To resume
-after a crash, load the last snapshot and pass it to `run()`:
+That is the whole mechanism. You observe step boundaries and snapshot the context at each one. To
+resume after a crash, load the last snapshot and pass it to `run()`:
 
 ```python
 w = MyWorkflow()
@@ -102,23 +100,23 @@ ctx = Context.from_dict(w, json.loads(db.load("my-run")))
 result = await w.run(ctx=ctx)
 ```
 
-A few things worth knowing about where these checkpoints land:
+How the checkpoints behave in a concurrent run:
 
-- Checkpointing is naturally granular: `NOT_RUNNING` fires **per step execution**, not per logical
-  step, so a `@step(num_workers=N)` step or a fan-out gives you a checkpoint per item finished.
-  `ev.name` and `ev.worker_id` tell you which one.
-- The snapshot you take when you observe the event is "the state right now," not a freeze of the
-  instant that step finished — other concurrent workers may have advanced. That's still a
-  consistent, resumable checkpoint; it just isn't a deterministic per-step freeze unless the
-  workflow is single-worker.
-- Each snapshot is a serialize + write, so in a hot concurrent run you don't need one on every
-  boundary. Throttling to a fixed interval (skip if you snapshotted in the last 10s, say) bounds a
-  crash to at most that interval of redone work.
+- Checkpointing is naturally granular. `NOT_RUNNING` fires per step execution, not per logical step,
+  so a `@step(num_workers=N)` step or a fan-out gives you a checkpoint per item finished. `ev.name`
+  and `ev.worker_id` tell you which one.
+- The snapshot is the state at the moment you take it, not a freeze of the instant that step
+  finished. Other concurrent workers may have advanced. It is still a consistent, resumable
+  checkpoint. It just isn't a deterministic per-step freeze unless the workflow runs one worker at a
+  time.
+- Each snapshot is a serialize and a write, so in a busy run you don't need one on every boundary.
+  Throttle to a fixed interval, and a crash costs you at most that interval of redone work. Skip the
+  snapshot if you took one in the last 10 seconds, for example.
 
 ## A concurrent fan-out that survives a restart
 
-A workflow that fans out work, processes items concurrently, and collects the results — checkpointed
-so a kill mid-run doesn't redo completed items:
+A workflow that fans out work, runs items concurrently, and collects the results. Checkpointed so a
+kill mid-run doesn't redo completed items:
 
 ```python
 import asyncio, json, os
@@ -136,8 +134,8 @@ class WorkDone(Event):
     result: str
 
 
-# Heavy / non-serializable inputs come from a Resource (see next section), so
-# they never land in the snapshot — they're re-created on resume.
+# Heavy inputs come from a Resource (see below). They aren't serialized into
+# the snapshot; they're re-created on resume.
 def get_client() -> MyApiClient:
     return MyApiClient(...)
 
@@ -174,8 +172,8 @@ CKPT = "enrich-batch.json"
 async def run_batch(item_ids):
     wf = EnrichBatch()
     if os.path.exists(CKPT):
-        # Resume: completed items are already in the collect buffer and won't re-run.
-        # Don't re-send the StartEvent — dispatch already ran in the previous process.
+        # Resume from the snapshot. Don't re-send the StartEvent; dispatch
+        # already ran, and completed items are in the collect buffer.
         handler = wf.run(ctx=Context.from_dict(wf, json.load(open(CKPT))))
     else:
         handler = wf.run(item_ids=item_ids)
@@ -187,42 +185,37 @@ async def run_batch(item_ids):
     return await handler
 ```
 
-When this is killed after, say, 60 of 100 items: the 60 finished `enrich` calls have their
-`WorkDone` events sitting in the collect buffer, which is part of the snapshot. On resume, `dispatch`
-does not re-run, the 60 done items are not re-enriched, and only the remaining `WorkItem` events —
-still in the queue — are processed. The collect step fires once all 100 distinct `WorkDone`s are
-present, across both runs, so the **final result is correct**.
+Say this is killed after 60 of 100 items. The 60 finished `enrich` calls have their `WorkDone`
+events in the collect buffer, which is part of the snapshot. On resume, `dispatch` does not re-run,
+the 60 done items are not re-enriched, and only the remaining `WorkItem` events get processed. The
+collect step fires once all 100 `WorkDone`s are present, across both runs, so the result is correct.
 
-What *does* get repeated is the in-flight work. At any instant up to `num_workers` `enrich`
-executions are running but not yet complete; every one of those is rewound and re-enriched on
-resume. So with `num_workers=8` you might re-run as many as 8 items — wasted compute, not wrong
-output, and precisely why `enrich` must be safe to repeat. (If a step both completed *and* was
-captured in the snapshot, it is not rewound — only genuinely in-flight executions are.)
+The in-flight work does get repeated. At any moment up to `num_workers` `enrich` calls are running
+but not finished, and each of those is rewound and re-enriched on resume. With `num_workers=8` that
+is up to 8 items run again. It is wasted compute, not wrong output, and it is why `enrich` has to be
+safe to repeat.
 
 ## Keeping snapshots cheap and correct
 
-The snapshot is only as cheap and reliable as what you put in events and state. Two rules:
+The snapshot is only as cheap and reliable as what you put in events and state. Two rules.
 
-**Heavy and non-serializable inputs belong in a [Resource](/python/llamaagents/workflows/resources),
-not in events or state.** A `Resource` factory is resolved once, cached on the workflow, and is
-**never serialized into the context** — on resume it's simply re-created by calling the factory
-again. So API clients, model handles, large reference data, byte buffers: inject them as resources,
-and let your events carry small identifiers (an id, a key, a plan) instead. This keeps the snapshot
-small and keeps you clear of the serialization rule below.
+Keep heavy or non-serializable inputs in a [Resource](/python/llamaagents/workflows/resources), not
+in events or state. A `Resource` factory is resolved once, cached on the workflow, and never
+serialized into the context. On resume it is re-created by calling the factory again. So put API
+clients, model handles, and large reference data in resources, and let your events carry small
+identifiers instead. This keeps the snapshot small, and keeps you clear of the serialization rule
+below.
 
-**Everything on an in-flight event and in the state store must be serializable.** Snapshots use a
-JSON serializer (Pydantic models included); if it hits a value it can't encode, `to_dict()` raises
-and the *whole* snapshot fails — not just that field. So don't put raw bytes, open connections, or
-arbitrary objects on events.
+Everything on an in-flight event and in the state store has to be serializable. Snapshots use a JSON
+serializer, Pydantic models included. If it hits a value it can't encode, `to_dict()` raises and the
+whole snapshot fails, not just that field. So don't put raw bytes or open connections on events.
 
-And the rule that bites, once more: **steps re-run on resume if they were in flight, so make their
-side effects safe to repeat.**
+## When you want durability handled for you
 
-## When to reach for DBOS instead
+The checkpoint loop is durability you control. You decide when to snapshot, and resume is a couple of
+lines. If you'd rather not manage that, the runtime can persist and restore state for you.
 
-The checkpoint loop is best-effort durability you control: you choose when to snapshot, and resume
-is a couple of lines. If you instead want **fully automatic, every-transition durability** — no
-snapshot code, crash recovery that resumes exactly where it stopped — use the
-[DBOS runtime](/python/llamaagents/workflows/dbos). It persists every step transition to a backing
-database (SQLite by default), at the cost of running that database and runtime. Same workflow code;
-different durability/effort trade-off.
+Running a workflow as a [server](/python/llamaagents/workflows/deployment) persists its state across
+requests and restarts. The [DBOS runtime](/python/llamaagents/workflows/dbos) journals every step
+transition to a database, so a crashed workflow resumes on its own. Both run the same workflow code
+you have already written.

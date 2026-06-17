@@ -101,12 +101,9 @@ handler = workflow.run(ctx=ctx)
 result = await handler
 ```
 
-## State, serialization, and durability
+## Serializable state
 
-`ctx.to_dict()` is what makes [durable workflows](/python/llamaagents/workflows/durable_workflows)
-possible: it serializes the state store (alongside the in-flight events) into a snapshot you can
-persist and later restore with `Context.from_dict()`. Because of this, **everything you put in the
-state store must be serializable** — the snapshot uses a JSON serializer (Pydantic models included),
-and a value it can't encode makes `to_dict()` fail. Keep non-serializable things (clients, byte
-buffers, open connections) out of the store and inject them as
+State you keep here is serialized when you snapshot a run to make it
+[durable](/python/llamaagents/workflows/durable_workflows), so keep it to values a JSON serializer
+can encode. Put clients and other non-serializable objects in
 [resources](/python/llamaagents/workflows/resources) instead.

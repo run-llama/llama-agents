@@ -174,15 +174,3 @@ The dependency chain is resolved automatically. In this example, when the workfl
 3. The resulting client is passed to the step
 
 This pattern works with any combination of `Resource` and `ResourceConfig` dependencies.
-
-## Resources and durability
-
-Resources are resolved by calling their factory and are **never serialized into the workflow
-context**. When you [checkpoint a workflow](/python/llamaagents/workflows/durable_workflows), the
-snapshot contains the in-flight events and the state store — not your resources. On resume, the
-factory simply runs again and re-creates the resource.
-
-That makes resources the right home for anything heavy or non-serializable: API clients, model
-handles, database connections, large reference data, byte buffers. Keep those out of your events
-and state store (which must be serializable to snapshot), inject them as resources, and let events
-carry small identifiers instead. This is what keeps a checkpoint small and cheap to take.
