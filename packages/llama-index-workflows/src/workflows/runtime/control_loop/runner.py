@@ -23,6 +23,7 @@ from workflows.events import (
     _set_event_origin_namespace,
 )
 from workflows.runtime.types.commands import (
+    CommandCancelNamespace,
     CommandCompleteRun,
     CommandFailWorkflow,
     CommandHalt,
@@ -352,6 +353,9 @@ class _ControlLoopRunner:
         elif isinstance(command, CommandFailWorkflow):
             await self.cleanup_tasks()
             raise command.exception
+        elif isinstance(command, CommandCancelNamespace):
+            await self._cancel_namespace_tasks(command.namespace)
+            return None
         elif isinstance(command, CommandScheduleIdleCheck):
             if not self._idle_check_pending:
                 self.tick_buffer.append(TickIdleCheck())
@@ -379,6 +383,46 @@ class _ControlLoopRunner:
             return None
         else:
             raise ValueError(f"Unknown command type: {type(command)}")
+
+    async def _cancel_namespace_tasks(self, namespace: tuple[str, ...]) -> None:
+        """Cancel worker tasks for a namespace and its descendants.
+
+        The reducer has already cleared the namespace's journaled buffers; this
+        cancels the live coroutines that back them (prefix-matched, so a
+        terminated child takes its grandchildren too) so an orphaned task cannot
+        complete and report into a now-empty worker slot. Pending workers not yet
+        started are dropped and their coroutines closed.
+        """
+        n = len(namespace)
+
+        def in_namespace(step_id: StepId) -> bool:
+            return step_id.namespace[:n] == namespace
+
+        # Drop not-yet-started pending workers for this namespace.
+        kept: list[PendingStart] = []
+        for pending in self._pending_workers:
+            if isinstance(pending, PendingWorker) and in_namespace(pending.step_id):
+                pending.coro.close()
+            else:
+                kept.append(pending)
+        self._pending_workers = kept
+
+        # Cancel running worker tasks for this namespace.
+        to_cancel = [
+            task for task, key in self._task_keys.items() if in_namespace(key[0])
+        ]
+        for task in to_cancel:
+            task.cancel()
+            self.worker_tasks.discard(task)
+            self._task_keys.pop(task, None)
+        if to_cancel:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*to_cancel, return_exceptions=True),
+                    timeout=0.5,
+                )
+            except Exception:
+                pass
 
     async def cleanup_tasks(self) -> None:
         """Cancel and cleanup all running worker tasks and pending coroutines."""

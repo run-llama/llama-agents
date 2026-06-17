@@ -17,18 +17,27 @@ repros.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
-from workflows import Workflow
-from workflows.decorators import step
-from workflows.errors import WorkflowRuntimeError
+from workflows import Context, Workflow
+from workflows.decorators import catch_error, step
+from workflows.errors import WorkflowRuntimeError, WorkflowTimeoutError
 from workflows.events import (
     Event,
     HumanResponseEvent,
     InputRequiredEvent,
     StartEvent,
+    StepFailedEvent,
     StopEvent,
 )
-from workflows.runtime.types.internal_state import BrokerState, _binding_id
+from workflows.runtime.control_loop.reduce import terminate_namespace
+from workflows.runtime.types.internal_state import (
+    BrokerState,
+    CollectionStreamInstance,
+    EventAttempt,
+    _binding_id,
+)
 from workflows.runtime.types.step_id import StepId
 from workflows.testing import WorkflowTestRunner
 
@@ -300,3 +309,290 @@ async def test_root_targeted_send_unchanged() -> None:
             )
     result = await handler
     assert result == "root-ok"
+
+
+# --- Phase 3: one namespace lifecycle (teardown + bounded timeout recovery) ----
+
+
+def test_terminate_namespace_prefix_matches_descendants_only() -> None:
+    """One teardown clears a namespace and every descendant (prefix match),
+    leaving sibling/ancestor namespaces untouched."""
+    state = BrokerState.from_workflow(
+        _GrandParent(mid=_MidChild(grand=_GrandFanChild()))
+    )
+    root = StepId((), "start")
+    mid = StepId(("mid",), "start")
+    grand = StepId(("mid", "grand"), "fan")
+    for sid in (root, mid, grand):
+        state.workers[sid].queue.append(EventAttempt(event=_Item(n=1)))
+        state.workers[sid].collected_events["buf"] = [_Item(n=1)]
+    state.streams["s-grand"] = CollectionStreamInstance(
+        stream_id="s-grand", source_step=grand, scope_path=(), open_work_items=1
+    )
+    state.namespace_started[()] = 1.0
+    state.namespace_started[("mid",)] = 1.0
+    state.namespace_started[("mid", "grand")] = 1.0
+
+    terminate_namespace(state, ("mid",))
+
+    # The child and grandchild are fully cleared.
+    for sid in (mid, grand):
+        assert not state.workers[sid].queue
+        assert not state.workers[sid].collected_events
+    assert ("mid",) not in state.namespace_started
+    assert ("mid", "grand") not in state.namespace_started
+    assert "s-grand" not in state.streams
+    # The root (ancestor) is untouched.
+    assert state.workers[root].queue
+    assert state.workers[root].collected_events
+    assert () in state.namespace_started
+
+
+class _OrphanChildStart(StartEvent):
+    pass
+
+
+class _OrphanChildStop(StopEvent):
+    pass
+
+
+class _RecoveringSlowChild(Workflow):
+    @step
+    async def run_child(self, ev: _OrphanChildStart) -> _OrphanChildStop:
+        # Orphaned coroutine: still running well after the child's timeout fires.
+        await asyncio.sleep(2)
+        return _OrphanChildStop()
+
+    @catch_error
+    async def recover(self, ev: StepFailedEvent) -> _OrphanChildStop:
+        assert isinstance(ev.exception, WorkflowTimeoutError)
+        return _OrphanChildStop()
+
+
+class _SlowBranch(Event):
+    pass
+
+
+class _BranchDone(Event):
+    pass
+
+
+class _OrphanParent(Workflow):
+    child: _RecoveringSlowChild
+
+    @step
+    async def begin(
+        self, ctx: Context, ev: StartEvent
+    ) -> _OrphanChildStart | _SlowBranch:
+        # Fan out: trigger the child AND a parent branch that outlives the orphan.
+        ctx.send_event(_SlowBranch())
+        return _OrphanChildStart()
+
+    @step
+    async def slow_branch(self, ev: _SlowBranch) -> _BranchDone:
+        await asyncio.sleep(0.5)
+        return _BranchDone()
+
+    @step
+    async def finish(
+        self, ctx: Context, ev: _OrphanChildStop | _BranchDone
+    ) -> StopEvent | None:
+        got = ctx.collect_events(ev, [_OrphanChildStop, _BranchDone])
+        if got is None:
+            return None
+        return StopEvent(result="done")
+
+
+@pytest.mark.asyncio
+async def test_caught_child_timeout_cancels_orphan_no_loop_crash() -> None:
+    """A caught child timeout cancels the still-running child coroutine, so it
+    cannot later report into a torn-down worker slot and crash the loop with
+    'Worker not found in in_progress'. The run completes via recovery + the
+    parent branch."""
+    handler = _OrphanParent(child=_RecoveringSlowChild(timeout=0.05), timeout=30).run()
+    result = await asyncio.wait_for(handler, timeout=10)
+    assert result == "done"
+
+
+class _LeakChildStart(StartEvent):
+    pass
+
+
+class _LeakChildStop(StopEvent):
+    tag: str = ""
+
+
+class _FastPath(Event):
+    pass
+
+
+class _SlowPath(Event):
+    pass
+
+
+class _LeakChild(Workflow):
+    @step
+    async def begin(self, ctx: Context, ev: _LeakChildStart) -> _FastPath | _SlowPath:
+        ctx.send_event(_SlowPath())
+        return _FastPath()
+
+    @step
+    async def fast(self, ev: _FastPath) -> _LeakChildStop:
+        return _LeakChildStop(tag="fast")
+
+    @step
+    async def slow(self, ev: _SlowPath) -> _LeakChildStop:
+        await asyncio.sleep(0.3)
+        return _LeakChildStop(tag="slow")
+
+
+class _KeepAlive(Event):
+    pass
+
+
+class _LeakParent(Workflow):
+    child: _LeakChild
+
+    @step
+    async def begin(self, ctx: Context, ev: StartEvent) -> _LeakChildStart | _KeepAlive:
+        ctx.send_event(_KeepAlive())
+        return _LeakChildStart()
+
+    @step
+    async def observe(self, ctx: Context, ev: _LeakChildStop) -> None:
+        seen = await ctx.store.get("stops", default=0)
+        await ctx.store.set("stops", seen + 1)
+        return None
+
+    @step
+    async def keep_alive(self, ctx: Context, ev: _KeepAlive) -> StopEvent:
+        # Outlive the slow child sibling (0.3s); if a leak existed its second
+        # ChildStop would have surfaced by now.
+        await asyncio.sleep(0.6)
+        return StopEvent(result=await ctx.store.get("stops", default=0))
+
+
+@pytest.mark.asyncio
+async def test_child_stop_terminates_sibling_no_double_fire() -> None:
+    """A child that returns its StopEvent while a sibling branch is in flight
+    surfaces exactly one StopEvent to the parent — the boundary terminates the
+    whole child namespace, cancelling the slow sibling before it can fire a
+    second StopEvent."""
+    handler = _LeakParent(child=_LeakChild(), timeout=30).run()
+    result = await asyncio.wait_for(handler, timeout=10)
+    assert result == 1
+
+
+class _GTeardownGrandStart(StartEvent):
+    pass
+
+
+class _GTeardownGrandStop(StopEvent):
+    pass
+
+
+class _GTeardownGrand(Workflow):
+    @step
+    async def work(self, ev: _GTeardownGrandStart) -> _GTeardownGrandStop:
+        await asyncio.sleep(0.4)
+        return _GTeardownGrandStop()
+
+
+class _GTeardownChildStart(StartEvent):
+    pass
+
+
+class _GTeardownChildStop(StopEvent):
+    pass
+
+
+class _GTeardownFast(Event):
+    pass
+
+
+class _GTeardownChild(Workflow):
+    grand: _GTeardownGrand
+
+    @step
+    async def begin(
+        self, ctx: Context, ev: _GTeardownChildStart
+    ) -> _GTeardownGrandStart | _GTeardownFast:
+        # Trigger the slow grandchild AND a fast path that stops the child.
+        ctx.send_event(_GTeardownFast())
+        return _GTeardownGrandStart()
+
+    @step
+    async def stop_fast(self, ev: _GTeardownFast) -> _GTeardownChildStop:
+        return _GTeardownChildStop()
+
+    @step
+    async def absorb_grand(self, ctx: Context, ev: _GTeardownGrandStop) -> None:
+        # Would only fire if the grandchild leaked past the child's teardown.
+        await ctx.store.set("grand_leaked", True)
+        return None
+
+
+class _GTeardownParent(Workflow):
+    child: _GTeardownChild
+
+    @step
+    async def begin(self, ev: StartEvent) -> _GTeardownChildStart:
+        return _GTeardownChildStart()
+
+    @step
+    async def finish(self, ev: _GTeardownChildStop) -> StopEvent:
+        return StopEvent(result="done")
+
+
+@pytest.mark.asyncio
+async def test_child_stop_tears_down_inflight_grandchild() -> None:
+    """When a child returns its StopEvent, an in-flight grandchild is torn down
+    with it (prefix teardown + task cancellation), so the grandchild's later
+    completion never surfaces and the run completes cleanly."""
+    handler = _GTeardownParent(child=_GTeardownChild(grand=_GTeardownGrand())).run()
+    result = await asyncio.wait_for(handler, timeout=10)
+    assert result == "done"
+    # Give a cancelled grandchild's 0.4s sleep time to (not) fire.
+    await asyncio.sleep(0.6)
+
+
+class _ReArmChildStart(StartEvent):
+    pass
+
+
+class _ReArmChildStop(StopEvent):
+    pass
+
+
+class _ReArmingChild(Workflow):
+    @step
+    async def run_child(self, ev: _ReArmChildStart) -> _ReArmChildStop:
+        await asyncio.sleep(2)  # always exceeds the child's own timeout
+        return _ReArmChildStop()
+
+    @catch_error(max_recoveries=2)
+    async def recover(self, ev: StepFailedEvent) -> _ReArmChildStart:
+        # Re-arm: re-trigger the child instead of stopping, so it times out
+        # again. Bounded by max_recoveries; otherwise it would loop forever.
+        return _ReArmChildStart()
+
+
+class _ReArmParent(Workflow):
+    child: _ReArmingChild
+
+    @step
+    async def begin(self, ev: StartEvent) -> _ReArmChildStart:
+        return _ReArmChildStart()
+
+    @step
+    async def finish(self, ev: _ReArmChildStop) -> StopEvent:
+        return StopEvent(result="never")
+
+
+@pytest.mark.asyncio
+async def test_rearming_child_timeout_bounded_by_max_recoveries() -> None:
+    """A child whose @catch_error re-arms the timeout fails the run after
+    max_recoveries, instead of looping forever."""
+    handler = _ReArmParent(child=_ReArmingChild(timeout=0.05), timeout=30).run()
+    with pytest.raises(WorkflowTimeoutError):
+        await asyncio.wait_for(handler, timeout=10)

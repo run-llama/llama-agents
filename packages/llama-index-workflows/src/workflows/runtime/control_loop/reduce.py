@@ -52,6 +52,7 @@ from workflows.runtime.control_loop.streams import (
     _release_state_for,
 )
 from workflows.runtime.types.commands import (
+    CommandCancelNamespace,
     CommandCompleteRun,
     CommandFailWorkflow,
     CommandHalt,
@@ -511,6 +512,47 @@ def _fan_out_scope(
     )
 
 
+def terminate_namespace(state: BrokerState, namespace: tuple[str, ...]) -> None:
+    """Tear down a namespace and every descendant, in place.
+
+    The single teardown mechanic behind all three paths (root stop, child-stop
+    boundary, child timeout): clear every worker buffer for the namespace, drop
+    the collection streams opened inside it, and forget its timeout activations.
+    The match is a *prefix* match, so terminating a child takes its grandchildren
+    with it. Root is ``namespace == ()`` — the prefix matches everything, exactly
+    the whole-run clear the root StopEvent needs.
+
+    Cancellation of the namespace's live worker *tasks* is a separate concern the
+    caller schedules via :class:`CommandCancelNamespace` (the reducer owns
+    journaled buffers; only the runner owns the asyncio tasks). Whether the run
+    then completes or the boundary event is re-injected also lives in the caller,
+    not here.
+    """
+    n = len(namespace)
+    for step_id, worker in state.workers.items():
+        if step_id.namespace[:n] == namespace:
+            worker.queue.clear()
+            worker.in_progress.clear()
+            worker.collected_events.clear()
+            worker.static_collect_events.clear()
+            worker.collected_waiters.clear()
+    dead_streams = {
+        sid
+        for sid, stream in state.streams.items()
+        if stream.source_step.namespace[:n] == namespace
+    }
+    for sid in dead_streams:
+        state.streams.pop(sid, None)
+    for key in [
+        key
+        for key, release in state.collection_release_states.items()
+        if release.stream_id in dead_streams
+    ]:
+        state.collection_release_states.pop(key, None)
+    for started_ns in [ns for ns in state.namespace_started if ns[:n] == namespace]:
+        state.namespace_started.pop(started_ns, None)
+
+
 def _apply_step_result(
     result: StepFunctionResult,
     *,
@@ -537,32 +579,23 @@ def _apply_step_result(
                 CommandPublishEvent(event=result.result)
             )  # stop event always published to the stream
             state.is_running = False
-            # Clear collected_events and collected_waiters since workflow is complete
-            for worker in state.workers.values():
-                worker.queue.clear()
-                worker.in_progress.clear()
-                worker.collected_events.clear()
-                worker.static_collect_events.clear()
-                worker.collected_waiters.clear()
-            # Drop open collection state; no release can fire after the run ends.
-            _clear_collection_state(state)
+            # Tear down the whole run (root prefix matches every namespace); the
+            # runner cancels the live tasks on CommandCompleteRun.
+            terminate_namespace(state, ())
             acc.commands.append(CommandCompleteRun(result=result.result))
         elif isinstance(result.result, StopEvent):
-            # A child's StopEvent is a *boundary* event, not a run terminal:
-            # terminate the child namespace (clear its buffers) and re-inject
-            # the event into the parent namespace as an ordinary routable
-            # event. The run keeps running; only the root StopEvent above
-            # completes it. The event is NOT published to the stream — that
-            # would signal completion to root stream consumers (Phase 5 adds
-            # opt-in child streaming).
+            # A child's StopEvent is a *boundary* event, not a run terminal: the
+            # child run is over, so terminate its namespace (and any grandchild
+            # under it) and re-inject the event into the parent namespace as an
+            # ordinary routable event. Tearing down cancels sibling branches
+            # still in flight, so a child that stops while a sibling runs cannot
+            # surface a second StopEvent. The run keeps running; only the root
+            # StopEvent above completes it. The event is NOT published to the
+            # stream — that would signal completion to root stream consumers
+            # (Phase 5 adds opt-in child streaming).
             parent_namespace = step_id.namespace[:-1]
-            for child_step_id, worker in state.workers.items():
-                if child_step_id.namespace == step_id.namespace:
-                    worker.collected_events.clear()
-                    worker.collected_waiters.clear()
-            # The child completed: clear its timeout activation so a pending
-            # namespace-timeout tick no-ops, and a re-trigger re-arms.
-            state.namespace_started.pop(step_id.namespace, None)
+            terminate_namespace(state, step_id.namespace)
+            acc.commands.append(CommandCancelNamespace(namespace=step_id.namespace))
             acc.commands.append(
                 CommandQueueEvent(
                     event=result.result,
@@ -1643,9 +1676,12 @@ def _process_namespace_timeout_tick(
     if state.namespace_started.get(namespace) != tick.started_at:
         return state, []
 
-    # Representative in-flight event for the StepFailedEvent payload, and the
-    # namespace's active steps for the timeout event.
+    # Representative in-flight event and recovery lineage for the StepFailedEvent
+    # payload, and the namespace's active steps for the timeout event. The
+    # recovery counts carry across re-arms so the catch-error budget below is
+    # honored exactly like the step-failure path.
     input_event: Event | None = None
+    recovery_counts: dict[str, int] = {}
     active_steps: list[str] = []
     for step_id, worker in init.workers.items():
         if step_id.namespace != namespace:
@@ -1655,20 +1691,17 @@ def _process_namespace_timeout_tick(
         if input_event is None:
             if worker.in_progress:
                 input_event = worker.in_progress[0].event
+                recovery_counts = dict(worker.in_progress[0].recovery_counts)
             elif worker.queue:
                 input_event = worker.queue[0].event
+                recovery_counts = dict(worker.queue[0].recovery_counts)
             elif worker.collected_waiters:
                 input_event = worker.collected_waiters[0].event
 
-    # Terminate the namespace: drop all of its in-flight work and buffers, and
-    # clear its activation so the run can't keep waiting on the dead child.
-    for step_id, worker in state.workers.items():
-        if step_id.namespace == namespace:
-            worker.in_progress = []
-            worker.queue = []
-            worker.collected_events.clear()
-            worker.collected_waiters.clear()
-    state.namespace_started.pop(namespace, None)
+    # Terminate the namespace (and any grandchild) through the one teardown, and
+    # cancel its live worker tasks so an orphaned child coroutine cannot crash
+    # the loop by reporting into a slot that no longer exists.
+    terminate_namespace(state, namespace)
 
     timeout_error = WorkflowTimeoutError(
         f"Child workflow '{'/'.join(namespace)}' timed out after "
@@ -1676,27 +1709,45 @@ def _process_namespace_timeout_tick(
     )
 
     handler_step_id = _namespace_catch_error_handler(state.config, namespace)
-    if handler_step_id is not None:
-        step_failed_event = StepFailedEvent(
-            step_name="/".join(namespace),
-            input_event=input_event if input_event is not None else Event(),
-            exception=timeout_error,
-            attempts=1,
-            elapsed_seconds=tick.timeout,
-            failed_at=datetime.fromtimestamp(now_seconds, tz=timezone.utc),
-        )
-        return state, [
-            CommandQueueEvent(event=step_failed_event, step_id=handler_step_id)
-        ]
+    handler = (
+        state.config.catch_error_handlers.get(handler_step_id)
+        if handler_step_id is not None
+        else None
+    )
+    if handler is not None and handler_step_id is not None:
+        # Honor the handler's recovery budget: a child whose @catch_error
+        # re-arms the timeout is bounded by max_recoveries, not looping forever.
+        recovery_key = str(handler_step_id)
+        new_count = recovery_counts.get(recovery_key, 0) + 1
+        if new_count <= handler.max_recoveries:
+            step_failed_event = StepFailedEvent(
+                step_name="/".join(namespace),
+                input_event=input_event if input_event is not None else Event(),
+                exception=timeout_error,
+                attempts=1,
+                elapsed_seconds=tick.timeout,
+                failed_at=datetime.fromtimestamp(now_seconds, tz=timezone.utc),
+            )
+            return state, [
+                CommandCancelNamespace(namespace=namespace),
+                CommandQueueEvent(
+                    event=step_failed_event,
+                    step_id=handler_step_id,
+                    recovery_counts={**recovery_counts, recovery_key: new_count},
+                ),
+            ]
+        # Recovery budget exhausted: fall through and fail the run.
 
-    # Uncaught child timeout: fail the whole run (no CommandHalt — that is for the
-    # root timeout only). Report the child's own namespace, not the whole run.
+    # Uncaught (or budget-exhausted) child timeout: fail the whole run (no
+    # CommandHalt — that is for the root timeout only). Report the child's own
+    # namespace, not the whole run.
     state.is_running = False
     failing_step_id = next(
         (sid for sid in state.workers if sid.namespace == namespace),
         StepId(namespace, namespace[-1] if namespace else ""),
     )
     return state, [
+        CommandCancelNamespace(namespace=namespace),
         CommandPublishEvent(
             event=WorkflowTimedOutEvent(
                 timeout=tick.timeout,

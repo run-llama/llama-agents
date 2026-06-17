@@ -100,6 +100,21 @@ class CommandScheduleNamespaceTimeout:
 
 
 @dataclass(frozen=True)
+class CommandCancelNamespace:
+    """Cancel the live worker tasks of a namespace and all its descendants.
+
+    Teardown of a child namespace (its StopEvent boundary, or its timeout)
+    clears the reducer's journaled buffers, but only the runner owns the asyncio
+    tasks. This command carries the cancellation across the reduce/runner
+    boundary: the runner cancels every worker task whose step's namespace is
+    prefix-matched by ``namespace``, so an orphaned child coroutine cannot report
+    a result into a worker slot that no longer exists.
+    """
+
+    namespace: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class CommandScheduleIdleCheck:
     """Schedule a deferred idle check via TickIdleCheck.
 
@@ -119,6 +134,7 @@ WorkflowCommand = (
     | CommandCompleteRun
     | CommandFailWorkflow
     | CommandPublishEvent
+    | CommandCancelNamespace
     | CommandScheduleIdleCheck
     | CommandScheduleWaiterTimeout
     | CommandScheduleWakeup
