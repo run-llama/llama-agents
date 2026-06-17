@@ -14,6 +14,7 @@ import pytest
 from llama_agents.server import HandlerQuery, SqliteWorkflowStore
 from llama_agents.server._store.sqlite.migrate import run_migrations
 from llama_agents.server._store.sqlite.sqlite_state_store import (
+    SqliteSerializedState,
     SqliteStateStore,
 )
 from pydantic import BaseModel
@@ -572,3 +573,30 @@ async def test_pre_migration_root_row_reads_as_root(tmp_path: Path) -> None:
         db_path=path, run_id="legacy-run"
     )
     assert await store.get("k") == "legacy"
+
+
+@pytest.mark.asyncio
+async def test_copy_reproduces_every_namespace(db_path: str) -> None:
+    """Copying a run via its handle reproduces root and child namespaces."""
+    src_root: SqliteStateStore[DictState] = SqliteStateStore(
+        db_path=db_path, run_id="run-src"
+    )
+    src_child: SqliteStateStore[DictState] = SqliteStateStore(
+        db_path=db_path, run_id="run-src", namespace=("child",)
+    )
+    await src_root.set("k", "root-val")
+    await src_child.set("k", "child-val")
+
+    # Seed the destination root facade from the source handle; ensure_seeded
+    # drives copy_from_handle, which spans every namespace of the source run.
+    serializer = JsonSerializer()
+    dst_root: SqliteStateStore[DictState] = SqliteStateStore(
+        db_path=db_path, run_id="run-dst"
+    )
+    dst_root.add_seed(SqliteSerializedState(run_id="run-src").model_dump(), serializer)
+    assert await dst_root.get("k") == "root-val"
+
+    dst_child: SqliteStateStore[DictState] = SqliteStateStore(
+        db_path=db_path, run_id="run-dst", namespace=("child",)
+    )
+    assert await dst_child.get("k") == "child-val"

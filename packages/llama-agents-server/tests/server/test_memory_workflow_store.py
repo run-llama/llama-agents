@@ -496,6 +496,23 @@ async def test_max_completed_cleans_up_events_ticks_and_state() -> None:
     assert remaining[0].handler_id == "h-new"
 
 
+async def test_evict_run_state_stores_drops_every_namespace() -> None:
+    """Run-scoped eviction removes all of a run's namespace facades at once."""
+    store = MemoryWorkflowStore()
+    store.create_state_store("run-x")
+    store.create_state_store("run-x", namespace=("child",))
+    store.create_state_store("run-other")
+    assert ("run-x", ()) in store.state_stores
+    assert ("run-x", ("child",)) in store.state_stores
+
+    store._evict_run_state_stores("run-x")
+
+    assert ("run-x", ()) not in store.state_stores
+    assert ("run-x", ("child",)) not in store.state_stores
+    # Other runs are untouched.
+    assert ("run-other", ()) in store.state_stores
+
+
 @pytest.mark.asyncio
 async def test_max_completed_eviction_via_update_handler_status() -> None:
     """Eviction triggers when status changes to terminal via update_handler_status."""
