@@ -10,8 +10,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Coroutine, Generic, TypeVar, cast
 
 from workflows.context.context_types import MODEL_T
-from workflows.context.serializers import JsonSerializer
-from workflows.context.state_store import StateStore, build_namespaced_state
+from workflows.context.state_store import StateStore
 from workflows.errors import WorkflowRuntimeError
 from workflows.events import _set_event_origin_namespace
 from workflows.retry_policy import RetryInfo
@@ -118,18 +117,15 @@ class InternalContext(Generic[MODEL_T]):
         """Access workflow state store.
 
         Inside a step the per-namespace view is threaded in at construction. For
-        a context built outside a step (no threaded view), resolve the root view
-        on demand from the run's single underlying store.
+        a context built outside a step (no threaded view), resolve the root
+        namespace's store on demand from the adapter.
         """
         if self._state_store is not None:
             return cast("StateStore[MODEL_T]", self._state_store)
-        underlying = self._internal_adapter.get_state_store()
-        if underlying is None:
+        store = self._internal_adapter.get_state_store(())
+        if store is None:
             raise RuntimeError("State store not available from adapter")
-        namespaced = build_namespaced_state(
-            self._workflow, underlying, JsonSerializer()
-        )
-        return namespaced.view(())  # type: ignore[return-value]
+        return cast("StateStore[MODEL_T]", store)
 
     def collect_events(
         self,

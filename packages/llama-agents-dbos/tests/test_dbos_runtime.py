@@ -9,7 +9,6 @@ particularly around run_id matching and state store availability.
 from __future__ import annotations
 
 import asyncio
-import json
 from contextlib import suppress
 from types import SimpleNamespace
 from typing import Any, Generator, cast
@@ -30,11 +29,11 @@ from sqlalchemy.engine import Engine
 from workflows.context import Context
 from workflows.context.serializers import JsonSerializer
 from workflows.context.state_store import (
-    CHILD_STATES_KEY,
     DictState,
     InMemoryStateStore,
     StateStore,
     build_namespaced_state,
+    is_durable_serialized_state,
 )
 from workflows.decorators import step
 from workflows.events import Event, StartEvent, StopEvent
@@ -330,9 +329,10 @@ async def test_run_workflow_seeds_state_store_from_durable_handle() -> None:
             state_type: type[Any] | None = None,
             serialized_state: dict[str, Any] | None = None,
             serializer: Any = None,
+            namespace: tuple[str, ...] = (),
         ) -> StateStore[Any]:
             self.create_state_store_calls.append(
-                (run_id, state_type, serialized_state, serializer)
+                (run_id, state_type, serialized_state, serializer, namespace)
             )
             return self.state_store
 
@@ -381,8 +381,10 @@ async def test_run_workflow_seeds_state_store_from_durable_handle() -> None:
 
     assert workflow_store.start_called
     assert workflow_store.state_store.ensure_seeded_called
+    # A durable handle can't split per namespace, so it seeds the root row;
+    # its copy_from_handle copies every namespace row under the run.
     assert workflow_store.create_state_store_calls == [
-        ("run-1", DictState, serialized_state, serializer)
+        ("run-1", DictState, serialized_state, serializer, ())
     ]
 
 
@@ -623,16 +625,15 @@ class _TopWithGrandchild(Workflow):
 
 async def _assert_child_state_durable_round_trip(
     runtime: DBOSRuntime,
-    read_blob: Any,
+    make_store: Any,
 ) -> None:
     """Run a top -> mid -> grandchild tree and assert each namespace's
-    ``ctx.store`` write persists, isolated, in its own slot of the single
-    durable blob row.
+    ``ctx.store`` write persists, isolated, in its own durable row.
 
     The workflow is constructed (so children attach and the runtime tracks it)
     BEFORE ``launch()`` -- DBOS applies its workflow/step decorators at launch,
-    so child step workers must be registered then. ``read_blob`` is an async
-    callable taking the run_id and returning the persisted ``DictState`` row.
+    so child step workers must be registered then. ``make_store`` builds a
+    state-store facade for a ``(run_id, namespace)`` pair.
     """
     wf = _TopWithGrandchild(mid=_StateMid(grand=_StateGrandchild()), runtime=runtime)
     await runtime.launch()
@@ -642,33 +643,30 @@ async def _assert_child_state_durable_round_trip(
     result = await handler
     assert result == "ok"
 
-    blob = await read_blob(run_id)
+    root = make_store(run_id, ())
+    mid = make_store(run_id, ("mid",))
+    grand = make_store(run_id, ("mid", "grand"))
 
-    def _data(payload: dict[str, Any]) -> dict[str, Any]:
-        return payload["_data"]
-
-    root_data = _data(blob)
-    child_states = blob.get(CHILD_STATES_KEY)
-    assert child_states is not None
-    mid_data = _data(child_states["mid"])
-    grand_data = _data(child_states["mid/grand"])
-
-    assert root_data["top_marker"] == '"from-top"'
-    assert mid_data["mid_marker"] == '"from-mid"'
-    assert grand_data["grand_marker"] == '"from-grand"'
-    # No cross-namespace leakage.
-    assert "grand_marker" not in root_data and "grand_marker" not in mid_data
-    assert "mid_marker" not in root_data and "mid_marker" not in grand_data
-    assert "top_marker" not in mid_data and "top_marker" not in grand_data
+    sentinel = object()
+    assert await root.get("top_marker") == "from-top"
+    assert await mid.get("mid_marker") == "from-mid"
+    assert await grand.get("grand_marker") == "from-grand"
+    # No cross-namespace leakage: each row holds only its own marker.
+    assert await root.get("grand_marker", sentinel) is sentinel
+    assert await root.get("mid_marker", sentinel) is sentinel
+    assert await mid.get("grand_marker", sentinel) is sentinel
+    assert await mid.get("top_marker", sentinel) is sentinel
+    assert await grand.get("mid_marker", sentinel) is sentinel
+    assert await grand.get("top_marker", sentinel) is sentinel
 
 
 @pytest.mark.asyncio
 async def test_child_state_durable_in_nested_blob_sqlite(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
-    """A child/grandchild's ``ctx.store`` write persists into the single durable
-    ``workflow_state`` row, nested under ``__child_states__`` and isolated from
-    the parent's root namespace (sqlite backend, no docker).
+    """A child/grandchild's ``ctx.store`` write persists into its own durable
+    ``workflow_state`` row, isolated from the parent's root row (sqlite backend,
+    no docker).
 
     Uses a dedicated DBOS instance so the child workflow is tracked before
     launch (DBOS registers child step workers at launch time)."""
@@ -686,15 +684,15 @@ async def test_child_state_durable_in_nested_blob_sqlite(
     try:
         db_path = str(db_file)
 
-        async def _read_blob(run_id: str) -> Any:
-            store = SqliteStateStore(
-                db_path=db_path, run_id=run_id, state_type=DictState
+        def _make_store(run_id: str, namespace: tuple[str, ...]) -> Any:
+            return SqliteStateStore(
+                db_path=db_path,
+                run_id=run_id,
+                state_type=DictState,
+                namespace=namespace,
             )
-            record = await cast(Any, store)._storage.load()
-            assert record is not None
-            return json.loads(record.data)
 
-        await _assert_child_state_durable_round_trip(runtime, _read_blob)
+        await _assert_child_state_durable_round_trip(runtime, _make_store)
     finally:
         with suppress(Exception):
             await runtime.destroy()
@@ -707,10 +705,10 @@ async def test_child_ful_external_serialization_surfaces_whole_tree_sqlite(
 ) -> None:
     """The DBOS external adapter surfaces the whole child tree for serialization.
 
-    Previously ``ExternalDBOSAdapter`` exposed no state store, so a child-ful
-    run's portable ``Context.to_dict`` dropped every child slot. Now it vends the
-    run's single durable store, and core's lens serializes the whole tree: the
-    root payload plus a per-namespace entry under ``__child_states__``.
+    Each namespace persists to its own durable row. The external adapter
+    reconnects any namespace's row, and a durable ``serialize_tree`` hands back
+    the root reconnect handle -- which already spans every namespace row under
+    the run -- so the whole tree round-trips without dropping any child slot.
     """
     db_file = tmp_path_factory.mktemp("dbos_ext_tree") / "ext_tree.sqlite3"
     system_db_url = f"sqlite+pysqlite:///{db_file}?check_same_thread=false"
@@ -733,15 +731,23 @@ async def test_child_ful_external_serialization_surfaces_whole_tree_sqlite(
         assert await handler == "ok"
 
         external = runtime.get_external_adapter(run_id)
-        underlying = external.get_state_store()
-        assert underlying is not None
+        # Each namespace's durable row reconnects through the external adapter.
+        root = external.get_state_store(())
+        mid = external.get_state_store(("mid",))
+        grand = external.get_state_store(("mid", "grand"))
+        assert root is not None and mid is not None and grand is not None
+        assert await root.get("top_marker") == "from-top"
+        assert await mid.get("mid_marker") == "from-mid"
+        assert await grand.get("grand_marker") == "from-grand"
+
+        # Durable serialize returns a reconnect handle that spans the whole tree.
         serializer = JsonSerializer()
-        tree = build_namespaced_state(wf, underlying, serializer).serialize_tree(
-            serializer
-        )
-        # The whole tree is surfaced: a child-ful run nests every child namespace.
-        child_states = tree[CHILD_STATES_KEY]
-        assert set(child_states) == {"mid", "mid/grand"}
+        tree = build_namespaced_state(
+            wf,
+            lambda ns: cast(Any, external.get_state_store(ns)),
+            serializer,
+        ).serialize_tree(serializer)
+        assert is_durable_serialized_state(tree)
     finally:
         with suppress(Exception):
             await runtime.destroy()
@@ -753,8 +759,8 @@ async def test_child_ful_external_serialization_surfaces_whole_tree_sqlite(
 async def test_child_state_durable_in_nested_blob_postgres(
     postgres_dsn: str,
 ) -> None:
-    """Postgres mirror of the child-state durability round-trip: the whole child
-    tree persists in one ``workflow_state`` row, partitioned per namespace."""
+    """Postgres mirror of the child-state durability round-trip: each namespace
+    persists in its own ``workflow_state`` row."""
     system_db_url = postgres_dsn.replace("postgresql://", "postgresql+psycopg://")
     DBOS.destroy()
     DBOS(
@@ -766,20 +772,18 @@ async def test_child_state_durable_in_nested_blob_postgres(
     )
     runtime = DBOSRuntime(polling_interval_sec=0.01)
     try:
+        pool = await runtime._ensure_pool()
 
-        async def _read_blob(run_id: str) -> Any:
-            pool = await runtime._ensure_pool()
-            store = PostgresStateStore(
+        def _make_store(run_id: str, namespace: tuple[str, ...]) -> Any:
+            return PostgresStateStore(
                 pool=pool,
                 run_id=run_id,
                 state_type=DictState,
                 schema=runtime._schema,
+                namespace=namespace,
             )
-            record = await cast(Any, store)._storage.load()
-            assert record is not None
-            return json.loads(record.data)
 
-        await _assert_child_state_durable_round_trip(runtime, _read_blob)
+        await _assert_child_state_durable_round_trip(runtime, _make_store)
     finally:
         with suppress(Exception):
             await runtime.destroy()

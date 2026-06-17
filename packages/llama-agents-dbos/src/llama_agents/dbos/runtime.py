@@ -60,10 +60,8 @@ from workflows.context.state_store import (
     DictState,
     StateStore,
     StateStoreFacade,
-    infer_state_type,
-    is_child_ful,
-    namespaced_seed_payload,
-    namespaced_underlying_state_type,
+    namespaced_seed_payloads,
+    namespaced_state_types,
 )
 from workflows.events import Event, StartEvent, StopEvent
 from workflows.runtime.types.internal_state import BrokerState
@@ -599,18 +597,32 @@ class DBOSRuntime(Runtime):
         # Capture values needed in the async task closure
         active_serializer = serializer or JsonSerializer()
 
-        # Child-ful runs persist the whole tree in one DictState blob; their seed
-        # is lifted into the root/child slots (and a flat childless checkpoint is
-        # carried forward into the root slot). Topology, not the seed's presence,
-        # decides the underlying store type. Core owns the reconvert.
-        child_ful = is_child_ful(workflow)
-        seed_payload = (
-            namespaced_seed_payload(
-                serialized_state, active_serializer, child_ful=child_ful
-            )
+        # Each namespace owns its own record. A portable in-memory tree splits
+        # into one seed per namespace; a durable handle can't split, so it seeds
+        # the root, whose copy_from_handle copies every namespace row in one shot.
+        state_types = namespaced_state_types(workflow)
+        seeds = (
+            namespaced_seed_payloads(serialized_state, state_types)
             if serialized_state
             else None
         )
+
+        async def _seed_namespace(
+            workflow_store: AbstractWorkflowStore,
+            namespace: tuple[str, ...],
+            payload: dict[str, Any] | None,
+        ) -> None:
+            store = workflow_store.create_state_store(
+                run_id,
+                state_types.get(namespace, DictState),
+                payload,
+                active_serializer,
+                namespace=namespace,
+            )
+            # Materialize the seed before the workflow starts so the first step
+            # observes the restored state.
+            if isinstance(store, StateStoreFacade):
+                await store.ensure_seeded()
 
         async def _run_workflow() -> WorkflowHandleAsync[Any]:
             with SetWorkflowID(run_id):
@@ -618,19 +630,12 @@ class DBOSRuntime(Runtime):
                 if serialized_state:
                     workflow_store = self.create_workflow_store()
                     await workflow_store.start()
-                    seed_state_type = (
-                        DictState if child_ful else infer_state_type(workflow)
-                    )
-                    store = workflow_store.create_state_store(
-                        run_id,
-                        seed_state_type,
-                        seed_payload or serialized_state,
-                        active_serializer,
-                    )
-                    # Materialize the seed before the workflow starts so the
-                    # first step observes the restored state.
-                    if isinstance(store, StateStoreFacade):
-                        await store.ensure_seeded()
+                    if seeds is not None:
+                        for namespace, payload in seeds.items():
+                            await _seed_namespace(workflow_store, namespace, payload)
+                    else:
+                        # Durable handle: one root seed copies the whole tree.
+                        await _seed_namespace(workflow_store, (), serialized_state)
 
                 try:
                     return await DBOS.start_workflow_async(
@@ -670,16 +675,14 @@ class DBOSRuntime(Runtime):
                 "No current run id. Must be called within a workflow run."
             )
 
-        # The single underlying durable store's type: a DictState blob for a
-        # child-ful run (core's lens slices it per namespace), the inferred root
-        # type for a childless run (flat format).
-        state_type = namespaced_underlying_state_type(workflow)
+        # Per-namespace state types: each namespace owns its own typed record.
+        state_types = namespaced_state_types(workflow)
 
         engine = self._get_sql_engine()
         return InternalDBOSAdapter(
             run_id,
             engine,
-            state_type,
+            state_types,
             schema=self._schema,
             state_table_name=self.config.get(
                 "state_table_name", DEFAULT_STATE_TABLE_NAME
@@ -1071,7 +1074,7 @@ class InternalDBOSAdapter(InternalRunAdapter):
         self,
         run_id: str,
         engine: Engine,
-        state_type: type[BaseModel] | None = None,
+        state_types: dict[tuple[str, ...], type[BaseModel]] | None = None,
         schema: str | None = None,
         state_table_name: str = DEFAULT_STATE_TABLE_NAME,
         journal_table_name: str = DEFAULT_JOURNAL_TABLE_NAME,
@@ -1081,7 +1084,8 @@ class InternalDBOSAdapter(InternalRunAdapter):
     ) -> None:
         self._run_id = run_id
         self._engine = engine
-        self._state_type = state_type
+        default_types: dict[tuple[str, ...], type[BaseModel]] = {(): DictState}
+        self._state_types = state_types or default_types
         self._schema = schema
         self._state_table_name = state_table_name
         self._journal_table_name = journal_table_name
@@ -1090,7 +1094,7 @@ class InternalDBOSAdapter(InternalRunAdapter):
         self._db_path = db_path
         self._closed = False
         self._shutdown_event = asyncio.Event()
-        self._state_store: StateStore[Any] | None = None
+        self._state_stores: dict[tuple[str, ...], StateStore[Any]] = {}
         # Journal for deterministic task ordering - lazily initialized
         self._journal: TaskJournal | None = None
         self._orphan_purge_done = False
@@ -1160,41 +1164,49 @@ class InternalDBOSAdapter(InternalRunAdapter):
         self._resolved_pool = await self._pool_provider.get()
         return self._resolved_pool
 
-    def _get_or_create_state_store(self) -> StateStore[Any]:
-        """Get or lazily create the state store.
+    def _get_or_create_state_store(
+        self, namespace: tuple[str, ...] = ()
+    ) -> StateStore[Any]:
+        """Get or lazily create the namespace's own durable store.
 
         For PostgreSQL, the pool must be resolved first via _resolve_pool().
         Call _ensure_resources() before accessing the state store.
         """
-        if self._state_store is None:
+        store = self._state_stores.get(namespace)
+        if store is None:
+            state_type = cast(type[Any], self._state_types.get(namespace, DictState))
             if self._resolved_pool is not None:
-                self._state_store = PostgresStateStore(
+                store = PostgresStateStore(
                     pool=self._resolved_pool,
                     run_id=self._run_id,
-                    state_type=cast(type[Any], self._state_type),
+                    state_type=state_type,
                     schema=self._schema,
+                    namespace=namespace,
                 )
             elif self._db_path is not None:
-                self._state_store = SqliteStateStore(
+                store = SqliteStateStore(
                     db_path=self._db_path,
                     run_id=self._run_id,
-                    state_type=cast(type[Any], self._state_type),
+                    state_type=state_type,
+                    namespace=namespace,
                 )
             else:
                 raise RuntimeError(
                     "No pool or db_path configured for state store. "
                     "Ensure the runtime pool is initialized before accessing state."
                 )
-        return self._state_store
+            self._state_stores[namespace] = store
+        return store
 
-    def get_state_store(self) -> StateStore[Any] | None:
-        """Vend the single per-run durable store; core's lens routes namespaces.
+    def get_state_store(
+        self, namespace: tuple[str, ...] = ()
+    ) -> StateStore[Any] | None:
+        """Vend the per-namespace durable store; each namespace owns its record.
 
-        The store's type was resolved by the runtime: a ``DictState`` blob row for
-        a child-ful run, the typed root store for a childless run. For postgres
-        the pool is resolved by the control loop before any step runs.
+        The store's type comes from the run's per-namespace topology. For
+        postgres the pool is resolved by the control loop before any step runs.
         """
-        return self._get_or_create_state_store()
+        return self._get_or_create_state_store(namespace)
 
     def is_replaying(self) -> bool:
         if (
@@ -1361,14 +1373,15 @@ class ExternalDBOSAdapter(ExternalRunAdapter):
         """Get the workflow run ID."""
         return self._run_id
 
-    def get_state_store(self) -> StateStore[Any] | None:
-        """Reconnect the run's single durable store for ``Context.to_dict``.
+    def get_state_store(
+        self, namespace: tuple[str, ...] = ()
+    ) -> StateStore[Any] | None:
+        """Reconnect the namespace's durable row for ``Context.to_dict``.
 
-        Reconnects the ``workflow_state`` row as a ``DictState`` blob: for a
-        child-ful run that surfaces the whole tree to core's lens (closing the
-        previous gap where DBOS dropped child slots from a portable checkpoint);
-        for a childless run the durable ``to_dict`` is a type-independent
-        reference. Returns ``None`` if no backend handle is available.
+        Reconnects the ``workflow_state`` row as a ``DictState`` blob. A durable
+        ``to_dict`` returns the root reconnect handle, which already spans every
+        namespace row, so child rows aren't read here; resume reconnects typed
+        rows via the internal adapter. Returns ``None`` if no backend handle.
         """
         if self._resolved_pool is not None:
             return PostgresStateStore(
@@ -1376,12 +1389,14 @@ class ExternalDBOSAdapter(ExternalRunAdapter):
                 run_id=self._run_id,
                 state_type=DictState,
                 schema=self._schema,
+                namespace=namespace,
             )
         if self._db_path is not None:
             return SqliteStateStore(
                 db_path=self._db_path,
                 run_id=self._run_id,
                 state_type=DictState,
+                namespace=namespace,
             )
         return None
 

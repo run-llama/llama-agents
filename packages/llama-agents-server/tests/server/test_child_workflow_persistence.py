@@ -8,16 +8,13 @@ confirm:
 
 - the namespaced ``StepId`` journal round-trips (child steps deserialize and
   are skipped on resume rather than re-run), and
-- a child step's ``ctx.store`` writes are durable: they persist into the
-  single ``workflow_state`` row under the nested ``children`` slot,
-  survive a full server restart, and stay isolated from the parent's root
-  state (and, for grandchildren, from intermediate namespaces).
+- a child step's ``ctx.store`` writes are durable: each namespace persists to
+  its own ``workflow_state`` row, survives a full server restart, and stays
+  isolated from the parent's root row (and, for grandchildren, from intermediate
+  namespaces).
 """
 
 from __future__ import annotations
-
-import json
-from typing import Any, cast
 
 import pytest
 from llama_agents.server import (
@@ -28,7 +25,6 @@ from llama_agents.server import (
 )
 from server_test_fixtures import wait_for_passing  # type: ignore[import]
 from workflows import Context, Workflow, step
-from workflows.context.state_store import CHILD_STATES_KEY
 from workflows.events import Event, StartEvent, StopEvent
 
 # Counts child step executions across the (in-process) server restart so we can
@@ -161,15 +157,13 @@ async def test_child_state_writes_are_persisted_under_server_runtime(
     """A child step's ``ctx.store`` writes are durable on the server.
 
     The runtime switch now propagates into the child, and the server adapter
-    is namespace-aware: the whole child tree's state persists in the single
-    ``workflow_state`` row, with the child's compact payload nested under the
-    reserved ``children`` slot. So a child's write survives a full server
-    restart while staying isolated from the parent's root state.
+    is namespace-aware: each namespace owns its own ``workflow_state`` row. The
+    child's write lands in the ``child`` namespace row, isolated from the
+    parent's root row, and survives a full server restart.
 
-    The child-only key is NOT at the decoded root store's top level.
-    Durability is verified by inspecting the raw ``children`` slice directly,
-    and by restarting the server and confirming the parent finishes with the
-    child's threaded-through output.
+    Durability is verified by reconnecting each namespace's row directly, and by
+    restarting the server and confirming the parent finishes with the child's
+    threaded-through output.
     """
     CHILD_RUN_COUNTS.pop("child", None)
     handler_id = "child-state-1"
@@ -190,28 +184,16 @@ async def test_child_state_writes_are_persisted_under_server_runtime(
     ].run_id
     assert run_id is not None
 
-    # A child-ful run appends every child payload to the root row. Decoded reads
-    # expose the root namespace; raw storage exposes the compact child payloads.
-    persisted = sqlite_store.create_state_store(run_id)
-    assert await persisted.get("child_marker", sentinel) is sentinel
-    assert await persisted.get("from_child") == "HELLO"
+    # Each namespace persists to its own row; reconnect each and read it back.
+    root = sqlite_store.create_state_store(run_id)
+    child = sqlite_store.create_state_store(run_id, namespace=("child",))
 
-    record = await cast(Any, persisted)._storage.load()
-    assert record is not None
-    blob = json.loads(record.data)
-    root_data = blob["_data"]
-    child_states = blob.get(CHILD_STATES_KEY)
-    assert child_states is not None
-    assert "child" in child_states
-    child_payload = child_states["child"]["_data"]
-
-    # The parent's root write is durable under the root slot.
-    assert root_data["from_child"] == '"HELLO"'
-    # The child's ``ctx.store`` write is durable in its own nested slot, isolated
-    # from the parent's root namespace.
-    assert child_payload["child_marker"] == '"from-child"'
-    assert "child_marker" not in root_data
-    assert "from_child" not in child_payload
+    # The parent's root write is durable in the root row, the child's in the
+    # child row, with no cross-namespace leakage.
+    assert await root.get("from_child") == "HELLO"
+    assert await root.get("child_marker", sentinel) is sentinel
+    assert await child.get("child_marker") == "from-child"
+    assert await child.get("from_child", sentinel) is sentinel
 
     # Restart: resume from the persisted journal + state, finish the run. The
     # child step is replayed (not re-run) and its output threads through.
@@ -301,10 +283,9 @@ async def test_grandchild_state_writes_are_durable_and_isolated(
     """A grandchild's ``ctx.store`` write survives a restart and stays isolated.
 
     A top -> mid -> grandchild tree, each namespace writing its own marker,
-    idles at a HITL point after the grandchild completed. The persisted row
-    holds each namespace's payload in its own ``__child_states__`` slot keyed by
-    the "/"-joined path (``mid``, ``mid/grand``); markers never cross
-    namespaces. A full server restart resumes and completes the run.
+    idles at a HITL point after the grandchild completed. Each namespace owns
+    its own row, keyed by the "/"-joined path (``mid``, ``mid/grand``); markers
+    never cross namespaces. A full server restart resumes and completes the run.
     """
     CHILD_RUN_COUNTS.pop("grand", None)
     handler_id = "grand-state-1"
@@ -324,30 +305,21 @@ async def test_grandchild_state_writes_are_durable_and_isolated(
     ].run_id
     assert run_id is not None
 
-    persisted = sqlite_store.create_state_store(run_id)
-    record = await cast(Any, persisted)._storage.load()
-    assert record is not None
-    blob = json.loads(record.data)
+    # Reconnect each namespace's own row.
+    root = sqlite_store.create_state_store(run_id)
+    mid = sqlite_store.create_state_store(run_id, namespace=("mid",))
+    grand = sqlite_store.create_state_store(run_id, namespace=("mid", "grand"))
 
-    def _data(payload: dict) -> dict:
-        return payload["_data"]
-
-    root_data = _data(blob)
-    child_states = blob.get(CHILD_STATES_KEY)
-    assert child_states is not None
-    mid_data = _data(child_states["mid"])
-    grand_data = _data(child_states["mid/grand"])
-
-    # Each namespace holds only its own marker.
-    assert root_data["top_marker"] == '"from-top"'
-    assert mid_data["mid_marker"] == '"from-mid"'
-    assert grand_data["grand_marker"] == '"from-grand"'
-    # No cross-namespace leakage.
-    assert "grand_marker" not in root_data and "grand_marker" not in mid_data
-    assert "mid_marker" not in root_data and "mid_marker" not in grand_data
-    assert "top_marker" not in mid_data and "top_marker" not in grand_data
-    # Flat read of the row never surfaces a nested namespace key.
-    assert await persisted.get("grand_marker", sentinel) is sentinel
+    # Each namespace holds only its own marker, with no cross-namespace leakage.
+    assert await root.get("top_marker") == "from-top"
+    assert await mid.get("mid_marker") == "from-mid"
+    assert await grand.get("grand_marker") == "from-grand"
+    assert await root.get("grand_marker", sentinel) is sentinel
+    assert await root.get("mid_marker", sentinel) is sentinel
+    assert await mid.get("grand_marker", sentinel) is sentinel
+    assert await mid.get("top_marker", sentinel) is sentinel
+    assert await grand.get("mid_marker", sentinel) is sentinel
+    assert await grand.get("top_marker", sentinel) is sentinel
 
     # Restart and finish.
     server2 = _make_grandchild_server(sqlite_store)

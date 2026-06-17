@@ -947,6 +947,9 @@ class _InMemoryStateStorage:
     def load_sync(self) -> StateRecord | None:
         return self._record.model_copy() if self._record is not None else None
 
+    def save_sync(self, record: StateRecord) -> None:
+        self._record = record.model_copy()
+
 
 class InMemoryStateStore(StateStoreFacade[MODEL_T]):
     """
@@ -1001,6 +1004,24 @@ class InMemoryStateStore(StateStoreFacade[MODEL_T]):
             type(initial_state),
             JsonSerializer(),
         )
+
+    def add_seed(self, payload: dict[str, Any], serializer: BaseSerializer) -> None:
+        """Apply a seed eagerly — in-memory storage has no I/O to defer.
+
+        Lazy seeding (the base implementation) exists to keep durable backends
+        from materializing on construction. In-process state has nothing to
+        defer, and sync readers (``to_dict``) would otherwise miss a seed that
+        no async access ever triggered. Decode and commit it now.
+        """
+        if not payload:
+            raise ValueError("Cannot seed state store from an empty payload")
+        if is_durable_serialized_state(payload):
+            raise ValueError(
+                "Cannot seed this state store from a durable handle with "
+                f"store_type '{payload.get('store_type')}'"
+            )
+        state = decode_seed_state(payload, serializer)
+        self._memory_storage.save_sync(_live_record(state))
 
     async def _load_state_for_edit(
         self, storage: _StateStorage | None = None
@@ -1313,8 +1334,16 @@ class NamespacedStateStores:
 
         Childless runs (a single namespace) produce exactly the flat root
         snapshot, with no ``children`` key.
+
+        Durable roots hand back a reconnect handle, not inline state: the
+        handle already spans every namespace row for the run (``copy_from_handle``
+        copies all rows under the ``run_id``), so resume reconnects the whole
+        tree from it. There is nothing to nest, and the durable child facades
+        have no sync ``state_data`` to gather — return the handle as-is.
         """
         result = self.view(()).to_dict(serializer)
+        if is_durable_serialized_state(result):
+            return result
         children: dict[str, Any] = {}
         for namespace in self._child_namespaces():
             children[_namespace_key(namespace)] = self.view(namespace).to_dict(
@@ -1358,14 +1387,6 @@ def namespaced_state_types(
         namespace: infer_state_type(instance)
         for namespace, instance in root_workflow._namespace_instances().items()
     }
-
-
-def is_child_ful(root_workflow: "Workflow") -> bool:
-    return len(root_workflow._namespace_instances()) > 1
-
-
-def namespaced_underlying_state_type(root_workflow: "Workflow") -> type[BaseModel]:
-    return infer_state_type(root_workflow)
 
 
 def build_namespaced_state(

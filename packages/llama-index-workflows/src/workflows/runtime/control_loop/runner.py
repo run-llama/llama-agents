@@ -8,11 +8,8 @@ import heapq
 import logging
 from typing import TYPE_CHECKING
 
-from workflows.context.serializers import JsonSerializer
 from workflows.context.state_store import (
-    NamespacedStateStores,
     StateStore,
-    build_namespaced_state,
 )
 from workflows.errors import (
     WorkflowRuntimeError,
@@ -157,30 +154,15 @@ class _ControlLoopRunner:
         self._idle_check_pending = False
         # Pending worker coroutines not yet started (started by adapter in wait_for_next_task)
         self._pending_workers: list[PendingStart] = []
-        # The run's namespace lens over the single underlying durable store,
-        # built once (lazily, after the backend's store/pool is ready) and shared
-        # across all steps. ``None`` when the adapter vends no store.
-        self._namespaced_built = False
-        self._namespaced: NamespacedStateStores | None = None
 
     def _resolve_state_view(self, namespace: tuple[str, ...]) -> StateStore | None:
-        """Resolve a step's per-namespace state view from the underlying store.
+        """Resolve a step's own per-namespace state view from the adapter.
 
-        Built lazily so the backend store (and, for postgres, the pool) is ready
-        by the time a worker coroutine runs. The lens is stateless over the
-        durable store, so a single per-run instance serves every namespace.
+        Each namespace owns an isolated record; the adapter mints (and caches)
+        the per-namespace store, so this stays a thin lookup. ``None`` when the
+        adapter vends no store.
         """
-        if not self._namespaced_built:
-            underlying = self.adapter.get_state_store()
-            self._namespaced = (
-                build_namespaced_state(self.workflow, underlying, JsonSerializer())
-                if underlying is not None
-                else None
-            )
-            self._namespaced_built = True
-        if self._namespaced is None:
-            return None
-        return self._namespaced.view(namespace)
+        return self.adapter.get_state_store(namespace)
 
     def schedule_tick(self, tick: WorkflowTick, at_time: float) -> None:
         """Schedule a tick to be processed at a specific time."""

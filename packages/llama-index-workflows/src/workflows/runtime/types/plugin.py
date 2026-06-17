@@ -182,11 +182,14 @@ class InternalRunAdapter(ABC):
         """
         pass
 
-    def get_state_store(self) -> StateStore[Any] | None:
+    def get_state_store(
+        self, namespace: tuple[str, ...] = ()
+    ) -> StateStore[Any] | None:
         """
-        Get the state store for this workflow run.
+        Get the per-namespace state store for this workflow run.
 
-        Returns the state store from the runtime, or None if not initialized.
+        ``namespace`` selects the namespace's own record (``()`` is the root);
+        each namespace owns an isolated store. Returns None if not initialized.
         Default implementation returns None.
         """
         return None
@@ -335,12 +338,14 @@ class ExternalRunAdapter(ABC):
         """
         await self.send_event(TickCancelRun())
 
-    def get_state_store(self) -> StateStore[Any] | None:
+    def get_state_store(
+        self, namespace: tuple[str, ...] = ()
+    ) -> StateStore[Any] | None:
         """
-        Get the state store for this workflow run.
+        Get the per-namespace state store for this workflow run.
 
-        Returns the state store if this adapter owns it, or None if state
-        is managed externally. Default implementation returns None.
+        ``namespace`` selects the namespace's own record (``()`` is the root).
+        Returns None if this adapter doesn't own state. Default returns None.
         """
         return None
 
