@@ -102,22 +102,23 @@ ctx = Context.from_dict(w, json.loads(db.load("my-run")))
 result = await w.run(ctx=ctx)
 ```
 
-A few honest caveats about the snapshot point:
+A few things worth knowing about where these checkpoints land:
 
-- `NOT_RUNNING` fires **per step execution**, not per logical step. A `@step(num_workers=N)` step or
-  a fan-out emits one event per item, so you'll checkpoint many times in a concurrent run. `ev.name`
-  and `ev.worker_id` tell you which.
+- Checkpointing is naturally granular: `NOT_RUNNING` fires **per step execution**, not per logical
+  step, so a `@step(num_workers=N)` step or a fan-out gives you a checkpoint per item finished.
+  `ev.name` and `ev.worker_id` tell you which one.
 - The snapshot you take when you observe the event is "the state right now," not a freeze of the
-  instant that step finished — other concurrent workers may have advanced. That's fine: it's still a
-  consistent, resumable checkpoint. It just isn't a deterministic per-step freeze unless the
+  instant that step finished — other concurrent workers may have advanced. That's still a
+  consistent, resumable checkpoint; it just isn't a deterministic per-step freeze unless the
   workflow is single-worker.
-- Snapshotting on every boundary has a cost (serialize + write). For a long run you may snapshot
-  only on the steps whose completion is expensive to lose, e.g. `if ev.name == "process_document"`.
+- Each snapshot is a serialize + write, so in a hot concurrent run you don't need one on every
+  boundary. Throttling to a fixed interval (skip if you snapshotted in the last 10s, say) bounds a
+  crash to at most that interval of redone work.
 
 ## A concurrent fan-out that survives a restart
 
-This is the case the page exists for: a workflow that fans out work, processes items concurrently,
-and collects the results — checkpointed so a kill mid-run doesn't redo completed items.
+A workflow that fans out work, processes items concurrently, and collects the results — checkpointed
+so a kill mid-run doesn't redo completed items:
 
 ```python
 import asyncio, json, os
