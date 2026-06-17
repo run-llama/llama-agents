@@ -28,14 +28,15 @@ A workflow is a regular Python class, so you can keep data in instance variables
 `run()` calls on the same instance:
 
 ```python
-class DbWorkflow(Workflow):
-    def __init__(self, db, *args, **kwargs):
-        self.db = db
-        super().__init__(*args, **kwargs)
+class CounterWorkflow(Workflow):
+    def __init__(self):
+        super().__init__()
+        self.run_count = 0
 
     @step
     async def count(self, ev: StartEvent) -> StopEvent:
-        return StopEvent(result=self.db.exec("select COUNT(*) from t;"))
+        self.run_count += 1
+        return StopEvent(result=self.run_count)
 ```
 
 This is shared state between runs. It survives neither a restart nor a crash.
