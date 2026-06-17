@@ -110,6 +110,3 @@ state store must be serializable** — the snapshot uses a JSON serializer (Pyda
 and a value it can't encode makes `to_dict()` fail. Keep non-serializable things (clients, byte
 buffers, open connections) out of the store and inject them as
 [resources](/python/llamaagents/workflows/resources) instead.
-
-One escape hatch: the key `"memory"` is recognized as non-serializable, skipped on snapshot with a
-warning, and must be re-set after a restore.

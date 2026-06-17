@@ -231,8 +231,7 @@ small and keeps you clear of the serialization rule below.
 **Everything on an in-flight event and in the state store must be serializable.** Snapshots use a
 JSON serializer (Pydantic models included); if it hits a value it can't encode, `to_dict()` raises
 and the *whole* snapshot fails — not just that field. So don't put raw bytes, open connections, or
-arbitrary objects on events. (One escape hatch: state-store keys the runtime knows can't be
-serialized — currently `"memory"` — are skipped with a warning and must be re-set after a restore.)
+arbitrary objects on events.
 
 And the rule from the mental model, restated because it's the one that bites: **steps re-run on
 resume if they were in flight, so make their side effects safe to repeat.**
