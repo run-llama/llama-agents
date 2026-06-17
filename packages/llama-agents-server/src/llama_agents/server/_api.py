@@ -614,6 +614,7 @@ class _WorkflowAPI:
         *,
         after_sequence: int | None,
         include_internal: bool,
+        include_children: bool,
         include_qualified_name: bool,
     ) -> AsyncGenerator[tuple[int, EventEnvelopeWithMetadata], None] | None:
         """Resolve a handler to an event stream.
@@ -623,6 +624,7 @@ class _WorkflowAPI:
             after_sequence: Resume after this sequence number. None means "now"
                 (skip historical events).
             include_internal: Whether to include internal dispatch events.
+            include_children: Whether to include child-origin events.
             include_qualified_name: Whether to include qualified_name in envelopes.
 
         Returns:
@@ -674,6 +676,8 @@ class _WorkflowAPI:
                 envelope = stored_event.event
                 types = (envelope.types or []) + [envelope.type]
                 if not include_internal and _INTERNAL_EVENT_TYPE in types:
+                    continue
+                if envelope.origin_namespace and not include_children:
                     continue
                 if not include_qualified_name:
                     envelope = envelope.model_copy(update={"qualified_name": None})
@@ -831,6 +835,13 @@ class _WorkflowAPI:
               default: false
             description: If true, include internal workflow events (e.g., step state changes).
           - in: query
+            name: include_children
+            required: false
+            schema:
+              type: boolean
+              default: false
+            description: If true, include events emitted from child workflow namespaces.
+          - in: query
             name: after_sequence
             required: false
             schema:
@@ -885,6 +896,9 @@ class _WorkflowAPI:
         include_internal = (
             request.query_params.get("include_internal", "false").lower() == "true"
         )
+        include_children = (
+            request.query_params.get("include_children", "false").lower() == "true"
+        )
         include_qualified_name = (
             request.query_params.get("include_qualified_name", "true").lower() == "true"
         )
@@ -915,6 +929,7 @@ class _WorkflowAPI:
             handler_id,
             after_sequence=after_sequence,
             include_internal=include_internal,
+            include_children=include_children,
             include_qualified_name=include_qualified_name,
         )
         if gen is None:

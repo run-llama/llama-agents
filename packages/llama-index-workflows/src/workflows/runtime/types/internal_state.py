@@ -6,7 +6,7 @@ from __future__ import annotations
 import dataclasses
 import importlib
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Mapping, TypeVar
 
 from workflows._event_matching import step_accepts_type
 from workflows._stream_levels import event_types, stream_level_types_by_producer
@@ -38,6 +38,17 @@ if TYPE_CHECKING:
     from workflows.context.serializers import BaseSerializer
 
 
+T = TypeVar("T")
+
+
+def _normalize_step_id(value: Any) -> StepId:
+    return value if isinstance(value, StepId) else StepId.from_str(value)
+
+
+def _normalize_step_id_keys(mapping: Mapping[Any, T]) -> dict[StepId, T]:
+    return {_normalize_step_id(step_id): value for step_id, value in mapping.items()}
+
+
 @dataclass(frozen=True)
 class CollectionBinding:
     """
@@ -49,8 +60,8 @@ class CollectionBinding:
     """
 
     id: str
-    source_step: str
-    target_step: str
+    source_step: StepId
+    target_step: StepId
     item_types: tuple[type[Event], ...]
     policy: Collect
 
@@ -66,7 +77,7 @@ class CollectionStreamInstance:
     """
 
     stream_id: str
-    source_step: str
+    source_step: StepId
     scope_path: tuple[str, ...]
     open_work_items: int = 0
     accepting_binding_ids: tuple[str, ...] = ()
@@ -112,12 +123,30 @@ class BrokerState:
 
     is_running: bool
     config: BrokerConfig
-    workers: dict[str, InternalStepWorkerState]
+    workers: dict[StepId, InternalStepWorkerState]
     stream_seq: int = 0
     streams: dict[str, CollectionStreamInstance] = field(default_factory=dict)
     collection_release_states: dict[str, CollectionReleaseState] = field(
         default_factory=dict
     )
+    # Per-child-namespace activation times: the moment the first event routed
+    # into a namespace that declares a ``timeout``. Used to arm and to staleness-
+    # check :class:`TickNamespaceTimeout`. Cleared when the namespace completes
+    # (StopEvent boundary) or is expired, so a re-triggered child re-arms. Not
+    # serialized — runtime scheduling state, like waiter timeouts.
+    namespace_started: dict[tuple[str, ...], float] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self._normalize_worker_keys()
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        if "namespace_started" not in state:
+            self.namespace_started = {}
+        self._normalize_worker_keys()
+
+    def _normalize_worker_keys(self) -> None:
+        self.workers = _normalize_step_id_keys(self.workers)
 
     def deepcopy(self) -> BrokerState:
         """
@@ -127,8 +156,8 @@ class BrokerState:
             is_running=self.is_running,
             config=self.config,  # immutable
             workers={
-                name: worker_state._deepcopy()
-                for name, worker_state in self.workers.items()
+                step_id: worker_state._deepcopy()
+                for step_id, worker_state in self.workers.items()
             },
             stream_seq=self.stream_seq,
             streams={sid: stream._copy() for sid, stream in self.streams.items()},
@@ -136,29 +165,55 @@ class BrokerState:
                 key: state._copy()
                 for key, state in self.collection_release_states.items()
             },
+            namespace_started=dict(self.namespace_started),
         )
 
     @staticmethod
     def from_workflow(workflow: Workflow) -> BrokerState:
+        namespaced_steps = workflow._get_namespaced_steps()
+        # Catch-error tables are per-instance (bare-name keyed) on each workflow;
+        # namespace them by the owning instance's path so a child's handlers
+        # recover its own steps. Root steps (namespace ()) project back to bare
+        # names, preserving the pre-namespace wire format.
+        catch_error_handlers: dict[StepId, CatchErrorHandler] = {}
+        handler_for_step: dict[StepId, StepId] = {}
+        # Per-child-namespace timeouts from each child instance. A child only
+        # arms its own deadline when it was given an explicit, non-None timeout;
+        # an unset child defers to its parent (see ``_child_namespace_timeout``).
+        # The root timeout (namespace ()) stays the single global deadline
+        # scheduled in the control loop's ``run()``.
+        namespace_timeouts: dict[tuple[str, ...], float] = {}
+        for namespace, instance in workflow._namespace_instances().items():
+            for name, handler in instance._catch_error_handlers.items():
+                catch_error_handlers[StepId(namespace, name)] = handler
+            for step_name, handler_name in instance._handler_for_step.items():
+                handler_for_step[StepId(namespace, step_name)] = StepId(
+                    namespace, handler_name
+                )
+            if namespace != ():
+                child_timeout = instance._child_namespace_timeout()
+                if child_timeout is not None:
+                    namespace_timeouts[namespace] = child_timeout
         return BrokerState(
             is_running=False,
             config=BrokerConfig(
                 steps={
-                    name: InternalStepConfig(
+                    step_id: InternalStepConfig(
                         accepted_events=step_func._step_config.accepted_events,
                         retry_policy=step_func._step_config.retry_policy,
                         num_workers=step_func._step_config.num_workers,
                         accept_event_subclasses=step_func._step_config.accept_event_subclasses,
                     )
-                    for name, step_func in workflow._get_steps().items()
+                    for step_id, step_func in namespaced_steps.items()
                 },
                 timeout=workflow._timeout,
-                catch_error_handlers=dict(workflow._catch_error_handlers),
-                handler_for_step=dict(workflow._handler_for_step),
+                catch_error_handlers=catch_error_handlers,
+                handler_for_step=handler_for_step,
+                namespace_timeouts=namespace_timeouts,
                 collection_bindings=_compute_collection_bindings(workflow),
             ),
             workers={
-                name: InternalStepWorkerState(
+                step_id: InternalStepWorkerState(
                     queue=[],
                     config=step_func._step_config,
                     in_progress=[],
@@ -166,7 +221,7 @@ class BrokerState:
                     static_collect_events=[],
                     collected_waiters=[],
                 )
-                for name, step_func in workflow._get_steps().items()
+                for step_id, step_func in namespaced_steps.items()
             },
         )
 
@@ -175,7 +230,9 @@ class BrokerState:
         Rehydrates non-serializable state by re-running commands
         """
         commands: list[WorkflowTick] = []
-        for step_name, worker_state in sorted(self.workers.items(), key=lambda x: x[0]):
+        for step_id, worker_state in sorted(
+            self.workers.items(), key=lambda x: str(x[0])
+        ):
             for waiter in sorted(
                 worker_state.collected_waiters, key=lambda x: x.waiter_id
             ):
@@ -186,7 +243,7 @@ class BrokerState:
                     commands.append(
                         TickAddEvent(
                             event=waiter.event,
-                            step_id=StepId.root(step_name),
+                            step_id=step_id,
                             bound_events=waiter.bound_events,
                             scope_path=waiter.scope_path,
                             collection_release_payload=waiter.collection_release_payload,
@@ -198,7 +255,7 @@ class BrokerState:
         """Serialize the broker state to a SerializedContext."""
 
         workers_dict = {}
-        for step_name, worker_state in self.workers.items():
+        for step_id, worker_state in self.workers.items():
             # Serialize queue with retry and stream scope info
             queue = [
                 SerializedEventAttempt(
@@ -276,7 +333,10 @@ class BrokerState:
                 for waiter in worker_state.collected_waiters
             ]
 
-            workers_dict[step_name] = SerializedStepWorkerState(
+            # The wire format keys workers by the string projection of the
+            # StepId (root steps -> bare name, identical to the pre-StepId
+            # format; child steps -> "namespace/name").
+            workers_dict[str(step_id)] = SerializedStepWorkerState(
                 queue=queue,
                 in_progress=in_progress,
                 collected_events=collected_events,
@@ -296,7 +356,9 @@ class BrokerState:
             streams={
                 sid: SerializedCollectionStreamInstance(
                     stream_id=stream.stream_id,
-                    source_step=stream.source_step,
+                    # Wire format keeps the bare string projection (root -> name,
+                    # child -> "ns/name"), byte-identical to the pre-StepId format.
+                    source_step=str(stream.source_step),
                     scope_path=list(stream.scope_path),
                     open_work_items=stream.open_work_items,
                     accepting_binding_ids=list(stream.accepting_binding_ids),
@@ -333,7 +395,7 @@ class BrokerState:
         base_state.streams = {
             sid: CollectionStreamInstance(
                 stream_id=stream.stream_id,
-                source_step=stream.source_step,
+                source_step=StepId.from_str(stream.source_step),
                 scope_path=tuple(stream.scope_path),
                 open_work_items=stream.open_work_items,
                 accepting_binding_ids=tuple(stream.accepting_binding_ids),
@@ -352,11 +414,12 @@ class BrokerState:
 
         # Restore worker state (queues, collected events, waiters)
         # We do this regardless of is_running state so workflows can resume from where they left off
-        for step_name, worker_data in serialized.workers.items():
-            if step_name not in base_state.workers:
+        for step_key, worker_data in serialized.workers.items():
+            step_id = StepId.from_str(step_key)
+            if step_id not in base_state.workers:
                 continue
 
-            worker = base_state.workers[step_name]
+            worker = base_state.workers[step_id]
 
             # Restore queue with retry and stream scope info.
             # in_progress events are moved to the queue on deserialization;
@@ -460,12 +523,18 @@ def _import_event_type(qualified_name: str) -> type[Event]:
 
 
 def _binding_id(
-    source_step: str,
-    target_step: str,
+    source_step: StepId,
+    target_step: StepId,
     item_types: tuple[type[Event], ...],
     policy: Collect,
 ) -> str:
-    """Build a stable id for one static source-to-collect-step binding."""
+    """Build a stable id for one static source-to-collect-step binding.
+
+    The id embeds the *string projection* of each StepId, so a root binding
+    (namespace ``()`` -> bare name) keeps the exact pre-StepId id string. This
+    id is serialized by value into stream state, so a changed root id would
+    break snapshot resume.
+    """
     type_names = ",".join(f"{t.__module__}.{t.__qualname__}" for t in item_types)
     card = policy.cardinality
     card_repr = f"Take({card.n})" if isinstance(card, Take) else type(card).__name__
@@ -480,38 +549,50 @@ def _compute_collection_bindings(workflow: Workflow) -> dict[str, CollectionBind
     type appears at the same stream level reachable from the source (see
     :mod:`workflows._stream_levels` for the level traversal, shared with static
     validation).
+
+    Bindings are computed **per-namespace**: each namespace's steps are fed to
+    the stream-level walk on their own, so a binding only ever forms within one
+    namespace. Feeding the flattened whole tree would re-open cross-namespace
+    binding, since the stream-level walk has no StartEvent boundary of its own
+    (that boundary lives in routing, not here). Source/target are keyed by the
+    namespaced StepId.
     """
-    steps = {name: fn._step_config for name, fn in workflow._get_steps().items()}
-    collects: dict[str, tuple[Any, ...]] = {
-        name: cfg.collection_param[1]
-        for name, cfg in steps.items()
-        if cfg.collection_param is not None
-    }
+    by_namespace: dict[tuple[str, ...], dict[str, StepConfig]] = {}
+    for step_id, fn in workflow._get_namespaced_steps().items():
+        by_namespace.setdefault(step_id.namespace, {})[step_id.name] = fn._step_config
 
     bindings: dict[str, CollectionBinding] = {}
-    for source_step, level_types in stream_level_types_by_producer(steps).items():
-        for target_step, collect_types in collects.items():
-            item_types = tuple(event_types(collect_types))
-            if not any(
-                step_accepts_type(
-                    produced,
-                    item_types,
-                    allow_subclasses=steps[target_step].accept_event_subclasses,
+    for namespace, steps in by_namespace.items():
+        collects: dict[str, tuple[Any, ...]] = {
+            name: cfg.collection_param[1]
+            for name, cfg in steps.items()
+            if cfg.collection_param is not None
+        }
+        for source_name, level_types in stream_level_types_by_producer(steps).items():
+            for target_name, collect_types in collects.items():
+                item_types = tuple(event_types(collect_types))
+                if not any(
+                    step_accepts_type(
+                        produced,
+                        item_types,
+                        allow_subclasses=steps[target_name].accept_event_subclasses,
+                    )
+                    for produced in level_types
+                ):
+                    continue
+                policy = steps[target_name].collection_policy
+                if policy is None:
+                    continue
+                source_step = StepId(namespace, source_name)
+                target_step = StepId(namespace, target_name)
+                binding = CollectionBinding(
+                    id=_binding_id(source_step, target_step, item_types, policy),
+                    source_step=source_step,
+                    target_step=target_step,
+                    item_types=item_types,
+                    policy=policy,
                 )
-                for produced in level_types
-            ):
-                continue
-            policy = steps[target_step].collection_policy
-            if policy is None:
-                continue
-            binding = CollectionBinding(
-                id=_binding_id(source_step, target_step, item_types, policy),
-                source_step=source_step,
-                target_step=target_step,
-                item_types=item_types,
-                policy=policy,
-            )
-            bindings[binding.id] = binding
+                bindings[binding.id] = binding
     return bindings
 
 
@@ -525,18 +606,50 @@ class BrokerConfig:
     Attributes:
         steps: Configuration for each step indexed by step name
         timeout: Maximum seconds before the workflow times out, or None for no timeout
-        catch_error_handlers: handler step name -> CatchErrorHandler descriptor
-        handler_for_step: step name -> handler step name that owns it
+        catch_error_handlers: handler StepId -> CatchErrorHandler descriptor
+        handler_for_step: covered step's StepId -> the handler StepId that owns it
         collection_bindings: Static list[E] stream bindings keyed by binding id
     """
 
-    steps: dict[str, InternalStepConfig]
+    steps: dict[StepId, InternalStepConfig]
     timeout: float | None
-    catch_error_handlers: dict[str, CatchErrorHandler] = field(default_factory=dict)
-    handler_for_step: dict[str, str] = field(default_factory=dict)
+    # Catch-error routing is keyed by StepId so a handler declared on a child
+    # recovers only that child's steps and keeps a recovery budget distinct from
+    # a same-named root handler. Merged from every namespace instance in
+    # ``from_workflow``; ``handler_for_step`` maps a covered step's StepId to its
+    # handler's StepId, ``catch_error_handlers`` maps a handler StepId to its
+    # descriptor.
+    catch_error_handlers: dict[StepId, CatchErrorHandler] = field(default_factory=dict)
+    handler_for_step: dict[StepId, StepId] = field(default_factory=dict)
+    # Per-child-namespace timeout (seconds), from each child's ``_timeout``.
+    # Root (``()``) is absent: its deadline is the global ``timeout`` above.
+    namespace_timeouts: dict[tuple[str, ...], float] = field(default_factory=dict)
     collection_bindings: dict[str, CollectionBinding] = field(default_factory=dict)
 
-    def bindings_for_source(self, source_step: str) -> tuple[CollectionBinding, ...]:
+    def __post_init__(self) -> None:
+        self._normalize_step_id_maps()
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self._normalize_step_id_maps()
+
+    def _normalize_step_id_maps(self) -> None:
+        object.__setattr__(self, "steps", _normalize_step_id_keys(self.steps))
+        object.__setattr__(
+            self,
+            "catch_error_handlers",
+            _normalize_step_id_keys(self.catch_error_handlers),
+        )
+        object.__setattr__(
+            self,
+            "handler_for_step",
+            {
+                _normalize_step_id(step_id): _normalize_step_id(handler_id)
+                for step_id, handler_id in self.handler_for_step.items()
+            },
+        )
+
+    def bindings_for_source(self, source_step: StepId) -> tuple[CollectionBinding, ...]:
         return tuple(
             binding
             for binding in self.collection_bindings.values()
@@ -546,7 +659,7 @@ class BrokerConfig:
     def binding_for_target(
         self,
         stream_id: str,
-        target_step: str,
+        target_step: StepId,
         streams: dict[str, CollectionStreamInstance],
     ) -> CollectionBinding | None:
         stream = streams.get(stream_id)

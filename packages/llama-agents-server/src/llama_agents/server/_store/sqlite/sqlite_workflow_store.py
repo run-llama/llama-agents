@@ -93,12 +93,14 @@ class SqliteWorkflowStore(AbstractWorkflowStore):
     def _build_state_store(
         self,
         run_id: str,
+        namespace: tuple[str, ...],
         state_type: type[Any] | None,
         serializer: BaseSerializer | None,
     ) -> SqliteStateStore[Any]:
         return SqliteStateStore(
             db_path=self.db_path,
             run_id=run_id,
+            namespace=namespace,
             state_type=state_type,
             serializer=serializer,
             connection=self._persistent_conn,

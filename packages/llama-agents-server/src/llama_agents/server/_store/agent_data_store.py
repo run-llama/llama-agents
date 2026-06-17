@@ -169,7 +169,7 @@ class AgentDataStore(AbstractWorkflowStore):
         # Clean up sequence counters and cached state store
         self._event_sequences.pop(run_id, None)
         self._tick_sequences.pop(run_id, None)
-        self._state_store_cache.pop(run_id, None)
+        self._evict_run_state_stores(run_id)
 
     # ------------------------------------------------------------------
     # Sequence helpers
@@ -491,12 +491,14 @@ class AgentDataStore(AbstractWorkflowStore):
     def _build_state_store(
         self,
         run_id: str,
+        namespace: tuple[str, ...],
         state_type: type[Any] | None,
         serializer: BaseSerializer | None,
     ) -> AgentDataStateStore[Any]:
         return AgentDataStateStore(
             client=self._client,
             run_id=run_id,
+            namespace=namespace,
             state_type=state_type,
             collection=f"{self._collection}_state",
             serializer=serializer,

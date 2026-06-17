@@ -8,7 +8,7 @@ import inspect
 import logging
 import time
 from collections.abc import AsyncIterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -45,12 +45,14 @@ from workflows.runtime.control_loop.streams import (
     _close_collection_stream,
     _count_accepting_steps,
     _detect_stuck_streams,
+    _event_routes_to,
     _fire_collection_release,
     _mint_stream_id,
     _release_on_item,
     _release_state_for,
 )
 from workflows.runtime.types.commands import (
+    CommandCancelNamespace,
     CommandCompleteRun,
     CommandFailWorkflow,
     CommandHalt,
@@ -58,12 +60,14 @@ from workflows.runtime.types.commands import (
     CommandQueueEvent,
     CommandRunWorker,
     CommandScheduleIdleCheck,
+    CommandScheduleNamespaceTimeout,
     CommandScheduleWaiterTimeout,
     CommandScheduleWakeup,
     WorkflowCommand,
     indicates_exit,
 )
 from workflows.runtime.types.internal_state import (
+    BrokerConfig,
     BrokerState,
     CollectionStreamInstance,
     EventAttempt,
@@ -87,6 +91,7 @@ from workflows.runtime.types.ticks import (
     TickCancelRun,
     TickIdleCheck,
     TickIdleRelease,
+    TickNamespaceTimeout,
     TickPublishEvent,
     TickStepResult,
     TickTimeout,
@@ -96,10 +101,6 @@ from workflows.runtime.types.ticks import (
 )
 
 logger = logging.getLogger("workflows.runtime.control_loop")
-
-
-def _root_step_key(step_id: StepId) -> str:
-    return str(step_id)
 
 
 def rebuild_state_from_ticks(
@@ -218,6 +219,8 @@ def _reduce_tick(
         state, commands = _process_timeout_tick(tick, init)
     elif isinstance(tick, TickWaiterTimeout):
         state, commands = _process_waiter_timeout_tick(tick, init, now_seconds)
+    elif isinstance(tick, TickNamespaceTimeout):
+        state, commands = _process_namespace_timeout_tick(tick, init, now_seconds)
     elif isinstance(tick, TickIdleCheck):
         # Return early — idle check ticks don't schedule further idle checks
         if _check_idle_state(init):
@@ -331,8 +334,7 @@ def rewind_in_progress(
     """
     state = state.deepcopy()
     commands: list[WorkflowCommand] = []
-    for step_name, step_state in sorted(state.workers.items(), key=lambda x: x[0]):
-        step_id = StepId.root(step_name)
+    for step_id, step_state in sorted(state.workers.items(), key=lambda x: str(x[0])):
         for in_progress in step_state.in_progress:
             step_state.queue.insert(
                 0,
@@ -510,6 +512,47 @@ def _fan_out_scope(
     )
 
 
+def terminate_namespace(state: BrokerState, namespace: tuple[str, ...]) -> None:
+    """Tear down a namespace and every descendant, in place.
+
+    The single teardown mechanic behind all three paths (root stop, child-stop
+    boundary, child timeout): clear every worker buffer for the namespace, drop
+    the collection streams opened inside it, and forget its timeout activations.
+    The match is a *prefix* match, so terminating a child takes its grandchildren
+    with it. Root is ``namespace == ()`` — the prefix matches everything, exactly
+    the whole-run clear the root StopEvent needs.
+
+    Cancellation of the namespace's live worker *tasks* is a separate concern the
+    caller schedules via :class:`CommandCancelNamespace` (the reducer owns
+    journaled buffers; only the runner owns the asyncio tasks). Whether the run
+    then completes or the boundary event is re-injected also lives in the caller,
+    not here.
+    """
+    n = len(namespace)
+    for step_id, worker in state.workers.items():
+        if step_id.namespace[:n] == namespace:
+            worker.queue.clear()
+            worker.in_progress.clear()
+            worker.collected_events.clear()
+            worker.static_collect_events.clear()
+            worker.collected_waiters.clear()
+    dead_streams = {
+        sid
+        for sid, stream in state.streams.items()
+        if stream.source_step.namespace[:n] == namespace
+    }
+    for sid in dead_streams:
+        state.streams.pop(sid, None)
+    for key in [
+        key
+        for key, release in state.collection_release_states.items()
+        if release.stream_id in dead_streams
+    ]:
+        state.collection_release_states.pop(key, None)
+    for started_ns in [ns for ns in state.namespace_started if ns[:n] == namespace]:
+        state.namespace_started.pop(started_ns, None)
+
+
 def _apply_step_result(
     result: StepFunctionResult,
     *,
@@ -524,33 +567,56 @@ def _apply_step_result(
 ) -> None:
     """Apply a single result item from a step execution to the state."""
     step_id = tick.step_id
-    step_name = _root_step_key(step_id)
+    # String projection of the step identity. For a root step this is the bare
+    # name (matching collection binding source/target names); for a child step
+    # it is the namespaced "path/name".
+    step_name = str(step_id)
     if isinstance(result, StepWorkerResult):
         acc.output_event_name = str(type(result.result))
-        if isinstance(result.result, StopEvent):
-            # huzzah! The workflow has completed
+        if isinstance(result.result, StopEvent) and step_id.is_root:
+            # huzzah! The (root) workflow has completed
             acc.commands.append(
                 CommandPublishEvent(event=result.result)
             )  # stop event always published to the stream
             state.is_running = False
-            # Clear collected_events and collected_waiters since workflow is complete
-            for worker in state.workers.values():
-                worker.queue.clear()
-                worker.in_progress.clear()
-                worker.collected_events.clear()
-                worker.static_collect_events.clear()
-                worker.collected_waiters.clear()
-            # Drop open collection state; no release can fire after the run ends.
-            _clear_collection_state(state)
+            # Tear down the whole run (root prefix matches every namespace); the
+            # runner cancels the live tasks on CommandCompleteRun.
+            terminate_namespace(state, ())
             acc.commands.append(CommandCompleteRun(result=result.result))
+        elif isinstance(result.result, StopEvent):
+            # A child's StopEvent is a *boundary* event, not a run terminal: the
+            # child run is over, so terminate its namespace (and any grandchild
+            # under it) and re-inject the event into the parent namespace as an
+            # ordinary routable event. Tearing down cancels sibling branches
+            # still in flight, so a child that stops while a sibling runs cannot
+            # surface a second StopEvent. The run keeps running; only the root
+            # StopEvent above completes it. The event is NOT published to the
+            # stream — that would signal completion to root stream consumers
+            # (Phase 5 adds opt-in child streaming).
+            parent_namespace = step_id.namespace[:-1]
+            terminate_namespace(state, step_id.namespace)
+            acc.commands.append(CommandCancelNamespace(namespace=step_id.namespace))
+            acc.commands.append(
+                CommandQueueEvent(
+                    event=result.result,
+                    origin_namespace=parent_namespace,
+                    recovery_counts=dict(this_execution.recovery_counts),
+                )
+            )
         elif isinstance(result.result, Event):
             # queue any subsequent events
             # human input required are automatically published to the stream
             if isinstance(result.result, InputRequiredEvent):
-                acc.commands.append(CommandPublishEvent(event=result.result))
+                acc.commands.append(
+                    CommandPublishEvent(
+                        event=result.result,
+                        origin_namespace=step_id.namespace,
+                    )
+                )
             acc.commands.append(
                 CommandQueueEvent(
                     event=result.result,
+                    origin_namespace=step_id.namespace,
                     recovery_counts=dict(this_execution.recovery_counts),
                     scope_path=scope.emit_stack,
                 )
@@ -574,7 +640,7 @@ def _apply_step_result(
         )
     elif isinstance(result, AddCollectedEvent):
         # The current state of collected events.
-        collected_events = state.workers[step_name].collected_events.setdefault(
+        collected_events = state.workers[step_id].collected_events.setdefault(
             result.event_id, []
         )
         # the events snapshot that was sent with the step function execution that yielded this result
@@ -589,7 +655,7 @@ def _apply_step_result(
                 this_execution.shared_state,
                 collected_events={
                     x: list(y)
-                    for x, y in state.workers[step_name].collected_events.items()
+                    for x, y in state.workers[step_id].collected_events.items()
                 },
             )
             this_execution.shared_state = updated_state
@@ -606,7 +672,7 @@ def _apply_step_result(
     elif isinstance(result, DeleteCollectedEvent):
         if did_complete_step:  # allow retries to grab the events
             # indicates that a run has successfully collected its events, and they can be deleted from the collected events state
-            state.workers[step_name].collected_events.pop(result.event_id, None)
+            state.workers[step_id].collected_events.pop(result.event_id, None)
     elif isinstance(result, AddWaiter):
         # indicates that a run has added a waiter to the collected waiters state
         existing = next(
@@ -635,7 +701,12 @@ def _apply_step_result(
         else:
             worker_state.collected_waiters.append(new_waiter)
             if result.waiter_event:
-                acc.commands.append(CommandPublishEvent(event=result.waiter_event))
+                acc.commands.append(
+                    CommandPublishEvent(
+                        event=result.waiter_event,
+                        origin_namespace=step_id.namespace,
+                    )
+                )
             if result.timeout is not None:
                 acc.commands.append(
                     CommandScheduleWaiterTimeout(
@@ -648,7 +719,7 @@ def _apply_step_result(
         if did_complete_step:  # allow retries to grab the waiter events
             # indicates that a run has obtained the waiting event, and it can be deleted from the collected waiters state
             to_remove = result.waiter_id
-            waiters = state.workers[step_name].collected_waiters
+            waiters = state.workers[step_id].collected_waiters
             item = next(filter(lambda w: w.waiter_id == to_remove, waiters), None)
             if item is not None:
                 waiters.remove(item)
@@ -669,7 +740,7 @@ def _schedule_retry_or_route_failure(
     """Handle a failed execution: schedule a retry if permitted, route to a
     catch_error handler if one applies, otherwise fail the workflow."""
     step_id = tick.step_id
-    step_name = _root_step_key(step_id)
+    step_name = str(step_id)
     # Prefer the journaled dispatch time: rebuilds re-stamp
     # this_execution.first_attempt_at with the rebuild clock, which
     # would silently restart elapsed-based retry budgets on resume.
@@ -727,24 +798,30 @@ def _schedule_retry_or_route_failure(
     total_attempts = this_execution.attempts + 1
     elapsed = result.failed_at - first_attempt_at
 
-    handler_name = state.config.handler_for_step.get(step_name)
+    # Route a failed step to the catch-error handler in its own
+    # namespace, if any. Tables are StepId-keyed, so a child's
+    # handler recovers only the child's steps; the recovery budget is
+    # keyed by the handler's str(StepId) to avoid colliding with a
+    # same-named root handler.
+    handler_step_id = state.config.handler_for_step.get(step_id)
     handler = (
-        state.config.catch_error_handlers.get(handler_name)
-        if handler_name is not None
+        state.config.catch_error_handlers.get(handler_step_id)
+        if handler_step_id is not None
         else None
     )
+    recovery_key = str(handler_step_id) if handler_step_id is not None else None
     current_count = (
-        this_execution.recovery_counts.get(handler.step_name, 0)
-        if handler is not None
+        this_execution.recovery_counts.get(recovery_key, 0)
+        if recovery_key is not None
         else 0
     )
     new_count = current_count + 1
     should_route = handler is not None and new_count <= handler.max_recoveries
-    if should_route and handler is not None:
+    if should_route and handler_step_id is not None and recovery_key is not None:
         # Route to the catch-error handler. Keep workflow running so
         # the handler can produce either a StopEvent or a new failure.
         step_failed_event = StepFailedEvent(
-            step_name=step_name,
+            step_name=str(step_id),
             input_event=tick.event,
             exception=exception,
             attempts=total_attempts,
@@ -760,10 +837,10 @@ def _schedule_retry_or_route_failure(
             _queue_catch_error_event(
                 this_execution,
                 event=step_failed_event,
-                step_id=StepId.root(handler.step_name),
+                step_id=handler_step_id,
                 recovery_counts={
                     **this_execution.recovery_counts,
-                    handler.step_name: new_count,
+                    recovery_key: new_count,
                 },
             )
         )
@@ -774,7 +851,7 @@ def _schedule_retry_or_route_failure(
         acc.commands.append(
             CommandPublishEvent(
                 event=WorkflowFailedEvent(
-                    step_name=step_name,
+                    step_name=str(step_id),
                     exception=exception,
                     attempts=total_attempts,
                     elapsed_seconds=elapsed,
@@ -797,7 +874,6 @@ def _resolve_work_item_in_stream(
     is driven only by source exhaustion plus ``open_work_items == 0``.
     Classification happens once, before any counter mutation.
     """
-    step_name = _root_step_key(tick.step_id)
     commands: list[WorkflowCommand] = []
     emitted_non_stop = [
         x.result
@@ -819,12 +895,15 @@ def _resolve_work_item_in_stream(
         disposition is WorkDisposition.FANNED_OUT
         and scope.fan_out_stream_id is not None
     ):
-        bindings = state.config.bindings_for_source(step_name)
+        bindings = state.config.bindings_for_source(tick.step_id)
         accepting_binding_ids = tuple(binding.id for binding in bindings)
-        seed = sum(_count_accepting_steps(state, type(m)) for m in emitted_non_stop)
+        seed = sum(
+            _count_accepting_steps(state, m, tick.step_id.namespace)
+            for m in emitted_non_stop
+        )
         state.streams[scope.fan_out_stream_id] = CollectionStreamInstance(
             stream_id=scope.fan_out_stream_id,
-            source_step=step_name,
+            source_step=tick.step_id,
             scope_path=scope.trigger_stack,
             accepting_binding_ids=accepting_binding_ids,
             open_work_items=seed,
@@ -845,7 +924,8 @@ def _resolve_work_item_in_stream(
         # work item per accepting step per emitted event. A step that returns
         # None adds zero successors and simply leaves the set.
         successors = sum(
-            _count_accepting_steps(state, type(ev)) for ev in emitted_non_stop
+            _count_accepting_steps(state, ev, tick.step_id.namespace)
+            for ev in emitted_non_stop
         )
         commands.extend(
             _adjust_open_work_items(state, enclosing, successors - 1, now_seconds)
@@ -874,8 +954,11 @@ def _process_step_result_tick(
     """
     state = init.deepcopy()
     step_id = tick.step_id
-    step_name = _root_step_key(step_id)
-    worker_state = state.workers[step_name]
+    worker_state = state.workers[step_id]
+    # String projection of the step identity. For a root step this is the bare
+    # name (matching collection binding source/target names); for a child step
+    # it is the namespaced "path/name".
+    step_name = str(step_id)
     this_execution = _find_in_progress(worker_state, tick.worker_id)
 
     rerun = _rerun_for_stale_collect_buffer(tick, worker_state, this_execution)
@@ -917,7 +1000,8 @@ def _process_step_result_tick(
                     input_event_name=str(type(tick.event)),
                     output_event_name=acc.output_event_name,
                     worker_id=str(tick.worker_id),
-                )
+                ),
+                origin_namespace=step_id.namespace,
             ),
         )
         if this_execution in worker_state.in_progress:
@@ -1001,7 +1085,6 @@ def _add_or_enqueue_event(
     Note! This mutates the state, assuming that its already been deepcopied in an outer scope.
     """
     commands: list[WorkflowCommand] = []
-    step_name = _root_step_key(step_id)
     # Determine if there is available capacity based on in_progress workers.
     # Delayed attempts (not_before set) are never dispatched here; they wait
     # in the queue without consuming a worker slot until a wakeup flips them.
@@ -1015,7 +1098,7 @@ def _add_or_enqueue_event(
         id = id_candidates[0]
         state_copy = state._deepcopy()
         shared_state: StepWorkerState = StepWorkerState(
-            step_name=step_name,
+            step_name=step_id.name,
             collected_events=state_copy.collected_events,
             collected_waiters=state_copy.collected_waiters,
             collection_release_payload=event.collection_release_payload._copy()
@@ -1049,10 +1132,11 @@ def _add_or_enqueue_event(
             CommandPublishEvent(
                 StepStateChanged(
                     step_state=StepState.RUNNING,
-                    name=step_name,
+                    name=str(step_id),
                     input_event_name=type(event.event).__name__,
                     worker_id=str(id),
-                )
+                ),
+                origin_namespace=step_id.namespace,
             )
         )
     else:
@@ -1060,10 +1144,11 @@ def _add_or_enqueue_event(
             CommandPublishEvent(
                 StepStateChanged(
                     step_state=StepState.PREPARING,
-                    name=step_name,
+                    name=str(step_id),
                     input_event_name=type(event.event).__name__,
                     worker_id="<enqueued>",
-                )
+                ),
+                origin_namespace=step_id.namespace,
             )
         )
         state.queue.append(event)
@@ -1080,6 +1165,8 @@ class _RouteResult:
     # The run was failed (a targeted send to a collect step); the caller must
     # return immediately rather than emit further commands.
     failed: bool = False
+    # Namespaces this event routed work into; used to arm per-child timeouts.
+    touched_namespaces: set[tuple[str, ...]] = field(default_factory=set)
 
 
 def _redeliver_collection_payload(
@@ -1115,7 +1202,7 @@ def _redeliver_collection_payload(
             scope_path=tuple(tick.scope_path),
             collection_release_payload=payload,
         ),
-        StepId.root(binding.target_step),
+        binding.target_step,
         state.workers[binding.target_step],
         now_seconds,
     )
@@ -1123,18 +1210,27 @@ def _redeliver_collection_payload(
 
 def _resolve_waiters(
     tick: TickAddEvent, state: BrokerState, now_seconds: float
-) -> tuple[list[WorkflowCommand], set[str]]:
+) -> tuple[list[WorkflowCommand], set[StepId], set[tuple[str, ...]]]:
     """Resolve any waiters the event satisfies, resuming their work items.
 
-    Returns the emitted commands plus the set of steps woken via waiter
-    resolution, so the routing pass can skip them and avoid double-processing
-    the same delivery as a normally-accepted event.
+    Returns the emitted commands, the set of steps woken via waiter resolution
+    (so the routing pass can skip them and avoid double-processing the same
+    delivery as a normally-accepted event), and the namespaces work routed into
+    (so the caller can arm per-child timeouts).
     """
     commands: list[WorkflowCommand] = []
-    waiter_resolved_steps: set[str] = set()
-    for step_name, step_config in state.config.steps.items():
-        step_id = StepId.root(step_name)
-        wait_conditions = state.workers[step_name].collected_waiters
+    waiter_resolved_steps: set[StepId] = set()
+    touched_namespaces: set[tuple[str, ...]] = set()
+    for step_id, step_config in state.config.steps.items():
+        # Scope waiter resolution to the event's namespace (exact step when the
+        # tick is targeted), so a child's waiter is only woken by events in its
+        # own namespace.
+        if tick.step_id is not None:
+            if tick.step_id != step_id:
+                continue
+        elif not _event_routes_to(tick.origin_namespace, step_id.namespace, tick.event):
+            continue
+        wait_conditions = state.workers[step_id].collected_waiters
         for wait_condition in wait_conditions:
             is_match = event_matches(
                 tick.event,
@@ -1146,7 +1242,8 @@ def _resolve_waiters(
                 for k, v in wait_condition.requirements.items()
             )
             if is_match:
-                waiter_resolved_steps.add(step_name)
+                waiter_resolved_steps.add(step_id)
+                touched_namespaces.add(step_id.namespace)
                 wait_condition.resolved_event = tick.event
                 # Resume re-delivers the suspended work item whole from the
                 # waiter record: original trigger, stream scope, collect batch.
@@ -1159,17 +1256,17 @@ def _resolve_waiters(
                             collection_release_payload=wait_condition.collection_release_payload,
                         ),
                         step_id,
-                        state.workers[step_name],
+                        state.workers[step_id],
                         now_seconds,
                     )
                 )
-    return commands, waiter_resolved_steps
+    return commands, waiter_resolved_steps, touched_namespaces
 
 
 def _route_member_to_collect_step(
     tick: TickAddEvent,
     state: BrokerState,
-    step_name: str,
+    step_id: StepId,
     worker_state: InternalStepWorkerState,
     now_seconds: float,
 ) -> tuple[list[WorkflowCommand], bool]:
@@ -1190,7 +1287,7 @@ def _route_member_to_collect_step(
             # data, so fail the run loudly instead.
             error = WorkflowRuntimeError(
                 f"{type(tick.event).__name__} was sent to collect "
-                f"step {step_name!r} via send_event(step=...), but "
+                f"step {step_id.name!r} via send_event(step=...), but "
                 "a collect step cannot receive targeted events: it "
                 "only collects events emitted inside a fan-out "
                 "stream."
@@ -1198,12 +1295,10 @@ def _route_member_to_collect_step(
             state.is_running = False
             commands.append(
                 CommandPublishEvent(
-                    event=WorkflowFailedEvent(step_name=step_name, exception=error)
+                    event=WorkflowFailedEvent(step_name=str(step_id), exception=error)
                 )
             )
-            commands.append(
-                CommandFailWorkflow(step_id=StepId.root(step_name), exception=error)
-            )
+            commands.append(CommandFailWorkflow(step_id=step_id, exception=error))
             return commands, True
         # An untargeted send may be legitimate traffic for other
         # steps that merely overlaps an open stream — warn.
@@ -1212,11 +1307,11 @@ def _route_member_to_collect_step(
             "outside any collection stream (e.g. via "
             "ctx.send_event) so it cannot join a batch.",
             type(tick.event).__name__,
-            step_name,
+            step_id.name,
         )
         return commands, False
     stream_id = tick.scope_path[-1]
-    binding = state.config.binding_for_target(stream_id, step_name, state.streams)
+    binding = state.config.binding_for_target(stream_id, step_id, state.streams)
     if binding is None:
         # Dropped member: its nearest stream has no binding to this
         # collect step. Balance the stream accounting for the dead
@@ -1226,7 +1321,7 @@ def _route_member_to_collect_step(
             "stream %r has no collection binding targeting that "
             "step, so it can never join a batch.",
             type(tick.event).__name__,
-            step_name,
+            step_id.name,
             stream_id,
         )
         commands.extend(_adjust_open_work_items(state, stream_id, -1, now_seconds))
@@ -1253,7 +1348,7 @@ def _route_member_to_collect_step(
 def _route_to_accepting_steps(
     tick: TickAddEvent,
     state: BrokerState,
-    waiter_resolved_steps: set[str],
+    waiter_resolved_steps: set[StepId],
     now_seconds: float,
 ) -> _RouteResult:
     """Route the event to every step that accepts (and is targeted by) it.
@@ -1262,16 +1357,20 @@ def _route_to_accepting_steps(
     accounting is balanced for the delivery the waiter swallowed.
     """
     result = _RouteResult(commands=[])
-    for step_name, step_config in state.config.steps.items():
-        step_id = StepId.root(step_name)
+    for step_id, step_config in state.config.steps.items():
         is_accepted = step_accepts_event(
             tick.event,
             step_config.accepted_events,
             allow_subclasses=step_config.accept_event_subclasses,
         )
-        is_targeted = tick.step_id is None or _root_step_key(tick.step_id) == step_name
-        if step_name in waiter_resolved_steps:
-            if is_accepted and is_targeted and tick.scope_path:
+        if tick.step_id is not None:
+            routes = tick.step_id == step_id
+        else:
+            routes = _event_routes_to(
+                tick.origin_namespace, step_id.namespace, tick.event
+            )
+        if step_id in waiter_resolved_steps:
+            if is_accepted and routes and tick.scope_path:
                 # The waiter swallowed a delivery this step would otherwise
                 # have received. The delivery was birth-counted as a work item
                 # in its stream, so consume it here — otherwise the stream can
@@ -1283,20 +1382,22 @@ def _route_to_accepting_steps(
                     _adjust_open_work_items(state, tick.scope_path[-1], -1, now_seconds)
                 )
             continue
-        if not (is_accepted and is_targeted):
+        if not (is_accepted and routes):
             continue
         result.handled = True
-        worker_state = state.workers[step_name]
+        result.touched_namespaces.add(step_id.namespace)
+        worker_state = state.workers[step_id]
         if worker_state.config.collection_param is not None:
             member_commands, failed = _route_member_to_collect_step(
-                tick, state, step_name, worker_state, now_seconds
+                tick, state, step_id, worker_state, now_seconds
             )
             result.commands.extend(member_commands)
             if failed:
                 result.failed = True
                 return result
             continue
-        _consume_superseded_delayed_attempt(tick, worker_state)
+        if tick.step_id is not None:
+            _consume_superseded_delayed_attempt(tick, worker_state)
         bound_events = tick.bound_events
         if bound_events is None and worker_state.config.collect_params:
             bound_events = _static_collect_events(
@@ -1324,7 +1425,7 @@ def _route_to_accepting_steps(
                     scope_path=tuple(tick.scope_path),
                 ),
                 step_id,
-                state.workers[step_name],
+                state.workers[step_id],
                 now_seconds,
             )
         )
@@ -1345,9 +1446,13 @@ def _unhandled_event_commands(
             UnhandledEvent(
                 event_type=event_cls.__name__,
                 qualified_name=f"{event_cls.__module__}.{event_cls.__name__}",
-                step_name=str(tick.step_id) if tick.step_id else None,
+                step_name=str(tick.step_id) if tick.step_id is not None else None,
                 idle=_check_idle_state(state),
-            )
+            ),
+            # An unhandled event from inside a child is a child-stream
+            # diagnostic, so tag it by origin and keep it out of the
+            # default (root) stream like every other child event.
+            origin_namespace=tick.origin_namespace,
         )
     ]
 
@@ -1370,12 +1475,29 @@ def _process_add_event_tick(
     if payload_commands is not None:
         return state, payload_commands
 
-    commands, waiter_resolved_steps = _resolve_waiters(tick, state, now_seconds)
+    commands, waiter_resolved_steps, touched_namespaces = _resolve_waiters(
+        tick, state, now_seconds
+    )
 
     routed = _route_to_accepting_steps(tick, state, waiter_resolved_steps, now_seconds)
     commands.extend(routed.commands)
     if routed.failed:
         return state, commands
+    touched_namespaces |= routed.touched_namespaces
+
+    # Arm a per-namespace timeout the first time an event routes into a child
+    # namespace that declares one. Re-arms after a prior activation completed
+    # (its start was cleared); only the root deadline is the global timeout.
+    for namespace in sorted(touched_namespaces):
+        timeout = state.config.namespace_timeouts.get(namespace)
+        if timeout is None or namespace in state.namespace_started:
+            continue
+        state.namespace_started[namespace] = now_seconds
+        commands.append(
+            CommandScheduleNamespaceTimeout(
+                namespace=namespace, timeout=timeout, started_at=now_seconds
+            )
+        )
 
     handled = bool(waiter_resolved_steps) or routed.handled
     if not handled:
@@ -1438,8 +1560,8 @@ def _process_timeout_tick(
     state.is_running = False
     _clear_collection_state(state)
     active_steps = [
-        step_name
-        for step_name, worker_state in init.workers.items()
+        str(step_id)
+        for step_id, worker_state in init.workers.items()
         if len(worker_state.in_progress) > 0
     ]
     steps_info = (
@@ -1474,8 +1596,7 @@ def _process_wakeup_tick(
     """
     state = init.deepcopy()
     commands: list[WorkflowCommand] = []
-    for step_name, worker_state in sorted(state.workers.items(), key=lambda x: x[0]):
-        step_id = StepId.root(step_name)
+    for step_id, worker_state in sorted(state.workers.items(), key=lambda x: str(x[0])):
         for attempt in worker_state.queue:
             if attempt.not_before is not None and attempt.not_before <= tick.due:
                 attempt.not_before = None
@@ -1488,11 +1609,9 @@ def _process_waiter_timeout_tick(
 ) -> tuple[BrokerState, list[WorkflowCommand]]:
     state = init.deepcopy()
     commands: list[WorkflowCommand] = []
-    step_id = tick.step_id
-    step_name = _root_step_key(step_id)
-    if step_name not in state.workers:
+    if tick.step_id not in state.workers:
         return state, commands
-    worker_state = state.workers[step_name]
+    worker_state = state.workers[tick.step_id]
     waiter = next(
         (w for w in worker_state.collected_waiters if w.waiter_id == tick.waiter_id),
         None,
@@ -1509,9 +1628,131 @@ def _process_waiter_timeout_tick(
             scope_path=waiter.scope_path,
             collection_release_payload=waiter.collection_release_payload,
         ),
-        step_id,
+        tick.step_id,
         worker_state,
         now_seconds,
     )
     commands.extend(subcommands)
     return state, commands
+
+
+def _namespace_catch_error_handler(
+    config: BrokerConfig, namespace: tuple[str, ...]
+) -> StepId | None:
+    """The handler StepId that can catch a failure within ``namespace``, if any.
+
+    Prefers a wildcard handler (``for_steps is None``) since a child timeout is
+    not attributable to one specific step; falls back to any handler declared in
+    the namespace.
+    """
+    candidates = [
+        handler_id
+        for handler_id in config.catch_error_handlers
+        if handler_id.namespace == namespace
+    ]
+    if not candidates:
+        return None
+    for handler_id in candidates:
+        if config.catch_error_handlers[handler_id].for_steps is None:
+            return handler_id
+    return candidates[0]
+
+
+def _process_namespace_timeout_tick(
+    tick: TickNamespaceTimeout, init: BrokerState, now_seconds: float
+) -> tuple[BrokerState, list[WorkflowCommand]]:
+    """Expire a single child namespace on its own deadline.
+
+    A no-op if the namespace already completed or was re-armed (its recorded
+    start no longer matches this tick). Otherwise terminate the namespace's
+    workers and route a :class:`WorkflowTimeoutError` through the namespaced
+    catch-error path so the child's ``@catch_error`` can recover it. If no
+    handler catches it, the uncaught child timeout fails the whole run — but it
+    never ``CommandHalt``s, since only the root timeout halts the run.
+    """
+    state = init.deepcopy()
+    namespace = tick.namespace
+    # Stale tick: the child completed or a re-trigger re-armed with a new start.
+    if state.namespace_started.get(namespace) != tick.started_at:
+        return state, []
+
+    # Representative in-flight event and recovery lineage for the StepFailedEvent
+    # payload, and the namespace's active steps for the timeout event. The
+    # recovery counts carry across re-arms so the catch-error budget below is
+    # honored exactly like the step-failure path.
+    input_event: Event | None = None
+    recovery_counts: dict[str, int] = {}
+    active_steps: list[str] = []
+    for step_id, worker in init.workers.items():
+        if step_id.namespace != namespace:
+            continue
+        if worker.in_progress or worker.queue:
+            active_steps.append(str(step_id))
+        if input_event is None:
+            if worker.in_progress:
+                input_event = worker.in_progress[0].event
+                recovery_counts = dict(worker.in_progress[0].recovery_counts)
+            elif worker.queue:
+                input_event = worker.queue[0].event
+                recovery_counts = dict(worker.queue[0].recovery_counts)
+            elif worker.collected_waiters:
+                input_event = worker.collected_waiters[0].event
+
+    # Terminate the namespace (and any grandchild) through the one teardown, and
+    # cancel its live worker tasks so an orphaned child coroutine cannot crash
+    # the loop by reporting into a slot that no longer exists.
+    terminate_namespace(state, namespace)
+
+    timeout_error = WorkflowTimeoutError(
+        f"Child workflow '{'/'.join(namespace)}' timed out after "
+        f"{tick.timeout} seconds."
+    )
+
+    handler_step_id = _namespace_catch_error_handler(state.config, namespace)
+    handler = (
+        state.config.catch_error_handlers.get(handler_step_id)
+        if handler_step_id is not None
+        else None
+    )
+    if handler is not None and handler_step_id is not None:
+        # Honor the handler's recovery budget: a child whose @catch_error
+        # re-arms the timeout is bounded by max_recoveries, not looping forever.
+        recovery_key = str(handler_step_id)
+        new_count = recovery_counts.get(recovery_key, 0) + 1
+        if new_count <= handler.max_recoveries:
+            step_failed_event = StepFailedEvent(
+                step_name="/".join(namespace),
+                input_event=input_event if input_event is not None else Event(),
+                exception=timeout_error,
+                attempts=1,
+                elapsed_seconds=tick.timeout,
+                failed_at=datetime.fromtimestamp(now_seconds, tz=timezone.utc),
+            )
+            return state, [
+                CommandCancelNamespace(namespace=namespace),
+                CommandQueueEvent(
+                    event=step_failed_event,
+                    step_id=handler_step_id,
+                    recovery_counts={**recovery_counts, recovery_key: new_count},
+                ),
+            ]
+        # Recovery budget exhausted: fall through and fail the run.
+
+    # Uncaught (or budget-exhausted) child timeout: fail the whole run. Publish
+    # on the root stream so default clients see the failure.
+    state.is_running = False
+    failing_step_id = next(
+        (sid for sid in state.workers if sid.namespace == namespace),
+        StepId(namespace, namespace[-1] if namespace else ""),
+    )
+    return state, [
+        CommandCancelNamespace(namespace=namespace),
+        CommandPublishEvent(
+            event=WorkflowTimedOutEvent(
+                timeout=tick.timeout,
+                active_steps=active_steps,
+            ),
+            origin_namespace=(),
+        ),
+        CommandFailWorkflow(step_id=failing_step_id, exception=timeout_error),
+    ]

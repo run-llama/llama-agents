@@ -4,7 +4,8 @@
 
 from __future__ import annotations
 
-from typing import AsyncGenerator
+import json
+from typing import Any, AsyncGenerator
 
 import asyncpg
 import pytest
@@ -35,12 +36,14 @@ async def pool(postgres_dsn: str) -> AsyncGenerator[asyncpg.Pool, None]:
         await conn.execute(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}")
         await conn.execute(f"""
             CREATE TABLE IF NOT EXISTS {SCHEMA}.workflow_state (
-                run_id VARCHAR(255) PRIMARY KEY,
+                run_id VARCHAR(255) NOT NULL,
+                namespace VARCHAR(255) NOT NULL DEFAULT '',
                 state_json TEXT NOT NULL,
                 state_type VARCHAR(255),
                 state_module VARCHAR(255),
                 created_at TIMESTAMPTZ,
-                updated_at TIMESTAMPTZ
+                updated_at TIMESTAMPTZ,
+                PRIMARY KEY (run_id, namespace)
             )
         """)
         await conn.execute(f"DELETE FROM {SCHEMA}.workflow_state")
@@ -321,19 +324,22 @@ async def test_from_dict_rejects_wrong_provider_handle(pool: asyncpg.Pool) -> No
 class FakeConnection:
     """Connection-level fake speaking the storage's fetchrow/execute dialect."""
 
-    def __init__(self, rows: dict[str, str]) -> None:
+    def __init__(self, rows: dict[str, dict[str, Any]]) -> None:
         self._rows = rows
 
-    async def fetchrow(self, query: str, run_id: str) -> dict[str, str] | None:
-        state_json = self._rows.get(run_id)
-        if state_json is None:
-            return None
-        return {"state_json": state_json}
+    async def fetchrow(
+        self, query: str, run_id: str, namespace: str
+    ) -> dict[str, Any] | None:
+        return self._rows.get(f"{run_id}\x00{namespace}")
 
     async def execute(self, query: str, *args: object) -> None:
-        # Save upsert: (run_id, state_json, state_type, state_module, now, now)
-        run_id, state_json = str(args[0]), str(args[1])
-        self._rows[run_id] = state_json
+        # Save upsert: (run_id, namespace, state_json, state_type, state_module, now, now)
+        run_id, namespace = str(args[0]), str(args[1])
+        self._rows[f"{run_id}\x00{namespace}"] = {
+            "state_json": args[2],
+            "state_type": args[3],
+            "state_module": args[4],
+        }
 
 
 class FakePoolAcquire:
@@ -352,7 +358,7 @@ class FakePool:
     """Counting asyncpg.Pool stand-in."""
 
     def __init__(self) -> None:
-        self.rows: dict[str, str] = {}
+        self.rows: dict[str, dict[str, Any]] = {}
         self.connection = FakeConnection(self.rows)
         self.acquire_count = 0
         self.release_count = 0
@@ -376,7 +382,7 @@ async def test_set_state_acquires_exactly_one_pool_connection() -> None:
 
     assert pool.acquire_count == 1
     assert pool.release_count == 1
-    assert "run-conn-count" in pool.rows
+    assert "run-conn-count\x00" in pool.rows
 
 
 async def test_from_dict_empty_raises() -> None:
@@ -389,3 +395,48 @@ async def test_from_dict_no_pool_raises() -> None:
         PostgresStateStore.from_dict(
             {"store_type": "postgres", "run_id": "x"}, JsonSerializer()
         )
+
+
+# -- Per-namespace records --
+
+
+@pytest.mark.docker
+async def test_namespace_round_trip_and_isolation(pool: asyncpg.Pool) -> None:
+    """Root and child namespaces persist as independent rows under one run."""
+    root: PostgresStateStore[DictState] = PostgresStateStore(
+        pool=pool, run_id="run-ns", schema=SCHEMA
+    )
+    child: PostgresStateStore[DictState] = PostgresStateStore(
+        pool=pool, run_id="run-ns", namespace=("child",), schema=SCHEMA
+    )
+
+    await root.set("k", "root-val")
+    await child.set("k", "child-val")
+
+    root2: PostgresStateStore[DictState] = PostgresStateStore(
+        pool=pool, run_id="run-ns", schema=SCHEMA
+    )
+    child2: PostgresStateStore[DictState] = PostgresStateStore(
+        pool=pool, run_id="run-ns", namespace=("child",), schema=SCHEMA
+    )
+    assert await root2.get("k") == "root-val"
+    assert await child2.get("k") == "child-val"
+
+
+@pytest.mark.docker
+async def test_pre_migration_root_row_reads_as_root(pool: asyncpg.Pool) -> None:
+    """A row written without a namespace (additive default '') reads as root."""
+    state_json = json.dumps({"_data": {"k": JsonSerializer().serialize("legacy")}})
+    async with pool.acquire() as conn:
+        await conn.execute(
+            f"INSERT INTO {SCHEMA}.workflow_state "
+            "(run_id, state_json, state_type, state_module, created_at, updated_at) "
+            "VALUES ($1, $2, 'DictState', 'workflows.context.state_store', now(), now())",
+            "legacy-run",
+            state_json,
+        )
+
+    store: PostgresStateStore[DictState] = PostgresStateStore(
+        pool=pool, run_id="legacy-run", schema=SCHEMA
+    )
+    assert await store.get("k") == "legacy"

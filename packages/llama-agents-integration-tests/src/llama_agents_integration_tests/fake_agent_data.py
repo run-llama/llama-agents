@@ -210,6 +210,7 @@ def create_agent_data_state_store(
     monkeypatch: pytest.MonkeyPatch,
     run_id: str,
     state_type: type[Any] | None = None,
+    namespace: tuple[str, ...] = (),
 ) -> AgentDataStateStore[Any]:
     """Create an AgentDataStateStore with httpx patched to use the fake backend."""
     client = AgentDataClient(
@@ -222,6 +223,7 @@ def create_agent_data_state_store(
     store = AgentDataStateStore(
         client=client,
         run_id=run_id,
+        namespace=namespace,
         state_type=state_type,
     )
     return store

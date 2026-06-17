@@ -56,7 +56,6 @@ def _call_adapter_close(run_id: str) -> None:
     adapter = InternalDBOSAdapter(
         run_id=run_id,
         engine=None,  # type: ignore[arg-type]
-        state_type=None,
     )
 
     def _run() -> None:

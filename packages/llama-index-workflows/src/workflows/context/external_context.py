@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Coroutine, Generic
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Coroutine, Generic, cast
 
 from typing_extensions import TypeVar
 
 from workflows.context.context_types import MODEL_T
 from workflows.context.serializers import JsonSerializer
-from workflows.context.state_store import StateStore
+from workflows.context.state_store import (
+    NamespacedStateStores,
+    StateStore,
+    StateStoreFacade,
+    build_namespaced_state,
+)
 from workflows.errors import WorkflowRuntimeError
 from workflows.events import StopEvent
 from workflows.runtime.types.internal_state import BrokerState
@@ -20,7 +25,6 @@ from workflows.runtime.types.plugin import (
     as_snapshottable_adapter,
     as_v2_runtime_compatibility_shim,
 )
-from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import TickAddEvent, TickCancelRun, WorkflowTick
 
 if TYPE_CHECKING:
@@ -108,23 +112,41 @@ class ExternalContext(Generic[MODEL_T, RunResultT]):
 
     @property
     def store(self) -> StateStore[MODEL_T]:
-        """Access workflow state store."""
-        state_store = self._external_adapter.get_state_store()
+        """Access workflow state store (the root namespace)."""
+        state_store = self._external_adapter.get_state_store(())
         if state_store is None:
             raise RuntimeError("State store not available from adapter")
-        return state_store  # type: ignore[return-value]
+        return cast("StateStore[MODEL_T]", state_store)
+
+    def _namespaced_state(self, serializer: BaseSerializer) -> NamespacedStateStores:
+        """A per-namespace router over the adapter's stores, for tree ops.
+
+        The adapter mints (and caches) each namespace's store; this lens just
+        walks the workflow's namespaces to serialize the whole tree.
+        """
+        return build_namespaced_state(
+            self._workflow,
+            lambda ns: cast(
+                "StateStoreFacade[Any]", self._external_adapter.get_state_store(ns)
+            ),
+            serializer,
+        )
 
     def send_event(self, message: Event, step: str | None = None) -> None:
-        """Send an event into the workflow."""
-        if step is not None:
-            self._workflow._validate_valid_step_message(step, message)
+        """Send an event into the workflow.
+
+        ``step`` is an absolute path from the root: a bare name targets a root
+        step, ``"child/answer"`` targets a step inside a child namespace.
+        """
+        step_id = (
+            self._workflow._resolve_target_step(step, message)
+            if step is not None
+            else None
+        )
 
         self._execute_task(
             self._external_adapter.send_event(
-                TickAddEvent(
-                    event=message,
-                    step_id=StepId.root(step) if step is not None else None,
-                )
+                TickAddEvent(event=message, step_id=step_id)
             )
         )
 
@@ -132,7 +154,9 @@ class ExternalContext(Generic[MODEL_T, RunResultT]):
         """Get list of currently running step names."""
         state = self._state
         return [
-            step for step in state.workers.keys() if state.workers[step].in_progress
+            str(step)
+            for step in state.workers.keys()
+            if state.workers[step].in_progress
         ]
 
     def _require_v2_runtime_compatibility(self) -> V2RuntimeCompatibilityShim:
@@ -160,11 +184,12 @@ class ExternalContext(Generic[MODEL_T, RunResultT]):
         """Serialize context state for persistence."""
         active_serializer = serializer or self._serializer
 
-        # Fetch state store from adapter and serialize
+        # Fetch state store from adapter and serialize the whole namespace tree
         state_data = {}
-        state_store = self._external_adapter.get_state_store()
-        if state_store is not None:
-            state_data = state_store.to_dict(active_serializer)
+        if self._external_adapter.get_state_store(()) is not None:
+            state_data = self._namespaced_state(active_serializer).serialize_tree(
+                active_serializer
+            )
 
         # Get the broker state
         broker_state = self._state

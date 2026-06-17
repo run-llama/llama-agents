@@ -8,14 +8,19 @@ import heapq
 import logging
 from typing import TYPE_CHECKING
 
+from workflows.context.state_store import (
+    StateStore,
+)
 from workflows.errors import (
     WorkflowRuntimeError,
 )
 from workflows.events import (
     Event,
     StopEvent,
+    _set_event_origin_namespace,
 )
 from workflows.runtime.types.commands import (
+    CommandCancelNamespace,
     CommandCompleteRun,
     CommandFailWorkflow,
     CommandHalt,
@@ -23,6 +28,7 @@ from workflows.runtime.types.commands import (
     CommandQueueEvent,
     CommandRunWorker,
     CommandScheduleIdleCheck,
+    CommandScheduleNamespaceTimeout,
     CommandScheduleWaiterTimeout,
     CommandScheduleWakeup,
     WorkflowCommand,
@@ -54,6 +60,7 @@ from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import (
     TickAddEvent,
     TickIdleCheck,
+    TickNamespaceTimeout,
     TickStepResult,
     TickTimeout,
     TickWaiterTimeout,
@@ -69,7 +76,6 @@ if TYPE_CHECKING:
 from workflows.runtime.control_loop.reduce import (
     _decide_retry_delay,
     _reduce_tick,
-    _root_step_key,
     rewind_in_progress,
 )
 
@@ -113,13 +119,21 @@ class _ControlLoopRunner:
         workflow: Workflow,
         adapter: InternalRunAdapter,
         context: Context,
-        step_workers: dict[str, StepWorkerFunction],
+        step_workers: dict[StepId, StepWorkerFunction],
         init_state: BrokerState,
+        instances: dict[tuple[str, ...], Workflow] | None = None,
     ):
         self.workflow = workflow
         self.adapter = adapter
         self.context = context
         self.step_workers = step_workers
+        # Per-run map from a step's namespace to the workflow instance that owns
+        # it. Dispatch binds the bare step name against this instance, so the
+        # registered worker table can stay unbound (GC-friendly). Defaults to
+        # root -> the run's workflow when no children are wired.
+        self.instances: dict[tuple[str, ...], Workflow] = (
+            instances if instances is not None else {(): workflow}
+        )
         self.state = init_state
         self.worker_tasks: set[asyncio.Task[TickStepResult]] = set()
         # Transient tick buffer - drained synchronously at start of each loop iteration
@@ -140,6 +154,15 @@ class _ControlLoopRunner:
         self._idle_check_pending = False
         # Pending worker coroutines not yet started (started by adapter in wait_for_next_task)
         self._pending_workers: list[PendingStart] = []
+
+    def _resolve_state_view(self, namespace: tuple[str, ...]) -> StateStore | None:
+        """Resolve a step's own per-namespace state view from the adapter.
+
+        Each namespace owns an isolated record; the adapter mints (and caches)
+        the per-namespace store, so this stays a thin lookup. ``None`` when the
+        adapter vends no store.
+        """
+        return self.adapter.get_state_store(namespace)
 
     def schedule_tick(self, tick: WorkflowTick, at_time: float) -> None:
         """Schedule a tick to be processed at a specific time."""
@@ -176,12 +199,11 @@ class _ControlLoopRunner:
 
         async def _run_worker() -> TickStepResult:
             worker: InProgressState | None = None
-            step_name = _root_step_key(command.step_id)
             try:
                 worker = next(
                     (
                         w
-                        for w in self.state.workers[step_name].in_progress
+                        for w in self.state.workers[command.step_id].in_progress
                         if w.worker_id == command.id
                     ),
                     None,
@@ -191,14 +213,22 @@ class _ControlLoopRunner:
                         f"Worker {command.id} not found in in_progress. This should not happen."
                     )
                 snapshot = worker.shared_state
-                step_fn: StepWorkerFunction = self.step_workers[step_name]
+                step_fn: StepWorkerFunction = self.step_workers[command.step_id]
+                # Bind the bare step name against the instance that owns this
+                # namespace (root -> parent, child slot -> child instance).
+                instance = self.instances[command.step_id.namespace]
+                # Resolve the step's state view now (the backend store/pool is
+                # ready once this coroutine runs) and thread it into the step.
+                state_store = self._resolve_state_view(command.step_id.namespace)
 
                 result = await step_fn(
                     state=snapshot,
-                    step_name=step_name,
+                    step_name=command.step_id.name,
                     event=command.event,
-                    workflow=self.workflow,
+                    workflow=instance,
                     bound_events=command.bound_events,
+                    namespace=command.step_id.namespace,
+                    state_store=state_store,
                     retry=RetryAttempt(
                         retry_number=worker.attempts,
                         first_attempt_at=worker.first_attempt_at,
@@ -253,8 +283,7 @@ class _ControlLoopRunner:
         """
         if worker is None:
             return results
-        step_name = _root_step_key(step_id)
-        policy = self.state.workers[step_name].config.retry_policy
+        policy = self.state.workers[step_id].config.retry_policy
         out: list[StepFunctionResult] = []
         for result in results:
             if isinstance(result, StepWorkerFailed) and result.retry_decision is None:
@@ -264,7 +293,7 @@ class _ControlLoopRunner:
                     failures=worker.attempts + 1,
                     exception=result.exception,
                     run_id=self.adapter.run_id,
-                    step_name=step_name,
+                    step_name=str(step_id),
                 )
                 result = result.model_copy(
                     update={
@@ -282,6 +311,7 @@ class _ControlLoopRunner:
                 TickAddEvent(
                     event=command.event,
                     step_id=command.step_id,
+                    origin_namespace=command.origin_namespace,
                     recovery_counts=dict(command.recovery_counts),
                     scope_path=command.scope_path,
                 )
@@ -298,11 +328,16 @@ class _ControlLoopRunner:
             await self.cleanup_tasks()
             return command.result
         elif isinstance(command, CommandPublishEvent):
+            if command.origin_namespace:
+                _set_event_origin_namespace(command.event, command.origin_namespace)
             await self.adapter.write_to_event_stream(command.event)
             return None
         elif isinstance(command, CommandFailWorkflow):
             await self.cleanup_tasks()
             raise command.exception
+        elif isinstance(command, CommandCancelNamespace):
+            await self._cancel_namespace_tasks(command.namespace)
+            return None
         elif isinstance(command, CommandScheduleIdleCheck):
             if not self._idle_check_pending:
                 self.tick_buffer.append(TickIdleCheck())
@@ -318,8 +353,58 @@ class _ControlLoopRunner:
         elif isinstance(command, CommandScheduleWakeup):
             self.schedule_tick(TickWakeup(due=command.at_time), at_time=command.at_time)
             return None
+        elif isinstance(command, CommandScheduleNamespaceTimeout):
+            self.schedule_tick(
+                TickNamespaceTimeout(
+                    namespace=command.namespace,
+                    timeout=command.timeout,
+                    started_at=command.started_at,
+                ),
+                at_time=command.started_at + command.timeout,
+            )
+            return None
         else:
             raise ValueError(f"Unknown command type: {type(command)}")
+
+    async def _cancel_namespace_tasks(self, namespace: tuple[str, ...]) -> None:
+        """Cancel worker tasks for a namespace and its descendants.
+
+        The reducer has already cleared the namespace's journaled buffers; this
+        cancels the live coroutines that back them (prefix-matched, so a
+        terminated child takes its grandchildren too) so an orphaned task cannot
+        complete and report into a now-empty worker slot. Pending workers not yet
+        started are dropped and their coroutines closed.
+        """
+        n = len(namespace)
+
+        def in_namespace(step_id: StepId) -> bool:
+            return step_id.namespace[:n] == namespace
+
+        # Drop not-yet-started pending workers for this namespace.
+        kept: list[PendingStart] = []
+        for pending in self._pending_workers:
+            if isinstance(pending, PendingWorker) and in_namespace(pending.step_id):
+                pending.coro.close()
+            else:
+                kept.append(pending)
+        self._pending_workers = kept
+
+        # Cancel running worker tasks for this namespace.
+        to_cancel = [
+            task for task, key in self._task_keys.items() if in_namespace(key[0])
+        ]
+        for task in to_cancel:
+            task.cancel()
+            self.worker_tasks.discard(task)
+            self._task_keys.pop(task, None)
+        if to_cancel:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*to_cancel, return_exceptions=True),
+                    timeout=0.5,
+                )
+            except Exception:
+                pass
 
     async def cleanup_tasks(self) -> None:
         """Cancel and cleanup all running worker tasks and pending coroutines."""
@@ -502,12 +587,16 @@ class _ControlLoopRunner:
                             "Worker task failed unexpectedly", exc_info=True
                         )
                     else:
-                        # Check if this worker returned a StopEvent - if so,
-                        # cancel other workers immediately to prevent them from
-                        # writing to the event stream after workflow completion
+                        # Check if this worker returned a *root* StopEvent - if
+                        # so, cancel other workers immediately to prevent them
+                        # from writing to the event stream after workflow
+                        # completion. A child's StopEvent is only a boundary
+                        # event, so it must not cancel the parent's workers.
                         for res in tick_result.result:
-                            if isinstance(res, StepWorkerResult) and isinstance(
-                                res.result, StopEvent
+                            if (
+                                isinstance(res, StepWorkerResult)
+                                and isinstance(res.result, StopEvent)
+                                and tick_result.step_id.is_root
                             ):
                                 await self.cleanup_tasks()
                                 break
@@ -568,6 +657,11 @@ async def control_loop(
     run = consume_current_run()
     state = init_state or BrokerState.from_workflow(run.workflow)
     runner = _ControlLoopRunner(
-        run.workflow, run.run_adapter, run.context, run.steps, state
+        run.workflow,
+        run.run_adapter,
+        run.context,
+        run.steps,
+        state,
+        instances=run.workflow._namespace_instances(),
     )
     return await runner.run(start_event=start_event)

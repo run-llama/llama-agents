@@ -16,11 +16,14 @@ from typing import Any, Awaitable, Callable
 from llama_agents.client.protocol.serializable_events import (
     EventEnvelopeWithMetadata,
 )
+from pydantic import BaseModel
 from typing_extensions import override
-from workflows.context.serializers import BaseSerializer
+from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import (
+    DictState,
     StateStore,
-    infer_state_type,
+    namespaced_seed_payloads,
+    namespaced_state_types,
 )
 from workflows.events import (
     Event,
@@ -29,8 +32,10 @@ from workflows.events import (
     WorkflowCancelledEvent,
     WorkflowFailedEvent,
     WorkflowTimedOutEvent,
+    get_event_origin_namespace,
 )
 from workflows.runtime.runtime_decorators import (
+    BaseExternalRunAdapterDecorator,
     BaseInternalRunAdapterDecorator,
     BaseRuntimeDecorator,
 )
@@ -67,29 +72,68 @@ class _ServerInternalRunAdapter(BaseInternalRunAdapterDecorator):
         decorated: InternalRunAdapter,
         runtime: ServerRuntimeDecorator,
         *,
-        state_type: type[Any] | None = None,
+        state_types: dict[tuple[str, ...], type[BaseModel]] | None = None,
     ) -> None:
         super().__init__(decorated)
         self._runtime = runtime
         self._store = runtime._store
-        self._state_type = state_type
-        self._state_store: StateStore[Any] | None = None
+        default_types: dict[tuple[str, ...], type[BaseModel]] = {(): DictState}
+        self._state_types = state_types or default_types
+        self._seed_resolved = False
+        self._seeds: dict[tuple[str, ...], dict[str, Any]] | None = None
+        self._root_handle: dict[str, Any] | None = None
+        self._serializer: BaseSerializer = JsonSerializer()
         self._write_lock: asyncio.Lock | None = None
 
-    @override
-    def get_state_store(self) -> StateStore[Any]:
-        if self._state_store is not None:
-            return self._state_store
+    def _resolve_seeds(self) -> None:
+        """Split the resume snapshot into per-namespace seeds, once.
+
+        A portable in-memory tree splits into one in-memory seed per namespace.
+        A durable handle can't split — its ``copy_from_handle`` copies every
+        namespace row under the run in one shot — so it seeds the root only.
+        Restart-resume of the same run carries no snapshot: rows already exist.
+        """
+        if self._seed_resolved:
+            return
         initial = self._runtime._initial_state.pop(self.run_id, None)
-        if initial is not None:
-            serialized_state, serializer = initial
-            store = self._store.create_state_store(
-                self.run_id, self._state_type, serialized_state, serializer
-            )
-        else:
-            store = self._store.create_state_store(self.run_id, self._state_type)
-        self._state_store = store
-        return store
+        serialized_state, serializer = initial if initial is not None else (None, None)
+        self._serializer = serializer or JsonSerializer()
+        self._seeds = namespaced_seed_payloads(serialized_state, self._state_types)
+        if self._seeds is not None:
+            for namespace, seed in list(self._seeds.items()):
+                self._store.create_state_store(
+                    self.run_id,
+                    self._state_types.get(namespace, DictState),
+                    seed,
+                    self._serializer,
+                    namespace=namespace,
+                )
+        if self._seeds is None and serialized_state:
+            self._root_handle = serialized_state
+        self._seed_resolved = True
+
+    @override
+    def get_state_store(self, namespace: tuple[str, ...] = ()) -> StateStore[Any]:
+        """Vend the per-namespace durable store, seeding it on first build.
+
+        Each namespace owns its own record. The seed (if any) is applied once,
+        on the first build of that namespace; ``create_state_store`` caches the
+        facade thereafter, so later calls reconnect without re-seeding.
+        """
+        self._resolve_seeds()
+        seed: dict[str, Any] | None = None
+        if self._seeds is not None:
+            seed = self._seeds.pop(namespace, None)
+        elif namespace == () and self._root_handle is not None:
+            seed = self._root_handle
+            self._root_handle = None
+        return self._store.create_state_store(
+            self.run_id,
+            self._state_types.get(namespace, DictState),
+            seed,
+            self._serializer if seed else None,
+            namespace=namespace,
+        )
 
     @override
     async def write_to_event_stream(self, event: Event) -> None:
@@ -134,7 +178,9 @@ class _ServerInternalRunAdapter(BaseInternalRunAdapterDecorator):
                     await self._runtime._handle_status_update(
                         run_id=self.run_id, status="cancelled"
                     )
-                elif isinstance(event, StopEvent):
+                elif isinstance(event, StopEvent) and not get_event_origin_namespace(
+                    event
+                ):
                     await self._runtime._handle_status_update(
                         run_id=self.run_id,
                         status="completed",
@@ -146,6 +192,45 @@ class _ServerInternalRunAdapter(BaseInternalRunAdapterDecorator):
 
             # Always forward to inner adapter (e.g. idle detection, DBOS stream)
             await super().write_to_event_stream(event)
+
+
+# ---------------------------------------------------------------------------
+# _ServerExternalRunAdapter
+# ---------------------------------------------------------------------------
+
+
+class _ServerExternalRunAdapter(BaseExternalRunAdapterDecorator):
+    """External adapter that reconnects a run's per-namespace durable rows.
+
+    The base (basic) external adapter only knows the in-memory queues; under the
+    server, state lives in durable rows keyed by ``(run_id, namespace)``.
+    Reconnecting them here lets ``Context.to_dict`` serialize the whole tree
+    without a shared cache.
+    """
+
+    def __init__(
+        self,
+        decorated: ExternalRunAdapter,
+        store: AbstractWorkflowStore,
+        run_id: str,
+        underlying_state_type: type[Any],
+    ) -> None:
+        super().__init__(decorated)
+        self._store = store
+        self._run_id = run_id
+        self._underlying_state_type = underlying_state_type
+
+    @override
+    def get_state_store(
+        self, namespace: tuple[str, ...] = ()
+    ) -> StateStore[Any] | None:
+        # Reconnect the namespace's existing durable row (no seed). DictState
+        # blob: a durable ``to_dict`` returns the root reconnect handle, which
+        # already spans every namespace row, so callers never read child rows
+        # here; resume reconnects typed rows via the internal adapter.
+        return self._store.create_state_store(
+            self._run_id, self._underlying_state_type, namespace=namespace
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -244,14 +329,15 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
         serialized_state: dict[str, Any] | None = None,
         serializer: BaseSerializer | None = None,
     ) -> ExternalRunAdapter:
-        # Intercept serialized state: we handle seeding ourselves in get_state_store
-        # so non-InMemory formats don't leak to the base runtime.
+        # Intercept serialized state: get_state_store seeds the durable
+        # store itself, so non-InMemory formats don't leak to the base runtime.
         passthrough_state = serialized_state
         if serialized_state and serializer:
             self._initial_state[run_id] = (serialized_state, serializer)
             store_type = serialized_state.get("store_type")
             if store_type is not None and store_type != "in_memory":
                 passthrough_state = None
+
         return super().run_workflow(
             run_id,
             workflow,
@@ -264,8 +350,18 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
     def get_internal_adapter(self, workflow: Workflow) -> InternalRunAdapter:
         """Wraps the inner runtime's adapter in _ServerInternalRunAdapter."""
         inner_adapter = self._decorated.get_internal_adapter(workflow)
-        state_type = infer_state_type(workflow)
-        return _ServerInternalRunAdapter(inner_adapter, self, state_type=state_type)
+        return _ServerInternalRunAdapter(
+            inner_adapter, self, state_types=namespaced_state_types(workflow)
+        )
+
+    @override
+    def get_external_adapter(self, run_id: str) -> ExternalRunAdapter:
+        inner = self._decorated.get_external_adapter(run_id)
+        # Reconnect the durable row as a DictState blob: this serves the
+        # child-ful tree directly and yields a type-independent reference for
+        # ``to_dict`` (resume reconnects with the correct typed store via the
+        # internal adapter, which knows the workflow).
+        return _ServerExternalRunAdapter(inner, self._store, run_id, DictState)
 
     # ------------------------------------------------------------------
     # Handler persistence

@@ -21,6 +21,7 @@ from llama_index_instrumentation.dispatcher import (
 from llama_index_instrumentation.events.span import SpanDropEvent
 from llama_index_instrumentation.span import active_span_id
 from workflows._event_summary import summarize_event
+from workflows.context.state_store import StateStore
 from workflows.decorators import P, StepConfig
 from workflows.errors import WorkflowCancelledByUser, WorkflowRuntimeError
 from workflows.events import (
@@ -48,6 +49,7 @@ from workflows.runtime.types.results import (
     StepWorkerStateContextVar,
     WaitingForEvent,
 )
+from workflows.runtime.types.step_id import StepId
 from workflows.workflow import Workflow
 
 if TYPE_CHECKING:
@@ -111,6 +113,8 @@ class StepWorkerFunction(Protocol):
         workflow: Workflow,
         bound_events: dict[str, Event] | None = None,
         retry: RetryAttempt = RetryAttempt(),
+        namespace: tuple[str, ...] = (),
+        state_store: StateStore[Any] | None = None,
     ) -> Awaitable[list[StepFunctionResult]]: ...
 
 
@@ -145,11 +149,11 @@ async def partial(
     return functools.partial(func, **kwargs)
 
 
-def as_step_worker_functions(workflow: Workflow) -> dict[str, StepWorkerFunction]:
-    step_funcs = workflow._get_steps()
-    step_workers: dict[str, StepWorkerFunction] = {
-        name: as_step_worker_function(getattr(func, "__func__", func))
-        for name, func in step_funcs.items()
+def as_step_worker_functions(workflow: Workflow) -> dict[StepId, StepWorkerFunction]:
+    step_funcs = workflow._get_namespaced_steps()
+    step_workers: dict[StepId, StepWorkerFunction] = {
+        step_id: as_step_worker_function(getattr(func, "__func__", func))
+        for step_id, func in step_funcs.items()
     }
     return step_workers
 
@@ -176,18 +180,24 @@ def as_step_worker_function(
         workflow: Workflow,
         bound_events: dict[str, Event] | None = None,
         retry: RetryAttempt = RetryAttempt(),
+        namespace: tuple[str, ...] = (),
+        state_store: StateStore[Any] | None = None,
     ) -> list[StepFunctionResult]:
         from workflows.context.context import Context
 
-        internal_context = Context._create_internal(workflow=workflow)
+        internal_context = Context._create_internal(
+            workflow=workflow, state_store=state_store
+        )
         returns = Returns(return_values=[])
 
-        step_ctx = StepWorkerContext(
-            state=state,
-            returns=returns,
-            retry=retry,
+        token = StepWorkerStateContextVar.set(
+            StepWorkerContext(
+                state=state,
+                returns=returns,
+                retry=retry,
+                namespace=namespace,
+            )
         )
-        token = StepWorkerStateContextVar.set(step_ctx)
         ctx_token = InternalContextVar.set(weakref.ref(internal_context))
 
         try:

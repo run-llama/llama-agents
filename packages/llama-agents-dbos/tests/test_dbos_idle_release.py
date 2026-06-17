@@ -75,7 +75,9 @@ class StubInternalAdapter(InternalRunAdapter):
     async def close(self) -> None:
         self.closed = True
 
-    def get_state_store(self) -> StateStore[Any] | None:
+    def get_state_store(
+        self, namespace: tuple[str, ...] = ()
+    ) -> StateStore[Any] | None:
         return None
 
 
@@ -102,7 +104,9 @@ class StubExternalAdapter(ExternalRunAdapter):
     async def get_result(self) -> StopEvent:
         return self._result
 
-    def get_state_store(self) -> StateStore[Any] | None:
+    def get_state_store(
+        self, namespace: tuple[str, ...] = ()
+    ) -> StateStore[Any] | None:
         return None
 
 
@@ -607,7 +611,7 @@ async def test_do_resume_carries_over_serialized_state(
 
     # Seed the state store with actual state data
     state_store = InMemoryStateStore(MyState(counter=42))
-    store.state_stores["run-1"] = state_store
+    store.state_stores[("run-1", ())] = state_store
 
     await decorator._do_resume("run-1")
 
