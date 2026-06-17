@@ -169,12 +169,13 @@ Everything on an in-flight event and in the state store has to be serializable. 
 serializer, Pydantic models included. If it hits a value it can't encode, `to_dict()` raises and the
 whole snapshot fails, not just that field. So don't put raw bytes or open connections on events.
 
-## When you want durability handled for you
+## Runtime plugins for durability
 
 The checkpoint loop is durability you control. You decide when to snapshot, and resume is a couple of
-lines. If you'd rather not manage that, the runtime can persist and restore state for you.
+lines. If you'd rather not manage that, use a runtime plugin that owns persistence and recovery.
 
-Running a workflow as a [server](/python/llamaagents/workflows/deployment) persists its state across
-requests and restarts. The [DBOS runtime](/python/llamaagents/workflows/dbos) journals every step
-transition to a database, so a crashed workflow resumes on its own. Both run the same workflow code
-you have already written.
+The default runtime runs workflows in-process. A plugin runtime can swap in a different execution
+model without changing the workflow code. For example, the
+[DBOS runtime](/python/llamaagents/workflows/dbos) journals step transitions to a database, so a
+crashed workflow can resume without your checkpoint loop. `WorkflowServer` can run workflows with the
+same runtime plugin, so served workflows get the same persistence and recovery behavior.
