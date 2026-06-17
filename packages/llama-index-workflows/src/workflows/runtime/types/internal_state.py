@@ -49,6 +49,14 @@ def _normalize_step_id_keys(mapping: Mapping[Any, T]) -> dict[StepId, T]:
     return {_normalize_step_id(step_id): value for step_id, value in mapping.items()}
 
 
+def _namespace_key(namespace: tuple[str, ...]) -> str:
+    return "/".join(namespace)
+
+
+def _namespace_from_key(key: str) -> tuple[str, ...]:
+    return tuple(key.split("/")) if key else ()
+
+
 @dataclass(frozen=True)
 class CollectionBinding:
     """
@@ -132,8 +140,8 @@ class BrokerState:
     # Per-child-namespace activation times: the moment the first event routed
     # into a namespace that declares a ``timeout``. Used to arm and to staleness-
     # check :class:`TickNamespaceTimeout`. Cleared when the namespace completes
-    # (StopEvent boundary) or is expired, so a re-triggered child re-arms. Not
-    # serialized — runtime scheduling state, like waiter timeouts.
+    # (StopEvent boundary) or is expired, so a re-triggered child re-arms.
+    # Serialized so resume preserves the original child timeout clock.
     namespace_started: dict[tuple[str, ...], float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -374,6 +382,10 @@ class BrokerState:
                 )
                 for key, release in self.collection_release_states.items()
             },
+            namespace_started={
+                _namespace_key(namespace): started_at
+                for namespace, started_at in self.namespace_started.items()
+            },
         )
 
     @staticmethod
@@ -410,6 +422,10 @@ class BrokerState:
                 released=release.released,
             )
             for key, release in serialized.collection_release_states.items()
+        }
+        base_state.namespace_started = {
+            _namespace_from_key(namespace): started_at
+            for namespace, started_at in serialized.namespace_started.items()
         }
 
         # Restore worker state (queues, collected events, waiters)

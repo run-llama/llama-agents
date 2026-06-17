@@ -207,6 +207,9 @@ class SerializedContext(BaseModel):
     collection_release_states: dict[str, SerializedCollectionReleaseState] = Field(
         default_factory=dict
     )
+    # Per-child namespace timeout activation times, keyed by "child/grandchild".
+    # Additive to v2: older payloads default to no active namespace deadlines.
+    namespace_started: dict[str, float] = Field(default_factory=dict)
 
     @staticmethod
     def from_v0(v0: SerializedContextV0) -> "SerializedContext":

@@ -170,6 +170,21 @@ class _ControlLoopRunner:
         self._wakeup_sequence += 1
         heapq.heappush(self.scheduled_wakeups, (at_time, seq, tick))
 
+    def schedule_active_namespace_timeouts(self) -> None:
+        """Re-arm child namespace deadlines restored from serialized state."""
+        for namespace, started_at in sorted(self.state.namespace_started.items()):
+            timeout = self.state.config.namespace_timeouts.get(namespace)
+            if timeout is None:
+                continue
+            self.schedule_tick(
+                TickNamespaceTimeout(
+                    namespace=namespace,
+                    timeout=timeout,
+                    started_at=started_at,
+                ),
+                at_time=started_at + timeout,
+            )
+
     def next_wakeup_timeout(self, now: float) -> float | None:
         """Calculate timeout until next scheduled wakeup.
 
@@ -466,6 +481,8 @@ class _ControlLoopRunner:
                 TickTimeout(timeout=self.workflow._timeout),
                 at_time=timeout_time,
             )
+
+        self.schedule_active_namespace_timeouts()
 
         # Resume any in-progress work
         self.state, commands = rewind_in_progress(self.state, start)

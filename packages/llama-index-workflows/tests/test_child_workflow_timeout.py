@@ -14,7 +14,8 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from workflows import Workflow
+from workflows import Context, Workflow
+from workflows.context.serializers import JsonSerializer
 from workflows.decorators import catch_error, step
 from workflows.errors import WorkflowTimeoutError
 from workflows.events import (
@@ -27,6 +28,8 @@ from workflows.events import (
 )
 from workflows.runtime.types.internal_state import BrokerState
 from workflows.workflow import DEFAULT_TIMEOUT
+
+RESUME_CHILD_STARTED: asyncio.Event | None = None
 
 
 class ChildStart(StartEvent):
@@ -207,6 +210,17 @@ def test_explicit_child_timeout_arms_namespace_deadline() -> None:
     assert state.config.namespace_timeouts == {("child",): 0.1}
 
 
+def test_active_namespace_timeout_activation_round_trips() -> None:
+    workflow = ParentOfSlowChild(child=SlowChild(timeout=0.1))
+    state = BrokerState.from_workflow(workflow)
+    state.namespace_started[("child",)] = 123.0
+
+    serialized = state.to_serialized(JsonSerializer())
+    restored = BrokerState.from_serialized(serialized, workflow, JsonSerializer())
+
+    assert restored.namespace_started == {("child",): 123.0}
+
+
 def test_explicit_child_none_timeout_arms_no_deadline() -> None:
     # Explicit None means "no deadline" — same armed state as unset, but chosen.
     state = BrokerState.from_workflow(ParentOfSlowChild(child=SlowChild(timeout=None)))
@@ -232,3 +246,42 @@ async def test_grandchild_times_out_on_its_own_clock() -> None:
     ).run()
     with pytest.raises(WorkflowTimeoutError):
         await handler
+
+
+class ResumeSlowChild(Workflow):
+    @step
+    async def run_child(self, ev: ChildStart) -> ChildStop:
+        assert RESUME_CHILD_STARTED is not None
+        RESUME_CHILD_STARTED.set()
+        await asyncio.sleep(5)
+        return ChildStop()
+
+
+class ParentOfResumeSlowChild(Workflow):
+    child: ResumeSlowChild
+
+    @step
+    async def begin(self, ev: StartEvent) -> ChildStart:
+        return ChildStart()
+
+    @step
+    async def finish(self, ev: ChildStop) -> StopEvent:
+        return StopEvent(result="never")
+
+
+@pytest.mark.asyncio
+async def test_child_timeout_is_rearmed_from_original_start_on_resume() -> None:
+    global RESUME_CHILD_STARTED
+    RESUME_CHILD_STARTED = asyncio.Event()
+    workflow = ParentOfResumeSlowChild(child=ResumeSlowChild(timeout=0.2), timeout=30)
+
+    handler = workflow.run()
+    await asyncio.wait_for(RESUME_CHILD_STARTED.wait(), timeout=1)
+    assert handler.ctx is not None
+    ctx_dict = handler.ctx.to_dict()
+    await handler.cancel_run()
+
+    await asyncio.sleep(0.3)
+    resumed = workflow.run(ctx=Context.from_dict(workflow, ctx_dict))
+    with pytest.raises(WorkflowTimeoutError):
+        await asyncio.wait_for(resumed, timeout=0.1)
