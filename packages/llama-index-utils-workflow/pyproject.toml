@@ -14,7 +14,7 @@ dev = [
 
 [project]
 name = "llama-index-utils-workflow"
-version = "0.10.1"
+version = "0.11.0"
 description = "llama-index utils for workflows"
 readme = "README.md"
 authors = [{name = "Adrian Lyjak", email = "adrianlyjak@gmail.com"}]
