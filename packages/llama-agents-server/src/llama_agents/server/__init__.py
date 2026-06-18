@@ -9,7 +9,11 @@ from ._store.abstract_workflow_store import (
 from ._store.agent_data_store import AgentDataStore
 from ._store.memory_workflow_store import MemoryWorkflowStore
 from ._store.sqlite.sqlite_workflow_store import SqliteWorkflowStore
-from .runtime import DurableWorkflowHandler, DurableWorkflowRuntime
+from .runtime import (
+    DurableWorkflowHandler,
+    DurableWorkflowRuntime,
+    ManagedWorkflowRuntime,
+)
 from .server import WorkflowServer
 
 __all__ = [
@@ -18,6 +22,7 @@ __all__ = [
     "DurableWorkflowHandler",
     "DurableWorkflowRuntime",
     "HandlerQuery",
+    "ManagedWorkflowRuntime",
     "PersistentHandler",
     "WorkflowServer",
     "MemoryWorkflowStore",

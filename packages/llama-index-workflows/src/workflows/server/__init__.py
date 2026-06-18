@@ -18,6 +18,7 @@ try:
         DurableWorkflowHandler,
         DurableWorkflowRuntime,
         HandlerQuery,
+        ManagedWorkflowRuntime,
         PersistentHandler,
         SqliteWorkflowStore,
         WorkflowServer,
@@ -34,6 +35,7 @@ __all__ = [
     "DurableWorkflowHandler",
     "DurableWorkflowRuntime",
     "HandlerQuery",
+    "ManagedWorkflowRuntime",
     "PersistentHandler",
     "SqliteWorkflowStore",
 ]
