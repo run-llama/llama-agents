@@ -296,8 +296,11 @@ class PersistenceDecorator(TickPersistenceDecorator):
         self,
         decorated: Runtime,
         store: AbstractWorkflowStore,
+        *,
+        resume_fresh_handler_grace: timedelta | None = RESUME_FRESH_HANDLER_GRACE,
     ) -> None:
         super().__init__(decorated, store)
+        self._resume_fresh_handler_grace = resume_fresh_handler_grace
         self._background_tasks: set[asyncio.Task[None]] = set()
         self.resume_task: asyncio.Task[None] | None = None
 
@@ -329,7 +332,14 @@ class PersistenceDecorator(TickPersistenceDecorator):
             )
         )
         for persistent in handlers:
-            if _created_within_resume_grace(persistent.started_at, resume_started_at):
+            if (
+                self._resume_fresh_handler_grace is not None
+                and _created_within_resume_grace(
+                    persistent.started_at,
+                    resume_started_at,
+                    self._resume_fresh_handler_grace,
+                )
+            ):
                 continue
             workflow = registered_workflows.get(persistent.workflow_name)
             if workflow is None:
@@ -410,7 +420,9 @@ class PersistenceDecorator(TickPersistenceDecorator):
 
 
 def _created_within_resume_grace(
-    created_at: datetime | None, resume_started_at: datetime
+    created_at: datetime | None,
+    resume_started_at: datetime,
+    resume_fresh_handler_grace: timedelta,
 ) -> bool:
     if created_at is None:
         return False
@@ -418,4 +430,4 @@ def _created_within_resume_grace(
         created_at = created_at.replace(tzinfo=timezone.utc)
     if resume_started_at.tzinfo is None:
         resume_started_at = resume_started_at.replace(tzinfo=timezone.utc)
-    return created_at > resume_started_at - RESUME_FRESH_HANDLER_GRACE
+    return created_at > resume_started_at - resume_fresh_handler_grace

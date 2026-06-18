@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any, AsyncGenerator
 from warnings import catch_warnings, simplefilter
 
@@ -28,20 +27,6 @@ from ._store.abstract_workflow_store import (
     is_terminal_status,
 )
 from ._store.memory_workflow_store import MemoryWorkflowStore
-
-
-class _ImmediateResumePersistenceDecorator(PersistenceDecorator):
-    async def launch(self) -> None:
-        await TickPersistenceDecorator.launch(self)
-        # The HTTP server keeps a grace window for request races during ASGI
-        # startup. In-process start has no concurrent request path, so resume
-        # all persisted runs before returning from DurableWorkflowRuntime.start().
-        self.resume_task = self._spawn_task(
-            self._on_server_start(
-                self._workflows_by_name,
-                datetime.max.replace(tzinfo=timezone.utc),
-            )
-        )
 
 
 @dataclass(frozen=True)
@@ -108,8 +93,11 @@ class DurableWorkflowRuntime:
         persisted: Runtime
         self._persistence: PersistenceDecorator | None = None
         if resume_existing:
-            self._persistence = _ImmediateResumePersistenceDecorator(
-                inner, store=self._store
+            # The HTTP server keeps a grace window for request races during ASGI
+            # startup. In-process start has no concurrent request path, so resume
+            # all persisted runs before returning from start().
+            self._persistence = PersistenceDecorator(
+                inner, store=self._store, resume_fresh_handler_grace=None
             )
             persisted = self._persistence
         else:
@@ -130,16 +118,11 @@ class DurableWorkflowRuntime:
 
     def add_workflow(self, name: str, workflow: Workflow) -> None:
         """Register a workflow under a stable name for new runs and resume."""
-        workflow._switch_workflow_name(name)
-        workflow._switch_runtime(self._runtime)
+        self._service.add_workflow(name, workflow)
 
     def get_workflows(self) -> dict[str, Workflow]:
         """Return registered workflows by name."""
-        return {
-            name: workflow
-            for name in self._service.get_workflow_names()
-            if (workflow := self._service.get_workflow(name)) is not None
-        }
+        return self._service.get_workflows()
 
     async def start(self) -> DurableWorkflowRuntime:
         """Start the store and runtime, resuming existing runs if enabled."""
