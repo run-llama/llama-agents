@@ -1,6 +1,6 @@
 ---
 sidebar:
-  order: 17
+  order: 18
 title: Run Your Workflow as a Server
 ---
 
@@ -73,7 +73,7 @@ The library also provides a convenient CLI to run a server from a file containin
 Given the `my_server.py` file from the example above, you can start the server with the following command:
 
 ```bash
-python -m workflows.server my_server.py
+python -m llama_agents.server my_server.py
 ```
 
 The server will start on `0.0.0.0:8080` by default. You can configure the host and port using the
@@ -177,7 +177,7 @@ To stream events either as Server-Sent Events (SSE) or as multi-line JSON payloa
 
 - `sse` (set to either "true" or "false", not required): stream the events as Server Sent Events (`text/event-stream`) if true, else stream them as a multi-line JSON payload (`application/x-ndjson`). Defaults to true.
 - `acquire_timeout` (a float-convertible string, not required): timeout for acquiring the lock to iterate over events
-- `include_internal` (set to either "true" or "false", not required): stream internal workfloe events if set to true. Defaults to false.
+- `include_internal` (set to either "true" or "false", not required): stream internal workflow events if set to true. Defaults to false.
 - `include_qualified_name` (set to either "true" or "false", not required): include the qualified name of the event in the response body. Defaults to true.
 
 **Example request**
@@ -315,7 +315,7 @@ from dbos import DBOS
 from llama_agents.dbos import DBOSRuntime
 from llama_agents.server import WorkflowServer
 
-# Configure DBOS — uses SQLite by default, or set system_database_url for Postgres
+# Configure DBOS. It uses SQLite by default, or set system_database_url for Postgres.
 DBOS(config={"name": "my-app", "run_admin_server": False})
 
 runtime = DBOSRuntime()

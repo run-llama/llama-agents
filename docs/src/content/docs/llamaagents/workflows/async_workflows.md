@@ -23,14 +23,14 @@ import requests
 class SyncStepWorkflow(Workflow):
     @step
     def fetch_data(self, ev: StartEvent) -> StopEvent:
-        # This runs in a thread automatically — the event loop stays free
+        # This runs in a thread automatically, so the event loop stays free
         response = requests.get("https://api.example.com/data")
         return StopEvent(result=response.json())
 ```
 
 This is the simplest option when your step body is entirely synchronous. The framework handles the thread-offloading for you, including preserving `contextvars` across the thread boundary.
 
-However, there are cases where you still need finer-grained control inside an `async def` step — for example, when only part of the step is blocking, or when you want to use a dedicated executor for CPU-heavy work. The sections below cover those scenarios.
+However, there are cases where you still need finer-grained control inside an `async def` step, for example, when only part of the step is blocking, or when you want to use a dedicated executor for CPU-heavy work. The sections below cover those scenarios.
 
 ## Blocking I/O in async steps
 
@@ -58,7 +58,7 @@ class BlockingIOWorkflow(Workflow):
 
 `asyncio.to_thread` schedules the function on the default `ThreadPoolExecutor` and returns an awaitable. While the blocking call runs in a separate thread, the event loop continues processing other steps and workflows.
 
-This applies to any synchronous library call that performs I/O — reading files, querying databases, calling external APIs, and so on:
+This applies to any synchronous library call that performs I/O: reading files, querying databases, calling external APIs, and so on:
 
 ```python
 import asyncio
@@ -82,7 +82,7 @@ class FileReaderWorkflow(Workflow):
 
 ## CPU-intensive operations
 
-CPU-bound work — data transformation, image processing, numerical computation — presents a different challenge. Even when run on a thread, CPU-intensive Python code can contend with the event loop due to the GIL (Global Interpreter Lock).
+CPU-bound work, such as data transformation, image processing, or numerical computation, presents a different challenge. Even when run on a thread, CPU-intensive Python code can contend with the event loop due to the GIL (Global Interpreter Lock).
 
 For CPU-heavy work, use a dedicated, smaller thread pool (or process pool) so that these tasks are queued and do not saturate the default executor:
 
@@ -128,7 +128,7 @@ Key differences from the I/O case:
 
 - **Use `loop.run_in_executor`** with an explicit executor instead of `asyncio.to_thread` so you can control the pool size and type.
 - **Keep the pool small.** A pool of 1–2 workers means CPU tasks queue up rather than competing for CPU time. Adjust based on your workload and available cores.
-- **Consider a `ProcessPoolExecutor`** for truly CPU-bound work that you want to run outside the GIL. The API is the same — just swap the executor type:
+- **Consider a `ProcessPoolExecutor`** for truly CPU-bound work that you want to run outside the GIL. The API is the same, just swap the executor type:
 
 ```python
 from concurrent.futures import ProcessPoolExecutor
