@@ -27,9 +27,9 @@ def test_add_workflow(simple_test_workflow: Workflow) -> None:
 
 def test_server_uses_shared_runtime_core() -> None:
     server = WorkflowServer()
-    assert server._service is server._runtime_core.service
-    assert server._runtime is server._runtime_core.runtime
-    assert server._workflow_store is server._runtime_core.store
+    assert server._service is server._runtime_core._service
+    assert server._runtime is server._runtime_core._runtime
+    assert server._workflow_store is server._runtime_core._store
 
 
 @pytest.mark.asyncio
