@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -62,6 +63,15 @@ async def _wait_for_completed(
         return handler.result
 
     return await wait_for_passing(check, max_duration=5.0, interval=0.05)
+
+
+async def _wait_for_idle(runtime: DurableWorkflowRuntime, handler_id: str) -> None:
+    async def check() -> None:
+        found = await runtime.query_handlers(HandlerQuery(handler_id_in=[handler_id]))
+        assert len(found) == 1
+        assert found[0].idle_since is not None
+
+    await wait_for_passing(check, max_duration=5.0, interval=0.05)
 
 
 @pytest.mark.asyncio
@@ -130,11 +140,80 @@ async def test_durable_workflow_runtime_can_skip_startup_resume(
     )
     runtime3.add_workflow("waiting", InProcessWaitingWorkflow())
     await runtime3.start()
-    resumed = await runtime3.load_active_handler(handler_id)
-    await resumed.send_event(ResumeInput(response="late"))
+    await runtime3.send_event(handler_id, ResumeInput(response="late"))
     result = await _wait_for_completed(runtime3, handler_id)
     assert result.result == "True:late"
     await runtime3.stop()
+
+
+@pytest.mark.asyncio
+async def test_durable_workflow_runtime_can_use_resume_grace(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "workflow.db"
+    handler_id = "fresh-grace-in-process"
+
+    runtime1 = DurableWorkflowRuntime(
+        workflow_store=SqliteWorkflowStore(str(db_path), poll_interval=0.01)
+    )
+    runtime1.add_workflow("waiting", InProcessWaitingWorkflow())
+    await runtime1.start()
+    await runtime1.run("waiting", handler_id=handler_id)
+    await _wait_for_running_tick(runtime1, handler_id)
+    await runtime1.stop()
+
+    runtime2 = DurableWorkflowRuntime(
+        workflow_store=SqliteWorkflowStore(str(db_path), poll_interval=0.01),
+        resume_fresh_handler_grace=timedelta(days=1),
+    )
+    runtime2.add_workflow("waiting", InProcessWaitingWorkflow())
+    await runtime2.start()
+    with pytest.raises(RuntimeError, match="not active"):
+        await runtime2.load_active_handler(handler_id)
+    skipped = await runtime2.get_handler_status(handler_id)
+    assert skipped.status == "running"
+    await runtime2.stop()
+
+    runtime3 = DurableWorkflowRuntime(
+        workflow_store=SqliteWorkflowStore(str(db_path), poll_interval=0.01)
+    )
+    runtime3.add_workflow("waiting", InProcessWaitingWorkflow())
+    await runtime3.start()
+    await runtime3.send_event(handler_id, ResumeInput(response="after-grace"))
+    result = await _wait_for_completed(runtime3, handler_id)
+    assert result.result == "True:after-grace"
+    await runtime3.stop()
+
+
+@pytest.mark.asyncio
+async def test_durable_workflow_runtime_reloads_idle_handler_on_event(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "workflow.db"
+    handler_id = "idle-reload-in-process"
+
+    runtime1 = DurableWorkflowRuntime(
+        workflow_store=SqliteWorkflowStore(str(db_path), poll_interval=0.01),
+        idle_timeout=0.01,
+    )
+    runtime1.add_workflow("waiting", InProcessWaitingWorkflow())
+    await runtime1.start()
+    await runtime1.run("waiting", handler_id=handler_id)
+    await _wait_for_idle(runtime1, handler_id)
+    await runtime1.stop()
+
+    runtime2 = DurableWorkflowRuntime(
+        workflow_store=SqliteWorkflowStore(str(db_path), poll_interval=0.01),
+    )
+    runtime2.add_workflow("waiting", InProcessWaitingWorkflow())
+    await runtime2.start()
+    with pytest.raises(RuntimeError, match="not active"):
+        await runtime2.load_active_handler(handler_id)
+
+    await runtime2.send_event(handler_id, ResumeInput(response="woke-up"))
+    result = await _wait_for_completed(runtime2, handler_id)
+    assert result.result == "True:woke-up"
+    await runtime2.stop()
 
 
 @pytest.mark.asyncio

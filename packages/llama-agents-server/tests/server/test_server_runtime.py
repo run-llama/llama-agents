@@ -129,6 +129,26 @@ class StubRuntime(Runtime):
         pass
 
 
+class RecordingStore(MemoryWorkflowStore):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__()
+        self._events = events
+
+    async def start(self) -> None:
+        self._events.append("store")
+        await super().start()
+
+
+class RecordingRuntime(StubRuntime):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__()
+        self._events = events
+
+    async def launch(self) -> None:
+        self._events.append("runtime")
+        await super().launch()
+
+
 class SimpleWorkflow(Workflow):
     @step
     async def start(self, ev: StartEvent) -> StopEvent:
@@ -161,6 +181,18 @@ def test_add_workflow_no_double_wrap() -> None:
     # Inner should be IdleReleaseDecorator, not another ServerRuntimeDecorator
     assert isinstance(wf.runtime._decorated, IdleReleaseDecorator)
     assert not isinstance(wf.runtime._decorated, ServerRuntimeDecorator)
+
+
+async def test_custom_server_runtime_launches_before_store_start() -> None:
+    events: list[str] = []
+    server = WorkflowServer(
+        workflow_store=RecordingStore(events),
+        runtime=RecordingRuntime(events),
+    )
+
+    await server.start()
+    assert events == ["runtime", "store"]
+    await server.stop()
 
 
 def test_server_runtime_decorator_wraps_internal_adapter() -> None:
