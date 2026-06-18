@@ -174,8 +174,101 @@ whole snapshot fails, not just that field. So don't put raw bytes or open connec
 The checkpoint loop is durability you control. You decide when to snapshot, and resume is a couple of
 lines. If you'd rather not manage that, use a runtime plugin that owns persistence and recovery.
 
-The default runtime runs workflows in-process. A plugin runtime can swap in a different execution
-model without changing the workflow code. For example, the
-[DBOS runtime](/python/llamaagents/workflows/dbos) journals step transitions to a database, so a
-crashed workflow can resume without your checkpoint loop. `WorkflowServer` can run workflows with the
-same runtime plugin, so served workflows get the same persistence and recovery behavior.
+For local apps, scripts, tests, and single-process workers that do not need an HTTP server,
+`DurableWorkflowRuntime` gives you the managed version of the same pattern. It stores handler state,
+events, state-store writes, and replay ticks in a `SqliteWorkflowStore`.
+
+The durable handle is a stable `handler_id`. Start the run with that id, then use the same id after
+restart to send events and read status from SQLite:
+
+```python
+import asyncio
+from pathlib import Path
+
+from llama_agents.server import (
+    DurableWorkflowRuntime,
+    HandlerQuery,
+    SqliteWorkflowStore,
+)
+from workflows import Context, Workflow, step
+from workflows.events import HumanResponseEvent, StartEvent, StopEvent
+
+
+class Approval(HumanResponseEvent):
+    response: str
+
+
+class DraftWorkflow(Workflow):
+    @step
+    async def create_draft(self, ctx: Context, ev: StartEvent) -> None:
+        await ctx.store.set("draft", f"Draft for {ev.get('topic')}")
+
+    @step
+    async def approve(self, ctx: Context, ev: Approval) -> StopEvent:
+        draft = await ctx.store.get("draft")
+        return StopEvent(result=f"{draft}: {ev.response}")
+
+
+async def wait_until_complete(
+    runtime: DurableWorkflowRuntime, handler_id: str
+) -> StopEvent:
+    while True:
+        status = await runtime.get_handler_status(handler_id)
+        if status.status == "completed":
+            assert status.result is not None
+            return status.result
+        await asyncio.sleep(0.05)
+```
+
+Start the workflow against a SQLite file:
+
+```python
+db_path = Path("workflow-state.db")
+handler_id = "draft-42"
+
+runtime = DurableWorkflowRuntime(
+    workflow_store=SqliteWorkflowStore(str(db_path)),
+)
+runtime.add_workflow("draft", DraftWorkflow())
+await runtime.start()
+
+handler_data = await runtime.run(
+    "draft",
+    handler_id=handler_id,
+    topic="quarterly update",
+)
+print(handler_data.handler_id, handler_data.status)
+
+# Simulate process shutdown. Active tasks are hard-aborted, but persisted
+# ticks and state remain in SQLite for the next runtime instance.
+await runtime.stop()
+```
+
+Then create a new runtime against the same SQLite file and continue by persistent id:
+
+```python
+runtime = DurableWorkflowRuntime(
+    workflow_store=SqliteWorkflowStore(str(db_path)),
+)
+runtime.add_workflow("draft", DraftWorkflow())
+await runtime.start()
+
+await runtime.send_event(handler_id, Approval(response="approved"))
+result = await wait_until_complete(runtime, handler_id)
+print(result.result)
+
+handlers = await runtime.query_handlers(HandlerQuery(handler_id_in=[handler_id]))
+print(handlers[0].status)
+
+await runtime.stop()
+```
+
+`run()` returns after the workflow has persisted enough state to be replayed, so immediate process
+death after `run()` is recoverable. A loaded `WorkflowHandler` is only useful while the run is active
+in the current process. Once the run only exists in SQLite, use the durable id API: `send_event`,
+`get_handler_status`, and `query_handlers`.
+
+If you already need HTTP, use `WorkflowServer` with a durable `workflow_store`. If you need
+multi-process or distributed execution, use the [DBOS runtime](/python/llamaagents/workflows/dbos).
+DBOS journals step transitions to a database, so a crashed workflow can resume without your
+checkpoint loop, and `WorkflowServer` can run workflows with the same runtime plugin.
