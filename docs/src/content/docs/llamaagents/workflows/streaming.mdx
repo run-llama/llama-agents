@@ -4,7 +4,16 @@ sidebar:
 title: Streaming events
 ---
 
-Workflows can be complex -- they are designed to handle complex, branching, concurrent logic -- which means they can take time to fully execute. To provide your user with a good experience, you may want to provide an indication of progress by streaming events as they occur. Workflows have built-in support for this on the `Context` object.
+Workflows often take time to finish. They may call slow providers, branch, fan out over a batch, or wait for a human response. Streaming lets you surface progress while the run is still moving.
+
+There are two sides to streaming:
+
+| Side | API |
+|---|---|
+| Inside a step | `ctx.write_event_to_stream(...)` |
+| Outside the workflow | `handler.stream_events()` |
+
+`workflow.run(...)` starts the workflow and returns a `WorkflowHandler`. The handler is awaitable for the final result, and it also owns the event stream for that run.
 
 To get this done, let's bring in all the deps we need:
 
@@ -77,7 +86,7 @@ class MyWorkflow(Workflow):
   You could also pass one in using the `api_key` parameter.
 </Aside>
 
-In `step_one` and `step_three` we write individual events to the event stream. In `step_two` we use `astream_complete` to produce an iterable generator of the LLM's response, then we produce an event for each chunk of data the LLM sends back to us -- roughly one per word -- before returning the final response to `step_three`.
+In `step_one` and `step_three` we write individual events to the event stream. In `step_two` we use `astream_complete` to produce an iterable generator of the LLM's response, then we produce an event for each chunk of data the LLM sends back to us before returning the final response to `step_three`.
 
 To actually get this output, we need to run the workflow asynchronously and listen for the events, like this:
 
@@ -98,11 +107,13 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-`run` runs the workflow in the background, while `stream_events` will provide any event that gets written to the stream. It stops when the stream delivers a `StopEvent`, after which you can get the final result of the workflow as you normally would.
+`run` schedules the workflow in the background. `stream_events()` yields every event written to the stream and stops when the stream delivers a `StopEvent`. After that, await the handler to get the final result.
+
+A handler stream can be consumed once. If you need to broadcast workflow events to multiple clients, consume the stream once in your application and fan those events out yourself.
 
 ## Handling workflow termination
 
-When a workflow ends abnormally (timeout, cancellation, or step failure), a specific `StopEvent` subclass is published to the stream before the exception is raised:
+When a workflow ends abnormally, a specific `StopEvent` subclass is published to the stream before the exception is raised from `await handler`:
 
 - **`WorkflowTimedOutEvent`** - Published when the workflow exceeds its timeout. Contains `timeout` (seconds) and `active_steps` (list of step names that were running).
 - **`WorkflowCancelledEvent`** - Published when the workflow is cancelled by the user.

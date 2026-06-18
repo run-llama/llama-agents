@@ -4,76 +4,68 @@ sidebar:
 title: Human in the Loop
 ---
 
-Since workflows are so flexible, there are many possible ways to implement human-in-the-loop patterns.
+Human-in-the-loop workflows need to pause, tell the caller what input is needed, and continue when the caller sends a response. Workflows support that with normal events.
 
-The easiest way to implement a human-in-the-loop is to use the `InputRequiredEvent` and `HumanResponseEvent` events during event streaming.
+The most direct pattern is a pair of steps: one returns `InputRequiredEvent`, and another consumes `HumanResponseEvent`. The caller watches the stream and sends the response back into the same handler.
 
 ```python
 from workflows import Workflow, step
 from workflows.events import StartEvent, StopEvent, InputRequiredEvent, HumanResponseEvent
 
 
-class HumanInTheLoopWorkflow(Workflow):
+class NumberWorkflow(Workflow):
     @step
-    async def step1(self, ev: StartEvent) -> InputRequiredEvent:
+    async def ask(self, ev: StartEvent) -> InputRequiredEvent:
         return InputRequiredEvent(prefix="Enter a number: ")
 
     @step
-    async def step2(self, ev: HumanResponseEvent) -> StopEvent:
+    async def answer(self, ev: HumanResponseEvent) -> StopEvent:
         return StopEvent(result=ev.response)
 
 
-# workflow should work with streaming
-workflow = HumanInTheLoopWorkflow()
+workflow = NumberWorkflow()
 
 handler = workflow.run()
 async for event in handler.stream_events():
     if isinstance(event, InputRequiredEvent):
-        # here, we can handle human input however you want
-        # this means using input(), websockets, accessing async state, etc.
-        # here, we just use input()
+        # This could be input(), a websocket reply, a web form submission, etc.
         response = input(event.prefix)
-        handler.ctx.send_event(HumanResponseEvent(response=response))
+        await handler.send_event(HumanResponseEvent(response=response))
 
 final_result = await handler
 ```
 
-Here, the workflow will wait until the `HumanResponseEvent` is emitted.
-
-If needed, you can also subclass these two events to add custom payloads.
+Here, the workflow waits until the `HumanResponseEvent` is emitted. You can subclass both events when the prompt or response needs more structure.
 
 ## Stopping/Resuming Between Human Responses
 
-You can break out of the event loop and resume later. This is useful when you want to pause the workflow to wait for a human response asynchronously (e.g., from a web request).
+In a web app, the process that sees the prompt is often not the same request that receives the answer. Snapshot the context after the prompt, store it, and restore it when the response arrives.
 
 ```python
+import json
 from workflows import Context
 
 handler = workflow.run()
 async for event in handler.stream_events():
     if isinstance(event, InputRequiredEvent):
-        # Serialize the context, store it anywhere as a JSON blob
-        ctx_dict = handler.ctx.to_dict()
+        await db.save("run-123", json.dumps(handler.ctx.to_dict()))
         await handler.cancel_run()
         break
 
-...
-
-# now we handle the human response once it comes in
-response = input(event.prefix)
-
+# Later, when the human response arrives:
+response = form_data["response"]
+ctx_dict = json.loads(await db.load("run-123"))
 restored_ctx = Context.from_dict(workflow, ctx_dict)
 handler = workflow.run(ctx=restored_ctx)
 
-# Send the event to resume the workflow
-handler.ctx.send_event(HumanResponseEvent(response=response))
-
-# now we resume the workflow streaming with our restored context
+await handler.send_event(HumanResponseEvent(response=response))
 async for event in handler.stream_events():
     continue
 
 final_result = await handler
 ```
+
+Cancel the original handler after snapshotting if you are intentionally handing the run off to another request or process. That avoids leaving the in-memory run waiting for an answer that will be delivered to the restored run.
 
 ## Using `wait_for_event`
 
@@ -90,7 +82,18 @@ async def ask_user(self, ctx: Context, ev: StartEvent) -> StopEvent:
     return StopEvent(result=response.response)
 ```
 
-**Important**: `wait_for_event` replays all code preceding it whenever the step receives its triggering event _or_ a matching waiting event. The step always runs at least once up to the waiter, which then raises an internal exception to pause execution. Because of this, any code before the `wait_for_event` call must be idempotent (safe to repeat).
+Use `waiter_id` when the same step may wait more than once. Use `requirements` when several waiters consume the same event type and you need to route the right response to the right waiter:
+
+```python
+response = await ctx.wait_for_event(
+    HumanResponseEvent,
+    waiter_event=InputRequiredEvent(prefix="Approve draft? "),
+    waiter_id="approve-draft",
+    requirements={"request_id": ev.request_id},
+)
+```
+
+`wait_for_event` replays all code preceding it whenever the step receives its triggering event or a matching waiting event. The step always runs at least once up to the waiter, which then raises an internal exception to pause execution. Any code before the `wait_for_event` call must be safe to repeat.
 
 Due to this complexity, the event-based approach with separate steps is generally recommended.
 

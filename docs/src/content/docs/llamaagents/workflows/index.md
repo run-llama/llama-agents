@@ -8,7 +8,9 @@ title: Introduction
 
 A workflow is an event-driven, step-based way to control the execution flow of an application.
 
-Your application is divided into sections called Steps which are triggered by Events, and themselves emit Events which trigger further steps. By combining steps and events, you can create arbitrarily complex flows that encapsulate logic and make your application more maintainable and easier to understand. A step can be anything from a single line of code to a complex agent. They can have arbitrary inputs and outputs, which are passed around by Events.
+Your application is divided into sections called steps. A step receives an event, does some work, and returns another event. That returned event triggers the next step whose type annotation accepts it.
+
+That is the whole model. A step can call an LLM, run retrieval, ask for human input, update shared state, or dispatch a batch of work. The event types describe the edges of the workflow, and regular Python describes the logic inside each edge.
 
 ## Why workflows?
 
@@ -18,10 +20,11 @@ Other frameworks and LlamaIndex itself have attempted to solve this problem prev
 
 - Logic like loops and branches needed to be encoded into the edges of graphs, which made them hard to read and understand.
 - Passing data between nodes in a DAG created complexity around optional and default values and which parameters should be passed.
-- DAGs did not feel natural to developers trying to developing complex, looping, branching AI applications.
+- DAGs did not feel natural to developers trying to develop complex, looping, branching AI applications.
 
-The event-based pattern and vanilla python approach of Workflows resolves these problems.
+The event-based pattern and plain Python approach of Workflows resolves these problems.
 
+Branches are ordinary `if` statements that return different event types. Loops are steps that return an event handled by an earlier step. Concurrent work is a step that returns `list[Event]`, paired with another step that accepts `list[Event]`. When the flow needs to become dynamic, you can send events directly from the `Context`.
 
 :::note
 The Workflows library can be installed standalone, via `pip install llama-index-workflows`. However,
@@ -36,7 +39,7 @@ the `llama-index` umbrella package, Workflows can be accessed with the import pa
 :::tip
 Workflows make async a first-class citizen, and this page assumes you are running in an async environment. What this means for you is setting up your code for async properly. If you are already running in a server like FastAPI, or in a notebook, you can freely use await already!
 
-If you are running your own python scripts, its best practice to have a single async entry point.
+If you are running your own Python scripts, it's best practice to have a single async entry point.
 
 ```python
 async def main():
@@ -52,7 +55,7 @@ if __name__ == "__main__":
 ```
 :::
 
-As an illustrative example, let's consider a naive workflow where a joke is generated and then critiqued.
+Here is the smallest useful shape: generate something, pass it to another step, then stop with a result.
 
 ```python
 from workflows import Workflow, step
@@ -97,7 +100,7 @@ print(str(result))
 
 ![joke](./assets/joke.png)
 
-There's a few moving pieces here, so let's go through this piece by piece.
+There are a few moving pieces here, so let's go through them one at a time.
 
 ### Defining Workflow Events
 
@@ -106,7 +109,7 @@ class JokeEvent(Event):
     joke: str
 ```
 
-Events are user-defined pydantic objects. You control the attributes and any other auxiliary methods. In this case, our workflow relies on a single user-defined event, the `JokeEvent`.
+Events are user-defined Pydantic objects. You control the attributes and any other auxiliary methods. In this case, our workflow relies on a single user-defined event, the `JokeEvent`.
 
 ### Setting up the Workflow Class
 
@@ -116,7 +119,7 @@ class JokeFlow(Workflow):
     ...
 ```
 
-Our workflow is implemented by subclassing the `Workflow` class. For simplicity, we attached a static `OpenAI` llm instance.
+Our workflow is implemented by subclassing the `Workflow` class. For simplicity, we attached a static `OpenAI` LLM instance.
 
 ### Workflow Entry Points
 
@@ -135,7 +138,7 @@ class JokeFlow(Workflow):
     ...
 ```
 
-Here, we come to the entry-point of our workflow. While most events are use-defined, there are two special-case events,
+Here, we come to the entry-point of our workflow. While most events are user-defined, there are two special-case events,
 the `StartEvent` and the `StopEvent` that the framework provides out of the box. Here, the `StartEvent` signifies where
 to send the initial workflow input.
 
@@ -166,7 +169,7 @@ class JokeFlow(Workflow):
     ...
 ```
 
-Here, we have our second, and last step, in the workflow. We know its the last step because the special `StopEvent` is
+Here, we have our second, and last step, in the workflow. We know it's the last step because the special `StopEvent` is
 returned. When the workflow encounters a returned `StopEvent`, it immediately stops the workflow and returns whatever
 we passed in the `result` parameter.
 
@@ -185,9 +188,68 @@ print(str(result))
 Lastly, we create and run the workflow. There are some settings like timeouts (in seconds) and verbosity to help with
 debugging.
 
-The `.run()` method is async, so we use await here to wait for the result. The keyword arguments passed to `run()` will
-become fields of the special `StartEvent` that will be automatically emitted and start the workflow. As we have seen,
-in this case `topic` will be accessed from the step with `ev.topic`.
+The `.run()` method starts the workflow and returns a `WorkflowHandler`. The handler is awaitable, so `await w.run(...)`
+waits for the final result. If you need streamed events while the workflow is running, keep the handler:
+
+```python
+handler = w.run(topic="pirates")
+async for ev in handler.stream_events():
+    ...
+result = await handler
+```
+
+The keyword arguments passed to `run()` become fields of the special `StartEvent` that is automatically emitted to start
+the workflow. As we have seen, in this case `topic` is accessed from the step with `ev.topic`.
+
+## How to choose the right workflow API
+
+Most workflow code should use typed step inputs and typed returns. That gives validation, diagrams, and readable code:
+
+```python
+@step
+async def retrieve(self, ev: StartEvent) -> Retrieved:
+    ...
+
+@step
+async def synthesize(self, ev: Retrieved) -> StopEvent:
+    ...
+```
+
+Use the other APIs when the shape of the work asks for them:
+
+| Use this | When |
+|---|---|
+| Return `A | B` | A step chooses one branch at runtime. |
+| Return `list[A]` | A step has a finite batch and can produce all work items before downstream workers start. |
+| Accept `list[A]` | A step needs the full batch of results before continuing. |
+| `ctx.send_event(...)` | A step needs to emit events incrementally, emit an unknown number of events, or send an event from outside the workflow while it is running. |
+| `ctx.collect_events(...)` | You used `ctx.send_event` and need to manually wait for a known set of events. |
+| `ctx.store` | Steps need shared per-run state. |
+| `Resource(...)` | Steps need clients, indexes, models, config, or other dependencies that should not live in serialized state. |
+
+The type-first APIs are easier to validate and visualize. The context APIs are more flexible, but they make you own more of the bookkeeping.
+
+## Validation
+
+Before a workflow runs, Workflows validates the event graph described by your step signatures. It checks that start and stop events are present, produced events have consumers, consumed events have producers, and the graph does not contain accidental dead ends.
+
+Most validation failures are useful design feedback. They usually mean one of these is true:
+
+| Symptom | Usual cause |
+|---|---|
+| A step consumes an event that is never produced | A return annotation is missing, or the event is only sent dynamically with `ctx.send_event`. |
+| A step produces an event that nobody consumes | The next step has the wrong event type, or the branch is unfinished. |
+| The workflow has no terminal event | No reachable step returns `StopEvent` or a custom `StopEvent` subclass. |
+
+For intentionally dynamic workflows, keep as much as possible in the type annotations and use `ctx.send_event` for the timing. If a step is intentionally unreachable from static analysis, skip that specific check on the step:
+
+```python
+@step(skip_graph_checks=["reachability"])
+async def receive_webhook(self, ev: WebhookEvent) -> StopEvent:
+    ...
+```
+
+You can also call `workflow.validate()` directly in tests or startup code. Resource config files are validated by default; resource factories are only resolved if you call `validate(validate_resources=True)`.
 
 ## Examples
 
@@ -199,7 +261,7 @@ like looping and state management using simple workflows. It's usually a great p
 simple workflow that performs both ingestion and querying.
 - [Citation Query Engine](/python/examples/workflow/citation_query_engine/) similar to RAG + Reranking, the
 notebook focuses on how to implement intermediate steps in between retrieval and generation. A good example of how to
-use the [`Context`](#working-with-global-context-state) object in a workflow.
+use the [`Context`](/python/llamaagents/workflows/managing_state) object in a workflow.
 - [Corrective RAG](/python/examples/workflow/corrective_rag_pack/) adds some more complexity on top of a RAG
 workflow, showcasing how to query a web search engine after an evaluation step.
 - [Utilizing Concurrency](/python/examples/workflow/parallel_execution/) explains how to manage the parallel
@@ -222,7 +284,7 @@ workflow, in this case to improve structured output through reflection.
 - [Query Planning with Workflows](/python/examples/workflow/planning_workflow/) is an example of a workflow
 that plans a query by breaking it down into smaller items, and executing those smaller items. It highlights how
 to stream events from a workflow, execute steps in parallel, and looping until a condition is met.
-- [Checkpointing Workflows](/python/examples/workflow/checkpointing_workflows/) is a more exhaustive demonstration of how to make full use of `WorkflowCheckpointer` to checkpoint Workflow runs.
+- [Writing Durable Workflows](/python/llamaagents/workflows/durable_workflows) shows how to checkpoint workflow context and resume a run after a restart.
 
 Last but not least, a few more advanced use cases that demonstrate how workflows can be extremely handy if you need
 to quickly implement prototypes, for example from literature:

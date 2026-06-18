@@ -12,6 +12,8 @@ For all those situations where you want the step to try again, you can use a **r
 instructs the workflow to execute a step multiple times, controlling how long to wait before each new attempt,
 which errors are retryable, and when to give up.
 
+Retries re-run the whole step body for the same input event. Keep side effects before the failing call idempotent, or move them after the retryable work. If the step wrote state or called an external service before raising, that work may happen again.
+
 The retry module is built from three families of composable building blocks:
 
 - **Retry conditions** decide whether an exception is retryable.
@@ -149,24 +151,34 @@ protocol:
 
 ```python
 def next(
-    self, elapsed_time: float, attempts: int, error: Exception
-) -> Optional[float]:
+    self,
+    elapsed_time: float,
+    attempts: int,
+    error: Exception,
+    *,
+    seed: int | None = None,
+) -> float | None:
     ...
 ```
 
 Return the number of seconds to wait before retrying, or `None` to stop.
+The optional `seed` is used by durable runtimes to make jitter deterministic during replay.
 
 For example, this policy only retries on Fridays:
 
 ```python
 from datetime import datetime
-from typing import Optional
 
 
 class RetryOnFridayPolicy:
     def next(
-        self, elapsed_time: float, attempts: int, error: Exception
-    ) -> Optional[float]:
+        self,
+        elapsed_time: float,
+        attempts: int,
+        error: Exception,
+        *,
+        seed: int | None = None,
+    ) -> float | None:
         if datetime.today().strftime("%A") == "Friday":
             return 5  # retry in 5 seconds
         return None  # don't retry
@@ -183,7 +195,7 @@ composable API and are kept for backwards compatibility only. Prefer
 ```python
 from workflows.retry_policy import ConstantDelayRetryPolicy
 
-# Deprecated — equivalent to:
+# Deprecated, equivalent to:
 #   retry_policy(wait=wait_fixed(5), stop=stop_after_attempt(10))
 policy = ConstantDelayRetryPolicy(delay=5, maximum_attempts=10)
 ```
@@ -191,7 +203,7 @@ policy = ConstantDelayRetryPolicy(delay=5, maximum_attempts=10)
 ```python
 from workflows.retry_policy import ExponentialBackoffRetryPolicy
 
-# Deprecated — equivalent to:
+# Deprecated, equivalent to:
 #   retry_policy(wait=wait_random_exponential(multiplier=1, exp_base=2, max=30),
 #                stop=stop_after_attempt(5))
 policy = ExponentialBackoffRetryPolicy(
@@ -202,7 +214,7 @@ policy = ExponentialBackoffRetryPolicy(
 ## Inspecting retry state inside a step
 
 `Context.retry_info()` returns a `RetryInfo` describing the current attempt.
-Use it to adapt behavior between retries — widen a search, shorten a timeout,
+Use it to adapt behavior between retries: widen a search, shorten a timeout,
 log a warning:
 
 ```python
@@ -227,7 +239,7 @@ are `None` until the first failure, then describe the most recent prior failure.
 
 ## Recovering when retries are exhausted
 
-When a policy gives up, the exception propagates and fails the workflow — unless
+When a policy gives up, the exception propagates and fails the workflow, unless
 a `@catch_error` handler is declared. A handler is a step that accepts
 `StepFailedEvent`; it can return a `StopEvent` to end the run gracefully, return
 some other event to re-route the workflow, or raise to fail with a new
@@ -255,7 +267,7 @@ class Pipeline(Workflow):
         )
 ```
 
-A bare `@catch_error` is a **wildcard** — it catches any step whose retries are
+A bare `@catch_error` is a **wildcard**. It catches any step whose retries are
 exhausted and isn't claimed by a more specific handler. Only one wildcard is
 allowed per workflow.
 
@@ -279,7 +291,7 @@ class Pipeline(Workflow):
     ) -> StopEvent:
         return StopEvent(result={"fallback": True})
 
-    @catch_error  # wildcard — covers `parse` and anything else
+    @catch_error  # wildcard; covers `parse` and anything else
     async def on_any_failure(
         self, ctx: Context, ev: StepFailedEvent
     ) -> StopEvent:

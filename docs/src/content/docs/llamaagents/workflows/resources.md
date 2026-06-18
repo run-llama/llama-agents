@@ -6,7 +6,9 @@ title: Resource Objects
 
 Resources are external dependencies you can inject into the steps of a workflow.
 
-As a simple example, look at `memory` from llama-index in the following workflow:
+Use resources for objects that should be created by the runtime instead of passed around as events or stored in `ctx.store`: LLM clients, retrievers, indexes, database handles, model configuration, and other dependencies that are expensive, stateful, or not JSON-serializable.
+
+As a simple example, look at `Memory` from LlamaIndex in the following workflow:
 
 ```python
 from typing import Annotated
@@ -18,7 +20,7 @@ from llama_index.core.llms import ChatMessage
 from llama_index.core.memory import Memory
 
 
-def get_memory(*args, **kwargs):
+def get_memory() -> Memory:
     return Memory.from_defaults("user_id_123", token_limit=60000)
 
 
@@ -50,20 +52,23 @@ class WorkflowWithResource(Workflow):
         return StopEvent(result="Messages put into memory")
 ```
 
-To inject a resource into a workflow step, you have to add a parameter to the step signature and define its type,
-using `Annotated` and invoke the `Resource()` wrapper passing a function or callable returning the actual Resource
-object. The return type of the wrapped function must match the declared type, ensuring consistency between what’s
-expected and what’s provided during execution. In the example above, `memory: Annotated[Memory, Resource(get_memory)`
-defines a resource of type `Memory` that will be provided by the `get_memory()` function and passed to the step in the
-`memory` parameter when the workflow runs.
+To inject a resource, add a parameter to the step signature, wrap the type in `Annotated`, and pass a factory to `Resource()`:
 
-Resources are shared among steps of a workflow, and the `Resource()` wrapper will invoke the factory function only once.
-In case this is not the desired behavior, passing `cache=False` to `Resource()` will inject different resource objects
-in different steps, invoking the factory function as many times.
+```python
+memory: Annotated[Memory, Resource(get_memory)]
+```
+
+The factory return type should match the annotated parameter type. By default, the resource is cached for the workflow run, so both steps receive the same `Memory` object and the factory is called once. If a step needs a fresh object each time, pass `cache=False`:
+
+```python
+memory: Annotated[Memory, Resource(get_memory, cache=False)]
+```
+
+Factories can be synchronous or async.
 
 ## Config-backed Resources
 
-For configuration data stored in JSON files, use `ResourceConfig` instead of `Resource`. It automatically loads a JSON file and parses it into a Pydantic model.
+For configuration data stored in JSON files, use `ResourceConfig` instead of `Resource`. It loads the JSON file and parses it into a Pydantic model.
 
 ```python
 from typing import Annotated
@@ -95,7 +100,7 @@ class DocumentClassifier(Workflow):
 ### Parameters
 
 - `config_file`: Path to the JSON file containing the configuration.
-- `path_selector`: Optional "." delimited JSON path to extract a nested value from the json in the config file (e.g., `"settings.classifier"`).
+- `path_selector`: Optional "."-delimited JSON path to extract a nested value from the JSON file (for example, `"settings.classifier"`).
 - `label`: Optional display name for workflow visualizations.
 - `description`: Optional description for workflow visualizations.
 

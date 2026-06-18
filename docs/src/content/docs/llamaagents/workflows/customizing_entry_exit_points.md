@@ -4,115 +4,98 @@ sidebar:
 title: Custom start and stop events
 ---
 
-Most of the time, the default `StartEvent` and `StopEvent` we have seen in the [Getting Started](/python/llamaagents/workflows/) section are enough.
-But you can define your own start and stop events where you would normally expect `StartEvent` and `StopEvent`, let's see how.
+Most workflows can use the default `StartEvent` and `StopEvent` from the [Getting Started](/python/llamaagents/workflows/) section. Define custom start and stop events when the workflow boundary itself has a useful schema: a typed request object at the beginning, or a typed result object at the end.
 
 ## Using a custom `StartEvent`
 
-When we call the `run()` method on a workflow instance, the keyword arguments passed become fields of a `StartEvent`
-instance that's automatically created under the hood. In case we want to pass complex data to start a workflow, this
-approach might become cumbersome, and it's when we can introduce a custom start event.
-
-To be able to use a custom start event, the first step is creating a custom class that inherits from `StartEvent`:
+When you call `run()` with keyword arguments, Workflows builds the workflow's start event from those arguments. With the default `StartEvent`, any extra field is accepted:
 
 ```python
-from pathlib import Path
-
-from workflows.events import StartEvent
-from llama_index.indices.managed.llama_cloud import LlamaCloudIndex
-from llama_index.llms.openai import OpenAI
-
-
-class MyCustomStartEvent(StartEvent):
-    a_string_field: str
-    a_path_to_somewhere: Path
-    an_index: LlamaCloudIndex
-    an_llm: OpenAI
+result = await workflow.run(topic="pirates")
 ```
 
-All we have to do now is using `MyCustomStartEvent` as event type in the steps that act as entry points.
-Take this artificially complex step for example:
+That is convenient for small inputs. For production code, a custom `StartEvent` gives the entry point a real schema and lets Pydantic validate missing or malformed input before the first step runs.
+
+Create a custom class that inherits from `StartEvent`:
+
+```python
+from workflows.events import StartEvent
+
+
+class JokeStartEvent(StartEvent):
+    topic: str
+    tone: str = "funny"
+```
+
+Then use that event type in the step that starts the workflow:
 
 ```python
 class JokeFlow(Workflow):
-    ...
-
     @step
-    async def generate_joke_from_index(
-        self, ev: MyCustomStartEvent
-    ) -> JokeEvent:
-        # Build a query engine using the index and the llm from the start event
-        query_engine = ev.an_index.as_query_engine(llm=ev.an_llm)
-        topic = await query_engine.aquery(
-            f"What is the closest topic to {ev.a_string_field}"
-        )
-        # Use the llm attached to the start event to instruct the model
-        prompt = f"Write your best joke about {topic}."
-        response = await ev.an_llm.acomplete(prompt)
-        # Dump the response on disk using the Path object from the event
-        ev.a_path_to_somewhere.write_text(str(response))
-        # Finally, pass the JokeEvent along
+    async def generate_joke(self, ev: JokeStartEvent) -> JokeEvent:
+        prompt = f"Write a {ev.tone} joke about {ev.topic}."
+        response = await self.llm.acomplete(prompt)
         return JokeEvent(joke=str(response))
 ```
 
-We could still pass the fields of `MyCustomStartEvent` as keyword arguments to the `run` method of our workflow, but
-that would be, again, cumbersome. A better approach is to use pass the event instance through the `start_event`
-keyword argument like this:
+You can still pass the fields as keyword arguments:
 
 ```python
-custom_start_event = MyCustomStartEvent(...)
-w = JokeFlow(timeout=60, verbose=False)
-result = await w.run(start_event=custom_start_event)
-print(str(result))
+w = JokeFlow(timeout=60)
+result = await w.run(topic="pirates", tone="dry")
 ```
 
-This approach makes the code cleaner and more explicit and allows autocompletion in IDEs to work properly.
+For a larger input object, pass the event instance through `start_event`:
+
+```python
+start_event = JokeStartEvent(topic="pirates", tone="dry")
+w = JokeFlow(timeout=60)
+result = await w.run(start_event=start_event)
+```
+
+Use events for serializable data. If the workflow needs an LLM client, an index, a database connection, or a file handle, inject it as a [resource](/python/llamaagents/workflows/resources) instead of putting it on the start event. Start events can be serialized when you snapshot or serve workflows, and heavyweight runtime objects usually cannot.
 
 ## Using a custom `StopEvent`
 
-Similarly to `StartEvent`, relying on the built-in `StopEvent` works most of the times but not always. In fact, when we
-use `StopEvent`, the result of a workflow must be set to the `result` field of the event instance. Since a result can
-be any Python object, the `result` field of `StopEvent` is typed as `Any`, losing any advantage from the typing system.
-Additionally, returning more than one object is cumbersome: we usually stuff a bunch of unrelated objects into a
-dictionary that we then assign to `StopEvent.result`.
+The built-in `StopEvent` returns whatever you put in `result`:
 
-First step to support custom stop events, we need to create a subclass of `StopEvent`:
+```python
+return StopEvent(result={"critique": critique, "score": score})
+```
+
+That is fine for quick workflows, but the result is typed as `Any`. A custom stop event makes the output shape explicit.
+
+Create a subclass of `StopEvent`:
 
 ```python
 from workflows.events import StopEvent
 
 
-class MyStopEvent(StopEvent):
-    critique: CompletionResponse
+class JokeResult(StopEvent):
+    joke: str
+    critique: str
 ```
 
-We can now replace `StopEvent` with `MyStopEvent` in our workflow:
+We can now replace `StopEvent` with `JokeResult` in our workflow:
 
 ```python
 class JokeFlow(Workflow):
     ...
 
     @step
-    async def critique_joke(self, ev: JokeEvent) -> MyStopEvent:
-        joke = ev.joke
-
-        prompt = f"Give a thorough analysis and critique of the following joke: {joke}"
+    async def critique_joke(self, ev: JokeEvent) -> JokeResult:
+        prompt = f"Give a thorough analysis and critique of the following joke: {ev.joke}"
         response = await self.llm.acomplete(prompt)
-        return MyStopEvent(critique=response)
-
-    ...
+        return JokeResult(joke=ev.joke, critique=str(response))
 ```
 
-The one important thing we need to remember when using a custom stop events, is that the result of a workflow run
-will be the instance of the event:
+When a step returns the base `StopEvent`, `await workflow.run(...)` returns `stop_event.result`. When a step returns a custom `StopEvent` subclass, `await workflow.run(...)` returns the event instance:
 
 ```python
-w = JokeFlow(timeout=60, verbose=False)
-# Warning! `result` now contains an instance of MyStopEvent!
+w = JokeFlow(timeout=60)
 result = await w.run(topic="pirates")
-# We can now access the event fields as any normal Event
-print(result.critique.text)
+print(result.joke)
+print(result.critique)
 ```
 
-This approach takes advantage of the Python typing system, is friendly to autocompletion in IDEs and allows
-introspection from outer applications that now know exactly what a workflow run will return.
+That makes the result friendly to type checkers, editor autocomplete, and callers that introspect workflow schemas.
