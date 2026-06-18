@@ -100,3 +100,10 @@ result = await handler
 handler = workflow.run(ctx=ctx)
 result = await handler
 ```
+
+## Serializable state
+
+State you keep here is serialized when you snapshot a run to make it
+[durable](/python/llamaagents/workflows/durable_workflows), so keep it to values a JSON serializer
+can encode. Put clients and other non-serializable objects in
+[resources](/python/llamaagents/workflows/resources) instead.

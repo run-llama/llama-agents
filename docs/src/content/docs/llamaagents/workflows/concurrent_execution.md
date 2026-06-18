@@ -302,3 +302,10 @@ You can wait for any mix of types, not just one type repeated. The order you pas
             return None
         return StopEvent(result="Done")
 ```
+
+## Making a fan-out durable
+
+A long fan-out is a good fit for checkpointing: pending events and partial fan-in state can be
+serialized and resumed after a restart. See
+[writing durable workflows](/python/llamaagents/workflows/durable_workflows) for the checkpoint loop
+and a worked example.

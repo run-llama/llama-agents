@@ -8,6 +8,30 @@ Observability is key for debugging workflows. Beyond just adding `print()` state
 
 Furthermore, you can leverage this instrumentation system to add observability to any function outside of workflow steps! More in-depth examples for all of this information can be found in the [examples folder for observability](https://github.com/run-llama/llama-agents/tree/main/examples/observability).
 
+## Observing step state with internal events
+
+Beyond the events your steps emit, the runtime publishes internal events describing its own
+execution. They are filtered out of `stream_events()` by default. Pass `expose_internal=True` to see
+them:
+
+```python
+from workflows.events import StepStateChanged, StepState
+
+handler = workflow.run()
+async for ev in handler.stream_events(expose_internal=True):
+    if isinstance(ev, StepStateChanged):
+        print(ev.name, ev.step_state, ev.worker_id)
+```
+
+`StepStateChanged` fires whenever a step execution changes state. Its `step_state` is one of
+`StepState.PREPARING` (enqueued, waiting for a worker slot), `StepState.RUNNING` (executing), or
+`StepState.NOT_RUNNING` (finished). It also carries `name`, `worker_id`, `input_event_name`, and
+`output_event_name`. It fires once per step execution, so a `@step(num_workers=N)` step or a fan-out
+emits one event per item.
+
+The [durable workflows](/python/llamaagents/workflows/durable_workflows) checkpoint loop uses this
+event to snapshot after step executions finish.
+
 ## OpenTelemetry Integration
 
 Workflows integrate with OpenTelemetry for exporting traces. Install the `llama-index-observability-otel` package:
