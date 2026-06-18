@@ -154,19 +154,14 @@ class WorkflowServer:
                 aren't discoverable from step signatures alone (e.g. events
                 consumed via ``ctx.wait_for_event()``).
         """
-        workflow._switch_workflow_name(name)
-        workflow._switch_runtime(self._runtime)
+        self._service.add_workflow(name, workflow)
 
         if additional_events is not None:
             self._api.register_additional_events(name, additional_events)
 
     def get_workflows(self) -> dict[str, Workflow]:
         """Return registered workflows as a dict by name. Only available after start()."""
-        return {
-            n: wf
-            for n in self._service.get_workflow_names()
-            if (wf := self._service.get_workflow(n)) is not None
-        }
+        return self._service.get_workflows()
 
     # ------------------------------------------------------------------
     # Lifecycle

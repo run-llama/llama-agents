@@ -112,6 +112,17 @@ class _WorkflowService:
     def get_workflow_names(self) -> list[str]:
         return self._runtime.get_workflow_names()
 
+    def add_workflow(self, name: str, workflow: Workflow) -> None:
+        workflow._switch_workflow_name(name)
+        workflow._switch_runtime(self._runtime)
+
+    def get_workflows(self) -> dict[str, Workflow]:
+        return {
+            name: workflow
+            for name in self.get_workflow_names()
+            if (workflow := self.get_workflow(name)) is not None
+        }
+
     # ------------------------------------------------------------------
     # Store access
     # ------------------------------------------------------------------
