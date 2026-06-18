@@ -206,9 +206,9 @@ Each join stays at its own level. `per_inner` runs three times, once per outer `
 
 ## The dynamic API
 
-When the events you emit do not follow from the step's signature, send them yourself with `ctx.send_event` and collect them with `ctx.collect_events`. Use this when you only emit some events depending on a condition, when you do not know in advance how many events you will emit, or when you want to emit them one at a time instead of in one batch.
+When a step needs to emit events before it returns, send them yourself with `ctx.send_event` and collect them with `ctx.collect_events`. Use this when you only emit some events depending on a condition, when you do not know in advance how many events you will emit, or when you want downstream work to start while the producer is still running.
 
-There is a trade-off here. A `list` return is all or nothing. It goes out as one batch when the step returns, so if the step raises an error first, nothing is emitted. `ctx.send_event` fires the moment you call it. Downstream steps can start before the producer step is done. But anything you already sent stays out even if the step later fails.
+There is a trade-off here. A `list` return is all or nothing. It goes out as one batch when the step returns, so if the step raises an error first, nothing is emitted. `ctx.send_event` fires the moment you call it. Downstream steps can start before the producer step is done, but anything already sent stays out even if the step later fails.
 
 `ctx.send_event` emits one event at a time:
 
@@ -237,7 +237,9 @@ class ParallelFlow(Workflow):
         return StopEvent(result=ev.query)
 ```
 
-`start` emits the events with `ctx.send_event` instead of returning them, so its return type is `StepTwoEvent | None` and the fan-out never appears in the signature. The downside is that nothing links `start` to the events it sends, so it appears as a disconnected node in the diagram. To wait for several of these events before moving on, use `ctx.collect_events`:
+`start` emits the events with `ctx.send_event` instead of returning them. The return annotation still includes `StepTwoEvent`, even though the function returns `None`, so validation and diagrams know this step can produce that event. If you omit the sent event from the signature, the runtime can still send it, but static validation and visualization cannot infer that edge.
+
+To wait for several manually sent events before moving on, use `ctx.collect_events`:
 
 ```python
 import asyncio

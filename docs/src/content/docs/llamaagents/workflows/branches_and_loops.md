@@ -105,3 +105,34 @@ Our imports are the same as before, but we've created 4 new event types. `start`
 ![A simple branch](./assets/branching.png)
 
 You can of course combine branches and loops in any order to fulfill the needs of your application. Later in this tutorial you'll learn how to run multiple branches in parallel using `send_event` and synchronize them using `collect_events`.
+
+## Event subclass routing
+
+Event routing is exact by default. A step annotated with `ParentEvent` does not automatically receive `ChildEvent`, even if `ChildEvent` subclasses it. This keeps accidental broad matches from changing a workflow as the event model grows.
+
+Opt in per step when a parent event really is the routing contract:
+
+```python
+from workflows import Workflow, step
+from workflows.events import Event, StartEvent, StopEvent
+
+
+class ToolEvent(Event):
+    tool_name: str
+
+
+class SearchEvent(ToolEvent):
+    query: str
+
+
+class ToolWorkflow(Workflow):
+    @step
+    async def start(self, ev: StartEvent) -> SearchEvent:
+        return SearchEvent(tool_name="search", query=ev.query)
+
+    @step(accept_event_subclasses=True)
+    async def handle_tool(self, ev: ToolEvent) -> StopEvent:
+        return StopEvent(result=ev.tool_name)
+```
+
+Use this sparingly. In most workflows, concrete event types make the branch structure clearer and give better validation errors.
