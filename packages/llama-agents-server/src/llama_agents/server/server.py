@@ -18,7 +18,7 @@ from ._api import _WorkflowAPI
 from ._runtime.persistence_runtime import RESUME_FRESH_HANDLER_GRACE
 from ._store.abstract_workflow_store import AbstractWorkflowStore
 from ._store.memory_workflow_store import MemoryWorkflowStore
-from .runtime import DurableWorkflowRuntime
+from .runtime import _DurableWorkflowRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,7 @@ class WorkflowServer:
                 only enable this on trusted networks.
         """
         if runtime is None:
-            self._runtime_core = DurableWorkflowRuntime(
+            self._runtime_core = _DurableWorkflowRuntime(
                 workflow_store=workflow_store,
                 resume_existing=True,
                 resume_fresh_handler_grace=RESUME_FRESH_HANDLER_GRACE,
@@ -109,7 +109,7 @@ class WorkflowServer:
                 persistence_backoff=list(persistence_backoff),
             )
         else:
-            self._runtime_core = DurableWorkflowRuntime(
+            self._runtime_core = _DurableWorkflowRuntime(
                 workflow_store=workflow_store or MemoryWorkflowStore(),
                 runtime=runtime,
                 wait_for_resume=False,

@@ -61,7 +61,7 @@ def _durable_runtime(
     )
 
 
-class DurableWorkflowRuntime:
+class _DurableWorkflowRuntime:
     """Shared durable workflow lifecycle used by HTTP and in-process runtimes."""
 
     def __init__(
@@ -109,7 +109,7 @@ class DurableWorkflowRuntime:
         """Register a workflow under a stable name for new runs and resume."""
         self._service.add_workflow(name, workflow)
 
-    async def start(self) -> DurableWorkflowRuntime:
+    async def start(self) -> _DurableWorkflowRuntime:
         """Start the store and runtime, resuming existing runs if enabled."""
         if self._started:
             return self
@@ -138,7 +138,7 @@ class DurableWorkflowRuntime:
         self._started = False
 
     @asynccontextmanager
-    async def contextmanager(self) -> AsyncGenerator[DurableWorkflowRuntime, None]:
+    async def contextmanager(self) -> AsyncGenerator[_DurableWorkflowRuntime, None]:
         """Use this runtime as an async context manager."""
         await self.start()
         try:
@@ -146,7 +146,7 @@ class DurableWorkflowRuntime:
         finally:
             await self.stop()
 
-    async def __aenter__(self) -> DurableWorkflowRuntime:
+    async def __aenter__(self) -> _DurableWorkflowRuntime:
         return await self.start()
 
     async def __aexit__(
@@ -276,4 +276,4 @@ class DurableWorkflowRuntime:
 
     def _ensure_started(self) -> None:
         if not self._started:
-            raise RuntimeError("DurableWorkflowRuntime is not started")
+            raise RuntimeError("_DurableWorkflowRuntime is not started")

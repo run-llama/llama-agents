@@ -7,12 +7,9 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from llama_agents.server import (
-    DurableWorkflowRuntime,
-    HandlerQuery,
-    SqliteWorkflowStore,
-)
+from llama_agents.server import HandlerQuery, SqliteWorkflowStore
 from llama_agents.server._store.abstract_workflow_store import AbstractWorkflowStore
+from llama_agents.server.runtime import _DurableWorkflowRuntime
 from server_test_fixtures import wait_for_passing  # type: ignore[import]
 from workflows import Context, Workflow, step
 from workflows.events import HumanResponseEvent, StartEvent, StopEvent
@@ -83,7 +80,7 @@ async def test_durable_workflow_runtime_resumes_sqlite_run(
     handler_id = "resume-in-process"
 
     store1 = SqliteWorkflowStore(str(db_path), poll_interval=0.01)
-    runtime1 = DurableWorkflowRuntime(workflow_store=store1)
+    runtime1 = _DurableWorkflowRuntime(workflow_store=store1)
     runtime1.add_workflow("waiting", InProcessWaitingWorkflow())
     await runtime1.start()
     started = await runtime1.run("waiting", handler_id=handler_id)
@@ -92,7 +89,7 @@ async def test_durable_workflow_runtime_resumes_sqlite_run(
     await runtime1.stop()
 
     store2 = SqliteWorkflowStore(str(db_path), poll_interval=0.01)
-    runtime2 = DurableWorkflowRuntime(workflow_store=store2)
+    runtime2 = _DurableWorkflowRuntime(workflow_store=store2)
     runtime2.add_workflow("waiting", InProcessWaitingWorkflow())
     await runtime2.start()
     await runtime2.send_event(handler_id, ResumeInput(response="done"))
@@ -110,7 +107,7 @@ async def test_durable_workflow_runtime_can_skip_startup_resume(
     handler_id = "skip-resume-in-process"
 
     store1 = SqliteWorkflowStore(str(db_path), poll_interval=0.01)
-    runtime1 = DurableWorkflowRuntime(workflow_store=store1)
+    runtime1 = _DurableWorkflowRuntime(workflow_store=store1)
     runtime1.add_workflow("waiting", InProcessWaitingWorkflow())
     await runtime1.start()
     await runtime1.run("waiting", handler_id=handler_id)
@@ -118,7 +115,7 @@ async def test_durable_workflow_runtime_can_skip_startup_resume(
     await runtime1.stop()
 
     store2 = SqliteWorkflowStore(str(db_path), poll_interval=0.01)
-    runtime2 = DurableWorkflowRuntime(
+    runtime2 = _DurableWorkflowRuntime(
         workflow_store=store2,
         resume_existing=False,
     )
@@ -132,7 +129,7 @@ async def test_durable_workflow_runtime_can_skip_startup_resume(
     await runtime2.stop()
 
     store3 = SqliteWorkflowStore(str(db_path), poll_interval=0.01)
-    runtime3 = DurableWorkflowRuntime(workflow_store=store3)
+    runtime3 = _DurableWorkflowRuntime(workflow_store=store3)
     runtime3.add_workflow("waiting", InProcessWaitingWorkflow())
     await runtime3.start()
     await runtime3.send_event(handler_id, ResumeInput(response="late"))
@@ -149,14 +146,14 @@ async def test_durable_workflow_runtime_run_returns_after_replayable_start(
     handler_id = "immediate-stop-in-process"
 
     store1 = SqliteWorkflowStore(str(db_path), poll_interval=0.01)
-    runtime1 = DurableWorkflowRuntime(workflow_store=store1)
+    runtime1 = _DurableWorkflowRuntime(workflow_store=store1)
     runtime1.add_workflow("waiting", InProcessWaitingWorkflow())
     await runtime1.start()
     await runtime1.run("waiting", handler_id=handler_id)
     await runtime1.stop()
 
     store2 = SqliteWorkflowStore(str(db_path), poll_interval=0.01)
-    runtime2 = DurableWorkflowRuntime(workflow_store=store2)
+    runtime2 = _DurableWorkflowRuntime(workflow_store=store2)
     runtime2.add_workflow("waiting", InProcessWaitingWorkflow())
     await runtime2.start()
     await runtime2.send_event(handler_id, ResumeInput(response="after-stop"))
@@ -173,7 +170,7 @@ async def test_durable_workflow_runtime_can_use_resume_grace(
     handler_id = "fresh-grace-in-process"
 
     store1 = SqliteWorkflowStore(str(db_path), poll_interval=0.01)
-    runtime1 = DurableWorkflowRuntime(workflow_store=store1)
+    runtime1 = _DurableWorkflowRuntime(workflow_store=store1)
     runtime1.add_workflow("waiting", InProcessWaitingWorkflow())
     await runtime1.start()
     await runtime1.run("waiting", handler_id=handler_id)
@@ -181,7 +178,7 @@ async def test_durable_workflow_runtime_can_use_resume_grace(
     await runtime1.stop()
 
     store2 = SqliteWorkflowStore(str(db_path), poll_interval=0.01)
-    runtime2 = DurableWorkflowRuntime(
+    runtime2 = _DurableWorkflowRuntime(
         workflow_store=store2,
         resume_fresh_handler_grace=timedelta(days=1),
     )
@@ -193,7 +190,7 @@ async def test_durable_workflow_runtime_can_use_resume_grace(
     await runtime2.stop()
 
     store3 = SqliteWorkflowStore(str(db_path), poll_interval=0.01)
-    runtime3 = DurableWorkflowRuntime(workflow_store=store3)
+    runtime3 = _DurableWorkflowRuntime(workflow_store=store3)
     runtime3.add_workflow("waiting", InProcessWaitingWorkflow())
     await runtime3.start()
     await runtime3.send_event(handler_id, ResumeInput(response="after-grace"))
@@ -210,7 +207,7 @@ async def test_durable_workflow_runtime_reloads_idle_handler_on_event(
     handler_id = "idle-reload-in-process"
 
     store1 = SqliteWorkflowStore(str(db_path), poll_interval=0.01)
-    runtime1 = DurableWorkflowRuntime(
+    runtime1 = _DurableWorkflowRuntime(
         workflow_store=store1,
         idle_timeout=0.01,
     )
@@ -221,7 +218,7 @@ async def test_durable_workflow_runtime_reloads_idle_handler_on_event(
     await runtime1.stop()
 
     store2 = SqliteWorkflowStore(str(db_path), poll_interval=0.01)
-    runtime2 = DurableWorkflowRuntime(
+    runtime2 = _DurableWorkflowRuntime(
         workflow_store=store2,
     )
     runtime2.add_workflow("waiting", InProcessWaitingWorkflow())
@@ -240,7 +237,7 @@ async def test_durable_workflow_runtime_rejects_duplicate_active_handler_id(
     handler_id = "duplicate-in-process"
 
     store = SqliteWorkflowStore(str(db_path), poll_interval=0.01)
-    runtime = DurableWorkflowRuntime(workflow_store=store)
+    runtime = _DurableWorkflowRuntime(workflow_store=store)
     runtime.add_workflow("waiting", InProcessWaitingWorkflow())
     await runtime.start()
     await runtime.run("waiting", handler_id=handler_id)
@@ -259,7 +256,7 @@ async def test_durable_workflow_runtime_returns_initial_handler_data(
     db_path = tmp_path / "workflow.db"
 
     store = SqliteWorkflowStore(str(db_path), poll_interval=0.01)
-    runtime = DurableWorkflowRuntime(workflow_store=store)
+    runtime = _DurableWorkflowRuntime(workflow_store=store)
     runtime.add_workflow("payload", InProcessPayloadWorkflow())
     await runtime.start()
 
