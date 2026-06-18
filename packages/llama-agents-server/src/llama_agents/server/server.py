@@ -12,13 +12,16 @@ import uvicorn
 from starlette.middleware import Middleware
 from workflows import Workflow
 from workflows.events import Event
+from workflows.plugins.basic import BasicRuntime
 from workflows.runtime.types.plugin import Runtime
 
 from ._api import _WorkflowAPI
+from ._runtime.persistence_runtime import RESUME_FRESH_HANDLER_GRACE
 from ._store.abstract_workflow_store import AbstractWorkflowStore
+from ._store.memory_workflow_store import MemoryWorkflowStore
 from .runtime import (
-    ManagedWorkflowRuntime,
-    default_resume_fresh_handler_grace,
+    _durable_runtime,
+    _DurableWorkflowRuntimeCore,
 )
 
 logger = logging.getLogger(__name__)
@@ -99,22 +102,34 @@ class WorkflowServer:
                 instantiate arbitrary Pydantic objects via ``importlib``, so
                 only enable this on trusted networks.
         """
-        enable_persistence = runtime is None
-        self._managed_runtime = ManagedWorkflowRuntime(
-            workflow_store=workflow_store,
+        store = workflow_store if workflow_store is not None else None
+        if runtime is None:
+            store = store if store is not None else MemoryWorkflowStore()
+            runtime, persistence = _durable_runtime(
+                BasicRuntime(),
+                store=store,
+                resume_existing=True,
+                resume_fresh_handler_grace=RESUME_FRESH_HANDLER_GRACE,
+                idle_timeout=idle_timeout,
+            )
+            start_store_before_runtime = True
+        else:
+            if store is None:
+                store = MemoryWorkflowStore()
+            persistence = None
+            start_store_before_runtime = False
+        self._runtime_core = _DurableWorkflowRuntimeCore(
+            workflow_store=store,
             runtime=runtime,
-            resume_existing=True,
-            resume_fresh_handler_grace=default_resume_fresh_handler_grace(),
+            persistence=persistence,
             wait_for_resume=False,
-            idle_timeout=idle_timeout if enable_persistence else None,
             abort_active_on_stop=False,
-            enable_persistence=enable_persistence,
-            start_store_before_runtime=enable_persistence,
+            start_store_before_runtime=start_store_before_runtime,
             persistence_backoff=list(persistence_backoff),
         )
-        self._workflow_store = self._managed_runtime.store
-        self._runtime = self._managed_runtime.runtime
-        self._service = self._managed_runtime.service
+        self._workflow_store = self._runtime_core.store
+        self._runtime = self._runtime_core.runtime
+        self._service = self._runtime_core.service
 
         self._api = _WorkflowAPI(
             self._service,
@@ -167,7 +182,7 @@ class WorkflowServer:
         Idle workflows are not resumed - they remain released and will be
         loaded on-demand when events arrive for them.
         """
-        await self._managed_runtime.start()
+        await self._runtime_core.start()
         return self
 
     @asynccontextmanager
@@ -181,7 +196,7 @@ class WorkflowServer:
 
     async def stop(self) -> None:
         """Gracefully shut down all running workflow handlers."""
-        await self._managed_runtime.stop()
+        await self._runtime_core.stop()
 
     # ------------------------------------------------------------------
     # Serve

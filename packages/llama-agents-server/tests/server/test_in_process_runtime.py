@@ -87,11 +87,12 @@ async def test_durable_workflow_runtime_resumes_sqlite_run(
     runtime1.add_workflow("waiting", InProcessWaitingWorkflow())
     await runtime1.start()
     started = await runtime1.run("waiting", handler_id=handler_id)
+    workflow_handler = await runtime1.load_workflow_handler(handler_id)
     run_id = await _wait_for_running_tick(runtime1, handler_id)
     assert started.run_id == run_id
-    assert not started.is_done()
+    assert not workflow_handler.is_done()
     await runtime1.stop()
-    assert started.is_done()
+    assert workflow_handler.is_done()
 
     runtime2 = DurableWorkflowRuntime(
         workflow_store=SqliteWorkflowStore(str(db_path), poll_interval=0.01)
@@ -130,7 +131,7 @@ async def test_durable_workflow_runtime_can_skip_startup_resume(
     with pytest.raises(RuntimeError):
         await runtime2.send_event(handler_id, ResumeInput(response="early"))
     with pytest.raises(RuntimeError, match="not active"):
-        await runtime2.load_active_handler(handler_id)
+        await runtime2.load_workflow_handler(handler_id)
     still_running = await runtime2.get_handler_status(handler_id)
     assert still_running.status == "running"
     await runtime2.stop()
@@ -144,6 +145,32 @@ async def test_durable_workflow_runtime_can_skip_startup_resume(
     result = await _wait_for_completed(runtime3, handler_id)
     assert result.result == "True:late"
     await runtime3.stop()
+
+
+@pytest.mark.asyncio
+async def test_durable_workflow_runtime_run_returns_after_replayable_start(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "workflow.db"
+    handler_id = "immediate-stop-in-process"
+
+    runtime1 = DurableWorkflowRuntime(
+        workflow_store=SqliteWorkflowStore(str(db_path), poll_interval=0.01)
+    )
+    runtime1.add_workflow("waiting", InProcessWaitingWorkflow())
+    await runtime1.start()
+    await runtime1.run("waiting", handler_id=handler_id)
+    await runtime1.stop()
+
+    runtime2 = DurableWorkflowRuntime(
+        workflow_store=SqliteWorkflowStore(str(db_path), poll_interval=0.01)
+    )
+    runtime2.add_workflow("waiting", InProcessWaitingWorkflow())
+    await runtime2.start()
+    await runtime2.send_event(handler_id, ResumeInput(response="after-stop"))
+    result = await _wait_for_completed(runtime2, handler_id)
+    assert result.result == "True:after-stop"
+    await runtime2.stop()
 
 
 @pytest.mark.asyncio
@@ -169,7 +196,7 @@ async def test_durable_workflow_runtime_can_use_resume_grace(
     runtime2.add_workflow("waiting", InProcessWaitingWorkflow())
     await runtime2.start()
     with pytest.raises(RuntimeError, match="not active"):
-        await runtime2.load_active_handler(handler_id)
+        await runtime2.load_workflow_handler(handler_id)
     skipped = await runtime2.get_handler_status(handler_id)
     assert skipped.status == "running"
     await runtime2.stop()
@@ -208,7 +235,7 @@ async def test_durable_workflow_runtime_reloads_idle_handler_on_event(
     runtime2.add_workflow("waiting", InProcessWaitingWorkflow())
     await runtime2.start()
     with pytest.raises(RuntimeError, match="not active"):
-        await runtime2.load_active_handler(handler_id)
+        await runtime2.load_workflow_handler(handler_id)
 
     await runtime2.send_event(handler_id, ResumeInput(response="woke-up"))
     result = await _wait_for_completed(runtime2, handler_id)
@@ -238,7 +265,9 @@ async def test_durable_workflow_runtime_rejects_duplicate_active_handler_id(
 
 
 @pytest.mark.asyncio
-async def test_durable_workflow_handler_result_shapes(tmp_path: Path) -> None:
+async def test_durable_workflow_runtime_loads_workflow_handler(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "workflow.db"
 
     runtime = DurableWorkflowRuntime(
@@ -247,8 +276,10 @@ async def test_durable_workflow_handler_result_shapes(tmp_path: Path) -> None:
     runtime.add_workflow("payload", InProcessPayloadWorkflow())
     await runtime.start()
 
-    handler = await runtime.run("payload", handler_id="payload-in-process")
-    assert await handler.result() == "payload"
+    data = await runtime.run("payload", handler_id="payload-in-process")
+    assert data.handler_id == "payload-in-process"
+    handler = await runtime.load_workflow_handler("payload-in-process")
+    assert await handler == "payload"
     stop_event = await handler.stop_event_result()
     assert isinstance(stop_event, StopEvent)
     assert stop_event.result == "payload"

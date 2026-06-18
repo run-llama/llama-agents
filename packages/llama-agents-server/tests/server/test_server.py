@@ -7,7 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from llama_agents.server import ManagedWorkflowRuntime, WorkflowServer
+from llama_agents.server import WorkflowServer
 from starlette.middleware import Middleware
 from workflows.workflow import Workflow
 
@@ -25,12 +25,11 @@ def test_add_workflow(simple_test_workflow: Workflow) -> None:
     assert server.get_workflows()["test"] == simple_test_workflow
 
 
-def test_server_uses_managed_runtime() -> None:
+def test_server_uses_shared_runtime_core() -> None:
     server = WorkflowServer()
-    assert isinstance(server._managed_runtime, ManagedWorkflowRuntime)
-    assert server._service is server._managed_runtime.service
-    assert server._runtime is server._managed_runtime.runtime
-    assert server._workflow_store is server._managed_runtime.store
+    assert server._service is server._runtime_core.service
+    assert server._runtime is server._runtime_core.runtime
+    assert server._workflow_store is server._runtime_core.store
 
 
 @pytest.mark.asyncio
