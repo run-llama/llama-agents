@@ -106,14 +106,24 @@ class PreContext(Generic[MODEL_T]):
         """
         if self._store is not None:
             payload = self._store.to_dict(self._serializer)
-            # The staging store only holds root state; carry any child-namespace
-            # payloads through unchanged so a resumed tree's child state isn't
-            # dropped when the root store is touched before run().
-            child_states = self._init_snapshot.state.get(CHILD_STATES_KEY)
-            if child_states:
+            # The staging store only holds root state. Preserve child invocation
+            # state only for a live resume; completed continuations intentionally
+            # start child invocations fresh.
+            child_states = (
+                self._init_snapshot.state.get(CHILD_STATES_KEY)
+                if self._init_snapshot.is_running
+                else None
+            )
+            if child_states is not None:
                 payload[CHILD_STATES_KEY] = child_states
             return payload
-        return self._init_snapshot.state
+        if self._init_snapshot.is_running:
+            return self._init_snapshot.state
+        return {
+            key: value
+            for key, value in self._init_snapshot.state.items()
+            if key != CHILD_STATES_KEY
+        }
 
     @property
     def is_running(self) -> bool:

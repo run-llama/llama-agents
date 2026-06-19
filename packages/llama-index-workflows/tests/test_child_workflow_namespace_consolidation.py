@@ -25,6 +25,7 @@ from workflows.events import (
     StartEvent,
     StepFailedEvent,
     StopEvent,
+    get_event_origin_namespace,
 )
 from workflows.runtime.control_loop.reduce import terminate_namespace
 from workflows.runtime.types.internal_state import (
@@ -259,9 +260,10 @@ async def test_child_human_input_resolves_via_targeted_send() -> None:
     async for ev in handler.stream_events(include_children=True):
         if isinstance(ev, InputRequiredEvent):
             saw_request = True
+            child_origin = get_event_origin_namespace(ev)
             handler.ctx.send_event(
                 HumanResponseEvent(response="ok"),  # type: ignore[reportCallIssue]
-                step="child/answer",
+                step=f"{child_origin[0]}/answer",
             )
     assert saw_request
     result = await handler
@@ -318,24 +320,41 @@ def test_terminate_namespace_prefix_matches_descendants_only() -> None:
     root = StepId((), "start")
     mid = StepId(("mid",), "start")
     grand = StepId(("mid", "grand"), "fan")
-    for sid in (root, mid, grand):
-        state.workers[sid].queue.append(EventAttempt(event=_Item(n=1)))
-        state.workers[sid].collected_events["buf"] = [_Item(n=1)]
+    mid_invocation = ("mid#abc",)
+    grand_invocation = ("mid#abc", "grand#def")
+    state.workers[root].queue.append(EventAttempt(event=_Item(n=1)))
+    state.workers[root].collected_events["buf"] = [_Item(n=1)]
+    state.workers[mid].queue.append(
+        EventAttempt(event=_Item(n=1), invocation_namespace=mid_invocation)
+    )
+    state.workers[mid].collected_events_by_invocation[mid_invocation] = {
+        "buf": [_Item(n=1)]
+    }
+    state.workers[grand].queue.append(
+        EventAttempt(event=_Item(n=1), invocation_namespace=grand_invocation)
+    )
+    state.workers[grand].collected_events_by_invocation[grand_invocation] = {
+        "buf": [_Item(n=1)]
+    }
     state.streams["s-grand"] = CollectionStreamInstance(
-        stream_id="s-grand", source_step=grand, scope_path=(), open_work_items=1
+        stream_id="s-grand",
+        source_step=grand,
+        scope_path=(),
+        source_invocation_namespace=grand_invocation,
+        open_work_items=1,
     )
     state.namespace_started[()] = 1.0
-    state.namespace_started[("mid",)] = 1.0
-    state.namespace_started[("mid", "grand")] = 1.0
+    state.namespace_started[mid_invocation] = 1.0
+    state.namespace_started[grand_invocation] = 1.0
 
-    terminate_namespace(state, ("mid",))
+    terminate_namespace(state, mid_invocation)
 
     # The child and grandchild are fully cleared.
     for sid in (mid, grand):
         assert not state.workers[sid].queue
-        assert not state.workers[sid].collected_events
-    assert ("mid",) not in state.namespace_started
-    assert ("mid", "grand") not in state.namespace_started
+        assert not state.workers[sid].collected_events_by_invocation
+    assert mid_invocation not in state.namespace_started
+    assert grand_invocation not in state.namespace_started
     assert "s-grand" not in state.streams
     # The root (ancestor) is untouched.
     assert state.workers[root].queue

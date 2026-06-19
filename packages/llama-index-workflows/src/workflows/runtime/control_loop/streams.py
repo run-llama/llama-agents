@@ -29,6 +29,7 @@ from workflows.runtime.types.internal_state import (
     EventAttempt,
     InternalStepWorkerState,
 )
+from workflows.runtime.types.invocation import slot_namespace
 from workflows.runtime.types.results import (
     AddCollectedEvent,
     AddWaiter,
@@ -137,12 +138,13 @@ def _event_routes_to(
     (``_route_to_accepting_steps``) and birth-counting
     (``_count_accepting_steps``); the two must never diverge.
     """
-    if target_namespace == origin_namespace:
+    origin_slot_namespace = slot_namespace(origin_namespace)
+    if target_namespace == origin_slot_namespace:
         return True
     if (
         isinstance(event, StartEvent)
-        and len(target_namespace) == len(origin_namespace) + 1
-        and target_namespace[: len(origin_namespace)] == origin_namespace
+        and len(target_namespace) == len(origin_slot_namespace) + 1
+        and target_namespace[: len(origin_slot_namespace)] == origin_slot_namespace
     ):
         return True
     return False
@@ -233,6 +235,7 @@ def _close_collection_stream(
                 worker_state,
                 release,
                 tuple(stream.scope_path),
+                stream.source_invocation_namespace,
                 now_seconds,
             )
         )
@@ -365,6 +368,7 @@ def _fire_collection_release(
     worker_state: InternalStepWorkerState,
     events: list[Event],
     output_stack: tuple[str, ...],
+    invocation_namespace: tuple[str, ...],
     now_seconds: float,
 ) -> list[WorkflowCommand]:
     # Inline import breaks the reduce<->streams cycle: _add_or_enqueue_event is
@@ -382,6 +386,7 @@ def _fire_collection_release(
         EventAttempt(
             event=payload.as_event(),
             scope_path=output_stack,
+            invocation_namespace=invocation_namespace,
             collection_release_payload=payload,
         ),
         binding.target_step,

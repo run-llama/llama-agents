@@ -46,6 +46,7 @@ class TickStepResult(BaseModel):
     type: Literal["step_result"] = "step_result"
     step_id: StepId = Field(validation_alias=_STEP_ID_ALIAS)
     worker_id: int
+    invocation_namespace: tuple[str, ...] = ()
     event: SerializableEvent
     result: list[Annotated[StepFunctionResult, Discriminator("type")]]
 
@@ -71,6 +72,12 @@ class TickAddEvent(BaseModel):
     last_failed_at: float | None = None
     recovery_counts: dict[str, int] = Field(default_factory=dict)
     scope_path: tuple[str, ...] = Field(default_factory=tuple)
+    # Static child target namespace -> minted runtime invocation namespace for
+    # StartEvent routes. Filled before the tick is reduced so replay uses the
+    # same opaque child invocation ids as the live run.
+    child_invocation_namespaces: dict[str, tuple[str, ...]] = Field(
+        default_factory=dict
+    )
     # Collect-invocation work record. A payload-carrying tick is routed
     # directly to the binding's target step, before waiter matching and the
     # member-arrival path.
@@ -114,6 +121,7 @@ class TickWaiterTimeout(BaseModel):
     type: Literal["waiter_timeout"] = "waiter_timeout"
     step_id: StepId = Field(validation_alias=_STEP_ID_ALIAS)
     waiter_id: str
+    invocation_namespace: tuple[str, ...] = ()
 
 
 class TickNamespaceTimeout(BaseModel):

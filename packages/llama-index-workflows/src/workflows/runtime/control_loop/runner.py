@@ -37,6 +37,7 @@ from workflows.runtime.types.internal_state import (
     BrokerState,
     InProgressState,
 )
+from workflows.runtime.types.invocation import namespace_startswith, slot_namespace
 from workflows.runtime.types.named_task import (
     PendingPull,
     PendingStart,
@@ -76,6 +77,7 @@ if TYPE_CHECKING:
 from workflows.runtime.control_loop.reduce import (
     _decide_retry_delay,
     _reduce_tick,
+    prepare_tick_for_reduce,
     rewind_in_progress,
 )
 
@@ -148,8 +150,10 @@ class _ControlLoopRunner:
         self._wakeup_sequence = 0
         # Pull task sequence counter for deterministic journaling
         self._pull_sequence = 0
-        # Map from worker task to (step_id, worker_id) key
-        self._task_keys: dict[asyncio.Task[TickStepResult], tuple[StepId, int]] = {}
+        # Map from worker task to (step_id, invocation_namespace, worker_id) key
+        self._task_keys: dict[
+            asyncio.Task[TickStepResult], tuple[StepId, tuple[str, ...], int]
+        ] = {}
         # Whether a TickIdleCheck is currently in tick_buffer
         self._idle_check_pending = False
         # Pending worker coroutines not yet started (started by adapter in wait_for_next_task)
@@ -173,7 +177,9 @@ class _ControlLoopRunner:
     def schedule_active_namespace_timeouts(self) -> None:
         """Re-arm child namespace deadlines restored from serialized state."""
         for namespace, started_at in sorted(self.state.namespace_started.items()):
-            timeout = self.state.config.namespace_timeouts.get(namespace)
+            timeout = self.state.config.namespace_timeouts.get(
+                slot_namespace(namespace)
+            )
             if timeout is None:
                 continue
             self.schedule_tick(
@@ -220,6 +226,7 @@ class _ControlLoopRunner:
                         w
                         for w in self.state.workers[command.step_id].in_progress
                         if w.worker_id == command.id
+                        and w.invocation_namespace == command.invocation_namespace
                     ),
                     None,
                 )
@@ -231,10 +238,11 @@ class _ControlLoopRunner:
                 step_fn: StepWorkerFunction = self.step_workers[command.step_id]
                 # Bind the bare step name against the instance that owns this
                 # namespace (root -> parent, child slot -> child instance).
-                instance = self.instances[command.step_id.namespace]
+                static_namespace = slot_namespace(command.invocation_namespace)
+                instance = self.instances[static_namespace]
                 # Resolve the step's state view now (the backend store/pool is
                 # ready once this coroutine runs) and thread it into the step.
-                state_store = self._resolve_state_view(command.step_id.namespace)
+                state_store = self._resolve_state_view(command.invocation_namespace)
 
                 result = await step_fn(
                     state=snapshot,
@@ -242,7 +250,7 @@ class _ControlLoopRunner:
                     event=command.event,
                     workflow=instance,
                     bound_events=command.bound_events,
-                    namespace=command.step_id.namespace,
+                    namespace=command.invocation_namespace,
                     state_store=state_store,
                     retry=RetryAttempt(
                         retry_number=worker.attempts,
@@ -256,6 +264,7 @@ class _ControlLoopRunner:
                 return TickStepResult(
                     step_id=command.step_id,
                     worker_id=command.id,
+                    invocation_namespace=command.invocation_namespace,
                     event=command.event,
                     result=self._stamp_retry_decisions(command.step_id, worker, result),
                 )
@@ -272,6 +281,7 @@ class _ControlLoopRunner:
                 return TickStepResult(
                     step_id=command.step_id,
                     worker_id=command.id,
+                    invocation_namespace=command.invocation_namespace,
                     event=command.event,
                     result=self._stamp_retry_decisions(
                         command.step_id, worker, [failed]
@@ -279,7 +289,12 @@ class _ControlLoopRunner:
                 )
 
         self._pending_workers.append(
-            PendingWorker(command.step_id, command.id, _run_worker())
+            PendingWorker(
+                command.step_id,
+                command.id,
+                _run_worker(),
+                invocation_namespace=command.invocation_namespace,
+            )
         )
 
     def _stamp_retry_decisions(
@@ -361,7 +376,11 @@ class _ControlLoopRunner:
         elif isinstance(command, CommandScheduleWaiterTimeout):
             now = await self.adapter.get_now()
             self.schedule_tick(
-                TickWaiterTimeout(step_id=command.step_id, waiter_id=command.waiter_id),
+                TickWaiterTimeout(
+                    step_id=command.step_id,
+                    waiter_id=command.waiter_id,
+                    invocation_namespace=command.invocation_namespace,
+                ),
                 at_time=now + command.timeout,
             )
             return None
@@ -390,15 +409,12 @@ class _ControlLoopRunner:
         complete and report into a now-empty worker slot. Pending workers not yet
         started are dropped and their coroutines closed.
         """
-        n = len(namespace)
-
-        def in_namespace(step_id: StepId) -> bool:
-            return step_id.namespace[:n] == namespace
-
         # Drop not-yet-started pending workers for this namespace.
         kept: list[PendingStart] = []
         for pending in self._pending_workers:
-            if isinstance(pending, PendingWorker) and in_namespace(pending.step_id):
+            if isinstance(pending, PendingWorker) and namespace_startswith(
+                pending.invocation_namespace, namespace
+            ):
                 pending.coro.close()
             else:
                 kept.append(pending)
@@ -406,7 +422,9 @@ class _ControlLoopRunner:
 
         # Cancel running worker tasks for this namespace.
         to_cancel = [
-            task for task, key in self._task_keys.items() if in_namespace(key[0])
+            task
+            for task, key in self._task_keys.items()
+            if namespace_startswith(key[1], namespace)
         ]
         for task in to_cancel:
             task.cancel()
@@ -541,7 +559,12 @@ class _ControlLoopRunner:
 
                 # Build running list from existing tasks
                 running: list[WorkerTask | PullTask] = [
-                    WorkerTask(key[0], key[1], task)
+                    WorkerTask(
+                        key[0],
+                        key[2],
+                        task,
+                        invocation_namespace=key[1],
+                    )
                     for task in self.worker_tasks
                     for key in [self._task_keys.get(task)]
                     if key is not None
@@ -566,7 +589,11 @@ class _ControlLoopRunner:
                         pull_task = nt.task
                     elif isinstance(nt, WorkerTask):
                         self.worker_tasks.add(nt.task)
-                        self._task_keys[nt.task] = (nt.step_id, nt.worker_id)
+                        self._task_keys[nt.task] = (
+                            nt.step_id,
+                            nt.invocation_namespace,
+                            nt.worker_id,
+                        )
 
                 completed_task = result.completed
 
@@ -633,6 +660,7 @@ class _ControlLoopRunner:
         """Process a single tick and return StopEvent if workflow completes."""
         try:
             start = await self.adapter.get_now()
+            tick = prepare_tick_for_reduce(tick, self.state)
             self.state, commands = _reduce_tick(
                 tick, self.state, start, run_id=self.adapter.run_id
             )

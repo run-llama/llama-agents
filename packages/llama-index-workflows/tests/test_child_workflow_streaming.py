@@ -86,7 +86,9 @@ async def test_child_events_surfaced_tagged_with_include_children() -> None:
     child_ping = next(ev for ev in collected if isinstance(ev, ChildPing))
 
     assert get_event_origin_namespace(parent_ping) == ()
-    assert get_event_origin_namespace(child_ping) == ("child",)
+    child_origin = get_event_origin_namespace(child_ping)
+    assert len(child_origin) == 1
+    assert child_origin[0].startswith("child#")
 
 
 # --- Grandchild: compound namespace tag ---------------------------------------
@@ -152,7 +154,10 @@ async def test_grandchild_event_tagged_with_compound_namespace() -> None:
     await handler
 
     grand_ping = next(ev for ev in collected if isinstance(ev, GrandPing))
-    assert get_event_origin_namespace(grand_ping) == ("mid", "grand")
+    grand_origin = get_event_origin_namespace(grand_ping)
+    assert len(grand_origin) == 2
+    assert grand_origin[0].startswith("mid#")
+    assert grand_origin[1].startswith("grand#")
 
 
 @pytest.mark.asyncio

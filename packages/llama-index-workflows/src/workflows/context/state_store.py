@@ -27,6 +27,7 @@ from typing_extensions import TypeVar
 
 from workflows.decorators import StepConfig
 from workflows.events import DictLikeModel
+from workflows.runtime.types.invocation import slot_namespace
 
 from .serializers import BaseSerializer, JsonSerializer
 
@@ -1281,7 +1282,7 @@ def namespaced_seed_payloads(
     for namespace_key, state_data in children.items():
         namespace = _namespace_from_key(namespace_key)
         seeds[namespace] = _in_memory_seed_payload(
-            state_data, state_types.get(namespace, DictState)
+            state_data, state_types.get(slot_namespace(namespace), DictState)
         )
     return seeds
 
@@ -1329,7 +1330,11 @@ class NamespacedStateStores:
         namespaces = set(self.state_types) | set(self._views)
         return sorted(ns for ns in namespaces if ns != ())
 
-    def serialize_tree(self, serializer: BaseSerializer) -> dict[str, Any]:
+    def serialize_tree(
+        self,
+        serializer: BaseSerializer,
+        child_namespaces: set[tuple[str, ...]] | None = None,
+    ) -> dict[str, Any]:
         """Portable snapshot: the root payload with ``children[ns]`` nested.
 
         Childless runs (a single namespace) produce exactly the flat root
@@ -1345,7 +1350,14 @@ class NamespacedStateStores:
         if is_durable_serialized_state(result):
             return result
         children: dict[str, Any] = {}
-        for namespace in self._child_namespaces():
+        namespaces = (
+            sorted(child_namespaces)
+            if child_namespaces is not None
+            else self._child_namespaces()
+        )
+        for namespace in namespaces:
+            if namespace == ():
+                continue
             children[_namespace_key(namespace)] = self.view(namespace).to_dict(
                 serializer
             )["state_data"]
@@ -1374,7 +1386,7 @@ def in_memory_namespace_factory(
     """A namespace factory that mints a fresh in-memory facade per namespace."""
 
     def factory(namespace: tuple[str, ...]) -> StateStoreFacade[Any]:
-        state_type = state_types.get(namespace, DictState)
+        state_type = state_types.get(slot_namespace(namespace), DictState)
         return InMemoryStateStore(create_cleared_state(state_type))
 
     return factory

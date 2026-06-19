@@ -14,6 +14,7 @@ from workflows.context.state_store import StateStore
 from workflows.errors import WorkflowRuntimeError
 from workflows.events import _set_event_origin_namespace
 from workflows.retry_policy import RetryInfo
+from workflows.runtime.types.invocation import slot_namespace
 from workflows.runtime.types.results import (
     AddCollectedEvent,
     AddWaiter,
@@ -183,7 +184,9 @@ class InternalContext(Generic[MODEL_T]):
         # bare name targets a sibling step in this namespace, a "child/answer"
         # path descends into a child of it.
         step_id = (
-            self._workflow._resolve_target_step(step, message, namespace)
+            self._workflow._resolve_target_step(
+                step, message, slot_namespace(namespace)
+            )
             if step is not None
             else None
         )

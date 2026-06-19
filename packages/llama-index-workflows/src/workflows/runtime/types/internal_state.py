@@ -87,6 +87,7 @@ class CollectionStreamInstance:
     stream_id: str
     source_step: StepId
     scope_path: tuple[str, ...]
+    source_invocation_namespace: tuple[str, ...] = ()
     open_work_items: int = 0
     accepting_binding_ids: tuple[str, ...] = ()
 
@@ -143,6 +144,7 @@ class BrokerState:
     # (StopEvent boundary) or is expired, so a re-triggered child re-arms.
     # Serialized so resume preserves the original child timeout clock.
     namespace_started: dict[tuple[str, ...], float] = field(default_factory=dict)
+    active_invocation_namespaces: set[tuple[str, ...]] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         self._normalize_worker_keys()
@@ -151,6 +153,8 @@ class BrokerState:
         self.__dict__.update(state)
         if "namespace_started" not in state:
             self.namespace_started = {}
+        if "active_invocation_namespaces" not in state:
+            self.active_invocation_namespaces = set()
         self._normalize_worker_keys()
 
     def _normalize_worker_keys(self) -> None:
@@ -174,7 +178,35 @@ class BrokerState:
                 for key, state in self.collection_release_states.items()
             },
             namespace_started=dict(self.namespace_started),
+            active_invocation_namespaces=set(self.active_invocation_namespaces),
         )
+
+    def live_invocation_namespaces(self) -> set[tuple[str, ...]]:
+        """Runtime invocation namespaces that still have live broker state."""
+        namespaces: set[tuple[str, ...]] = set(self.active_invocation_namespaces)
+        namespaces.update(self.namespace_started)
+        for stream in self.streams.values():
+            if stream.source_invocation_namespace:
+                namespaces.add(stream.source_invocation_namespace)
+        for worker in self.workers.values():
+            namespaces.update(
+                attempt.invocation_namespace
+                for attempt in worker.queue
+                if attempt.invocation_namespace
+            )
+            namespaces.update(
+                running.invocation_namespace
+                for running in worker.in_progress
+                if running.invocation_namespace
+            )
+            namespaces.update(
+                waiter.invocation_namespace
+                for waiter in worker.collected_waiters
+                if waiter.invocation_namespace
+            )
+            namespaces.update(worker.collected_events_by_invocation)
+            namespaces.update(worker.static_collect_events_by_invocation)
+        return namespaces
 
     @staticmethod
     def from_workflow(workflow: Workflow) -> BrokerState:
@@ -226,7 +258,9 @@ class BrokerState:
                     config=step_func._step_config,
                     in_progress=[],
                     collected_events={},
+                    collected_events_by_invocation={},
                     static_collect_events=[],
+                    static_collect_events_by_invocation={},
                     collected_waiters=[],
                 )
                 for step_id, step_func in namespaced_steps.items()
@@ -254,6 +288,7 @@ class BrokerState:
                             step_id=step_id,
                             bound_events=waiter.bound_events,
                             scope_path=waiter.scope_path,
+                            origin_namespace=waiter.invocation_namespace,
                             collection_release_payload=waiter.collection_release_payload,
                         )
                     )
@@ -281,6 +316,7 @@ class BrokerState:
                     recovery_counts=dict(attempt.recovery_counts),
                     not_before=attempt.not_before,
                     scope_path=list(attempt.scope_path),
+                    invocation_namespace=list(attempt.invocation_namespace),
                     collection_release_payload=_serialize_release_payload(
                         attempt.collection_release_payload, serializer
                     ),
@@ -303,6 +339,7 @@ class BrokerState:
                     last_failed_at=ip.last_failed_at,
                     recovery_counts=dict(ip.recovery_counts),
                     scope_path=list(ip.scope_path),
+                    invocation_namespace=list(ip.invocation_namespace),
                     collection_release_payload=_serialize_release_payload(
                         ip.shared_state.collection_release_payload, serializer
                     ),
@@ -314,6 +351,13 @@ class BrokerState:
             collected_events = {
                 buffer_id: [serializer.serialize(ev) for ev in events]
                 for buffer_id, events in worker_state.collected_events.items()
+            }
+            collected_events_by_invocation = {
+                _namespace_key(namespace): {
+                    buffer_id: [serializer.serialize(ev) for ev in events]
+                    for buffer_id, events in buffers.items()
+                }
+                for namespace, buffers in worker_state.collected_events_by_invocation.items()
             }
 
             # Serialize waiters
@@ -334,6 +378,7 @@ class BrokerState:
                     if waiter.resolved_event
                     else None,
                     scope_path=list(waiter.scope_path),
+                    invocation_namespace=list(waiter.invocation_namespace),
                     collection_release_payload=_serialize_release_payload(
                         waiter.collection_release_payload, serializer
                     ),
@@ -348,10 +393,17 @@ class BrokerState:
                 queue=queue,
                 in_progress=in_progress,
                 collected_events=collected_events,
+                collected_events_by_invocation=collected_events_by_invocation,
                 static_collect_events=[
                     serializer.serialize(ev)
                     for ev in worker_state.static_collect_events
                 ],
+                static_collect_events_by_invocation={
+                    _namespace_key(namespace): [
+                        serializer.serialize(ev) for ev in events
+                    ]
+                    for namespace, events in worker_state.static_collect_events_by_invocation.items()
+                },
                 collected_waiters=waiters,
             )
 
@@ -367,6 +419,9 @@ class BrokerState:
                     # Wire format keeps the bare string projection (root -> name,
                     # child -> "ns/name"), byte-identical to the pre-StepId format.
                     source_step=str(stream.source_step),
+                    source_invocation_namespace=list(
+                        stream.source_invocation_namespace
+                    ),
                     scope_path=list(stream.scope_path),
                     open_work_items=stream.open_work_items,
                     accepting_binding_ids=list(stream.accepting_binding_ids),
@@ -386,6 +441,10 @@ class BrokerState:
                 _namespace_key(namespace): started_at
                 for namespace, started_at in self.namespace_started.items()
             },
+            active_invocation_namespaces=[
+                _namespace_key(namespace)
+                for namespace in sorted(self.active_invocation_namespaces)
+            ],
         )
 
     @staticmethod
@@ -408,6 +467,7 @@ class BrokerState:
             sid: CollectionStreamInstance(
                 stream_id=stream.stream_id,
                 source_step=StepId.from_str(stream.source_step),
+                source_invocation_namespace=tuple(stream.source_invocation_namespace),
                 scope_path=tuple(stream.scope_path),
                 open_work_items=stream.open_work_items,
                 accepting_binding_ids=tuple(stream.accepting_binding_ids),
@@ -426,6 +486,10 @@ class BrokerState:
         base_state.namespace_started = {
             _namespace_from_key(namespace): started_at
             for namespace, started_at in serialized.namespace_started.items()
+        }
+        base_state.active_invocation_namespaces = {
+            _namespace_from_key(namespace)
+            for namespace in serialized.active_invocation_namespaces
         }
 
         # Restore worker state (queues, collected events, waiters)
@@ -450,9 +514,22 @@ class BrokerState:
                 buffer_id: [serializer.deserialize(ev) for ev in events]
                 for buffer_id, events in worker_data.collected_events.items()
             }
+            worker.collected_events_by_invocation = {
+                _namespace_from_key(namespace): {
+                    buffer_id: [serializer.deserialize(ev) for ev in events]
+                    for buffer_id, events in buffers.items()
+                }
+                for namespace, buffers in worker_data.collected_events_by_invocation.items()
+            }
             worker.static_collect_events = [
                 serializer.deserialize(ev) for ev in worker_data.static_collect_events
             ]
+            worker.static_collect_events_by_invocation = {
+                _namespace_from_key(namespace): [
+                    serializer.deserialize(ev) for ev in events
+                ]
+                for namespace, events in worker_data.static_collect_events_by_invocation.items()
+            }
 
             # Restore waiters
             worker.collected_waiters = []
@@ -486,6 +563,7 @@ class BrokerState:
                         if waiter_data.resolved_event
                         else None,
                         scope_path=tuple(waiter_data.scope_path),
+                        invocation_namespace=tuple(waiter_data.invocation_namespace),
                         collection_release_payload=waiter_payload,
                     )
                 )
@@ -522,6 +600,7 @@ def _deserialize_event_attempt(
         recovery_counts=dict(attempt.recovery_counts),
         not_before=attempt.not_before,
         scope_path=tuple(attempt.scope_path),
+        invocation_namespace=tuple(attempt.invocation_namespace),
         collection_release_payload=payload,
     )
 
@@ -735,6 +814,7 @@ class EventAttempt:
     not_before: float | None = None
     scope_path: tuple[str, ...] = field(default_factory=tuple)
     collection_release_payload: CollectionReleasePayload | None = None
+    invocation_namespace: tuple[str, ...] = ()
 
 
 @dataclass()
@@ -758,7 +838,13 @@ class InternalStepWorkerState:
     in_progress: list[InProgressState]
     collected_events: dict[str, list[Event]]
     collected_waiters: list[StepWorkerWaiter]
+    collected_events_by_invocation: dict[tuple[str, ...], dict[str, list[Event]]] = (
+        field(default_factory=dict)
+    )
     static_collect_events: list[Event] = field(default_factory=list)
+    static_collect_events_by_invocation: dict[tuple[str, ...], list[Event]] = field(
+        default_factory=dict
+    )
 
     def _deepcopy(self) -> InternalStepWorkerState:
         return InternalStepWorkerState(
@@ -766,7 +852,15 @@ class InternalStepWorkerState:
             config=self.config,
             in_progress=[x._deepcopy() for x in self.in_progress],
             collected_events={k: list(v) for k, v in self.collected_events.items()},
+            collected_events_by_invocation={
+                namespace: {k: list(v) for k, v in buffers.items()}
+                for namespace, buffers in self.collected_events_by_invocation.items()
+            },
             static_collect_events=list(self.static_collect_events),
+            static_collect_events_by_invocation={
+                namespace: list(events)
+                for namespace, events in self.static_collect_events_by_invocation.items()
+            },
             collected_waiters=[dataclasses.replace(x) for x in self.collected_waiters],
         )
 
@@ -803,6 +897,7 @@ class InProgressState:
     recovery_counts: dict[str, int] = field(default_factory=dict)
     bound_events: dict[str, Event] | None = None
     scope_path: tuple[str, ...] = field(default_factory=tuple)
+    invocation_namespace: tuple[str, ...] = ()
 
     def _deepcopy(self) -> InProgressState:
         return InProgressState(
@@ -816,6 +911,7 @@ class InProgressState:
             last_failed_at=self.last_failed_at,
             recovery_counts=dict(self.recovery_counts),
             scope_path=self.scope_path,
+            invocation_namespace=self.invocation_namespace,
         )
 
 

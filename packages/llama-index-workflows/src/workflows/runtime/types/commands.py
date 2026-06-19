@@ -27,6 +27,7 @@ class CommandRunWorker:
     step_id: StepId
     event: Event
     id: int
+    invocation_namespace: tuple[str, ...] = ()
     bound_events: dict[str, Event] | None = None
 
 
@@ -71,6 +72,7 @@ class CommandScheduleWaiterTimeout:
     step_id: StepId
     waiter_id: str
     timeout: float
+    invocation_namespace: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

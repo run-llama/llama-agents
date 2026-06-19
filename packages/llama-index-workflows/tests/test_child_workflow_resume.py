@@ -143,22 +143,16 @@ class Top(Workflow):
 
 
 @pytest.mark.asyncio
-async def test_grandchild_state_serialized_in_one_blob() -> None:
+async def test_completed_grandchild_state_is_not_carried_forward() -> None:
     top = Top(mid=Mid(grand=Grand()))
     ctx = Context(top)
     result = await top.run(ctx=ctx)
     assert result == "g!"
 
     blob = ctx.to_dict()
-    # Root + each child namespace's state are nested in the single blob.
-    child_states = blob["state"][CHILD_STATES_KEY]
-    assert set(child_states) == {"mid", "mid/grand"}
+    assert CHILD_STATES_KEY not in blob["state"]
 
-    # The grandchild's own state is present in the blob.
-    grand_data = child_states["mid/grand"]["_data"]
-    assert grand_data  # non-empty
-
-    # from_dict round-trips without dropping the child tree's StepId set.
+    # from_dict round-trips the completed root context without stale child state.
     restored = Context.from_dict(top, blob)
     assert restored is not None
 

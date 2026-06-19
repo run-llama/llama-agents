@@ -193,6 +193,8 @@ class StepWorkerWaiter(Generic[EventType]):
     # Originating work record: stream scope of the suspended work item, restored
     # whole on resume so the resumed attempt still closes its stream.
     scope_path: tuple[str, ...] = ()
+    # Runtime invocation namespace of the suspended work item.
+    invocation_namespace: tuple[str, ...] = ()
     # For a suspended collect invocation, the release batch to re-invoke with.
     collection_release_payload: CollectionReleasePayload | None = None
 
