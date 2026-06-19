@@ -71,6 +71,10 @@ class StepWorkerContext:
     # add commands here to mutate the internal worker state after step execution
     returns: Returns
     retry: RetryAttempt = dataclasses.field(default_factory=RetryAttempt)
+    # The namespace of the step that is currently executing. Root steps run at
+    # ``()``; a child-workflow step runs under its declared field path. Read by
+    # ``InternalContext.send_event`` so events a child emits stay namespaced.
+    namespace: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -189,6 +193,8 @@ class StepWorkerWaiter(Generic[EventType]):
     # Originating work record: stream scope of the suspended work item, restored
     # whole on resume so the resumed attempt still closes its stream.
     scope_path: tuple[str, ...] = ()
+    # Runtime invocation namespace of the suspended work item.
+    invocation_namespace: tuple[str, ...] = ()
     # For a suspended collect invocation, the release batch to re-invoke with.
     collection_release_payload: CollectionReleasePayload | None = None
 

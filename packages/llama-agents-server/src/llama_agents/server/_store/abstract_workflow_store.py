@@ -116,9 +116,9 @@ class AbstractWorkflowStore(ABC):
         # Weak-valued by default so facades die with their last consumer.
         # Backends needing a different lifecycle (strong refs + explicit
         # eviction) assign a plain dict in their __init__.
-        self._state_store_cache: MutableMapping[str, StateStoreFacade[Any]] = (
-            weakref.WeakValueDictionary()
-        )
+        self._state_store_cache: MutableMapping[
+            tuple[str, tuple[str, ...]], StateStoreFacade[Any]
+        ] = weakref.WeakValueDictionary()
 
     async def start(self) -> None:
         """Initialize backend resources. Default is a no-op."""
@@ -129,18 +129,22 @@ class AbstractWorkflowStore(ABC):
         state_type: type[Any] | None = None,
         serialized_state: dict[str, Any] | None = None,
         serializer: BaseSerializer | None = None,
+        namespace: tuple[str, ...] = (),
     ) -> StateStore[Any]:
-        """Return the per-run state store, creating and caching it on first use.
+        """Return the per-(run, namespace) state store, caching on first use.
 
-        One facade per run per process, so its write lock is a real guarantee.
-        If *serialized_state* is provided, it is staged as a seed on the
-        (possibly already handed-out) facade: validation is eager, the I/O to
-        materialize it stays lazy (first async state access or handoff).
+        Namespace is a key dimension alongside ``run_id``: the default ``()``
+        is the root namespace and reproduces the single-record behavior. One
+        facade per (run, namespace) per process, so its write lock is a real
+        guarantee. If *serialized_state* is provided, it is staged as a seed on
+        the (possibly already handed-out) facade: validation is eager, the I/O
+        to materialize it stays lazy (first async state access or handoff).
         """
-        store = self._state_store_cache.get(run_id)
+        cache_key = (run_id, namespace)
+        store = self._state_store_cache.get(cache_key)
         if store is None:
-            store = self._build_state_store(run_id, state_type, serializer)
-            self._state_store_cache[run_id] = store
+            store = self._build_state_store(run_id, namespace, state_type, serializer)
+            self._state_store_cache[cache_key] = store
         elif state_type is not None and store.state_type is DictState:
             # An earlier type-less caller (e.g. handler continuation) must
             # not shadow the workflow's concrete state type.
@@ -149,14 +153,20 @@ class AbstractWorkflowStore(ABC):
             store.add_seed(serialized_state, serializer or JsonSerializer())
         return store
 
+    def _evict_run_state_stores(self, run_id: str) -> None:
+        """Drop every cached namespace facade for *run_id* (all namespaces)."""
+        for key in [k for k in self._state_store_cache if k[0] == run_id]:
+            self._state_store_cache.pop(key, None)
+
     @abstractmethod
     def _build_state_store(
         self,
         run_id: str,
+        namespace: tuple[str, ...],
         state_type: type[Any] | None,
         serializer: BaseSerializer | None,
     ) -> StateStoreFacade[Any]:
-        """Construct the backend facade for a run. No caching, no seeding."""
+        """Construct the backend facade for a (run, namespace). No caching."""
 
     @abstractmethod
     async def query(self, query: HandlerQuery) -> list[PersistentHandler]: ...

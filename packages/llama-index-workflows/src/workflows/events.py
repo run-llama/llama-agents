@@ -150,8 +150,31 @@ class Event(DictLikeModel):
         - [HumanResponseEvent][workflows.events.HumanResponseEvent]
     """
 
+    # Namespace of the child execution that published this event to the stream.
+    # Empty tuple (the default) means root — i.e. an ordinary parent event. The
+    # runtime tags streaming copies at the publish chokepoints; it is never
+    # serialized, so the wire/checkpoint schema is unchanged.
+    _origin_namespace: tuple[str, ...] = PrivateAttr(default=())
+
     def __init__(self, **params: Any):
         super().__init__(**params)
+
+
+def get_event_origin_namespace(event: Event) -> tuple[str, ...]:
+    """Namespace path of the child execution that published ``event`` to the
+    stream, or ``()`` for a root (parent) event.
+
+    Populated only on the streaming copy of an event; not serialized. See
+    [`stream_events(include_children=True)`][workflows.handler.WorkflowHandler.stream_events].
+    """
+    return event._origin_namespace
+
+
+def _set_event_origin_namespace(event: Event, namespace: tuple[str, ...]) -> None:
+    """Tag a published event with the namespace of the child execution it came
+    from. Package-internal: the runtime stamps this at the stream-publish
+    chokepoints. Read it back with the public ``get_event_origin_namespace``."""
+    event._origin_namespace = namespace
 
 
 _json_serializer = JsonSerializer()

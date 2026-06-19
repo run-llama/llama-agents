@@ -85,6 +85,7 @@ from workflows.runtime.types.step_function import (
     as_step_worker_functions,
     create_workflow_run_function,
 )
+from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import WorkflowTick
 from workflows.workflow import Workflow
 
@@ -144,20 +145,24 @@ class DBOSWorkflowStore(AbstractWorkflowStore):
         state_type: type[Any] | None = None,
         serialized_state: dict[str, Any] | None = None,
         serializer: BaseSerializer | None = None,
+        namespace: tuple[str, ...] = (),
     ) -> StateStore[Any]:
         # Delegate the whole template method so memoization lives in the
         # inner store's single cache (the proxy's own cache stays unused).
         return self._resolve().create_state_store(
-            run_id, state_type, serialized_state, serializer
+            run_id, state_type, serialized_state, serializer, namespace
         )
 
     def _build_state_store(
         self,
         run_id: str,
+        namespace: tuple[str, ...],
         state_type: type[Any] | None,
         serializer: BaseSerializer | None,
     ) -> StateStoreFacade[Any]:
-        return self._resolve()._build_state_store(run_id, state_type, serializer)
+        return self._resolve()._build_state_store(
+            run_id, namespace, state_type, serializer
+        )
 
     async def query(self, query: HandlerQuery) -> list[PersistentHandler]:
         return await self._resolve().query(query)
@@ -281,6 +286,8 @@ class DBOSRuntime(Runtime):
     State is persisted to the database using SQL state stores,
     enabling state recovery across process restarts.
     """
+
+    _supports_child_workflows = False
 
     def __init__(self, **kwargs: Unpack[DBOSRuntimeConfig]) -> None:
         """Initialize the DBOS runtime.
@@ -416,7 +423,7 @@ class DBOSRuntime(Runtime):
             return await workflow_run_fn(init_state, start_event, tags)
 
         # Wrap steps with stable names
-        wrapped_steps: dict[str, StepWorkerFunction] = {
+        wrapped_steps: dict[StepId, StepWorkerFunction] = {
             step_name: DBOS.step(name=f"{name}.{step_name}")(step)
             for step_name, step in as_step_worker_functions(workflow).items()
         }
@@ -1152,7 +1159,9 @@ class InternalDBOSAdapter(InternalRunAdapter):
                 )
         return self._state_store
 
-    def get_state_store(self) -> StateStore[Any] | None:
+    def get_state_store(
+        self, namespace: tuple[str, ...] = ()
+    ) -> StateStore[Any] | None:
         return self._get_or_create_state_store()
 
     def is_replaying(self) -> bool:

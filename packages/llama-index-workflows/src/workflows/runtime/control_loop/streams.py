@@ -8,7 +8,7 @@ import logging
 from enum import Enum
 
 from workflows._event_matching import (
-    step_accepts_type,
+    step_accepts_event,
 )
 from workflows.collect import Collect, Take
 from workflows.errors import (
@@ -16,6 +16,7 @@ from workflows.errors import (
 )
 from workflows.events import (
     Event,
+    StartEvent,
 )
 from workflows.runtime.types.commands import (
     WorkflowCommand,
@@ -28,6 +29,7 @@ from workflows.runtime.types.internal_state import (
     EventAttempt,
     InternalStepWorkerState,
 )
+from workflows.runtime.types.invocation import slot_namespace
 from workflows.runtime.types.results import (
     AddCollectedEvent,
     AddWaiter,
@@ -35,7 +37,6 @@ from workflows.runtime.types.results import (
     StepWorkerFailed,
     StepWorkerResult,
 )
-from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import (
     TickStepResult,
 )
@@ -70,7 +71,7 @@ def _detect_stuck_streams(
     )
     if orphaned is not None:
         binding = state.config.collection_bindings.get(orphaned.binding_id)
-        step_name = binding.target_step if binding is not None else "<unknown>"
+        step_name = str(binding.target_step) if binding is not None else "<unknown>"
         return step_name, WorkflowRuntimeError(
             f"Workflow is idle with a pending collect release for step "
             f"{step_name!r} (binding {orphaned.binding_id!r}) whose stream "
@@ -91,11 +92,11 @@ def _detect_stuck_streams(
         return None
     first_leaked = next(iter(state.streams.values()))
     details = "; ".join(
-        f"stream {stream.stream_id!r} opened by step {stream.source_step!r} "
+        f"stream {stream.stream_id!r} opened by step {str(stream.source_step)!r} "
         f"with {stream.open_work_items} open work item(s)"
         for stream in state.streams.values()
     )
-    return first_leaked.source_step, WorkflowRuntimeError(
+    return str(first_leaked.source_step), WorkflowRuntimeError(
         "Workflow is idle but collection streams are still open, so the run "
         f"can never complete: {details}. No queued, running, or resumable "
         "scoped work remains that can close the stream. This indicates "
@@ -119,24 +120,58 @@ def _clear_collection_state(state: BrokerState) -> None:
     state.collection_release_states.clear()
 
 
-def _count_accepting_steps(state: BrokerState, event_type: type) -> int:
-    """Number of steps that accept ``event_type`` — the work-item fan-out factor.
+def _event_routes_to(
+    origin_namespace: tuple[str, ...],
+    target_namespace: tuple[str, ...],
+    event: Event,
+) -> bool:
+    """Whether a type-routed event from ``origin_namespace`` reaches a step in
+    ``target_namespace``.
 
-    An event routed at a stream level becomes one work item per accepting step
-    (1:1 *and* collect steps count). This is the per-emission birth count for the
-    open_work_items set: a single emitted event accepted by N steps is N work
-    items. Must mirror the routing predicate in ``_process_add_event_tick``
-    exactly (including subclass-aware acceptance) — a birth count that differs
-    from the delivery count drifts the stream counter.
+    An event stays within the namespace that emitted it, except that a
+    ``StartEvent`` may cross *down* into a direct child namespace (that is how a
+    parent triggers a child). A child's ``StopEvent`` crossing back *up* is
+    handled by re-injecting it with the parent namespace as its origin, so it is
+    just an ordinary same-namespace route here.
+
+    This is the single routing predicate shared by delivery
+    (``_route_to_accepting_steps``) and birth-counting
+    (``_count_accepting_steps``); the two must never diverge.
+    """
+    origin_slot_namespace = slot_namespace(origin_namespace)
+    if target_namespace == origin_slot_namespace:
+        return True
+    if (
+        isinstance(event, StartEvent)
+        and len(target_namespace) == len(origin_slot_namespace) + 1
+        and target_namespace[: len(origin_slot_namespace)] == origin_slot_namespace
+    ):
+        return True
+    return False
+
+
+def _count_accepting_steps(
+    state: BrokerState, event: Event, origin_namespace: tuple[str, ...]
+) -> int:
+    """Number of steps an emitted ``event`` routes to — the work-item fan-out
+    factor for the stream that produced it.
+
+    This is the per-emission birth count for the open_work_items set: a single
+    emitted event delivered to N steps is N work items. It *is* the delivery
+    predicate (``step_accepts_event`` ∧ ``_event_routes_to``), counted — so the
+    birth count can never drift from the delivery count. A flat (namespace-blind)
+    count is exactly what wedged a root stream when a child step accepted the
+    same event type.
     """
     return sum(
         1
-        for cfg in state.config.steps.values()
-        if step_accepts_type(
-            event_type,
+        for step_id, cfg in state.config.steps.items()
+        if step_accepts_event(
+            event,
             cfg.accepted_events,
             allow_subclasses=cfg.accept_event_subclasses,
         )
+        and _event_routes_to(origin_namespace, step_id.namespace, event)
     )
 
 
@@ -200,6 +235,7 @@ def _close_collection_stream(
                 worker_state,
                 release,
                 tuple(stream.scope_path),
+                stream.source_invocation_namespace,
                 now_seconds,
             )
         )
@@ -332,6 +368,7 @@ def _fire_collection_release(
     worker_state: InternalStepWorkerState,
     events: list[Event],
     output_stack: tuple[str, ...],
+    invocation_namespace: tuple[str, ...],
     now_seconds: float,
 ) -> list[WorkflowCommand]:
     # Inline import breaks the reduce<->streams cycle: _add_or_enqueue_event is
@@ -349,9 +386,10 @@ def _fire_collection_release(
         EventAttempt(
             event=payload.as_event(),
             scope_path=output_stack,
+            invocation_namespace=invocation_namespace,
             collection_release_payload=payload,
         ),
-        StepId.root(binding.target_step),
+        binding.target_step,
         worker_state,
         now_seconds,
     )

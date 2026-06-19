@@ -12,6 +12,7 @@ from workflows.decorators import step as free_step
 from workflows.errors import WorkflowValidationError
 from workflows.events import Event, StartEvent, StepFailedEvent, StopEvent
 from workflows.runtime.types.internal_state import BrokerState, EventAttempt
+from workflows.runtime.types.step_id import StepId
 
 
 class Header(Event):
@@ -376,7 +377,7 @@ def test_collect_mode_state_serializes_static_buffers() -> None:
     workflow = SerializeWorkflow()
     serializer = JsonSerializer()
     state = BrokerState.from_workflow(workflow)
-    worker = state.workers["assemble"]
+    worker = state.workers[StepId.root("assemble")]
     worker.static_collect_events.append(Header(value="pending"))
     worker.queue.append(
         EventAttempt(
@@ -393,7 +394,7 @@ def test_collect_mode_state_serializes_static_buffers() -> None:
         workflow,
         serializer,
     )
-    restored_worker = restored.workers["assemble"]
+    restored_worker = restored.workers[StepId.root("assemble")]
 
     assert restored_worker.static_collect_events == [Header(value="pending")]
     assert restored_worker.queue[0].bound_events == {

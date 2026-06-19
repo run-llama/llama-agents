@@ -151,7 +151,7 @@ def _leaked_stream_state() -> BrokerState:
     state.is_running = True
     state.streams["stream-x"] = CollectionStreamInstance(
         stream_id="stream-x",
-        source_step="fan_out",
+        source_step=StepId.root("fan_out"),
         scope_path=("stream-x",),
         open_work_items=1,
     )
@@ -212,7 +212,7 @@ def _waiter(scope_path: tuple[str, ...]) -> StepWorkerWaiter:
 
 def test_idle_check_with_in_stream_waiter_publishes_idle_not_failure() -> None:
     state = _leaked_stream_state()
-    state.workers["work"].collected_waiters.append(_waiter(("stream-x",)))
+    state.workers[StepId.root("work")].collected_waiters.append(_waiter(("stream-x",)))
     _, commands = _reduce_tick(TickIdleCheck(), state, 0.0)
 
     assert not any(isinstance(c, CommandFailWorkflow) for c in commands), commands
@@ -233,7 +233,7 @@ def test_idle_check_with_out_of_stream_waiter_still_fails_run() -> None:
     attempt counters — this is not an exhausted step attempt.
     """
     state = _leaked_stream_state()
-    state.workers["work"].collected_waiters.append(_waiter(()))
+    state.workers[StepId.root("work")].collected_waiters.append(_waiter(()))
     _, commands = _reduce_tick(TickIdleCheck(), state, 0.0)
 
     failures = [c for c in commands if isinstance(c, CommandFailWorkflow)]

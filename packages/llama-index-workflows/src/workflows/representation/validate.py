@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from typing import Protocol, TypeVar, cast
 
 from workflows._event_matching import is_subclass, step_accepts_type, type_matches
 from workflows._stream_levels import (
@@ -26,6 +27,25 @@ from workflows.resource import ResourceDescriptor, ResourceManager, _ResourceCon
 
 # Graph nodes: step names (str) for steps, event classes (type) for events.
 GraphNode = str | type
+WORKFLOW_T = TypeVar("WORKFLOW_T", bound="_WorkflowForValidation")
+
+
+class _WorkflowClassForValidation(Protocol):
+    __name__: str
+
+    @classmethod
+    def _get_child_workflow_slots(cls) -> dict[str, type]: ...
+
+
+class _WorkflowForValidation(Protocol):
+    @classmethod
+    def _get_child_workflow_slots(cls) -> dict[str, type]: ...
+
+    @property
+    def _start_event_class(self) -> type[StartEvent]: ...
+
+    @property
+    def _child_workflows(self) -> dict[str, WORKFLOW_T]: ...
 
 
 @dataclass
@@ -58,6 +78,7 @@ def build_step_graph(
     steps: dict[str, StepConfig],
     start_event_class: type,
     catch_error_steps: list[str] | None = None,
+    child_boundaries: list[tuple[type, type]] | None = None,
 ) -> StepGraph:
     """Build a StepGraph from step configs and a start event class.
 
@@ -65,6 +86,13 @@ def build_step_graph(
     events (StartEvent + HumanResponseEvent subclasses + any catch_error handler
     step names) and reverse reachability from output events (StopEvent +
     InputRequiredEvent).
+
+    ``child_boundaries`` is a list of ``(child_start_event, child_stop_event)``
+    pairs, one per attached child workflow. Each becomes a synthetic boundary
+    node that consumes the child's StartEvent (emitted by a parent step) and
+    produces the child's StopEvent (re-injected to a parent step), so the parent
+    graph stays connected across the child boundary without instantiating the
+    child's steps here.
     """
     outgoing: dict[GraphNode, list[GraphNode]] = {}
     event_types: set[type] = {start_event_class} if steps else set()
@@ -96,6 +124,14 @@ def build_step_graph(
                 allow_subclasses=allow_subclasses,
             ):
                 outgoing.setdefault(ev_type, []).append(name)
+
+    for i, (child_start, child_stop) in enumerate(child_boundaries or []):
+        boundary = f"<child-boundary-{i}>"
+        step_names.add(boundary)
+        event_types.add(child_start)
+        event_types.add(child_stop)
+        outgoing.setdefault(child_start, []).append(boundary)
+        outgoing.setdefault(boundary, []).append(child_stop)
 
     # Forward DFS from StartEvent + HumanResponseEvent subclasses +
     # catch_error handler step names (their sub-graphs are reachable via
@@ -164,6 +200,7 @@ def validate_graph(
     start_event_class: type,
     skip_checks: set[WorkflowGraphCheck] | None = None,
     catch_error_steps: list[str] | None = None,
+    child_boundaries: list[tuple[type, type]] | None = None,
 ) -> list[GraphValidationError]:
     """Validate the graph structure of a workflow, accumulating all errors.
 
@@ -186,7 +223,9 @@ def validate_graph(
     skip_checks = skip_checks or set()
     errors: list[GraphValidationError] = []
 
-    graph = build_step_graph(steps, start_event_class, catch_error_steps)
+    graph = build_step_graph(
+        steps, start_event_class, catch_error_steps, child_boundaries
+    )
 
     # Check 1: Reachability
     if "reachability" not in skip_checks:
@@ -451,28 +490,37 @@ def _collect_catch_error_handlers(
 def _validate_event_connectivity(
     steps: dict[str, StepConfig],
     start_event_class: type[StartEvent],
+    child_start_event_classes: set[type] | None = None,
+    child_stop_event_classes: set[type] | None = None,
 ) -> bool:
     """Validate event production/consumption across the step graph.
 
     Checks that:
-    - No user step accepts ``StopEvent``.
+    - No user step accepts ``StopEvent`` (except an attached child's StopEvent,
+      which a parent step consumes as a boundary event).
     - Every consumed event is either produced or crosses the workflow
       boundary (``InputRequiredEvent``/``HumanResponseEvent``/``StopEvent``/
       ``StepFailedEvent``).
     - Every produced event is consumed, except for
-      ``InputRequiredEvent``/``HumanResponseEvent``/``StopEvent`` subclasses.
+      ``InputRequiredEvent``/``HumanResponseEvent``/``StopEvent`` subclasses and
+      a triggered child's StartEvent (consumed across the child boundary).
 
     Returns ``True`` if the workflow uses human-in-the-loop
     (``InputRequiredEvent`` produced or ``HumanResponseEvent`` consumed).
     Raises ``WorkflowValidationError`` on any violation.
     """
+    child_start_event_classes = child_start_event_classes or set()
+    child_stop_event_classes = child_stop_event_classes or set()
     produced_events: set[type] = {start_event_class}
     consumed_events: set[type] = set()
     steps_accepting_stop_event: list[str] = []
 
     for name, cfg in steps.items():
         for event_type in cfg.accepted_events:
-            if is_subclass(event_type, StopEvent):
+            if (
+                is_subclass(event_type, StopEvent)
+                and event_type not in child_stop_event_classes
+            ):
                 steps_accepting_stop_event.append(name)
                 break
         for event_type in cfg.accepted_events:
@@ -520,7 +568,7 @@ def _validate_event_connectivity(
     boundary_out = (InputRequiredEvent, HumanResponseEvent, StopEvent)
     unused_events = set()
     for x in produced_events:
-        if is_subclass(x, boundary_out):
+        if is_subclass(x, boundary_out) or x in child_start_event_classes:
             continue
         consumed = any(
             step_accepts_type(
@@ -745,10 +793,60 @@ def _validate_multi_slot_levels(
         raise WorkflowValidationError("\n".join(errors))
 
 
+def _validate_child_workflow_declarations(
+    workflow: _WorkflowForValidation,
+) -> None:
+    """Validate child workflow declarations that need the workflow tree.
+
+    Per-workflow graph validation runs from step configs. These checks sit one
+    level up: they validate the declared child type graph and event routing
+    boundary between a parent instance and its direct children.
+    """
+    root = cast("type[_WorkflowClassForValidation]", type(workflow))
+    _validate_child_type_graph(root)
+    _validate_child_start_events(workflow)
+
+
+def _validate_child_type_graph(root: type[_WorkflowClassForValidation]) -> None:
+    """Reject cycles in the declared child-workflow type graph."""
+
+    def walk(
+        node: type[_WorkflowClassForValidation],
+        path: tuple[type[_WorkflowClassForValidation], ...],
+    ) -> None:
+        for child_type in node._get_child_workflow_slots().values():
+            child_cls = cast("type[_WorkflowClassForValidation]", child_type)
+            if child_cls in path:
+                chain = " -> ".join(c.__name__ for c in (*path, child_cls))
+                raise WorkflowValidationError(
+                    f"Child workflow type cycle detected: {chain}. A child "
+                    "workflow cannot transitively declare itself as a child."
+                )
+            walk(child_cls, (*path, child_cls))
+
+    walk(root, (root,))
+
+
+def _validate_child_start_events(workflow: _WorkflowForValidation) -> None:
+    """Each direct child's ``StartEvent`` type must be unique."""
+    seen: dict[type[StartEvent], str] = {}
+    for field_name, child in workflow._child_workflows.items():
+        start_cls = child._start_event_class
+        if start_cls in seen:
+            raise WorkflowValidationError(
+                f"Child workflows '{seen[start_cls]}' and '{field_name}' on "
+                f"'{type(workflow).__name__}' both accept StartEvent type "
+                f"'{start_cls.__name__}'; each child's StartEvent type must "
+                "be unique so the parent can route to exactly one child."
+            )
+        seen[start_cls] = field_name
+
+
 def _validate_workflow(
     steps: dict[str, StepConfig],
     workflow_cls_name: str,
     skip_graph_checks: set[WorkflowGraphCheck],
+    child_boundaries: list[tuple[type, type]] | None = None,
 ) -> _WorkflowValidationResult:
     """Run every structural check on a workflow's step set.
 
@@ -767,13 +865,22 @@ def _validate_workflow(
             "free-function steps via @step(workflow=...)?"
         )
 
+    child_boundaries = child_boundaries or []
+    child_start_event_classes = {start for start, _ in child_boundaries}
+    child_stop_event_classes = {stop for _, stop in child_boundaries}
+
     start_event_class = _ensure_start_event_class(steps, workflow_cls_name)
     stop_event_class = _ensure_stop_event_class(steps, workflow_cls_name)
 
     _validate_collection_bindings(steps)
     _validate_multi_slot_levels(steps, start_event_class)
 
-    uses_hitl = _validate_event_connectivity(steps, start_event_class)
+    uses_hitl = _validate_event_connectivity(
+        steps,
+        start_event_class,
+        child_start_event_classes,
+        child_stop_event_classes,
+    )
 
     catch_error_handlers, handler_for_step = _collect_catch_error_handlers(steps)
 
@@ -782,6 +889,7 @@ def _validate_workflow(
         start_event_class=start_event_class,
         skip_checks=skip_graph_checks,
         catch_error_steps=list(catch_error_handlers.keys()),
+        child_boundaries=child_boundaries,
     )
     if graph_errors:
         detail = "\n".join(

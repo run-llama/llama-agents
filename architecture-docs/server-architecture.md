@@ -65,6 +65,12 @@ Two implementations:
 - **`SqliteWorkflowStore`** — SQLite-backed. Survives restarts.
   [`sqlite_workflow_store.py`](../packages/llama-agents-server/src/llama_agents/server/_store/sqlite/sqlite_workflow_store.py)
 
+### State records are keyed by `(run_id, namespace)`
+
+State persists as one record per `(run_id, namespace)`, not one bundled record per run. The root namespace is `""` (a childless run is exactly one root record, byte-identical to the pre-namespace single row); child workflows get their own records under their namespace key. Whole-run operations stay run-keyed — copy and the in-process facade cache eviction both filter on `run_id` alone, so they span every namespace in one pass.
+
+**No automatic state GC.** State records are never deleted today — there is no `DELETE FROM workflow_state`, no cascade from handler/event deletion, and no TTL. Per-namespace records multiply a childful run's footprint by the number of namespaces but add no new *category* of leak. A retention policy is future work; until then, state accumulates per run.
+
 ## Resumable Event Streams
 
 Events flow from step functions to clients through the store, which acts as both a write-ahead log and a subscription source:

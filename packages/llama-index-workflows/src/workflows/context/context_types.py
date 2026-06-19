@@ -97,6 +97,9 @@ class SerializedEventAttempt(BaseModel):
     not_before: float | None = None
     # Collection stream scope path (innermost stream id last).
     scope_path: list[str] = Field(default_factory=list)
+    # Runtime invocation namespace. Static StepId keys still identify the step
+    # config; this separates sibling child calls through the same slot.
+    invocation_namespace: list[str] = Field(default_factory=list)
     # Explicit collect invocation payload, serialized only for queued/in-progress
     # list[E] collect executions.
     collection_release_payload: SerializedCollectionReleasePayload | None = None
@@ -129,6 +132,8 @@ class SerializedWaiter(BaseModel):
     # Originating work record: collection stream scope of the suspended work
     # item (innermost stream id last).
     scope_path: list[str] = Field(default_factory=list)
+    # Runtime invocation namespace for the suspended work item.
+    invocation_namespace: list[str] = Field(default_factory=list)
     # For a suspended collect invocation, the release batch to re-invoke with.
     collection_release_payload: SerializedCollectionReleasePayload | None = None
 
@@ -156,8 +161,16 @@ class SerializedStepWorkerState(BaseModel):
     # Collected events for ctx.collect_events(), keyed by buffer_id -> [event, ...]
     # Events are serialized strings
     collected_events: dict[str, list[str]] = Field(default_factory=dict)
+    # Non-root invocation collect buffers, keyed by invocation namespace.
+    collected_events_by_invocation: dict[str, dict[str, list[str]]] = Field(
+        default_factory=dict
+    )
     # Pending static multi-parameter fan-in events.
     static_collect_events: list[str] = Field(default_factory=list)
+    # Pending static multi-parameter fan-in events for non-root invocations.
+    static_collect_events_by_invocation: dict[str, list[str]] = Field(
+        default_factory=dict
+    )
     # Active waiters created by ctx.wait_for_event()
     collected_waiters: list[SerializedWaiter] = Field(default_factory=list)
 
@@ -167,6 +180,7 @@ class SerializedCollectionStreamInstance(BaseModel):
 
     stream_id: str
     source_step: str
+    source_invocation_namespace: list[str] = Field(default_factory=list)
     scope_path: list[str] = Field(default_factory=list)
     open_work_items: int = 0
     accepting_binding_ids: list[str] = Field(default_factory=list)
@@ -207,6 +221,13 @@ class SerializedContext(BaseModel):
     collection_release_states: dict[str, SerializedCollectionReleaseState] = Field(
         default_factory=dict
     )
+    # Per-child namespace timeout activation times, keyed by "child/grandchild".
+    # Additive to v2: older payloads default to no active namespace deadlines.
+    namespace_started: dict[str, float] = Field(default_factory=dict)
+    # Active child invocation namespaces, keyed like namespace_started. These
+    # remain live until the child invocation stops or is terminated, even if the
+    # child is currently idle while waiting for an external targeted event.
+    active_invocation_namespaces: list[str] = Field(default_factory=list)
 
     @staticmethod
     def from_v0(v0: SerializedContextV0) -> "SerializedContext":

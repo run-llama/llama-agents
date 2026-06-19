@@ -22,6 +22,10 @@ class StepId:
         if any(not part for part in self.namespace):
             raise ValueError("StepId namespace parts cannot be empty")
 
+    @property
+    def is_root(self) -> bool:
+        return not self.namespace
+
     @classmethod
     def root(cls, name: str) -> StepId:
         return cls(namespace=(), name=name)

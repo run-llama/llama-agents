@@ -17,13 +17,24 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Discriminator, Field, TypeAdapter
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    Field,
+    TypeAdapter,
+)
 from workflows.events import SerializableEvent, SerializableOptionalException
 from workflows.runtime.types.results import (
     SerializableCollectionReleasePayload,
     StepFunctionResult,
 )
 from workflows.runtime.types.step_id import StepId
+
+# Pre-StepId journals serialized this field as ``step_name``; accept both so
+# persisted ticks still deserialize. New ticks serialize under ``step_id``.
+_STEP_ID_ALIAS = AliasChoices("step_id", "step_name")
 
 
 class TickStepResult(BaseModel):
@@ -33,8 +44,9 @@ class TickStepResult(BaseModel):
         frozen=True, arbitrary_types_allowed=True, populate_by_name=True
     )
     type: Literal["step_result"] = "step_result"
-    step_id: StepId = Field(validation_alias="step_name")
+    step_id: StepId = Field(validation_alias=_STEP_ID_ALIAS)
     worker_id: int
+    invocation_namespace: tuple[str, ...] = ()
     event: SerializableEvent
     result: list[Annotated[StepFunctionResult, Discriminator("type")]]
 
@@ -47,14 +59,25 @@ class TickAddEvent(BaseModel):
     )
     type: Literal["add_event"] = "add_event"
     event: SerializableEvent
-    step_id: StepId | None = Field(default=None, validation_alias="step_name")
+    step_id: StepId | None = Field(default=None, validation_alias=_STEP_ID_ALIAS)
     bound_events: dict[str, SerializableEvent] | None = None
+    # Namespace of the step (or boundary) that emitted this event. Type-routing
+    # is scoped to this namespace so events emitted inside a child stay in the
+    # child; ``()`` (the default) is the root namespace, preserving the
+    # pre-child wire format for old journals.
+    origin_namespace: tuple[str, ...] = ()
     attempts: int | None = None
     first_attempt_at: float | None = None
     last_exception: SerializableOptionalException = None
     last_failed_at: float | None = None
     recovery_counts: dict[str, int] = Field(default_factory=dict)
     scope_path: tuple[str, ...] = Field(default_factory=tuple)
+    # Static child target namespace -> minted runtime invocation namespace for
+    # StartEvent routes. Filled before the tick is reduced so replay uses the
+    # same opaque child invocation ids as the live run.
+    child_invocation_namespaces: dict[str, tuple[str, ...]] = Field(
+        default_factory=dict
+    )
     # Collect-invocation work record. A payload-carrying tick is routed
     # directly to the binding's target step, before waiter matching and the
     # member-arrival path.
@@ -96,8 +119,27 @@ class TickWaiterTimeout(BaseModel):
 
     model_config = ConfigDict(frozen=True, populate_by_name=True)
     type: Literal["waiter_timeout"] = "waiter_timeout"
-    step_id: StepId = Field(validation_alias="step_name")
+    step_id: StepId = Field(validation_alias=_STEP_ID_ALIAS)
     waiter_id: str
+    invocation_namespace: tuple[str, ...] = ()
+
+
+class TickNamespaceTimeout(BaseModel):
+    """When processed, times out a single child namespace (not the whole run).
+
+    Scheduled when the first event routes into a child namespace that declares a
+    ``timeout``. On fire it expires *that child* through the namespaced failure
+    path (so the child's ``@catch_error`` can recover it); only the root timeout
+    (:class:`TickTimeout`) halts the whole run. ``started_at`` pins the activation
+    this tick was scheduled for: if the namespace has since completed or been
+    re-armed, the tick is a stale no-op.
+    """
+
+    model_config = ConfigDict(frozen=True)
+    type: Literal["namespace_timeout"] = "namespace_timeout"
+    namespace: tuple[str, ...]
+    timeout: float
+    started_at: float
 
 
 class TickIdleCheck(BaseModel):
@@ -137,6 +179,7 @@ WorkflowTick = Annotated[
     | TickPublishEvent
     | TickTimeout
     | TickWaiterTimeout
+    | TickNamespaceTimeout
     | TickIdleCheck
     | TickIdleRelease
     | TickWakeup,
