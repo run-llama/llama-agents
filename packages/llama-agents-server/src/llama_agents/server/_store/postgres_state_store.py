@@ -92,14 +92,18 @@ class _PostgresStateStorage:
         """Load raw state from the database."""
         async with self._acquire() as conn:
             row = await conn.fetchrow(
-                f"SELECT state_json FROM {self._table_ref} "
+                f"SELECT state_json, state_type, state_module FROM {self._table_ref} "
                 "WHERE run_id = $1 AND namespace = $2",
                 self._run_id,
                 self._namespace_key,
             )
         if row is None:
             return None
-        return StateRecord(data=row["state_json"])
+        return StateRecord(
+            data=row["state_json"],
+            state_type=row["state_type"],
+            state_module=row["state_module"],
+        )
 
     async def save(self, record: StateRecord) -> None:
         """Save raw state to the database via upsert."""

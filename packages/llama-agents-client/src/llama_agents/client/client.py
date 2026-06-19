@@ -324,6 +324,7 @@ class WorkflowClient:
         self,
         handler_id: str,
         include_internal_events: bool = False,
+        include_children: bool = False,
         after_sequence: int | Literal["now"] = -1,
         max_reconnect_attempts: int = 3,
     ) -> EventStream:
@@ -344,6 +345,8 @@ class WorkflowClient:
             handler_id: ID of the handler running the workflow.
             include_internal_events: Include internal dispatch events.
                 Defaults to ``False``.
+            include_children: Include events emitted from child workflow namespaces.
+                Defaults to ``False``.
             after_sequence: Where to start streaming. ``-1`` (default) streams
                 all events from the beginning. ``"now"`` skips existing events
                 and only delivers new ones. An integer ``N`` streams events
@@ -356,6 +359,7 @@ class WorkflowClient:
 
         async def reader() -> None:
             incl_inter = "true" if include_internal_events else "false"
+            incl_children = "true" if include_children else "false"
             url = f"/events/{handler_id}"
             last_sequence: int | Literal["now"] = after_sequence
             attempts = 0
@@ -369,6 +373,7 @@ class WorkflowClient:
                                 params={
                                     "sse": "true",
                                     "include_internal": incl_inter,
+                                    "include_children": incl_children,
                                     "after_sequence": str(last_sequence),
                                 },
                                 headers={"Connection": "keep-alive"},

@@ -83,8 +83,8 @@ class AgentCoreRuntimeDecorator(ServerRuntimeDecorator):
         if name not in self._tracked:
             self._tracked[name] = workflow
         wrapped_steps: dict[StepId, StepWorkerFunction] = {
-            step_name: as_agentcore_async_task(self.app, f"{name}.{step_name}", step)
-            for step_name, step in as_step_worker_functions(workflow).items()
+            step_id: as_agentcore_async_task(self.app, f"{name}.{step_id}", step)
+            for step_id, step in as_step_worker_functions(workflow).items()
         }
         run_fn = create_workflow_run_function(workflow)
         registered = RegisteredWorkflow(

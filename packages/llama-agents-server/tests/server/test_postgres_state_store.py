@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import json
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 
 import asyncpg
 import pytest
@@ -324,21 +324,22 @@ async def test_from_dict_rejects_wrong_provider_handle(pool: asyncpg.Pool) -> No
 class FakeConnection:
     """Connection-level fake speaking the storage's fetchrow/execute dialect."""
 
-    def __init__(self, rows: dict[str, str]) -> None:
+    def __init__(self, rows: dict[str, dict[str, Any]]) -> None:
         self._rows = rows
 
     async def fetchrow(
         self, query: str, run_id: str, namespace: str
-    ) -> dict[str, str] | None:
-        state_json = self._rows.get(f"{run_id}\x00{namespace}")
-        if state_json is None:
-            return None
-        return {"state_json": state_json}
+    ) -> dict[str, Any] | None:
+        return self._rows.get(f"{run_id}\x00{namespace}")
 
     async def execute(self, query: str, *args: object) -> None:
         # Save upsert: (run_id, namespace, state_json, state_type, state_module, now, now)
-        run_id, namespace, state_json = str(args[0]), str(args[1]), str(args[2])
-        self._rows[f"{run_id}\x00{namespace}"] = state_json
+        run_id, namespace = str(args[0]), str(args[1])
+        self._rows[f"{run_id}\x00{namespace}"] = {
+            "state_json": args[2],
+            "state_type": args[3],
+            "state_module": args[4],
+        }
 
 
 class FakePoolAcquire:
@@ -357,7 +358,7 @@ class FakePool:
     """Counting asyncpg.Pool stand-in."""
 
     def __init__(self) -> None:
-        self.rows: dict[str, str] = {}
+        self.rows: dict[str, dict[str, Any]] = {}
         self.connection = FakeConnection(self.rows)
         self.acquire_count = 0
         self.release_count = 0
