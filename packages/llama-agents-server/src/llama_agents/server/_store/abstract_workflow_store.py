@@ -247,6 +247,8 @@ class AbstractWorkflowStore(ABC):
     def _is_terminal_event(event: StoredEvent) -> bool:
         """Check if a stored event is terminal (StopEvent or subclass, etc.)."""
 
+        if event.event.origin_namespace:
+            return False
         types = (event.event.types or []) + [event.event.type]
         return StopEvent.__name__ in types
 
