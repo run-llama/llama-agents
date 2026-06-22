@@ -33,6 +33,7 @@ from workflows.context.state_store import InMemoryStateStore, StateStore
 from workflows.decorators import step
 from workflows.events import Event, StartEvent, StopEvent, WorkflowIdleEvent
 from workflows.runtime.runtime_decorators import BaseRuntimeDecorator
+from workflows.runtime.types.internal_state import BrokerState
 from workflows.runtime.types.plugin import (
     ExternalRunAdapter,
     InternalRunAdapter,
@@ -450,14 +451,14 @@ async def test_idle_event_skips_release_schedule_if_lifecycle_create_fails(
 
     lifecycle = FailingCreateLifecycle()
     decorator = _make_decorator(stub_runtime, store, mock_journal_crud, lifecycle)
-    adapter = _DBOSIdleReleaseInternalRunAdapter(
-        StubInternalAdapter(run_id="run-1"), decorator, store
-    )
+    inner_adapter = StubInternalAdapter(run_id="run-1")
+    adapter = _DBOSIdleReleaseInternalRunAdapter(inner_adapter, decorator, store)
 
     await adapter.write_to_event_stream(WorkflowIdleEvent())
 
     assert "run-1" not in decorator._deferred_release_tasks
     assert lifecycle.get_state("run-1") is None
+    assert inner_adapter.written_events == []
 
 
 @pytest.mark.asyncio()
@@ -863,7 +864,7 @@ async def test_do_resume_stops_if_resume_ownership_was_lost(
 
 
 @pytest.mark.asyncio()
-async def test_do_resume_refreshes_owner_before_starting_replacement(
+async def test_do_resume_refreshes_owner_before_purging_or_starting_replacement(
     decorator: DBOSIdleReleaseDecorator,
     store: MemoryWorkflowStore,
     stub_runtime: StubRuntime,
@@ -881,18 +882,23 @@ async def test_do_resume_refreshes_owner_before_starting_replacement(
     )
     claim = await _claim_resume(lifecycle)
 
-    async def _delete_and_steal(run_id: str) -> None:
+    async def _rebuild_and_steal(workflow: Workflow, run_id: str) -> BrokerState:
         lifecycle._states[run_id] = (
             RunLifecycleState.resuming,
             datetime.now(timezone.utc),
         )
+        return BrokerState.from_workflow(workflow)
 
-    mock_journal_crud.delete.side_effect = _delete_and_steal
+    decorator._broker_state_from_ticks = AsyncMock(  # type: ignore[method-assign]
+        side_effect=_rebuild_and_steal
+    )
 
     result = await decorator._do_resume("run-1", resume_claim=claim)
 
     assert result is None
     assert len(stub_runtime.run_workflow_calls) == 0
+    mock_dbos.delete_workflow_async.assert_not_called()
+    mock_journal_crud.delete.assert_not_called()
 
 
 @pytest.mark.asyncio()

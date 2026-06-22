@@ -54,6 +54,7 @@ from workflows.runtime.types.ticks import (
 from workflows.workflow import Workflow
 
 from dbos import DBOS
+from dbos._error import DBOSNonExistentWorkflowError
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,6 @@ class _DBOSIdleReleaseInternalRunAdapter(BaseInternalRunAdapterDecorator):
 
     @override
     async def write_to_event_stream(self, event: Event) -> None:
-        await super().write_to_event_stream(event)
         if isinstance(event, WorkflowIdleEvent):
             try:
                 await self._runtime._create_lifecycle(self.run_id)
@@ -99,6 +99,8 @@ class _DBOSIdleReleaseInternalRunAdapter(BaseInternalRunAdapterDecorator):
                     exc_info=True,
                 )
                 return
+        await super().write_to_event_stream(event)
+        if isinstance(event, WorkflowIdleEvent):
             self._runtime._schedule_deferred_release(self.run_id)
 
 
@@ -312,6 +314,11 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
                 "Timed out awaiting stale releasing DBOS workflow before resume "
                 f"[run_id={run_id}]"
             )
+        except DBOSNonExistentWorkflowError:
+            logger.debug(
+                f"Old DBOS workflow already purged before resume [run_id={run_id}]",
+                exc_info=True,
+            )
         except Exception:
             logger.warning(
                 f"Failed to await old DBOS workflow for run_id={run_id}",
@@ -386,6 +393,10 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
                     f"Failed to carry over state from run {run_id}", exc_info=True
                 )
 
+        owner_claim = await lifecycle.refresh_resume_owner(run_id, owner_claim.version)
+        if owner_claim is None:
+            return None
+
         # Purge DBOS state and journal so the same run_id can be reused.
         try:
             await DBOS.delete_workflow_async(run_id)
@@ -400,10 +411,6 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
                 logger.debug(
                     f"Journal already purged for run_id={run_id}", exc_info=True
                 )
-
-        owner_claim = await lifecycle.refresh_resume_owner(run_id, owner_claim.version)
-        if owner_claim is None:
-            return None
 
         # Start new workflow run with the same run_id.
         new_adapter = self._decorated.run_workflow(
