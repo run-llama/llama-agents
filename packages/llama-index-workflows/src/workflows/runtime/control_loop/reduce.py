@@ -1378,7 +1378,16 @@ def _process_add_event_tick(
     """
     state = init.deepcopy()
     if tick.work_item_id is None:
-        tick = tick.model_copy(update={"work_item_id": _next_work_item_id(state)})
+        # A collect re-delivery derives its id from the payload's stable
+        # stream+binding key so it matches the invocation fired at release time
+        # and never re-mints a fresh id on resume; everything else mints from the
+        # monotonic counter.
+        work_item_id = (
+            tick.collection_release_payload.work_item_id()
+            if tick.collection_release_payload is not None
+            else _next_work_item_id(state)
+        )
+        tick = tick.model_copy(update={"work_item_id": work_item_id})
     if isinstance(tick.event, StartEvent):
         state.is_running = True
 

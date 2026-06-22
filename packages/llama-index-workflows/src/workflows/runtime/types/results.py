@@ -131,6 +131,18 @@ class CollectionReleasePayload:
             binding_id=self.binding_id,
         )
 
+    def work_item_id(self) -> str:
+        """Stable work item id for this collect invocation.
+
+        Collect invocations are fired directly (not via a routed tick), so the
+        monotonic work-item counter never sees them. Their stream+binding key is
+        already unique and carried on the payload across serialize/resume, so use
+        it as the work item id. This keeps two collect invocations of the same
+        step distinct and lets a suspended collect invocation recreate the same
+        implicit waiter id on resume.
+        """
+        return f"work_item_collect_{self.stream_id}:{self.binding_id}"
+
 
 # Tick wire format for the payload's member events: the same SerializableEvent
 # codec every other tick/result event field uses (events.py).
