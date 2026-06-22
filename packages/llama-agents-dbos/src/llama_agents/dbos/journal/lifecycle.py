@@ -28,7 +28,7 @@ class RunLifecycleState(str, Enum):
 
 @dataclass(frozen=True)
 class ResumeClaim:
-    version: datetime | str
+    version: datetime
     previous_state: RunLifecycleState
 
 
@@ -72,13 +72,13 @@ class RunLifecycleLock(ABC):
 
     @abstractmethod
     async def refresh_resume_owner(
-        self, run_id: str, version: datetime | str
+        self, run_id: str, version: datetime
     ) -> ResumeClaim | None:
         """Refresh resume ownership timestamp and return the new owner claim."""
         ...
 
     @abstractmethod
-    async def complete_resume(self, run_id: str, version: datetime | str) -> bool:
+    async def complete_resume(self, run_id: str, version: datetime) -> bool:
         """CAS: resuming with version -> active. Returns True on success."""
         ...
 
@@ -162,10 +162,8 @@ class PostgresRunLifecycleLock(RunLifecycleLock):
                 return state
 
     async def refresh_resume_owner(
-        self, run_id: str, version: datetime | str
+        self, run_id: str, version: datetime
     ) -> ResumeClaim | None:
-        if not isinstance(version, datetime):
-            return None
         row = await self._pool.fetchrow(
             f"UPDATE {self._table_ref} SET updated_at = $1 "
             f"WHERE run_id = $2 AND state = $3 AND updated_at = $4 RETURNING updated_at",
@@ -181,9 +179,7 @@ class PostgresRunLifecycleLock(RunLifecycleLock):
             previous_state=RunLifecycleState.resuming,
         )
 
-    async def complete_resume(self, run_id: str, version: datetime | str) -> bool:
-        if not isinstance(version, datetime):
-            return False
+    async def complete_resume(self, run_id: str, version: datetime) -> bool:
         row = await self._pool.fetchrow(
             f"UPDATE {self._table_ref} SET state = $1, updated_at = $2 "
             f"WHERE run_id = $3 AND state = $4 AND updated_at = $5 RETURNING run_id",
@@ -217,6 +213,10 @@ class SqliteRunLifecycleLock(RunLifecycleLock):
         finally:
             conn.close()
 
+    @staticmethod
+    def _datetime_text(value: datetime) -> str:
+        return value.isoformat()
+
     async def create(self, run_id: str) -> None:
         async with self._lock(run_id):
             with self._connect() as conn:
@@ -226,7 +226,7 @@ class SqliteRunLifecycleLock(RunLifecycleLock):
                     (
                         run_id,
                         RunLifecycleState.active.value,
-                        datetime.now(timezone.utc).isoformat(),
+                        self._datetime_text(datetime.now(timezone.utc)),
                     ),
                 )
                 conn.commit()
@@ -239,7 +239,7 @@ class SqliteRunLifecycleLock(RunLifecycleLock):
                     f"WHERE run_id = ? AND state = ?",
                     (
                         RunLifecycleState.releasing.value,
-                        datetime.now(timezone.utc).isoformat(),
+                        self._datetime_text(datetime.now(timezone.utc)),
                         run_id,
                         RunLifecycleState.active.value,
                     ),
@@ -255,7 +255,7 @@ class SqliteRunLifecycleLock(RunLifecycleLock):
                     f"WHERE run_id = ? AND state = ?",
                     (
                         RunLifecycleState.released.value,
-                        datetime.now(timezone.utc).isoformat(),
+                        self._datetime_text(datetime.now(timezone.utc)),
                         run_id,
                         RunLifecycleState.releasing.value,
                     ),
@@ -294,12 +294,12 @@ class SqliteRunLifecycleLock(RunLifecycleLock):
                             ).total_seconds()
                             > crash_timeout_seconds
                         ):
-                            version = datetime.now(timezone.utc).isoformat()
+                            version = datetime.now(timezone.utc)
                             conn.execute(
                                 f"UPDATE {self._table_ref} SET state = ?, updated_at = ? WHERE run_id = ?",
                                 (
                                     RunLifecycleState.resuming.value,
-                                    version,
+                                    self._datetime_text(version),
                                     run_id,
                                 ),
                             )
@@ -311,19 +311,19 @@ class SqliteRunLifecycleLock(RunLifecycleLock):
                     raise
 
     async def refresh_resume_owner(
-        self, run_id: str, version: datetime | str
+        self, run_id: str, version: datetime
     ) -> ResumeClaim | None:
         async with self._lock(run_id):
             with self._connect() as conn:
-                new_version = datetime.now(timezone.utc).isoformat()
+                new_version = datetime.now(timezone.utc)
                 cursor = conn.execute(
                     f"UPDATE {self._table_ref} SET updated_at = ? "
                     f"WHERE run_id = ? AND state = ? AND updated_at = ?",
                     (
-                        new_version,
+                        self._datetime_text(new_version),
                         run_id,
                         RunLifecycleState.resuming.value,
-                        version,
+                        self._datetime_text(version),
                     ),
                 )
                 conn.commit()
@@ -334,7 +334,7 @@ class SqliteRunLifecycleLock(RunLifecycleLock):
                     previous_state=RunLifecycleState.resuming,
                 )
 
-    async def complete_resume(self, run_id: str, version: datetime | str) -> bool:
+    async def complete_resume(self, run_id: str, version: datetime) -> bool:
         async with self._lock(run_id):
             with self._connect() as conn:
                 cursor = conn.execute(
@@ -342,10 +342,10 @@ class SqliteRunLifecycleLock(RunLifecycleLock):
                     f"WHERE run_id = ? AND state = ? AND updated_at = ?",
                     (
                         RunLifecycleState.active.value,
-                        datetime.now(timezone.utc).isoformat(),
+                        self._datetime_text(datetime.now(timezone.utc)),
                         run_id,
                         RunLifecycleState.resuming.value,
-                        version,
+                        self._datetime_text(version),
                     ),
                 )
                 conn.commit()

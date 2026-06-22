@@ -234,7 +234,7 @@ class FakeLifecycleLock(RunLifecycleLock):
         return state
 
     async def refresh_resume_owner(
-        self, run_id: str, version: datetime | str
+        self, run_id: str, version: datetime
     ) -> ResumeClaim | None:
         entry = self._states.get(run_id)
         if (
@@ -253,7 +253,7 @@ class FakeLifecycleLock(RunLifecycleLock):
             previous_state=RunLifecycleState.resuming,
         )
 
-    async def complete_resume(self, run_id: str, version: datetime | str) -> bool:
+    async def complete_resume(self, run_id: str, version: datetime) -> bool:
         entry = self._states.get(run_id)
         if (
             entry is None

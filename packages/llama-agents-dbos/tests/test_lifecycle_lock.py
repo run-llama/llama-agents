@@ -263,9 +263,10 @@ async def test_resume_claim_fences_completion(lock_fixture: LockFixture) -> None
     claim = await lock.try_begin_resume("run-1")
     assert isinstance(claim, ResumeClaim)
 
-    assert await lock.complete_resume("run-1", "wrong-token") is False
+    wrong_version = datetime.now(timezone.utc) - timedelta(days=1)
+    assert await lock.complete_resume("run-1", wrong_version) is False
     assert await lock.try_begin_resume("run-1") == RunLifecycleState.resuming
-    assert await lock.refresh_resume_owner("run-1", "wrong-token") is None
+    assert await lock.refresh_resume_owner("run-1", wrong_version) is None
     refreshed_claim = await lock.refresh_resume_owner("run-1", claim.version)
     assert isinstance(refreshed_claim, ResumeClaim)
     assert await lock.complete_resume("run-1", claim.version) is False
