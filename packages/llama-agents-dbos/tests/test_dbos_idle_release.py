@@ -33,7 +33,6 @@ from workflows.context.state_store import InMemoryStateStore, StateStore
 from workflows.decorators import step
 from workflows.events import Event, StartEvent, StopEvent, WorkflowIdleEvent
 from workflows.runtime.runtime_decorators import BaseRuntimeDecorator
-from workflows.runtime.types.internal_state import BrokerState
 from workflows.runtime.types.plugin import (
     ExternalRunAdapter,
     InternalRunAdapter,
@@ -377,7 +376,9 @@ async def _claim_resume(
 
 @pytest.mark.asyncio()
 async def test_idle_event_schedules_release_without_stamping_idle_since(
-    decorator: DBOSIdleReleaseDecorator, store: MemoryWorkflowStore
+    decorator: DBOSIdleReleaseDecorator,
+    store: MemoryWorkflowStore,
+    lifecycle: FakeLifecycleLock,
 ) -> None:
     """WorkflowIdleEvent should schedule deferred release but NOT stamp idle_since."""
     inner_adapter = StubInternalAdapter(run_id="run-1")
@@ -398,29 +399,13 @@ async def test_idle_event_schedules_release_without_stamping_idle_since(
     # Should have a deferred release task tracked by run_id
     assert "run-1" in decorator._deferred_release_tasks
 
-
-@pytest.mark.asyncio()
-async def test_run_workflow_creates_lifecycle_row(
-    decorator: DBOSIdleReleaseDecorator,
-    lifecycle: FakeLifecycleLock,
-) -> None:
-    workflow = SimpleWorkflow()
-
-    decorator.run_workflow(
-        "run-1",
-        workflow,
-        init_state=BrokerState.from_workflow(workflow),
-        start_event=StartEvent(),
-    )
-    await asyncio.sleep(0)
-
     state = lifecycle.get_state("run-1")
     assert state is not None
     assert state[0] == RunLifecycleState.active
 
 
 @pytest.mark.asyncio()
-async def test_release_waits_for_lifecycle_create(
+async def test_idle_event_waits_for_lifecycle_create_before_scheduling_release(
     stub_runtime: StubRuntime,
     store: MemoryWorkflowStore,
     mock_journal_crud: AsyncMock,
@@ -436,111 +421,43 @@ async def test_release_waits_for_lifecycle_create(
 
     lifecycle = SlowCreateLifecycle()
     decorator = _make_decorator(stub_runtime, store, mock_journal_crud, lifecycle)
-    workflow = SimpleWorkflow()
-    stub_runtime._external_adapters["run-1"] = StubExternalAdapter(run_id="run-1")
-
-    decorator.run_workflow(
-        "run-1",
-        workflow,
-        init_state=BrokerState.from_workflow(workflow),
-        start_event=StartEvent(),
+    adapter = _DBOSIdleReleaseInternalRunAdapter(
+        StubInternalAdapter(run_id="run-1"), decorator, store
     )
-    release_task = asyncio.create_task(decorator._release_idle_handler("run-1"))
+    write_task = asyncio.create_task(adapter.write_to_event_stream(WorkflowIdleEvent()))
     await asyncio.sleep(0)
 
-    ext = stub_runtime._external_adapters["run-1"]
-    assert ext.sent_events == []
+    assert "run-1" not in decorator._deferred_release_tasks
 
     lifecycle.allow_create.set()
-    await release_task
+    await write_task
 
     state = lifecycle.get_state("run-1")
     assert state is not None
-    assert state[0] in (RunLifecycleState.releasing, RunLifecycleState.released)
-    assert len(ext.sent_events) == 1
-    assert isinstance(ext.sent_events[0], TickIdleRelease)
-
-
-@pytest.mark.asyncio()
-async def test_deferred_release_can_be_cancelled_while_lifecycle_create_pending(
-    stub_runtime: StubRuntime,
-    store: MemoryWorkflowStore,
-    mock_journal_crud: AsyncMock,
-) -> None:
-    class SlowCreateLifecycle(FakeLifecycleLock):
-        def __init__(self) -> None:
-            super().__init__()
-            self.allow_create = asyncio.Event()
-
-        async def create(self, run_id: str) -> None:
-            await self.allow_create.wait()
-            await super().create(run_id)
-
-    lifecycle = SlowCreateLifecycle()
-    decorator = _make_decorator(
-        stub_runtime, store, mock_journal_crud, lifecycle, idle_timeout=0.01
-    )
-    workflow = SimpleWorkflow()
-    stub_runtime._external_adapters["run-1"] = StubExternalAdapter(run_id="run-1")
-
-    decorator.run_workflow(
-        "run-1",
-        workflow,
-        init_state=BrokerState.from_workflow(workflow),
-        start_event=StartEvent(),
-    )
-    decorator._schedule_deferred_release("run-1")
-    await asyncio.sleep(0.05)
-
+    assert state[0] == RunLifecycleState.active
     assert "run-1" in decorator._deferred_release_tasks
-    decorator._cancel_deferred_release("run-1")
-    lifecycle.allow_create.set()
-    await asyncio.sleep(0)
-
-    ext = stub_runtime._external_adapters["run-1"]
-    assert ext.sent_events == []
-    state = lifecycle.get_state("run-1")
-    assert state is not None
-    assert state[0] == RunLifecycleState.active
 
 
 @pytest.mark.asyncio()
-async def test_cancelled_deferred_release_does_not_cancel_lifecycle_create(
+async def test_idle_event_skips_release_schedule_if_lifecycle_create_fails(
     stub_runtime: StubRuntime,
     store: MemoryWorkflowStore,
     mock_journal_crud: AsyncMock,
 ) -> None:
-    class SlowCreateLifecycle(FakeLifecycleLock):
-        def __init__(self) -> None:
-            super().__init__()
-            self.allow_create = asyncio.Event()
-
+    class FailingCreateLifecycle(FakeLifecycleLock):
         async def create(self, run_id: str) -> None:
-            await self.allow_create.wait()
-            await super().create(run_id)
+            raise RuntimeError("create failed")
 
-    lifecycle = SlowCreateLifecycle()
-    decorator = _make_decorator(
-        stub_runtime, store, mock_journal_crud, lifecycle, idle_timeout=0.01
+    lifecycle = FailingCreateLifecycle()
+    decorator = _make_decorator(stub_runtime, store, mock_journal_crud, lifecycle)
+    adapter = _DBOSIdleReleaseInternalRunAdapter(
+        StubInternalAdapter(run_id="run-1"), decorator, store
     )
-    workflow = SimpleWorkflow()
 
-    decorator.run_workflow(
-        "run-1",
-        workflow,
-        init_state=BrokerState.from_workflow(workflow),
-        start_event=StartEvent(),
-    )
-    decorator._schedule_deferred_release("run-1")
-    await asyncio.sleep(0.05)
+    await adapter.write_to_event_stream(WorkflowIdleEvent())
 
-    decorator._cancel_deferred_release("run-1")
-    lifecycle.allow_create.set()
-    await asyncio.sleep(0)
-
-    state = lifecycle.get_state("run-1")
-    assert state is not None
-    assert state[0] == RunLifecycleState.active
+    assert "run-1" not in decorator._deferred_release_tasks
+    assert lifecycle.get_state("run-1") is None
 
 
 @pytest.mark.asyncio()

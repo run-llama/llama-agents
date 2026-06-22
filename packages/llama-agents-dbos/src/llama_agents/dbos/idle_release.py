@@ -27,10 +27,10 @@ from llama_agents.server._store.abstract_workflow_store import (
     stream_workflow_ticks,
 )
 from typing_extensions import override
-from workflows.context.serializers import BaseSerializer, JsonSerializer
+from workflows.context.serializers import JsonSerializer
 from workflows.context.state_store import infer_state_type
 from workflows.context.state_store_integration import state_store_handoff
-from workflows.events import Event, StartEvent, WorkflowIdleEvent
+from workflows.events import Event, WorkflowIdleEvent
 from workflows.runtime.control_loop import (
     rebuild_state_from_ticks,
     rebuild_state_from_ticks_stream,
@@ -90,6 +90,15 @@ class _DBOSIdleReleaseInternalRunAdapter(BaseInternalRunAdapterDecorator):
     async def write_to_event_stream(self, event: Event) -> None:
         await super().write_to_event_stream(event)
         if isinstance(event, WorkflowIdleEvent):
+            try:
+                await self._runtime._create_lifecycle(self.run_id)
+            except Exception:
+                logger.warning(
+                    "Skipping DBOS idle release scheduling after lifecycle init "
+                    f"failure [run_id={self.run_id}]",
+                    exc_info=True,
+                )
+                return
             self._runtime._schedule_deferred_release(self.run_id)
 
 
@@ -161,7 +170,6 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
         super().__init__(decorated)
         self._store = store
         self._deferred_release_tasks: dict[str, asyncio.Task[None]] = {}
-        self._lifecycle_create_tasks: dict[str, asyncio.Task[None]] = {}
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._idle_timeout = idle_timeout
         self._workflows: dict[str, Workflow] = {}
@@ -205,53 +213,9 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
         task.add_done_callback(self._background_tasks.discard)
         return task
 
-    @override
-    def run_workflow(
-        self,
-        run_id: str,
-        workflow: Workflow,
-        init_state: BrokerState,
-        start_event: StartEvent | None = None,
-        serialized_state: dict[str, Any] | None = None,
-        serializer: BaseSerializer | None = None,
-    ) -> ExternalRunAdapter:
-        adapter = super().run_workflow(
-            run_id,
-            workflow,
-            init_state,
-            start_event=start_event,
-            serialized_state=serialized_state,
-            serializer=serializer,
-        )
-        self._schedule_lifecycle_create(run_id)
-        return adapter
-
-    def _schedule_lifecycle_create(self, run_id: str) -> None:
-        task = self._lifecycle_create_tasks.get(run_id)
-        if task is None or task.done():
-            task = self._spawn_task(self._create_lifecycle(run_id))
-            self._lifecycle_create_tasks[run_id] = task
-            task.add_done_callback(
-                lambda completed: self._on_lifecycle_create_done(run_id, completed)
-            )
-
-    def _on_lifecycle_create_done(self, run_id: str, task: asyncio.Task[None]) -> None:
-        if self._lifecycle_create_tasks.get(run_id) is task:
-            self._lifecycle_create_tasks.pop(run_id, None)
-        if not task.cancelled() and (exc := task.exception()) is not None:
-            logger.warning(
-                f"Failed to initialize DBOS lifecycle row [run_id={run_id}]",
-                exc_info=(type(exc), exc, exc.__traceback__),
-            )
-
     async def _create_lifecycle(self, run_id: str) -> None:
         lifecycle = await self._get_lifecycle()
         await lifecycle.create(run_id)
-
-    async def _await_lifecycle_create(self, run_id: str) -> None:
-        task = self._lifecycle_create_tasks.get(run_id)
-        if task is not None:
-            await asyncio.shield(task)
 
     def _schedule_deferred_release(self, run_id: str) -> None:
         """Cancel any existing timer for run_id and schedule a new one."""
@@ -281,15 +245,6 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
 
     async def _release_idle_handler(self, run_id: str) -> None:
         """Release an idle handler by sending TickIdleRelease."""
-        try:
-            await self._await_lifecycle_create(run_id)
-        except Exception:
-            self._clear_current_deferred_release(run_id)
-            logger.warning(
-                f"Skipping idle release after lifecycle init failure [run_id={run_id}]",
-                exc_info=True,
-            )
-            return
         self._clear_current_deferred_release(run_id)
         lifecycle = await self._get_lifecycle()
         if not await lifecycle.begin_release(run_id):
