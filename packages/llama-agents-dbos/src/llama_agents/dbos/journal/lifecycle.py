@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Iterator
-from uuid import uuid4
 
 import asyncpg
 from llama_agents.dbos.journal.crud import _qualified_table_ref, _quote_identifier
@@ -29,7 +28,7 @@ class RunLifecycleState(str, Enum):
 
 @dataclass(frozen=True)
 class ResumeClaim:
-    token: str
+    token: datetime | str
     previous_state: RunLifecycleState
 
 
@@ -72,17 +71,19 @@ class RunLifecycleLock(ABC):
         ...
 
     @abstractmethod
-    async def is_resume_owner(self, run_id: str, token: str) -> bool:
+    async def is_resume_owner(self, run_id: str, token: datetime | str) -> bool:
         """Return whether token still owns the resuming row."""
         ...
 
     @abstractmethod
-    async def refresh_resume_owner(self, run_id: str, token: str) -> bool:
-        """Refresh resume ownership timestamp. Returns True if token still owns it."""
+    async def refresh_resume_owner(
+        self, run_id: str, token: datetime | str
+    ) -> ResumeClaim | None:
+        """Refresh resume ownership timestamp and return the new owner claim."""
         ...
 
     @abstractmethod
-    async def complete_resume(self, run_id: str, token: str) -> bool:
+    async def complete_resume(self, run_id: str, token: datetime | str) -> bool:
         """CAS: resuming with token -> active. Returns True on success."""
         ...
 
@@ -103,7 +104,7 @@ class PostgresRunLifecycleLock(RunLifecycleLock):
         await self._pool.execute(
             f"INSERT INTO {self._table_ref} (run_id, state, updated_at) "
             f"VALUES ($1, $2, $3) "
-            f"ON CONFLICT (run_id) DO UPDATE SET state = $2, resume_token = NULL, updated_at = $3",
+            f"ON CONFLICT (run_id) DO UPDATE SET state = $2, updated_at = $3",
             run_id,
             RunLifecycleState.active.value,
             datetime.now(timezone.utc),
@@ -111,7 +112,7 @@ class PostgresRunLifecycleLock(RunLifecycleLock):
 
     async def begin_release(self, run_id: str) -> bool:
         row = await self._pool.fetchrow(
-            f"UPDATE {self._table_ref} SET state = $1, resume_token = NULL, updated_at = $2 "
+            f"UPDATE {self._table_ref} SET state = $1, updated_at = $2 "
             f"WHERE run_id = $3 AND state = $4 RETURNING run_id",
             RunLifecycleState.releasing.value,
             datetime.now(timezone.utc),
@@ -122,7 +123,7 @@ class PostgresRunLifecycleLock(RunLifecycleLock):
 
     async def complete_release(self, run_id: str) -> bool:
         row = await self._pool.fetchrow(
-            f"UPDATE {self._table_ref} SET state = $1, resume_token = NULL, updated_at = $2 "
+            f"UPDATE {self._table_ref} SET state = $1, updated_at = $2 "
             f"WHERE run_id = $3 AND state = $4 RETURNING run_id",
             RunLifecycleState.released.value,
             datetime.now(timezone.utc),
@@ -152,43 +153,57 @@ class PostgresRunLifecycleLock(RunLifecycleLock):
                     and (datetime.now(timezone.utc) - row["updated_at"]).total_seconds()
                     > crash_timeout_seconds
                 ):
-                    token = uuid4().hex
-                    await conn.execute(
-                        f"UPDATE {self._table_ref} SET state = $1, resume_token = $2, updated_at = $3 "
-                        f"WHERE run_id = $4",
+                    claim_row = await conn.fetchrow(
+                        f"UPDATE {self._table_ref} SET state = $1, updated_at = $2 "
+                        f"WHERE run_id = $3 RETURNING updated_at",
                         RunLifecycleState.resuming.value,
-                        token,
                         datetime.now(timezone.utc),
                         run_id,
                     )
-                    return ResumeClaim(token=token, previous_state=state)
+                    return ResumeClaim(
+                        token=claim_row["updated_at"],
+                        previous_state=state,
+                    )
                 return state
 
-    async def is_resume_owner(self, run_id: str, token: str) -> bool:
+    async def is_resume_owner(self, run_id: str, token: datetime | str) -> bool:
+        if not isinstance(token, datetime):
+            return False
         row = await self._pool.fetchrow(
             f"SELECT run_id FROM {self._table_ref} "
-            f"WHERE run_id = $1 AND state = $2 AND resume_token = $3",
+            f"WHERE run_id = $1 AND state = $2 AND updated_at = $3",
             run_id,
             RunLifecycleState.resuming.value,
             token,
         )
         return row is not None
 
-    async def refresh_resume_owner(self, run_id: str, token: str) -> bool:
+    async def refresh_resume_owner(
+        self, run_id: str, token: datetime | str
+    ) -> ResumeClaim | None:
+        if not isinstance(token, datetime):
+            return None
         row = await self._pool.fetchrow(
             f"UPDATE {self._table_ref} SET updated_at = $1 "
-            f"WHERE run_id = $2 AND state = $3 AND resume_token = $4 RETURNING run_id",
+            f"WHERE run_id = $2 AND state = $3 AND updated_at = $4 RETURNING updated_at",
             datetime.now(timezone.utc),
             run_id,
             RunLifecycleState.resuming.value,
             token,
         )
-        return row is not None
+        if row is None:
+            return None
+        return ResumeClaim(
+            token=row["updated_at"],
+            previous_state=RunLifecycleState.resuming,
+        )
 
-    async def complete_resume(self, run_id: str, token: str) -> bool:
+    async def complete_resume(self, run_id: str, token: datetime | str) -> bool:
+        if not isinstance(token, datetime):
+            return False
         row = await self._pool.fetchrow(
-            f"UPDATE {self._table_ref} SET state = $1, resume_token = NULL, updated_at = $2 "
-            f"WHERE run_id = $3 AND state = $4 AND resume_token = $5 RETURNING run_id",
+            f"UPDATE {self._table_ref} SET state = $1, updated_at = $2 "
+            f"WHERE run_id = $3 AND state = $4 AND updated_at = $5 RETURNING run_id",
             RunLifecycleState.active.value,
             datetime.now(timezone.utc),
             run_id,
@@ -237,7 +252,7 @@ class SqliteRunLifecycleLock(RunLifecycleLock):
         async with self._lock(run_id):
             with self._connect() as conn:
                 cursor = conn.execute(
-                    f"UPDATE {self._table_ref} SET state = ?, resume_token = NULL, updated_at = ? "
+                    f"UPDATE {self._table_ref} SET state = ?, updated_at = ? "
                     f"WHERE run_id = ? AND state = ?",
                     (
                         RunLifecycleState.releasing.value,
@@ -253,7 +268,7 @@ class SqliteRunLifecycleLock(RunLifecycleLock):
         async with self._lock(run_id):
             with self._connect() as conn:
                 cursor = conn.execute(
-                    f"UPDATE {self._table_ref} SET state = ?, resume_token = NULL, updated_at = ? "
+                    f"UPDATE {self._table_ref} SET state = ?, updated_at = ? "
                     f"WHERE run_id = ? AND state = ?",
                     (
                         RunLifecycleState.released.value,
@@ -296,13 +311,12 @@ class SqliteRunLifecycleLock(RunLifecycleLock):
                             ).total_seconds()
                             > crash_timeout_seconds
                         ):
-                            token = uuid4().hex
+                            token = datetime.now(timezone.utc).isoformat()
                             conn.execute(
-                                f"UPDATE {self._table_ref} SET state = ?, resume_token = ?, updated_at = ? WHERE run_id = ?",
+                                f"UPDATE {self._table_ref} SET state = ?, updated_at = ? WHERE run_id = ?",
                                 (
                                     RunLifecycleState.resuming.value,
                                     token,
-                                    datetime.now(timezone.utc).isoformat(),
                                     run_id,
                                 ),
                             )
@@ -313,38 +327,46 @@ class SqliteRunLifecycleLock(RunLifecycleLock):
                     conn.rollback()
                     raise
 
-    async def is_resume_owner(self, run_id: str, token: str) -> bool:
+    async def is_resume_owner(self, run_id: str, token: datetime | str) -> bool:
         async with self._lock(run_id):
             with self._connect() as conn:
                 row = conn.execute(
                     f"SELECT run_id FROM {self._table_ref} "
-                    f"WHERE run_id = ? AND state = ? AND resume_token = ?",
+                    f"WHERE run_id = ? AND state = ? AND updated_at = ?",
                     (run_id, RunLifecycleState.resuming.value, token),
                 ).fetchone()
                 return row is not None
 
-    async def refresh_resume_owner(self, run_id: str, token: str) -> bool:
+    async def refresh_resume_owner(
+        self, run_id: str, token: datetime | str
+    ) -> ResumeClaim | None:
         async with self._lock(run_id):
             with self._connect() as conn:
+                new_token = datetime.now(timezone.utc).isoformat()
                 cursor = conn.execute(
                     f"UPDATE {self._table_ref} SET updated_at = ? "
-                    f"WHERE run_id = ? AND state = ? AND resume_token = ?",
+                    f"WHERE run_id = ? AND state = ? AND updated_at = ?",
                     (
-                        datetime.now(timezone.utc).isoformat(),
+                        new_token,
                         run_id,
                         RunLifecycleState.resuming.value,
                         token,
                     ),
                 )
                 conn.commit()
-                return cursor.rowcount > 0
+                if cursor.rowcount == 0:
+                    return None
+                return ResumeClaim(
+                    token=new_token,
+                    previous_state=RunLifecycleState.resuming,
+                )
 
-    async def complete_resume(self, run_id: str, token: str) -> bool:
+    async def complete_resume(self, run_id: str, token: datetime | str) -> bool:
         async with self._lock(run_id):
             with self._connect() as conn:
                 cursor = conn.execute(
-                    f"UPDATE {self._table_ref} SET state = ?, resume_token = NULL, updated_at = ? "
-                    f"WHERE run_id = ? AND state = ? AND resume_token = ?",
+                    f"UPDATE {self._table_ref} SET state = ?, updated_at = ? "
+                    f"WHERE run_id = ? AND state = ? AND updated_at = ?",
                     (
                         RunLifecycleState.active.value,
                         datetime.now(timezone.utc).isoformat(),

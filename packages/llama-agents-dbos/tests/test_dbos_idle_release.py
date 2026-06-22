@@ -228,36 +228,40 @@ class FakeLifecycleLock(RunLifecycleLock):
             and (datetime.now(timezone.utc) - updated_at).total_seconds()
             > crash_timeout_seconds
         ):
-            token = (
-                f"token-{len(self._states)}-{datetime.now(timezone.utc).timestamp()}"
-            )
+            token = datetime.now(timezone.utc)
             self._states[run_id] = (
                 RunLifecycleState.resuming,
-                datetime.now(timezone.utc),
                 token,
+                None,
             )
             return ResumeClaim(token=token, previous_state=state)
         return state
 
-    async def is_resume_owner(self, run_id: str, token: str) -> bool:
+    async def is_resume_owner(self, run_id: str, token: datetime | str) -> bool:
         entry = self._states.get(run_id)
         return (
             entry is not None
             and entry[0] == RunLifecycleState.resuming
-            and entry[2] == token
+            and entry[1] == token
         )
 
-    async def refresh_resume_owner(self, run_id: str, token: str) -> bool:
+    async def refresh_resume_owner(
+        self, run_id: str, token: datetime | str
+    ) -> ResumeClaim | None:
         if not await self.is_resume_owner(run_id, token):
-            return False
+            return None
+        new_token = datetime.now(timezone.utc)
         self._states[run_id] = (
             RunLifecycleState.resuming,
-            datetime.now(timezone.utc),
-            token,
+            new_token,
+            None,
         )
-        return True
+        return ResumeClaim(
+            token=new_token,
+            previous_state=RunLifecycleState.resuming,
+        )
 
-    async def complete_resume(self, run_id: str, token: str) -> bool:
+    async def complete_resume(self, run_id: str, token: datetime | str) -> bool:
         if not await self.is_resume_owner(run_id, token):
             return False
         self._states[run_id] = (
