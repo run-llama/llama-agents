@@ -59,6 +59,8 @@ class TickAddEvent(BaseModel):
     # directly to the binding's target step, before waiter matching and the
     # member-arrival path.
     collection_release_payload: SerializableCollectionReleasePayload = None
+    # Stable identity for this work item when re-delivering suspended work.
+    work_item_id: str | None = None
 
 
 class TickCancelRun(BaseModel):

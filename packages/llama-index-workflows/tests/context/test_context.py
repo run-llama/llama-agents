@@ -45,6 +45,7 @@ from workflows.plugins.basic import (
     BasicRuntime,
     setting_run_id,
 )
+from workflows.retry_policy import retry_policy, stop_after_attempt, wait_fixed
 from workflows.runtime.types.internal_state import BrokerState
 from workflows.runtime.types.ticks import TickAddEvent
 from workflows.testing import WorkflowTestRunner
@@ -425,7 +426,7 @@ async def test_to_dict_after_stream_events_break_resumes() -> None:
             )
             return StopEvent(result=response.response)
 
-    workflow = WaiterWorkflow()
+    workflow = WaiterWorkflow(timeout=1.0)
     handler = workflow.run()
 
     async for ev in handler.stream_events():
@@ -438,6 +439,14 @@ async def test_to_dict_after_stream_events_break_resumes() -> None:
         for worker_data in ctx_dict["workers"].values()
     )
     assert total_waiters == 1
+    waiters = [
+        waiter
+        for worker_data in ctx_dict["workers"].values()
+        for waiter in worker_data["collected_waiters"]
+    ]
+    work_item_id = waiters[0]["work_item_id"]
+    assert work_item_id
+    assert waiters[0]["waiter_id"].endswith(f"_{work_item_id}")
     await handler.cancel_run()
 
     new_ctx = Context.from_dict(workflow, ctx_dict)
@@ -445,6 +454,45 @@ async def test_to_dict_after_stream_events_break_resumes() -> None:
     new_handler.ctx.send_event(NamedResponseEvent(response="bob"))
     result = await new_handler
     assert result == "bob"
+
+
+@pytest.mark.asyncio
+async def test_legacy_implicit_waiter_id_survives_serialization_resume() -> None:
+    """Implicit waiters serialized before work item IDs should still resume."""
+
+    class WaiterWorkflow(Workflow):
+        @step
+        async def ask(self, ctx: Context, ev: StartEvent) -> StopEvent:
+            response = await ctx.wait_for_event(
+                NamedResponseEvent,
+                waiter_event=InputRequiredEvent(),
+            )
+            return StopEvent(result=response.response)
+
+    workflow = WaiterWorkflow(timeout=1.0)
+    handler = workflow.run()
+
+    async for ev in handler.stream_events():
+        if isinstance(ev, InputRequiredEvent):
+            break
+
+    ctx_dict = handler.ctx.to_dict()
+    legacy_waiter_id = (
+        f"waiter_{NamedResponseEvent.__module__}.{NamedResponseEvent.__name__}_"
+        f"{str({})}"
+    )
+    for worker_data in ctx_dict["workers"].values():
+        for waiter in worker_data["collected_waiters"]:
+            waiter["waiter_id"] = legacy_waiter_id
+            waiter.pop("work_item_id", None)
+    ctx_dict.pop("work_item_seq", None)
+    await handler.cancel_run()
+
+    new_ctx = Context.from_dict(workflow, ctx_dict)
+    new_handler = workflow.run(ctx=new_ctx)
+    new_handler.ctx.send_event(NamedResponseEvent(response="legacy"))
+    result = await new_handler
+    assert result == "legacy"
 
 
 class Waiter1(Event):
@@ -537,6 +585,222 @@ async def test_wait_for_multiple_events_in_workflow() -> None:
     result = await handler
     # Order is non-deterministic since waiters run concurrently
     assert sorted(result) == ["buzz", "fizz"]
+
+
+class ParallelWaitEvent(Event):
+    branch: str
+
+
+class ParallelWaitDone(Event):
+    branch: str
+    response: str
+
+
+class ParallelImplicitWaiterWorkflow(Workflow):
+    @step
+    async def dispatch(self, ctx: Context, ev: StartEvent) -> ParallelWaitEvent:
+        for branch in ("a", "b", "c"):
+            ctx.send_event(ParallelWaitEvent(branch=branch))
+        return None  # type: ignore
+
+    @step(num_workers=3)
+    async def wait_branch(
+        self, ctx: Context, ev: ParallelWaitEvent
+    ) -> ParallelWaitDone:
+        response = await ctx.wait_for_event(
+            HumanResponseEvent,
+            waiter_event=InputRequiredEvent(prefix=f"approve {ev.branch}"),  # type: ignore
+        )
+        return ParallelWaitDone(branch=ev.branch, response=response.response)
+
+    @step
+    async def collect(self, ctx: Context, ev: ParallelWaitDone) -> StopEvent:
+        events: list[ParallelWaitDone] | None = ctx.collect_events(  # type: ignore
+            ev, [ParallelWaitDone, ParallelWaitDone, ParallelWaitDone]
+        )
+        if events is None:
+            return None  # type: ignore
+
+        return StopEvent(result=sorted((e.branch, e.response) for e in events))
+
+
+@pytest.mark.asyncio
+async def test_parallel_implicit_waiters_are_not_collapsed() -> None:
+    workflow = ParallelImplicitWaiterWorkflow(timeout=1.0)
+    handler = workflow.run()
+    prefixes: set[str] = set()
+
+    async for ev in handler.stream_events():
+        if isinstance(ev, InputRequiredEvent):
+            prefixes.add(ev.prefix)
+            if len(prefixes) == 3:
+                handler.ctx.send_event(HumanResponseEvent(response="approved"))  # type: ignore
+                break
+
+    assert prefixes == {"approve a", "approve b", "approve c"}
+    result = await handler
+    assert result == [
+        ("a", "approved"),
+        ("b", "approved"),
+        ("c", "approved"),
+    ]
+
+
+class IdenticalWaitEvent(Event):
+    pass
+
+
+class IdenticalWaitDone(Event):
+    response: str
+
+
+class IdenticalImplicitWaiterWorkflow(Workflow):
+    @step
+    async def dispatch(self, ctx: Context, ev: StartEvent) -> IdenticalWaitEvent:
+        for _ in range(3):
+            ctx.send_event(IdenticalWaitEvent())
+        return None  # type: ignore
+
+    @step(num_workers=3)
+    async def wait_branch(
+        self, ctx: Context, ev: IdenticalWaitEvent
+    ) -> IdenticalWaitDone:
+        response = await ctx.wait_for_event(
+            HumanResponseEvent,
+            waiter_event=InputRequiredEvent(prefix="approve"),  # type: ignore
+        )
+        return IdenticalWaitDone(response=response.response)
+
+    @step
+    async def collect(self, ctx: Context, ev: IdenticalWaitDone) -> StopEvent:
+        events: list[IdenticalWaitDone] | None = ctx.collect_events(  # type: ignore
+            ev, [IdenticalWaitDone, IdenticalWaitDone, IdenticalWaitDone]
+        )
+        if events is None:
+            return None  # type: ignore
+
+        return StopEvent(result=[e.response for e in events])
+
+
+@pytest.mark.asyncio
+async def test_parallel_identical_implicit_waiters_are_not_collapsed() -> None:
+    workflow = IdenticalImplicitWaiterWorkflow(timeout=1.0)
+    handler = workflow.run()
+    input_required_count = 0
+
+    async for ev in handler.stream_events():
+        if isinstance(ev, InputRequiredEvent):
+            input_required_count += 1
+            if input_required_count == 3:
+                handler.ctx.send_event(HumanResponseEvent(response="approved"))  # type: ignore
+                break
+
+    assert input_required_count == 3
+    result = await handler
+    assert result == ["approved", "approved", "approved"]
+
+
+@pytest.mark.asyncio
+async def test_parallel_implicit_waiters_survive_snapshot_resume() -> None:
+    """The per-invocation waiter ids must round-trip: snapshot three suspended
+    fan-out branches, restore, and every branch still resolves."""
+    workflow = ParallelImplicitWaiterWorkflow(timeout=5.0)
+    handler = workflow.run()
+    prefixes: set[str] = set()
+
+    async for ev in handler.stream_events():
+        if isinstance(ev, InputRequiredEvent):
+            prefixes.add(ev.prefix)
+            if len(prefixes) == 3:
+                break
+
+    assert prefixes == {"approve a", "approve b", "approve c"}
+    ctx_dict = handler.ctx.to_dict()
+    total_waiters = sum(
+        len(worker_data["collected_waiters"])
+        for worker_data in ctx_dict["workers"].values()
+    )
+    assert total_waiters == 3
+    await handler.cancel_run()
+
+    resumed = workflow.run(ctx=Context.from_dict(workflow, ctx_dict))
+    resumed.ctx.send_event(HumanResponseEvent(response="approved"))  # type: ignore
+    result = await resumed
+    assert result == [
+        ("a", "approved"),
+        ("b", "approved"),
+        ("c", "approved"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_implicit_waiter_survives_retry() -> None:
+    """A retry is the same invocation, a new attempt. After a step acquires its
+    waiter response then fails once, the replay must re-acquire the same resolved
+    waiter (it survives until the step completes) instead of re-prompting."""
+    attempts = 0
+
+    class RetryWaiterWorkflow(Workflow):
+        @step(retry_policy=retry_policy(wait=wait_fixed(0), stop=stop_after_attempt(3)))
+        async def ask(self, ctx: Context, ev: StartEvent) -> StopEvent:
+            nonlocal attempts
+            response = await ctx.wait_for_event(
+                HumanResponseEvent, waiter_event=InputRequiredEvent()
+            )
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("transient failure after acquiring the waiter")
+            return StopEvent(result=response.response)
+
+    workflow = RetryWaiterWorkflow(timeout=5.0)
+    handler = workflow.run()
+    prompts = 0
+    answered = False
+    async for ev in handler.stream_events():
+        if isinstance(ev, InputRequiredEvent):
+            prompts += 1
+            if not answered:
+                handler.ctx.send_event(HumanResponseEvent(response="once"))  # type: ignore
+                answered = True
+
+    result = await handler
+    assert result == "once"
+    assert attempts == 2  # one failure, then one success — same invocation
+    assert prompts == 1  # the human is asked exactly once across the retry
+
+
+@pytest.mark.asyncio
+async def test_requirements_waiter_survives_snapshot_resume() -> None:
+    """A waiter created with requirements is re-pinged on resume (via
+    rehydrate_with_ticks). The invocation id must ride along on that re-ping so
+    the replayed step regenerates the same waiter id and resolves once."""
+
+    class ReqWaiterWorkflow(Workflow):
+        @step
+        async def ask(self, ctx: Context, ev: StartEvent) -> StopEvent:
+            response = await ctx.wait_for_event(
+                HumanResponseEvent,
+                waiter_event=InputRequiredEvent(),
+                requirements={"response": "go"},
+            )
+            return StopEvent(result=response.response)
+
+    workflow = ReqWaiterWorkflow(timeout=5.0)
+    handler = workflow.run()
+    async for ev in handler.stream_events():
+        if isinstance(ev, InputRequiredEvent):
+            break
+
+    ctx_dict = handler.ctx.to_dict()
+    await handler.cancel_run()
+
+    resumed = workflow.run(ctx=Context.from_dict(workflow, ctx_dict))
+    # The mismatched response is ignored by the requirement; the matching one
+    # resolves the re-pinged waiter.
+    resumed.ctx.send_event(HumanResponseEvent(response="nope"))  # type: ignore
+    resumed.ctx.send_event(HumanResponseEvent(response="go"))  # type: ignore
+    result = await resumed
+    assert result == "go"
 
 
 @pytest.mark.asyncio

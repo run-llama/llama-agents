@@ -66,6 +66,8 @@ class StepWorkerContext:
     Base state passed to step functions and returned by step functions.
     """
 
+    # event currently being processed by this step invocation
+    event: Event
     # immutable state of the step events at start of the step function execution
     state: StepWorkerState
     # add commands here to mutate the internal worker state after step execution
@@ -84,6 +86,7 @@ class StepWorkerState:
     collected_waiters: list[StepWorkerWaiter]
     collection_release_payload: CollectionReleasePayload | None = None
     scope_path: tuple[str, ...] = ()
+    work_item_id: str | None = None
 
     def _deepcopy(self) -> StepWorkerState:
         return StepWorkerState(
@@ -94,6 +97,7 @@ class StepWorkerState:
             if self.collection_release_payload is not None
             else None,
             scope_path=self.scope_path,
+            work_item_id=self.work_item_id,
         )
 
 
@@ -126,6 +130,18 @@ class CollectionReleasePayload:
             stream_id=self.stream_id,
             binding_id=self.binding_id,
         )
+
+    def work_item_id(self) -> str:
+        """Stable work item id for this collect invocation.
+
+        Collect invocations are fired directly (not via a routed tick), so the
+        monotonic work-item counter never sees them. Their stream+binding key is
+        already unique and carried on the payload across serialize/resume, so use
+        it as the work item id. This keeps two collect invocations of the same
+        step distinct and lets a suspended collect invocation recreate the same
+        implicit waiter id on resume.
+        """
+        return f"work_item_collect_{self.stream_id}:{self.binding_id}"
 
 
 # Tick wire format for the payload's member events: the same SerializableEvent
@@ -191,6 +207,9 @@ class StepWorkerWaiter(Generic[EventType]):
     scope_path: tuple[str, ...] = ()
     # For a suspended collect invocation, the release batch to re-invoke with.
     collection_release_payload: CollectionReleasePayload | None = None
+    # Stable identity for the suspended work item. Used to rebuild implicit
+    # waiter IDs across retries, serialization, and resume.
+    work_item_id: str | None = None
 
 
 @dataclass()

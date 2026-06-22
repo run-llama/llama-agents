@@ -183,6 +183,7 @@ def as_step_worker_function(
         returns = Returns(return_values=[])
 
         step_ctx = StepWorkerContext(
+            event=event,
             state=state,
             returns=returns,
             retry=retry,

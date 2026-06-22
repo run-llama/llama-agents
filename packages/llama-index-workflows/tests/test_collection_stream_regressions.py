@@ -18,7 +18,14 @@ import pytest
 from workflows import Context, Workflow, catch_error, step
 from workflows.collect import Collect, Take
 from workflows.errors import WorkflowValidationError
-from workflows.events import Event, StartEvent, StepFailedEvent, StopEvent
+from workflows.events import (
+    Event,
+    HumanResponseEvent,
+    InputRequiredEvent,
+    StartEvent,
+    StepFailedEvent,
+    StopEvent,
+)
 from workflows.retry_policy import retry_policy, stop_after_attempt, wait_fixed
 
 _CONTROL_LOOP_LOGGER = "workflows.runtime.control_loop"
@@ -171,6 +178,58 @@ async def test_distinct_fan_out_sources_share_collect_target_without_merging() -
 
     result = await _run(WF(timeout=8))
     assert result == [[0, 1], [10, 11]]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_collect_invocations_keep_distinct_implicit_waiters() -> None:
+    """Two collect invocations of the same join step (one per fan-out source)
+    each wait for the same event type with an implicit waiter id. Collect
+    invocations are fired directly rather than through a routed tick, so they
+    must still get distinct work item ids — otherwise both waiters collapse onto
+    one and only one invocation resumes."""
+
+    class Batch(Event):
+        nums: list[int]
+
+    batches: list[list[int]] = []
+
+    class WF(Workflow):
+        @step
+        async def fan_a(self, ev: StartEvent) -> list[Done]:
+            return [Done(n=0), Done(n=1)]
+
+        @step
+        async def fan_b(self, ev: StartEvent) -> list[Done]:
+            return [Done(n=10), Done(n=11)]
+
+        @step
+        async def join(self, ctx: Context, events: list[Done]) -> Batch:
+            response = await ctx.wait_for_event(
+                HumanResponseEvent,
+                waiter_event=InputRequiredEvent(),
+            )
+            return Batch(nums=sorted(e.n for e in events) + [int(response.response)])
+
+        @step
+        async def finish(self, ev: Batch) -> StopEvent | None:
+            batches.append(ev.nums)
+            if len(batches) < 2:
+                return None
+            return StopEvent(result=sorted(batches))
+
+    workflow = WF(timeout=8.0)
+    handler = workflow.run()
+    prompts = 0
+    async for ev in handler.stream_events():
+        if isinstance(ev, InputRequiredEvent):
+            prompts += 1
+            if prompts == 2:
+                handler.ctx.send_event(HumanResponseEvent(response="7"))  # type: ignore
+                break
+
+    assert prompts == 2
+    result = await handler
+    assert result == [[0, 1, 7], [10, 11, 7]]
 
 
 # ---------------------------------------------------------------------------
