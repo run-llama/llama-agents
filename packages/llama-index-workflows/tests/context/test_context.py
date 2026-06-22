@@ -608,13 +608,13 @@ class ParallelImplicitWaiterWorkflow(Workflow):
     ) -> ParallelWaitDone:
         response = await ctx.wait_for_event(
             HumanResponseEvent,
-            waiter_event=InputRequiredEvent(prefix=f"approve {ev.branch}"),
+            waiter_event=InputRequiredEvent(prefix=f"approve {ev.branch}"),  # type: ignore
         )
         return ParallelWaitDone(branch=ev.branch, response=response.response)
 
     @step
     async def collect(self, ctx: Context, ev: ParallelWaitDone) -> StopEvent:
-        events: list[ParallelWaitDone] | None = ctx.collect_events(
+        events: list[ParallelWaitDone] | None = ctx.collect_events(  # type: ignore
             ev, [ParallelWaitDone, ParallelWaitDone, ParallelWaitDone]
         )
         if events is None:
@@ -633,7 +633,7 @@ async def test_parallel_implicit_waiters_are_not_collapsed() -> None:
         if isinstance(ev, InputRequiredEvent):
             prefixes.add(ev.prefix)
             if len(prefixes) == 3:
-                handler.ctx.send_event(HumanResponseEvent(response="approved"))
+                handler.ctx.send_event(HumanResponseEvent(response="approved"))  # type: ignore
                 break
 
     assert prefixes == {"approve a", "approve b", "approve c"}
@@ -666,13 +666,13 @@ class IdenticalImplicitWaiterWorkflow(Workflow):
     ) -> IdenticalWaitDone:
         response = await ctx.wait_for_event(
             HumanResponseEvent,
-            waiter_event=InputRequiredEvent(prefix="approve"),
+            waiter_event=InputRequiredEvent(prefix="approve"),  # type: ignore
         )
         return IdenticalWaitDone(response=response.response)
 
     @step
     async def collect(self, ctx: Context, ev: IdenticalWaitDone) -> StopEvent:
-        events: list[IdenticalWaitDone] | None = ctx.collect_events(
+        events: list[IdenticalWaitDone] | None = ctx.collect_events(  # type: ignore
             ev, [IdenticalWaitDone, IdenticalWaitDone, IdenticalWaitDone]
         )
         if events is None:
@@ -691,7 +691,7 @@ async def test_parallel_identical_implicit_waiters_are_not_collapsed() -> None:
         if isinstance(ev, InputRequiredEvent):
             input_required_count += 1
             if input_required_count == 3:
-                handler.ctx.send_event(HumanResponseEvent(response="approved"))
+                handler.ctx.send_event(HumanResponseEvent(response="approved"))  # type: ignore
                 break
 
     assert input_required_count == 3
