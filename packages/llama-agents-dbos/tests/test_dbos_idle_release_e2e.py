@@ -11,14 +11,18 @@ boundary and handler completion.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
+import asyncpg
 import httpx
 import pytest
 from llama_agents.client import WorkflowClient
+from sqlalchemy.engine import make_url
 from tests.fixtures.sample_workflows.hitl import UserInput
 from workflows.events import WorkflowIdleEvent
 
@@ -26,6 +30,10 @@ REPLICA_SERVER_PATH = str(Path(__file__).parent / "fixtures" / "replica_server.p
 WORKFLOW_PATH = "tests.fixtures.sample_workflows.hitl:TestWorkflow"
 IDLE_TIMEOUT = 0.5
 RESTART_EXECUTOR_ID = "test-replica-restart"
+
+
+def _table_refs(table_name: str) -> list[str]:
+    return [f"dbos.{table_name}", table_name]
 
 
 def _start_idle_server(
@@ -93,6 +101,73 @@ def _wait_for_server(
     )
 
 
+def _sqlite_db_path(db_url: str) -> str | None:
+    url = make_url(db_url)
+    if not url.drivername.startswith("sqlite"):
+        return None
+    return str(url.database)
+
+
+async def _fetchone(db_url: str, query: str, *args: Any) -> Any:
+    db_path = _sqlite_db_path(db_url)
+    if db_path is not None:
+        with sqlite3.connect(db_path) as conn:
+            return conn.execute(query, args).fetchone()
+
+    dsn = db_url.replace("postgresql+psycopg://", "postgresql://", 1)
+    conn = await asyncpg.connect(dsn)
+    try:
+        return await conn.fetchrow(query.replace("?", "$1"), *args)
+    finally:
+        await conn.close()
+
+
+async def _fetch_table_value(
+    db_url: str,
+    table_name: str,
+    value_column: str,
+    id_column: str,
+    id_value: str,
+) -> str | None:
+    for table_ref in _table_refs(table_name):
+        try:
+            row = await _fetchone(
+                db_url,
+                f"SELECT {value_column} FROM {table_ref} WHERE {id_column} = ?",
+                id_value,
+            )
+        except Exception:
+            continue
+        if row is None:
+            return None
+        return row[0]
+    return None
+
+
+async def _wait_for_table_value(
+    db_url: str,
+    table_name: str,
+    value_column: str,
+    id_column: str,
+    id_value: str,
+    expected: str,
+    timeout: float = 20.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    last_value = None
+    while time.monotonic() < deadline:
+        last_value = await _fetch_table_value(
+            db_url, table_name, value_column, id_column, id_value
+        )
+        if last_value == expected:
+            return
+        await asyncio.sleep(0.25)
+    raise AssertionError(
+        f"Expected {table_name}.{value_column} for {id_value} to be "
+        f"{expected!r}, got {last_value!r}"
+    )
+
+
 async def _run_idle_release_test(port: int, db_url: str) -> None:
     """Core test logic shared between SQLite and Postgres variants."""
     proc = _start_idle_server(port, db_url, IDLE_TIMEOUT)
@@ -103,6 +178,8 @@ async def _run_idle_release_test(port: int, db_url: str) -> None:
         # 1. Start workflow
         handler = await client.run_workflow_nowait("test")
         handler_id = handler.handler_id
+        run_id = handler.run_id or ""
+        assert run_id, "Workflow should have a run_id"
 
         # 2. Stream events until WorkflowIdleEvent
         stream = client.get_workflow_events(handler_id, include_internal_events=True)
@@ -115,6 +192,22 @@ async def _run_idle_release_test(port: int, db_url: str) -> None:
 
         # 3. Wait for idle timeout to elapse (release happens in background)
         await asyncio.sleep(IDLE_TIMEOUT + 1.5)
+        await _wait_for_table_value(
+            db_url,
+            "workflow_status",
+            "status",
+            "workflow_uuid",
+            run_id,
+            "SUCCESS",
+        )
+        await _wait_for_table_value(
+            db_url,
+            "run_lifecycle",
+            "state",
+            "run_id",
+            run_id,
+            "released",
+        )
 
         # 4. Handler should still be "running" (released but not completed)
         h = await client.get_handler(handler_id)
@@ -143,6 +236,14 @@ async def _run_idle_release_test(port: int, db_url: str) -> None:
         assert h.status == "completed", f"Expected 'completed', got '{h.status}'"
         assert h.result is not None
         assert h.result.value.get("result", {}).get("response") == "world"
+        await _wait_for_table_value(
+            db_url,
+            "run_lifecycle",
+            "state",
+            "run_id",
+            run_id,
+            "active",
+        )
     finally:
         _stop_server(proc)
 
