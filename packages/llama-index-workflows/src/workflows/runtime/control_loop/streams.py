@@ -350,6 +350,7 @@ def _fire_collection_release(
             event=payload.as_event(),
             scope_path=output_stack,
             collection_release_payload=payload,
+            invocation_id=payload.invocation_id(),
         ),
         StepId.root(binding.target_step),
         worker_state,

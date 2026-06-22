@@ -189,19 +189,41 @@ class InternalContext(Generic[MODEL_T]):
         collected_waiters = step_ctx.state.collected_waiters
         requirements = requirements or {}
 
-        # Generate a unique key for the waiter
+        # Generate a unique key for the waiter. The implicit (default) id is
+        # suffixed with this invocation's stable id so parallel fan-out branches
+        # that wait for the same event type without an explicit waiter_id stay
+        # distinct instead of collapsing onto one shared waiter.
         event_str = f"{event_type.__module__}.{event_type.__name__}"
         requirements_str = str(requirements)
-        waiter_id = waiter_id or f"waiter_{event_str}_{requirements_str}"
+        if waiter_id is None:
+            legacy_id = f"waiter_{event_str}_{requirements_str}"
+            invocation_id = step_ctx.state.invocation_id
+            new_id = (
+                f"{legacy_id}_{invocation_id}"
+                if invocation_id is not None
+                else legacy_id
+            )
+            # Prefer the invocation-scoped id; fall back to the pre-upgrade id so
+            # a waiter persisted before this change still resolves on resume.
+            # Under current code every implicit waiter carries the suffixed id,
+            # so the legacy fallback can only match an old persisted waiter.
+            candidate_ids = (new_id, legacy_id)
+        else:
+            candidate_ids = (waiter_id,)
 
-        waiter = next((w for w in collected_waiters if w.waiter_id == waiter_id), None)
+        waiter = next(
+            (w for w in collected_waiters if w.waiter_id in candidate_ids), None
+        )
+        # Target whichever id actually exists (the matched waiter's, else the
+        # preferred id) so AddWaiter/DeleteWaiter act on the right record.
+        effective_id = waiter.waiter_id if waiter is not None else candidate_ids[0]
         if waiter is not None and waiter.timed_out:
-            step_ctx.returns.return_values.append(DeleteWaiter(waiter_id=waiter_id))
+            step_ctx.returns.return_values.append(DeleteWaiter(waiter_id=effective_id))
             raise asyncio.TimeoutError(f"Timed out waiting for {event_type.__name__}")
         if waiter is None or waiter.resolved_event is None:
             raise WaitingForEvent(
                 AddWaiter(
-                    waiter_id=waiter_id,
+                    waiter_id=effective_id,
                     requirements=requirements,
                     timeout=timeout,
                     event_type=event_type,
@@ -209,7 +231,7 @@ class InternalContext(Generic[MODEL_T]):
                 )
             )
         else:
-            step_ctx.returns.return_values.append(DeleteWaiter(waiter_id=waiter_id))
+            step_ctx.returns.return_values.append(DeleteWaiter(waiter_id=effective_id))
             return cast(T, waiter.resolved_event)
 
     def write_event_to_stream(self, ev: Event | None) -> None:

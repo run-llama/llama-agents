@@ -55,6 +55,10 @@ class TickAddEvent(BaseModel):
     last_failed_at: float | None = None
     recovery_counts: dict[str, int] = Field(default_factory=dict)
     scope_path: tuple[str, ...] = Field(default_factory=tuple)
+    # Stable invocation id carried when this tick re-pings an existing suspended
+    # work item (rehydrate_with_ticks resume). None for genuinely new external
+    # events, which mint a fresh id when routed to a step.
+    invocation_id: str | None = None
     # Collect-invocation work record. A payload-carrying tick is routed
     # directly to the binding's target step, before waiter matching and the
     # member-arrival path.

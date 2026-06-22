@@ -84,6 +84,9 @@ class StepWorkerState:
     collected_waiters: list[StepWorkerWaiter]
     collection_release_payload: CollectionReleasePayload | None = None
     scope_path: tuple[str, ...] = ()
+    # Stable id of the invocation that owns this worker snapshot. Read by
+    # wait_for_event to keep implicit waiters distinct per invocation.
+    invocation_id: str | None = None
 
     def _deepcopy(self) -> StepWorkerState:
         return StepWorkerState(
@@ -94,6 +97,7 @@ class StepWorkerState:
             if self.collection_release_payload is not None
             else None,
             scope_path=self.scope_path,
+            invocation_id=self.invocation_id,
         )
 
 
@@ -126,6 +130,15 @@ class CollectionReleasePayload:
             stream_id=self.stream_id,
             binding_id=self.binding_id,
         )
+
+    def invocation_id(self) -> str:
+        """Deterministic invocation id for this collect release.
+
+        A collect invocation has a natural stable key (stream + binding) that is
+        carried on the payload across resume, so its implicit-waiter id needs no
+        counter and matches at both the initial release and any re-delivery.
+        """
+        return f"inv-collect-{self.stream_id}:{self.binding_id}"
 
 
 # Tick wire format for the payload's member events: the same SerializableEvent
@@ -191,6 +204,10 @@ class StepWorkerWaiter(Generic[EventType]):
     scope_path: tuple[str, ...] = ()
     # For a suspended collect invocation, the release batch to re-invoke with.
     collection_release_payload: CollectionReleasePayload | None = None
+    # Stable id of the invocation that created this waiter. Carried back into the
+    # re-delivered work item on resolve/timeout so the replay regenerates the same
+    # implicit waiter id. None for waiters persisted before this field existed.
+    invocation_id: str | None = None
 
 
 @dataclass()

@@ -45,6 +45,7 @@ from workflows.plugins.basic import (
     BasicRuntime,
     setting_run_id,
 )
+from workflows.retry_policy import retry_policy, stop_after_attempt, wait_fixed
 from workflows.runtime.types.internal_state import BrokerState
 from workflows.runtime.types.ticks import TickAddEvent
 from workflows.testing import WorkflowTestRunner
@@ -1324,3 +1325,274 @@ def test_basic_runtime_rejects_durable_state_handle(workflow: Workflow) -> None:
             serialized_state={"store_type": "postgres", "run_id": "run-1"},
             serializer=JsonSerializer(),
         )
+
+
+# ---------------------------------------------------------------------------
+# Implicit waiter ids: distinct across fan-out, stable across resume + retry,
+# and back-compatible with waiters persisted before invocation ids existed.
+# ---------------------------------------------------------------------------
+
+
+class _BranchEvent(Event):
+    branch: str
+
+
+class _BranchDone(Event):
+    branch: str
+    response: str
+
+
+class _BranchParallelWorkflow(Workflow):
+    """Fan-out where every branch waits for the same event type with an
+    implicit (default) waiter id. Branch payloads are distinct."""
+
+    @step
+    async def dispatch(self, ctx: Context, ev: StartEvent) -> _BranchEvent:
+        for branch in ("a", "b", "c"):
+            ctx.send_event(_BranchEvent(branch=branch))
+        return None  # type: ignore
+
+    @step(num_workers=3)
+    async def wait_branch(self, ctx: Context, ev: _BranchEvent) -> _BranchDone:
+        response = await ctx.wait_for_event(
+            HumanResponseEvent,
+            waiter_event=InputRequiredEvent(prefix=f"approve {ev.branch}"),  # type: ignore
+        )
+        return _BranchDone(branch=ev.branch, response=response.response)
+
+    @step
+    async def collect(self, ctx: Context, ev: _BranchDone) -> StopEvent:
+        done = ctx.collect_events(ev, [_BranchDone, _BranchDone, _BranchDone])
+        if done is None:
+            return None  # type: ignore
+        return StopEvent(result=sorted((e.branch, e.response) for e in done))
+
+
+@pytest.mark.asyncio
+async def test_parallel_implicit_waiters_distinct_payloads() -> None:
+    """Three branches with distinct payloads each get their own waiter and
+    InputRequiredEvent; a single HumanResponseEvent resolves them all."""
+    workflow = _BranchParallelWorkflow(timeout=5.0)
+    handler = workflow.run()
+    prefixes: set[str] = set()
+
+    async for ev in handler.stream_events():
+        if isinstance(ev, InputRequiredEvent):
+            prefixes.add(ev.prefix)
+            if len(prefixes) == 3:
+                handler.ctx.send_event(HumanResponseEvent(response="approved"))  # type: ignore
+                break
+
+    assert prefixes == {"approve a", "approve b", "approve c"}
+    result = await handler
+    assert result == [("a", "approved"), ("b", "approved"), ("c", "approved")]
+
+
+class _SameEvent(Event):
+    """No distinguishing fields: every fan-out branch is byte-identical."""
+
+
+class _SameDone(Event):
+    response: str
+
+
+class _IdenticalPayloadWorkflow(Workflow):
+    @step
+    async def dispatch(self, ctx: Context, ev: StartEvent) -> _SameEvent:
+        for _ in range(3):
+            ctx.send_event(_SameEvent())
+        return None  # type: ignore
+
+    @step(num_workers=3)
+    async def wait_branch(self, ctx: Context, ev: _SameEvent) -> _SameDone:
+        response = await ctx.wait_for_event(
+            HumanResponseEvent,
+            waiter_event=InputRequiredEvent(prefix="approve"),  # type: ignore
+        )
+        return _SameDone(response=response.response)
+
+    @step
+    async def collect(self, ctx: Context, ev: _SameDone) -> StopEvent:
+        done = ctx.collect_events(ev, [_SameDone, _SameDone, _SameDone])
+        if done is None:
+            return None  # type: ignore
+        return StopEvent(result=[e.response for e in done])
+
+
+@pytest.mark.asyncio
+async def test_parallel_implicit_waiters_identical_payloads() -> None:
+    """The case a content-hash waiter id cannot handle: three branches whose
+    trigger events are byte-identical must still get three distinct waiters
+    (three InputRequiredEvents) rather than collapsing onto one."""
+    workflow = _IdenticalPayloadWorkflow(timeout=5.0)
+    handler = workflow.run()
+    prompts = 0
+
+    async for ev in handler.stream_events():
+        if isinstance(ev, InputRequiredEvent):
+            prompts += 1
+            if prompts == 3:
+                handler.ctx.send_event(HumanResponseEvent(response="ok"))  # type: ignore
+                break
+
+    assert prompts == 3
+    result = await handler
+    assert result == ["ok", "ok", "ok"]
+
+
+@pytest.mark.asyncio
+async def test_parallel_implicit_waiters_resume_after_snapshot() -> None:
+    """Snapshot mid-wait, restore, and resume: the suffixed implicit waiter ids
+    must survive to_dict/from_dict so every branch still resolves."""
+    workflow = _BranchParallelWorkflow(timeout=5.0)
+    handler = workflow.run()
+    prefixes: set[str] = set()
+
+    async for ev in handler.stream_events():
+        if isinstance(ev, InputRequiredEvent):
+            prefixes.add(ev.prefix)
+            if len(prefixes) == 3:
+                break
+
+    assert prefixes == {"approve a", "approve b", "approve c"}
+    ctx_dict = handler.ctx.to_dict()
+    total_waiters = sum(
+        len(worker_data["collected_waiters"])
+        for worker_data in ctx_dict["workers"].values()
+    )
+    assert total_waiters == 3
+    await handler.cancel_run()
+
+    new_ctx = Context.from_dict(workflow, ctx_dict)
+    new_handler = workflow.run(ctx=new_ctx)
+    new_handler.ctx.send_event(HumanResponseEvent(response="resumed"))  # type: ignore
+    result = await new_handler
+    assert result == [
+        ("a", "resumed"),
+        ("b", "resumed"),
+        ("c", "resumed"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_legacy_implicit_waiter_resumes() -> None:
+    """A waiter persisted before invocation ids existed has a legacy, unsuffixed
+    waiter_id and no invocation_id. The back-compat lookup must still resolve it
+    on resume rather than re-suspending and dropping the response."""
+
+    class WaiterWorkflow(Workflow):
+        @step
+        async def ask(self, ctx: Context, ev: StartEvent) -> StopEvent:
+            response = await ctx.wait_for_event(
+                NamedResponseEvent,
+                waiter_event=InputRequiredEvent(),
+            )
+            return StopEvent(result=response.response)
+
+    workflow = WaiterWorkflow(timeout=5.0)
+    handler = workflow.run()
+    async for ev in handler.stream_events():
+        if isinstance(ev, InputRequiredEvent):
+            break
+
+    ctx_dict = handler.ctx.to_dict()
+    await handler.cancel_run()
+
+    # Rewrite the snapshot to look like a pre-invocation-id payload: legacy
+    # waiter_id (no suffix) and all invocation ids stripped.
+    legacy_id = (
+        f"waiter_{NamedResponseEvent.__module__}.{NamedResponseEvent.__name__}_{{}}"
+    )
+    ctx_dict.pop("invocation_seq", None)
+    rewrote = False
+    for worker_data in ctx_dict["workers"].values():
+        for waiter in worker_data["collected_waiters"]:
+            waiter["waiter_id"] = legacy_id
+            waiter.pop("invocation_id", None)
+            rewrote = True
+        for attempt in (
+            *worker_data.get("queue", []),
+            *worker_data.get("in_progress", []),
+        ):
+            attempt.pop("invocation_id", None)
+    assert rewrote
+
+    new_ctx = Context.from_dict(workflow, ctx_dict)
+    new_handler = workflow.run(ctx=new_ctx)
+    new_handler.ctx.send_event(NamedResponseEvent(response="legacy-ok"))
+    result = await new_handler
+    assert result == "legacy-ok"
+
+
+@pytest.mark.asyncio
+async def test_implicit_waiter_stable_across_retry() -> None:
+    """A retry is the same invocation, a new attempt: after a step acquires its
+    waiter response then fails and retries, the replay must re-acquire the same
+    resolved waiter instead of re-prompting the human."""
+    attempts = {"n": 0}
+    prompts = {"n": 0}
+
+    class FlakyWaiterWorkflow(Workflow):
+        @step(retry_policy=retry_policy(wait=wait_fixed(0), stop=stop_after_attempt(3)))
+        async def ask(self, ctx: Context, ev: StartEvent) -> StopEvent:
+            response = await ctx.wait_for_event(
+                HumanResponseEvent,
+                waiter_event=InputRequiredEvent(),
+            )
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise RuntimeError("transient failure after acquiring the waiter")
+            return StopEvent(result=response.response)
+
+    workflow = FlakyWaiterWorkflow(timeout=5.0)
+    handler = workflow.run()
+    async for ev in handler.stream_events():
+        if isinstance(ev, InputRequiredEvent):
+            prompts["n"] += 1
+            handler.ctx.send_event(HumanResponseEvent(response="once"))  # type: ignore
+            break
+
+    result = await handler
+    assert result == "once"
+    # The step ran twice (one failure + one success) but the human was prompted
+    # exactly once: the resolved waiter survived the retry.
+    assert attempts["n"] == 2
+    assert prompts["n"] == 1
+
+
+class _ReqDone(Event):
+    response: str
+
+
+@pytest.mark.asyncio
+async def test_requirements_waiter_resumes_after_reping() -> None:
+    """A waiter created with requirements is re-pinged by rehydrate_with_ticks on
+    resume. The invocation id must ride along on that re-ping tick so the
+    replayed step regenerates the same waiter id and resolves once."""
+
+    class ReqWaiterWorkflow(Workflow):
+        @step
+        async def ask(self, ctx: Context, ev: StartEvent) -> StopEvent:
+            response = await ctx.wait_for_event(
+                HumanResponseEvent,
+                waiter_event=InputRequiredEvent(),
+                requirements={"response": "go"},
+            )
+            return StopEvent(result=response.response)
+
+    workflow = ReqWaiterWorkflow(timeout=5.0)
+    handler = workflow.run()
+    async for ev in handler.stream_events():
+        if isinstance(ev, InputRequiredEvent):
+            break
+
+    ctx_dict = handler.ctx.to_dict()
+    await handler.cancel_run()
+
+    new_ctx = Context.from_dict(workflow, ctx_dict)
+    new_handler = workflow.run(ctx=new_ctx)
+    # Mismatched requirement is ignored; the matching one resolves the waiter.
+    new_handler.ctx.send_event(HumanResponseEvent(response="nope"))  # type: ignore
+    new_handler.ctx.send_event(HumanResponseEvent(response="go"))  # type: ignore
+    result = await new_handler
+    assert result == "go"

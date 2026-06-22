@@ -346,6 +346,7 @@ def rewind_in_progress(
                     recovery_counts=dict(in_progress.recovery_counts),
                     scope_path=in_progress.scope_path,
                     collection_release_payload=in_progress.shared_state.collection_release_payload,
+                    invocation_id=in_progress.invocation_id,
                 ),
             )
         step_state.in_progress = []
@@ -626,9 +627,11 @@ def _apply_step_result(
             has_requirements=bool(len(result.requirements)),
             resolved_event=None,
             # Store the suspended work item's record so resume re-delivers
-            # it whole: same stream scope, same collect batch.
+            # it whole: same stream scope, same collect batch, same invocation
+            # id (so the replay regenerates the same implicit waiter id).
             scope_path=this_execution.scope_path,
             collection_release_payload=this_execution.shared_state.collection_release_payload,
+            invocation_id=this_execution.invocation_id,
         )
         if existing is not None:
             worker_state.collected_waiters[existing] = new_waiter
@@ -716,6 +719,9 @@ def _schedule_retry_or_route_failure(
                 not_before=not_before,
                 scope_path=this_execution.scope_path,
                 collection_release_payload=this_execution.shared_state.collection_release_payload,
+                # A retry is the same invocation, a new attempt: keep the id so
+                # the replay re-acquires the same (still-resolved) waiter.
+                invocation_id=this_execution.invocation_id,
             ),
         )
         if not_before is not None:
@@ -990,6 +996,18 @@ def _select_static_collect_batch(
     return search(0, set())
 
 
+def _mint_invocation_id(state: BrokerState) -> str:
+    """Mint a deterministic, replay-stable id for a fresh step invocation.
+
+    Mirrors _mint_stream_id: the counter lives on BrokerState, is advanced only
+    inside the single-threaded reducer, and is persisted, so replay/resume
+    reproduce identical ids and only genuinely new work items consume the counter.
+    """
+    seq = state.invocation_seq
+    state.invocation_seq = seq + 1
+    return f"inv-{seq}"
+
+
 def _add_or_enqueue_event(
     event: EventAttempt,
     step_id: StepId,
@@ -1022,6 +1040,7 @@ def _add_or_enqueue_event(
             if event.collection_release_payload is not None
             else None,
             scope_path=event.scope_path,
+            invocation_id=event.invocation_id,
         )
         state.in_progress.append(
             InProgressState(
@@ -1035,6 +1054,7 @@ def _add_or_enqueue_event(
                 last_failed_at=event.last_failed_at,
                 recovery_counts=dict(event.recovery_counts),
                 scope_path=event.scope_path,
+                invocation_id=event.invocation_id,
             )
         )
         commands.append(
@@ -1114,6 +1134,9 @@ def _redeliver_collection_payload(
             recovery_counts=dict(tick.recovery_counts),
             scope_path=tuple(tick.scope_path),
             collection_release_payload=payload,
+            # Re-delivery of a collect invocation: prefer a carried id, else the
+            # payload's stable natural key (matches the initial release).
+            invocation_id=tick.invocation_id or payload.invocation_id(),
         ),
         StepId.root(binding.target_step),
         state.workers[binding.target_step],
@@ -1157,6 +1180,7 @@ def _resolve_waiters(
                             bound_events=wait_condition.bound_events,
                             scope_path=wait_condition.scope_path,
                             collection_release_payload=wait_condition.collection_release_payload,
+                            invocation_id=wait_condition.invocation_id,
                         ),
                         step_id,
                         state.workers[step_name],
@@ -1322,6 +1346,9 @@ def _route_to_accepting_steps(
                     last_failed_at=tick.last_failed_at,
                     recovery_counts=dict(tick.recovery_counts),
                     scope_path=tuple(tick.scope_path),
+                    # Carry the id on a resume re-ping; mint a fresh one per
+                    # accepting step for a genuinely new external delivery.
+                    invocation_id=tick.invocation_id or _mint_invocation_id(state),
                 ),
                 step_id,
                 state.workers[step_name],
@@ -1508,6 +1535,7 @@ def _process_waiter_timeout_tick(
             bound_events=waiter.bound_events,
             scope_path=waiter.scope_path,
             collection_release_payload=waiter.collection_release_payload,
+            invocation_id=waiter.invocation_id,
         ),
         step_id,
         worker_state,
