@@ -114,6 +114,7 @@ class BrokerState:
     config: BrokerConfig
     workers: dict[str, InternalStepWorkerState]
     stream_seq: int = 0
+    work_item_seq: int = 0
     streams: dict[str, CollectionStreamInstance] = field(default_factory=dict)
     collection_release_states: dict[str, CollectionReleaseState] = field(
         default_factory=dict
@@ -131,6 +132,7 @@ class BrokerState:
                 for name, worker_state in self.workers.items()
             },
             stream_seq=self.stream_seq,
+            work_item_seq=self.work_item_seq,
             streams={sid: stream._copy() for sid, stream in self.streams.items()},
             collection_release_states={
                 key: state._copy()
@@ -190,6 +192,7 @@ class BrokerState:
                             bound_events=waiter.bound_events,
                             scope_path=waiter.scope_path,
                             collection_release_payload=waiter.collection_release_payload,
+                            work_item_id=waiter.work_item_id,
                         )
                     )
         return commands
@@ -219,6 +222,7 @@ class BrokerState:
                     collection_release_payload=_serialize_release_payload(
                         attempt.collection_release_payload, serializer
                     ),
+                    work_item_id=attempt.work_item_id,
                 )
                 for attempt in worker_state.queue
             ]
@@ -241,6 +245,7 @@ class BrokerState:
                     collection_release_payload=_serialize_release_payload(
                         ip.shared_state.collection_release_payload, serializer
                     ),
+                    work_item_id=ip.work_item_id,
                 )
                 for ip in worker_state.in_progress
             ]
@@ -272,6 +277,7 @@ class BrokerState:
                     collection_release_payload=_serialize_release_payload(
                         waiter.collection_release_payload, serializer
                     ),
+                    work_item_id=waiter.work_item_id,
                 )
                 for waiter in worker_state.collected_waiters
             ]
@@ -293,6 +299,7 @@ class BrokerState:
             is_running=self.is_running,
             workers=workers_dict,
             stream_seq=self.stream_seq,
+            work_item_seq=self.work_item_seq,
             streams={
                 sid: SerializedCollectionStreamInstance(
                     stream_id=stream.stream_id,
@@ -330,6 +337,7 @@ class BrokerState:
         # whether to create a start_event from kwargs (it only constructs and passes a start event if not already running)
         base_state.is_running = serialized.is_running
         base_state.stream_seq = serialized.stream_seq
+        base_state.work_item_seq = serialized.work_item_seq
         base_state.streams = {
             sid: CollectionStreamInstance(
                 stream_id=stream.stream_id,
@@ -408,6 +416,7 @@ class BrokerState:
                         else None,
                         scope_path=tuple(waiter_data.scope_path),
                         collection_release_payload=waiter_payload,
+                        work_item_id=waiter_data.work_item_id,
                     )
                 )
 
@@ -444,6 +453,7 @@ def _deserialize_event_attempt(
         not_before=attempt.not_before,
         scope_path=tuple(attempt.scope_path),
         collection_release_payload=payload,
+        work_item_id=attempt.work_item_id,
     )
 
 
@@ -606,6 +616,7 @@ class EventAttempt:
     not_before: float | None = None
     scope_path: tuple[str, ...] = field(default_factory=tuple)
     collection_release_payload: CollectionReleasePayload | None = None
+    work_item_id: str | None = None
 
 
 @dataclass()
@@ -674,6 +685,7 @@ class InProgressState:
     recovery_counts: dict[str, int] = field(default_factory=dict)
     bound_events: dict[str, Event] | None = None
     scope_path: tuple[str, ...] = field(default_factory=tuple)
+    work_item_id: str | None = None
 
     def _deepcopy(self) -> InProgressState:
         return InProgressState(
@@ -687,6 +699,7 @@ class InProgressState:
             last_failed_at=self.last_failed_at,
             recovery_counts=dict(self.recovery_counts),
             scope_path=self.scope_path,
+            work_item_id=self.work_item_id,
         )
 
 

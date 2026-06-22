@@ -100,6 +100,9 @@ class SerializedEventAttempt(BaseModel):
     # Explicit collect invocation payload, serialized only for queued/in-progress
     # list[E] collect executions.
     collection_release_payload: SerializedCollectionReleasePayload | None = None
+    # Stable identity of this queued or in-progress work item. Additive:
+    # older payloads validate with None and get fresh ids on requeue.
+    work_item_id: str | None = None
 
 
 class SerializedCollectionReleasePayload(BaseModel):
@@ -131,6 +134,8 @@ class SerializedWaiter(BaseModel):
     scope_path: list[str] = Field(default_factory=list)
     # For a suspended collect invocation, the release batch to re-invoke with.
     collection_release_payload: SerializedCollectionReleasePayload | None = None
+    # Stable identity for the suspended work item, if available.
+    work_item_id: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -203,6 +208,9 @@ class SerializedContext(BaseModel):
     # Monotonic stream-id counter. Persisted so a resumed run keeps minting
     # unique, deterministic stream ids.
     stream_seq: int = Field(default=0)
+    # Monotonic work-item counter. Persisted so implicit waiter ids remain
+    # stable and unique across serialize/resume boundaries.
+    work_item_seq: int = Field(default=0)
     streams: dict[str, SerializedCollectionStreamInstance] = Field(default_factory=dict)
     collection_release_states: dict[str, SerializedCollectionReleaseState] = Field(
         default_factory=dict

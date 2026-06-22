@@ -66,6 +66,8 @@ class StepWorkerContext:
     Base state passed to step functions and returned by step functions.
     """
 
+    # event currently being processed by this step invocation
+    event: Event
     # immutable state of the step events at start of the step function execution
     state: StepWorkerState
     # add commands here to mutate the internal worker state after step execution
@@ -84,6 +86,7 @@ class StepWorkerState:
     collected_waiters: list[StepWorkerWaiter]
     collection_release_payload: CollectionReleasePayload | None = None
     scope_path: tuple[str, ...] = ()
+    work_item_id: str | None = None
 
     def _deepcopy(self) -> StepWorkerState:
         return StepWorkerState(
@@ -94,6 +97,7 @@ class StepWorkerState:
             if self.collection_release_payload is not None
             else None,
             scope_path=self.scope_path,
+            work_item_id=self.work_item_id,
         )
 
 
@@ -191,6 +195,9 @@ class StepWorkerWaiter(Generic[EventType]):
     scope_path: tuple[str, ...] = ()
     # For a suspended collect invocation, the release batch to re-invoke with.
     collection_release_payload: CollectionReleasePayload | None = None
+    # Stable identity for the suspended work item. Used to rebuild implicit
+    # waiter IDs across retries, serialization, and resume.
+    work_item_id: str | None = None
 
 
 @dataclass()

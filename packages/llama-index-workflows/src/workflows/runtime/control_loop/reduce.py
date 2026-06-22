@@ -261,6 +261,12 @@ def _is_eligible(attempt: EventAttempt) -> bool:
     return attempt.not_before is None
 
 
+def _next_work_item_id(state: BrokerState) -> str:
+    """Mint a deterministic identity for one routed work item."""
+    state.work_item_seq += 1
+    return f"work_item_{state.work_item_seq}"
+
+
 def _decide_retry_delay(
     policy: RetryPolicy | None,
     *,
@@ -346,6 +352,7 @@ def rewind_in_progress(
                     recovery_counts=dict(in_progress.recovery_counts),
                     scope_path=in_progress.scope_path,
                     collection_release_payload=in_progress.shared_state.collection_release_payload,
+                    work_item_id=in_progress.work_item_id,
                 ),
             )
         step_state.in_progress = []
@@ -629,6 +636,7 @@ def _apply_step_result(
             # it whole: same stream scope, same collect batch.
             scope_path=this_execution.scope_path,
             collection_release_payload=this_execution.shared_state.collection_release_payload,
+            work_item_id=this_execution.work_item_id,
         )
         if existing is not None:
             worker_state.collected_waiters[existing] = new_waiter
@@ -716,6 +724,7 @@ def _schedule_retry_or_route_failure(
                 not_before=not_before,
                 scope_path=this_execution.scope_path,
                 collection_release_payload=this_execution.shared_state.collection_release_payload,
+                work_item_id=this_execution.work_item_id,
             ),
         )
         if not_before is not None:
@@ -1022,6 +1031,7 @@ def _add_or_enqueue_event(
             if event.collection_release_payload is not None
             else None,
             scope_path=event.scope_path,
+            work_item_id=event.work_item_id,
         )
         state.in_progress.append(
             InProgressState(
@@ -1035,6 +1045,7 @@ def _add_or_enqueue_event(
                 last_failed_at=event.last_failed_at,
                 recovery_counts=dict(event.recovery_counts),
                 scope_path=event.scope_path,
+                work_item_id=event.work_item_id,
             )
         )
         commands.append(
@@ -1114,6 +1125,7 @@ def _redeliver_collection_payload(
             recovery_counts=dict(tick.recovery_counts),
             scope_path=tuple(tick.scope_path),
             collection_release_payload=payload,
+            work_item_id=tick.work_item_id,
         ),
         StepId.root(binding.target_step),
         state.workers[binding.target_step],
@@ -1157,6 +1169,7 @@ def _resolve_waiters(
                             bound_events=wait_condition.bound_events,
                             scope_path=wait_condition.scope_path,
                             collection_release_payload=wait_condition.collection_release_payload,
+                            work_item_id=wait_condition.work_item_id,
                         ),
                         step_id,
                         state.workers[step_name],
@@ -1322,6 +1335,7 @@ def _route_to_accepting_steps(
                     last_failed_at=tick.last_failed_at,
                     recovery_counts=dict(tick.recovery_counts),
                     scope_path=tuple(tick.scope_path),
+                    work_item_id=tick.work_item_id,
                 ),
                 step_id,
                 state.workers[step_name],
@@ -1363,6 +1377,8 @@ def _process_add_event_tick(
     an UnhandledEvent.
     """
     state = init.deepcopy()
+    if tick.work_item_id is None:
+        tick = tick.model_copy(update={"work_item_id": _next_work_item_id(state)})
     if isinstance(tick.event, StartEvent):
         state.is_running = True
 
@@ -1508,6 +1524,7 @@ def _process_waiter_timeout_tick(
             bound_events=waiter.bound_events,
             scope_path=waiter.scope_path,
             collection_release_payload=waiter.collection_release_payload,
+            work_item_id=waiter.work_item_id,
         ),
         step_id,
         worker_state,

@@ -425,7 +425,7 @@ async def test_to_dict_after_stream_events_break_resumes() -> None:
             )
             return StopEvent(result=response.response)
 
-    workflow = WaiterWorkflow()
+    workflow = WaiterWorkflow(timeout=1.0)
     handler = workflow.run()
 
     async for ev in handler.stream_events():
@@ -438,6 +438,14 @@ async def test_to_dict_after_stream_events_break_resumes() -> None:
         for worker_data in ctx_dict["workers"].values()
     )
     assert total_waiters == 1
+    waiters = [
+        waiter
+        for worker_data in ctx_dict["workers"].values()
+        for waiter in worker_data["collected_waiters"]
+    ]
+    work_item_id = waiters[0]["work_item_id"]
+    assert work_item_id
+    assert waiters[0]["waiter_id"].endswith(f"_{work_item_id}")
     await handler.cancel_run()
 
     new_ctx = Context.from_dict(workflow, ctx_dict)
@@ -445,6 +453,45 @@ async def test_to_dict_after_stream_events_break_resumes() -> None:
     new_handler.ctx.send_event(NamedResponseEvent(response="bob"))
     result = await new_handler
     assert result == "bob"
+
+
+@pytest.mark.asyncio
+async def test_legacy_implicit_waiter_id_survives_serialization_resume() -> None:
+    """Implicit waiters serialized before work item IDs should still resume."""
+
+    class WaiterWorkflow(Workflow):
+        @step
+        async def ask(self, ctx: Context, ev: StartEvent) -> StopEvent:
+            response = await ctx.wait_for_event(
+                NamedResponseEvent,
+                waiter_event=InputRequiredEvent(),
+            )
+            return StopEvent(result=response.response)
+
+    workflow = WaiterWorkflow(timeout=1.0)
+    handler = workflow.run()
+
+    async for ev in handler.stream_events():
+        if isinstance(ev, InputRequiredEvent):
+            break
+
+    ctx_dict = handler.ctx.to_dict()
+    legacy_waiter_id = (
+        f"waiter_{NamedResponseEvent.__module__}.{NamedResponseEvent.__name__}_"
+        f"{str({})}"
+    )
+    for worker_data in ctx_dict["workers"].values():
+        for waiter in worker_data["collected_waiters"]:
+            waiter["waiter_id"] = legacy_waiter_id
+            waiter.pop("work_item_id", None)
+    ctx_dict.pop("work_item_seq", None)
+    await handler.cancel_run()
+
+    new_ctx = Context.from_dict(workflow, ctx_dict)
+    new_handler = workflow.run(ctx=new_ctx)
+    new_handler.ctx.send_event(NamedResponseEvent(response="legacy"))
+    result = await new_handler
+    assert result == "legacy"
 
 
 class Waiter1(Event):
@@ -537,6 +584,119 @@ async def test_wait_for_multiple_events_in_workflow() -> None:
     result = await handler
     # Order is non-deterministic since waiters run concurrently
     assert sorted(result) == ["buzz", "fizz"]
+
+
+class ParallelWaitEvent(Event):
+    branch: str
+
+
+class ParallelWaitDone(Event):
+    branch: str
+    response: str
+
+
+class ParallelImplicitWaiterWorkflow(Workflow):
+    @step
+    async def dispatch(self, ctx: Context, ev: StartEvent) -> ParallelWaitEvent:
+        for branch in ("a", "b", "c"):
+            ctx.send_event(ParallelWaitEvent(branch=branch))
+        return None  # type: ignore
+
+    @step(num_workers=3)
+    async def wait_branch(
+        self, ctx: Context, ev: ParallelWaitEvent
+    ) -> ParallelWaitDone:
+        response = await ctx.wait_for_event(
+            HumanResponseEvent,
+            waiter_event=InputRequiredEvent(prefix=f"approve {ev.branch}"),
+        )
+        return ParallelWaitDone(branch=ev.branch, response=response.response)
+
+    @step
+    async def collect(self, ctx: Context, ev: ParallelWaitDone) -> StopEvent:
+        events: list[ParallelWaitDone] | None = ctx.collect_events(
+            ev, [ParallelWaitDone, ParallelWaitDone, ParallelWaitDone]
+        )
+        if events is None:
+            return None  # type: ignore
+
+        return StopEvent(result=sorted((e.branch, e.response) for e in events))
+
+
+@pytest.mark.asyncio
+async def test_parallel_implicit_waiters_are_not_collapsed() -> None:
+    workflow = ParallelImplicitWaiterWorkflow(timeout=1.0)
+    handler = workflow.run()
+    prefixes: set[str] = set()
+
+    async for ev in handler.stream_events():
+        if isinstance(ev, InputRequiredEvent):
+            prefixes.add(ev.prefix)
+            if len(prefixes) == 3:
+                handler.ctx.send_event(HumanResponseEvent(response="approved"))
+                break
+
+    assert prefixes == {"approve a", "approve b", "approve c"}
+    result = await handler
+    assert result == [
+        ("a", "approved"),
+        ("b", "approved"),
+        ("c", "approved"),
+    ]
+
+
+class IdenticalWaitEvent(Event):
+    pass
+
+
+class IdenticalWaitDone(Event):
+    response: str
+
+
+class IdenticalImplicitWaiterWorkflow(Workflow):
+    @step
+    async def dispatch(self, ctx: Context, ev: StartEvent) -> IdenticalWaitEvent:
+        for _ in range(3):
+            ctx.send_event(IdenticalWaitEvent())
+        return None  # type: ignore
+
+    @step(num_workers=3)
+    async def wait_branch(
+        self, ctx: Context, ev: IdenticalWaitEvent
+    ) -> IdenticalWaitDone:
+        response = await ctx.wait_for_event(
+            HumanResponseEvent,
+            waiter_event=InputRequiredEvent(prefix="approve"),
+        )
+        return IdenticalWaitDone(response=response.response)
+
+    @step
+    async def collect(self, ctx: Context, ev: IdenticalWaitDone) -> StopEvent:
+        events: list[IdenticalWaitDone] | None = ctx.collect_events(
+            ev, [IdenticalWaitDone, IdenticalWaitDone, IdenticalWaitDone]
+        )
+        if events is None:
+            return None  # type: ignore
+
+        return StopEvent(result=[e.response for e in events])
+
+
+@pytest.mark.asyncio
+async def test_parallel_identical_implicit_waiters_are_not_collapsed() -> None:
+    workflow = IdenticalImplicitWaiterWorkflow(timeout=1.0)
+    handler = workflow.run()
+    input_required_count = 0
+
+    async for ev in handler.stream_events():
+        if isinstance(ev, InputRequiredEvent):
+            input_required_count += 1
+            if input_required_count == 3:
+                handler.ctx.send_event(HumanResponseEvent(response="approved"))
+                break
+
+    assert input_required_count == 3
+    result = await handler
+    assert result == ["approved", "approved", "approved"]
 
 
 @pytest.mark.asyncio
