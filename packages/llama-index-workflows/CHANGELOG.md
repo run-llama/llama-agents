@@ -1,5 +1,11 @@
 # llama-index-workflows
 
+## 2.22.1
+
+### Patch Changes
+
+- 36fffec: Keep implicit waiters distinct across parallel workflow fan-out branches.
+
 ## 2.22.0
 
 ### Minor Changes
