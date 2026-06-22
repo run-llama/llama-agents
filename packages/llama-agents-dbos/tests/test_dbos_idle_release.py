@@ -18,7 +18,11 @@ from llama_agents.dbos.idle_release import (
     _DBOSIdleReleaseInternalRunAdapter,
 )
 from llama_agents.dbos.journal.crud import JournalCrud
-from llama_agents.dbos.journal.lifecycle import RunLifecycleLock, RunLifecycleState
+from llama_agents.dbos.journal.lifecycle import (
+    ResumeClaim,
+    RunLifecycleLock,
+    RunLifecycleState,
+)
 from llama_agents.server._store.abstract_workflow_store import (
     PersistentHandler,
 )
@@ -29,6 +33,7 @@ from workflows.context.state_store import InMemoryStateStore, StateStore
 from workflows.decorators import step
 from workflows.events import Event, StartEvent, StopEvent, WorkflowIdleEvent
 from workflows.runtime.runtime_decorators import BaseRuntimeDecorator
+from workflows.runtime.types.internal_state import BrokerState
 from workflows.runtime.types.plugin import (
     ExternalRunAdapter,
     InternalRunAdapter,
@@ -180,26 +185,34 @@ class FakeLifecycleLock(RunLifecycleLock):
         self._states: dict[str, tuple[RunLifecycleState, datetime]] = {}
 
     async def create(self, run_id: str) -> None:
-        self._states[run_id] = (RunLifecycleState.active, datetime.now(timezone.utc))
+        self._states[run_id] = (
+            RunLifecycleState.active,
+            datetime.now(timezone.utc),
+        )
 
     async def begin_release(self, run_id: str) -> bool:
         entry = self._states.get(run_id)
         if entry is None or entry[0] != RunLifecycleState.active:
             return False
-        self._states[run_id] = (RunLifecycleState.releasing, datetime.now(timezone.utc))
+        self._states[run_id] = (
+            RunLifecycleState.releasing,
+            datetime.now(timezone.utc),
+        )
         return True
 
-    async def complete_release(self, run_id: str) -> None:
+    async def complete_release(self, run_id: str) -> bool:
         entry = self._states.get(run_id)
         if entry is not None and entry[0] == RunLifecycleState.releasing:
             self._states[run_id] = (
                 RunLifecycleState.released,
                 datetime.now(timezone.utc),
             )
+            return True
+        return False
 
     async def try_begin_resume(
         self, run_id: str, crash_timeout_seconds: float | None = None
-    ) -> RunLifecycleState | None:
+    ) -> ResumeClaim | RunLifecycleState | None:
         entry = self._states.get(run_id)
         if entry is None:
             return None
@@ -207,17 +220,52 @@ class FakeLifecycleLock(RunLifecycleLock):
         if state == RunLifecycleState.active:
             return None
         if state == RunLifecycleState.released or (
-            state == RunLifecycleState.releasing
+            state in (RunLifecycleState.releasing, RunLifecycleState.resuming)
             and crash_timeout_seconds is not None
             and (datetime.now(timezone.utc) - updated_at).total_seconds()
             > crash_timeout_seconds
         ):
+            version = datetime.now(timezone.utc)
             self._states[run_id] = (
-                RunLifecycleState.active,
-                datetime.now(timezone.utc),
+                RunLifecycleState.resuming,
+                version,
             )
-            return RunLifecycleState.released
-        return RunLifecycleState.releasing
+            return ResumeClaim(version=version, previous_state=state)
+        return state
+
+    async def refresh_resume_owner(
+        self, run_id: str, version: datetime
+    ) -> ResumeClaim | None:
+        entry = self._states.get(run_id)
+        if (
+            entry is None
+            or entry[0] != RunLifecycleState.resuming
+            or entry[1] != version
+        ):
+            return None
+        new_version = datetime.now(timezone.utc)
+        self._states[run_id] = (
+            RunLifecycleState.resuming,
+            new_version,
+        )
+        return ResumeClaim(
+            version=new_version,
+            previous_state=RunLifecycleState.resuming,
+        )
+
+    async def complete_resume(self, run_id: str, version: datetime) -> bool:
+        entry = self._states.get(run_id)
+        if (
+            entry is None
+            or entry[0] != RunLifecycleState.resuming
+            or entry[1] != version
+        ):
+            return False
+        self._states[run_id] = (
+            RunLifecycleState.active,
+            datetime.now(timezone.utc),
+        )
+        return True
 
     def get_state(self, run_id: str) -> tuple[RunLifecycleState, datetime] | None:
         """Test-only helper for assertions."""
@@ -310,12 +358,28 @@ def _seed_handler(
     return handler
 
 
+async def _claim_resume(
+    lifecycle: FakeLifecycleLock,
+    run_id: str = "run-1",
+    previous_state: RunLifecycleState = RunLifecycleState.released,
+) -> ResumeClaim:
+    lifecycle._states[run_id] = (
+        previous_state,
+        datetime.now(timezone.utc),
+    )
+    claim = await lifecycle.try_begin_resume(run_id)
+    assert isinstance(claim, ResumeClaim)
+    return claim
+
+
 # -- Tests -----------------------------------------------------------------
 
 
 @pytest.mark.asyncio()
 async def test_idle_event_schedules_release_without_stamping_idle_since(
-    decorator: DBOSIdleReleaseDecorator, store: MemoryWorkflowStore
+    decorator: DBOSIdleReleaseDecorator,
+    store: MemoryWorkflowStore,
+    lifecycle: FakeLifecycleLock,
 ) -> None:
     """WorkflowIdleEvent should schedule deferred release but NOT stamp idle_since."""
     inner_adapter = StubInternalAdapter(run_id="run-1")
@@ -335,6 +399,66 @@ async def test_idle_event_schedules_release_without_stamping_idle_since(
 
     # Should have a deferred release task tracked by run_id
     assert "run-1" in decorator._deferred_release_tasks
+
+    state = lifecycle.get_state("run-1")
+    assert state is not None
+    assert state[0] == RunLifecycleState.active
+
+
+@pytest.mark.asyncio()
+async def test_idle_event_waits_for_lifecycle_create_before_scheduling_release(
+    stub_runtime: StubRuntime,
+    store: MemoryWorkflowStore,
+    mock_journal_crud: AsyncMock,
+) -> None:
+    class SlowCreateLifecycle(FakeLifecycleLock):
+        def __init__(self) -> None:
+            super().__init__()
+            self.allow_create = asyncio.Event()
+
+        async def create(self, run_id: str) -> None:
+            await self.allow_create.wait()
+            await super().create(run_id)
+
+    lifecycle = SlowCreateLifecycle()
+    decorator = _make_decorator(stub_runtime, store, mock_journal_crud, lifecycle)
+    adapter = _DBOSIdleReleaseInternalRunAdapter(
+        StubInternalAdapter(run_id="run-1"), decorator, store
+    )
+    write_task = asyncio.create_task(adapter.write_to_event_stream(WorkflowIdleEvent()))
+    await asyncio.sleep(0)
+
+    assert "run-1" not in decorator._deferred_release_tasks
+
+    lifecycle.allow_create.set()
+    await write_task
+
+    state = lifecycle.get_state("run-1")
+    assert state is not None
+    assert state[0] == RunLifecycleState.active
+    assert "run-1" in decorator._deferred_release_tasks
+
+
+@pytest.mark.asyncio()
+async def test_idle_event_skips_release_schedule_if_lifecycle_create_fails(
+    stub_runtime: StubRuntime,
+    store: MemoryWorkflowStore,
+    mock_journal_crud: AsyncMock,
+) -> None:
+    class FailingCreateLifecycle(FakeLifecycleLock):
+        async def create(self, run_id: str) -> None:
+            raise RuntimeError("create failed")
+
+    lifecycle = FailingCreateLifecycle()
+    decorator = _make_decorator(stub_runtime, store, mock_journal_crud, lifecycle)
+    inner_adapter = StubInternalAdapter(run_id="run-1")
+    adapter = _DBOSIdleReleaseInternalRunAdapter(inner_adapter, decorator, store)
+
+    await adapter.write_to_event_stream(WorkflowIdleEvent())
+
+    assert "run-1" not in decorator._deferred_release_tasks
+    assert lifecycle.get_state("run-1") is None
+    assert inner_adapter.written_events == []
 
 
 @pytest.mark.asyncio()
@@ -396,6 +520,26 @@ async def test_await_and_mark_released_sets_idle_since(
     assert state[0] == RunLifecycleState.released
     handler = store.handlers["handler-1"]
     assert handler.idle_since is not None
+
+
+@pytest.mark.asyncio()
+async def test_await_and_mark_released_skips_idle_since_if_release_not_owned(
+    decorator: DBOSIdleReleaseDecorator,
+    store: MemoryWorkflowStore,
+    lifecycle: FakeLifecycleLock,
+) -> None:
+    _seed_handler(store, run_id="run-1")
+    lifecycle._states["run-1"] = (
+        RunLifecycleState.resuming,
+        datetime.now(timezone.utc),
+    )
+
+    external = StubExternalAdapter(run_id="run-1")
+
+    await decorator._await_and_mark_released("run-1", external)
+
+    handler = store.handlers["handler-1"]
+    assert handler.idle_since is None
 
 
 @pytest.mark.asyncio()
@@ -507,6 +651,74 @@ async def test_send_event_waits_on_releasing_then_resumes(
 
 
 @pytest.mark.asyncio()
+async def test_second_send_waits_while_resume_is_in_progress(
+    decorator: DBOSIdleReleaseDecorator,
+    store: MemoryWorkflowStore,
+    stub_runtime: StubRuntime,
+    lifecycle: FakeLifecycleLock,
+) -> None:
+    lifecycle._states["run-1"] = (
+        RunLifecycleState.released,
+        datetime.now(timezone.utc),
+    )
+    workflow = SimpleWorkflow()
+    decorator.track_workflow(workflow)
+    _seed_handler(
+        store,
+        workflow_name=workflow.workflow_name,
+        run_id="run-1",
+        idle_since=datetime(2020, 1, 1, tzinfo=timezone.utc),
+    )
+
+    resume_started = asyncio.Event()
+    resume_continue = asyncio.Event()
+
+    async def _slow_resume(
+        run_id: str,
+        resume_claim: ResumeClaim,
+        pending_tick: WorkflowTick | None = None,
+    ) -> tuple[str, ExternalRunAdapter] | None:
+        resume_started.set()
+        await resume_continue.wait()
+        await lifecycle.complete_resume(run_id, resume_claim.version)
+        return run_id, stub_runtime.get_external_adapter(run_id)
+
+    decorator._do_resume = _slow_resume  # type: ignore[method-assign]
+    original_sleep = asyncio.sleep
+
+    async def _fast_sleep(delay: float) -> None:
+        await original_sleep(0)
+
+    first = asyncio.create_task(
+        DBOSIdleReleaseExternalRunAdapter(decorator, "run-1").send_event(
+            TickIdleCheck()
+        )
+    )
+    await resume_started.wait()
+    state = lifecycle.get_state("run-1")
+    assert state is not None
+    assert state[0] == RunLifecycleState.resuming
+
+    second = asyncio.create_task(
+        DBOSIdleReleaseExternalRunAdapter(decorator, "run-1").send_event(
+            TickIdleCheck()
+        )
+    )
+    with patch("asyncio.sleep", side_effect=_fast_sleep):
+        await original_sleep(0)
+        ext = stub_runtime.get_external_adapter("run-1")
+        assert isinstance(ext, StubExternalAdapter)
+        assert ext.sent_events == []
+
+        resume_continue.set()
+        await asyncio.wait_for(asyncio.gather(first, second), timeout=1)
+
+    ext = stub_runtime.get_external_adapter("run-1")
+    assert isinstance(ext, StubExternalAdapter)
+    assert len(ext.sent_events) == 1
+
+
+@pytest.mark.asyncio()
 async def test_send_event_force_resumes_on_crash_timeout(
     decorator: DBOSIdleReleaseDecorator,
     store: MemoryWorkflowStore,
@@ -593,6 +805,7 @@ async def test_do_resume_carries_over_serialized_state(
     stub_runtime: StubRuntime,
     mock_journal_crud: AsyncMock,
     mock_dbos: AsyncMock,
+    lifecycle: FakeLifecycleLock,
 ) -> None:
     """_do_resume should pass serialized_state from the old state store."""
     workflow = StatefulWorkflow()
@@ -609,13 +822,119 @@ async def test_do_resume_carries_over_serialized_state(
     state_store = InMemoryStateStore(MyState(counter=42))
     store.state_stores["run-1"] = state_store
 
-    await decorator._do_resume("run-1")
+    claim = await _claim_resume(lifecycle)
+    await decorator._do_resume("run-1", resume_claim=claim)
 
     assert len(stub_runtime.run_workflow_calls) == 1
     call = stub_runtime.run_workflow_calls[0]
     serialized_state = call["serialized_state"]
     assert serialized_state is not None
     assert "counter" in serialized_state["state_data"]
+
+
+@pytest.mark.asyncio()
+async def test_do_resume_stops_if_resume_ownership_was_lost(
+    decorator: DBOSIdleReleaseDecorator,
+    store: MemoryWorkflowStore,
+    stub_runtime: StubRuntime,
+    mock_journal_crud: AsyncMock,
+    mock_dbos: AsyncMock,
+    lifecycle: FakeLifecycleLock,
+) -> None:
+    workflow = SimpleWorkflow()
+    decorator.track_workflow(workflow)
+    _seed_handler(
+        store,
+        workflow_name=workflow.workflow_name,
+        run_id="run-1",
+        idle_since=datetime(2020, 1, 1, tzinfo=timezone.utc),
+    )
+    claim = await _claim_resume(lifecycle)
+    lifecycle._states["run-1"] = (
+        RunLifecycleState.resuming,
+        datetime.now(timezone.utc),
+    )
+
+    result = await decorator._do_resume("run-1", resume_claim=claim)
+
+    assert result is None
+    assert len(stub_runtime.run_workflow_calls) == 0
+    mock_dbos.delete_workflow_async.assert_not_called()
+    mock_journal_crud.delete.assert_not_called()
+
+
+@pytest.mark.asyncio()
+async def test_do_resume_refreshes_owner_before_purging_or_starting_replacement(
+    decorator: DBOSIdleReleaseDecorator,
+    store: MemoryWorkflowStore,
+    stub_runtime: StubRuntime,
+    mock_journal_crud: AsyncMock,
+    mock_dbos: AsyncMock,
+    lifecycle: FakeLifecycleLock,
+) -> None:
+    workflow = SimpleWorkflow()
+    decorator.track_workflow(workflow)
+    _seed_handler(
+        store,
+        workflow_name=workflow.workflow_name,
+        run_id="run-1",
+        idle_since=datetime(2020, 1, 1, tzinfo=timezone.utc),
+    )
+    claim = await _claim_resume(lifecycle)
+
+    async def _rebuild_and_steal(workflow: Workflow, run_id: str) -> BrokerState:
+        lifecycle._states[run_id] = (
+            RunLifecycleState.resuming,
+            datetime.now(timezone.utc),
+        )
+        return BrokerState.from_workflow(workflow)
+
+    decorator._broker_state_from_ticks = AsyncMock(  # type: ignore[method-assign]
+        side_effect=_rebuild_and_steal
+    )
+
+    result = await decorator._do_resume("run-1", resume_claim=claim)
+
+    assert result is None
+    assert len(stub_runtime.run_workflow_calls) == 0
+    mock_dbos.delete_workflow_async.assert_not_called()
+    mock_journal_crud.delete.assert_not_called()
+
+
+@pytest.mark.asyncio()
+async def test_do_resume_stale_resuming_takeover_does_not_wait_for_dbos_result(
+    decorator: DBOSIdleReleaseDecorator,
+    store: MemoryWorkflowStore,
+    stub_runtime: StubRuntime,
+    mock_journal_crud: AsyncMock,
+    mock_dbos: AsyncMock,
+    lifecycle: FakeLifecycleLock,
+) -> None:
+    workflow = SimpleWorkflow()
+    decorator.track_workflow(workflow)
+    _seed_handler(
+        store,
+        workflow_name=workflow.workflow_name,
+        run_id="run-1",
+        idle_since=datetime(2020, 1, 1, tzinfo=timezone.utc),
+    )
+    lifecycle._states["run-1"] = (
+        RunLifecycleState.resuming,
+        datetime.now(timezone.utc) - timedelta(seconds=CRASH_TIMEOUT_SECONDS + 10),
+    )
+    claim = await lifecycle.try_begin_resume(
+        "run-1", crash_timeout_seconds=CRASH_TIMEOUT_SECONDS
+    )
+    assert isinstance(claim, ResumeClaim)
+    assert claim.previous_state == RunLifecycleState.resuming
+
+    await decorator._do_resume("run-1", resume_claim=claim)
+
+    mock_dbos.retrieve_workflow_async.assert_not_called()
+    assert len(stub_runtime.run_workflow_calls) == 1
+    state = lifecycle.get_state("run-1")
+    assert state is not None
+    assert state[0] == RunLifecycleState.active
 
 
 @pytest.mark.asyncio()
@@ -707,6 +1026,7 @@ async def test_do_resume_continues_when_old_dbos_workflow_gone(
     stub_runtime: StubRuntime,
     mock_journal_crud: AsyncMock,
     mock_dbos: AsyncMock,
+    lifecycle: FakeLifecycleLock,
 ) -> None:
     mock_dbos.retrieve_workflow_async.side_effect = Exception("workflow not found")
     workflow = SimpleWorkflow()
@@ -718,7 +1038,8 @@ async def test_do_resume_continues_when_old_dbos_workflow_gone(
         idle_since=datetime(2020, 1, 1, tzinfo=timezone.utc),
     )
 
-    await decorator._do_resume("run-1")
+    claim = await _claim_resume(lifecycle)
+    await decorator._do_resume("run-1", resume_claim=claim)
 
     assert len(stub_runtime.run_workflow_calls) == 1
 
@@ -730,6 +1051,7 @@ async def test_do_resume_continues_when_state_carryover_fails(
     stub_runtime: StubRuntime,
     mock_journal_crud: AsyncMock,
     mock_dbos: AsyncMock,
+    lifecycle: FakeLifecycleLock,
 ) -> None:
     workflow = StatefulWorkflow()
     decorator.track_workflow(workflow)
@@ -741,7 +1063,8 @@ async def test_do_resume_continues_when_state_carryover_fails(
     )
 
     with patch.object(store, "create_state_store", side_effect=Exception("boom")):
-        await decorator._do_resume("run-1")
+        claim = await _claim_resume(lifecycle)
+        await decorator._do_resume("run-1", resume_claim=claim)
 
     assert len(stub_runtime.run_workflow_calls) == 1
     call = stub_runtime.run_workflow_calls[0]
@@ -755,6 +1078,7 @@ async def test_do_resume_continues_when_journal_delete_fails(
     stub_runtime: StubRuntime,
     mock_journal_crud: AsyncMock,
     mock_dbos: AsyncMock,
+    lifecycle: FakeLifecycleLock,
 ) -> None:
     mock_journal_crud.delete.side_effect = Exception("db error")
     workflow = SimpleWorkflow()
@@ -766,7 +1090,8 @@ async def test_do_resume_continues_when_journal_delete_fails(
         idle_since=datetime(2020, 1, 1, tzinfo=timezone.utc),
     )
 
-    await decorator._do_resume("run-1")
+    claim = await _claim_resume(lifecycle)
+    await decorator._do_resume("run-1", resume_claim=claim)
 
     assert len(stub_runtime.run_workflow_calls) == 1
 
@@ -778,6 +1103,7 @@ async def test_do_resume_continues_when_dbos_delete_fails(
     stub_runtime: StubRuntime,
     mock_journal_crud: AsyncMock,
     mock_dbos: AsyncMock,
+    lifecycle: FakeLifecycleLock,
 ) -> None:
     mock_dbos.delete_workflow_async.side_effect = Exception("delete failed")
     workflow = SimpleWorkflow()
@@ -789,7 +1115,8 @@ async def test_do_resume_continues_when_dbos_delete_fails(
         idle_since=datetime(2020, 1, 1, tzinfo=timezone.utc),
     )
 
-    await decorator._do_resume("run-1")
+    claim = await _claim_resume(lifecycle)
+    await decorator._do_resume("run-1", resume_claim=claim)
 
     assert len(stub_runtime.run_workflow_calls) == 1
 
@@ -798,9 +1125,11 @@ async def test_do_resume_continues_when_dbos_delete_fails(
 async def test_do_resume_raises_when_handler_not_found(
     decorator: DBOSIdleReleaseDecorator,
     mock_dbos: AsyncMock,
+    lifecycle: FakeLifecycleLock,
 ) -> None:
+    claim = await _claim_resume(lifecycle)
     with pytest.raises(ValueError, match="Expected 1 handler"):
-        await decorator._do_resume("run-1")
+        await decorator._do_resume("run-1", resume_claim=claim)
 
 
 @pytest.mark.asyncio()
@@ -808,10 +1137,12 @@ async def test_do_resume_raises_when_workflow_not_tracked(
     decorator: DBOSIdleReleaseDecorator,
     store: MemoryWorkflowStore,
     mock_dbos: AsyncMock,
+    lifecycle: FakeLifecycleLock,
 ) -> None:
     _seed_handler(store, workflow_name="unknown_workflow", run_id="run-1")
+    claim = await _claim_resume(lifecycle)
     with pytest.raises(ValueError, match="not found"):
-        await decorator._do_resume("run-1")
+        await decorator._do_resume("run-1", resume_claim=claim)
 
 
 @pytest.mark.asyncio()
@@ -821,6 +1152,7 @@ async def test_do_resume_includes_pending_tick_in_rebuilt_state(
     stub_runtime: StubRuntime,
     mock_journal_crud: AsyncMock,
     mock_dbos: AsyncMock,
+    lifecycle: FakeLifecycleLock,
 ) -> None:
     workflow = SimpleWorkflow()
     decorator.track_workflow(workflow)
@@ -834,7 +1166,8 @@ async def test_do_resume_includes_pending_tick_in_rebuilt_state(
     # Use TickAddEvent with StartEvent — this sets is_running=True in BrokerState,
     # giving us a concrete observable difference vs. no pending tick.
     tick = TickAddEvent(event=StartEvent())
-    await decorator._do_resume("run-1", pending_tick=tick)
+    claim = await _claim_resume(lifecycle)
+    await decorator._do_resume("run-1", resume_claim=claim, pending_tick=tick)
 
     assert len(stub_runtime.run_workflow_calls) == 1
     call = stub_runtime.run_workflow_calls[0]
@@ -852,6 +1185,7 @@ async def test_do_resume_replays_persisted_ticks(
     stub_runtime: StubRuntime,
     mock_journal_crud: AsyncMock,
     mock_dbos: AsyncMock,
+    lifecycle: FakeLifecycleLock,
 ) -> None:
     """Persisted ticks must be replayed to rebuild BrokerState on resume (Fault 8)."""
     workflow = SimpleWorkflow()
@@ -869,7 +1203,8 @@ async def test_do_resume_replays_persisted_ticks(
     tick_data = WorkflowTickAdapter.dump_python(tick)
     await store.append_tick("run-1", tick_data)
 
-    await decorator._do_resume("run-1")
+    claim = await _claim_resume(lifecycle)
+    await decorator._do_resume("run-1", resume_claim=claim)
 
     assert len(stub_runtime.run_workflow_calls) == 1
     call = stub_runtime.run_workflow_calls[0]

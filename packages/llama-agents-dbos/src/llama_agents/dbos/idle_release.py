@@ -3,7 +3,7 @@
 """Idle detection and release for DBOS-backed workflows.
 
 Uses a ``RunLifecycleLock`` to coordinate the release/resume state machine
-(active → releasing → released → active) across replicas. See
+(active → releasing → released → resuming → active) across replicas. See
 ``packages/llama-agents-dbos/ARCHITECTURE.md`` for details.
 """
 
@@ -16,7 +16,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from llama_agents.dbos.journal.crud import JournalCrud
-from llama_agents.dbos.journal.lifecycle import RunLifecycleLock, RunLifecycleState
+from llama_agents.dbos.journal.lifecycle import (
+    ResumeClaim,
+    RunLifecycleLock,
+    RunLifecycleState,
+)
 from llama_agents.server._store.abstract_workflow_store import (
     AbstractWorkflowStore,
     HandlerQuery,
@@ -50,12 +54,14 @@ from workflows.runtime.types.ticks import (
 from workflows.workflow import Workflow
 
 from dbos import DBOS
+from dbos._error import DBOSNonExistentWorkflowError
 
 logger = logging.getLogger(__name__)
 
 
 # How long to wait before declaring a "releasing" state as crashed
 CRASH_TIMEOUT_SECONDS = 120.0
+STALE_RELEASING_GRACE_SECONDS = 5.0
 
 
 class _DBOSIdleReleaseInternalRunAdapter(BaseInternalRunAdapterDecorator):
@@ -83,6 +89,16 @@ class _DBOSIdleReleaseInternalRunAdapter(BaseInternalRunAdapterDecorator):
 
     @override
     async def write_to_event_stream(self, event: Event) -> None:
+        if isinstance(event, WorkflowIdleEvent):
+            try:
+                await self._runtime._create_lifecycle(self.run_id)
+            except Exception:
+                logger.warning(
+                    "Skipping DBOS idle release scheduling after lifecycle init "
+                    f"failure [run_id={self.run_id}]",
+                    exc_info=True,
+                )
+                return
         await super().write_to_event_stream(event)
         if isinstance(event, WorkflowIdleEvent):
             self._runtime._schedule_deferred_release(self.run_id)
@@ -122,10 +138,13 @@ class DBOSIdleReleaseExternalRunAdapter(BaseExternalRunAdapterDecorator):
             if result is None:
                 await self._decorated.send_event(tick)
                 return
-            if result == RunLifecycleState.released:
-                await self._runtime._do_resume(self.run_id, pending_tick=tick)
-                return
-            # releasing — poll until it completes or times out
+            if isinstance(result, ResumeClaim):
+                if await self._runtime._do_resume(
+                    self.run_id, resume_claim=result, pending_tick=tick
+                ):
+                    return
+                continue
+            # releasing/resuming — poll until it completes or times out
             await asyncio.sleep(0.5)
 
 
@@ -134,7 +153,7 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
     and reload via reusing the same run_id for DBOS-backed workflows.
 
     Uses a distributed lifecycle lock to coordinate release/resume across
-    replicas. The state machine is: active → releasing → released → active.
+    replicas. The state machine is: active → releasing → released → resuming → active.
 
     Must wrap an EventInterceptorDecorator (or compatible runtime) that
     wraps a DBOSRuntime.
@@ -196,6 +215,10 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
         task.add_done_callback(self._background_tasks.discard)
         return task
 
+    async def _create_lifecycle(self, run_id: str) -> None:
+        lifecycle = await self._get_lifecycle()
+        await lifecycle.create(run_id)
+
     def _schedule_deferred_release(self, run_id: str) -> None:
         """Cancel any existing timer for run_id and schedule a new one."""
         self._cancel_deferred_release(run_id)
@@ -220,11 +243,11 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
     async def _deferred_release(self, run_id: str) -> None:
         """Wait for idle_timeout then release the handler if still idle."""
         await asyncio.sleep(self._idle_timeout)
-        self._deferred_release_tasks.pop(run_id, None)
         await self._release_idle_handler(run_id)
 
     async def _release_idle_handler(self, run_id: str) -> None:
         """Release an idle handler by sending TickIdleRelease."""
+        self._clear_current_deferred_release(run_id)
         lifecycle = await self._get_lifecycle()
         if not await lifecycle.begin_release(run_id):
             return
@@ -235,6 +258,11 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
 
         self._spawn_task(self._await_and_mark_released(run_id, external))
 
+    def _clear_current_deferred_release(self, run_id: str) -> None:
+        task = asyncio.current_task()
+        if task is not None and self._deferred_release_tasks.get(run_id) is task:
+            self._deferred_release_tasks.pop(run_id, None)
+
     async def _await_and_mark_released(
         self, run_id: str, external: ExternalRunAdapter
     ) -> None:
@@ -243,7 +271,8 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
             await external.get_result()
 
             lifecycle = await self._get_lifecycle()
-            await lifecycle.complete_release(run_id)
+            if not await lifecycle.complete_release(run_id):
+                return
 
             # Set idle_since NOW — after the workflow is fully released
             await self._store.update_handler_status(
@@ -265,11 +294,43 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
             init_state, stream_workflow_ticks(self._store, run_id), run_id=run_id
         )
 
+    async def _await_old_workflow_for_resume(
+        self, run_id: str, resume_claim: ResumeClaim
+    ) -> None:
+        if resume_claim.previous_state not in (
+            RunLifecycleState.released,
+            RunLifecycleState.releasing,
+        ):
+            return
+        try:
+            handle = await DBOS.retrieve_workflow_async(run_id)
+            result = handle.get_result()
+            if resume_claim.previous_state == RunLifecycleState.releasing:
+                await asyncio.wait_for(result, timeout=STALE_RELEASING_GRACE_SECONDS)
+            else:
+                await result
+        except TimeoutError:
+            logger.warning(
+                "Timed out awaiting stale releasing DBOS workflow before resume "
+                f"[run_id={run_id}]"
+            )
+        except DBOSNonExistentWorkflowError:
+            logger.debug(
+                f"Old DBOS workflow already purged before resume [run_id={run_id}]",
+                exc_info=True,
+            )
+        except Exception:
+            logger.warning(
+                f"Failed to await old DBOS workflow for run_id={run_id}",
+                exc_info=True,
+            )
+
     async def _do_resume(
         self,
         run_id: str,
+        resume_claim: ResumeClaim,
         pending_tick: WorkflowTick | None = None,
-    ) -> tuple[str, ExternalRunAdapter]:
+    ) -> tuple[str, ExternalRunAdapter] | None:
         """Resume a workflow that was previously idle-released.
 
         Waits for the old DBOS workflow to finish (works cross-replica),
@@ -286,15 +347,12 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
         """
         self._cancel_deferred_release(run_id)
 
-        # Wait for old DBOS workflow to finish (cross-replica safe)
-        try:
-            handle = await DBOS.retrieve_workflow_async(run_id)
-            await handle.get_result()
-        except Exception:
-            logger.warning(
-                f"Failed to await old DBOS workflow for run_id={run_id}",
-                exc_info=True,
-            )
+        await self._await_old_workflow_for_resume(run_id, resume_claim)
+
+        lifecycle = await self._get_lifecycle()
+        owner_claim = await lifecycle.refresh_resume_owner(run_id, resume_claim.version)
+        if owner_claim is None:
+            return None
 
         # Look up handler to get workflow_name
         handlers = await self._store.query(HandlerQuery(run_id_in=[run_id]))
@@ -335,6 +393,10 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
                     f"Failed to carry over state from run {run_id}", exc_info=True
                 )
 
+        owner_claim = await lifecycle.refresh_resume_owner(run_id, owner_claim.version)
+        if owner_claim is None:
+            return None
+
         # Purge DBOS state and journal so the same run_id can be reused.
         try:
             await DBOS.delete_workflow_async(run_id)
@@ -358,6 +420,8 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
             serialized_state=serialized_state,
             serializer=serializer,
         )
+        if not await lifecycle.complete_resume(run_id, owner_claim.version):
+            return None
 
         handler.status = "running"
         handler.updated_at = datetime.now(timezone.utc)
