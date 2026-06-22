@@ -14,7 +14,7 @@ dev = [
 
 [project]
 name = "llama-agents-client"
-version = "0.3.9"
+version = "0.3.10"
 description = "HTTP client for connecting to and interacting with LlamaIndex workflow servers"
 readme = "README.md"
 requires-python = ">=3.10"

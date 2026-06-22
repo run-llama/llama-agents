@@ -1,5 +1,11 @@
 # llama-agents-dbos
 
+## 0.4.1
+
+### Patch Changes
+
+- d16172e: Fix DBOS idle release so parked workflows leave the pending set and resume correctly.
+
 ## 0.4.0
 
 ### Minor Changes
