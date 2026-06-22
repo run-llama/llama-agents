@@ -175,7 +175,6 @@ async def test_try_begin_resume_released_transitions_to_resuming(
     result = await lock.try_begin_resume("run-1")
     assert isinstance(result, ResumeClaim)
     assert result.previous_state == RunLifecycleState.released
-    assert await lock.is_resume_owner("run-1", result.token) is True
     assert await lock.try_begin_resume("run-1") == RunLifecycleState.resuming
 
 
@@ -249,7 +248,7 @@ async def test_full_lifecycle(lock_fixture: LockFixture) -> None:
     assert isinstance(claim, ResumeClaim)
     assert claim.previous_state == RunLifecycleState.released
     assert await lock.try_begin_resume("run-1") == RunLifecycleState.resuming
-    assert await lock.complete_resume("run-1", claim.token) is True
+    assert await lock.complete_resume("run-1", claim.version) is True
     assert await lock.try_begin_resume("run-1") is None
 
 
@@ -267,10 +266,10 @@ async def test_resume_claim_fences_completion(lock_fixture: LockFixture) -> None
     assert await lock.complete_resume("run-1", "wrong-token") is False
     assert await lock.try_begin_resume("run-1") == RunLifecycleState.resuming
     assert await lock.refresh_resume_owner("run-1", "wrong-token") is None
-    refreshed_claim = await lock.refresh_resume_owner("run-1", claim.token)
+    refreshed_claim = await lock.refresh_resume_owner("run-1", claim.version)
     assert isinstance(refreshed_claim, ResumeClaim)
-    assert await lock.complete_resume("run-1", claim.token) is False
-    assert await lock.complete_resume("run-1", refreshed_claim.token) is True
+    assert await lock.complete_resume("run-1", claim.version) is False
+    assert await lock.complete_resume("run-1", refreshed_claim.version) is True
     assert await lock.try_begin_resume("run-1") is None
 
 
@@ -293,9 +292,8 @@ async def test_stale_resuming_takeover_invalidates_old_owner(
     new_claim = await lock.try_begin_resume("run-1", crash_timeout_seconds=120.0)
     assert isinstance(new_claim, ResumeClaim)
     assert new_claim.previous_state == RunLifecycleState.resuming
-    assert await lock.is_resume_owner("run-1", old_claim.token) is False
-    assert await lock.complete_resume("run-1", old_claim.token) is False
-    assert await lock.complete_resume("run-1", new_claim.token) is True
+    assert await lock.complete_resume("run-1", old_claim.version) is False
+    assert await lock.complete_resume("run-1", new_claim.version) is True
 
 
 @sqlite_only

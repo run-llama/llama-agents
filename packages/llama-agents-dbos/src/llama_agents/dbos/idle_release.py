@@ -388,7 +388,8 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
         await self._await_old_workflow_for_resume(run_id, resume_claim)
 
         lifecycle = await self._get_lifecycle()
-        if not await lifecycle.is_resume_owner(run_id, resume_claim.token):
+        owner_claim = await lifecycle.refresh_resume_owner(run_id, resume_claim.version)
+        if owner_claim is None:
             return None
 
         # Look up handler to get workflow_name
@@ -445,10 +446,8 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
                     f"Journal already purged for run_id={run_id}", exc_info=True
                 )
 
-        refreshed_claim = await lifecycle.refresh_resume_owner(
-            run_id, resume_claim.token
-        )
-        if refreshed_claim is None:
+        owner_claim = await lifecycle.refresh_resume_owner(run_id, owner_claim.version)
+        if owner_claim is None:
             return None
 
         # Start new workflow run with the same run_id.
@@ -459,7 +458,7 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
             serialized_state=serialized_state,
             serializer=serializer,
         )
-        if not await lifecycle.complete_resume(run_id, refreshed_claim.token):
+        if not await lifecycle.complete_resume(run_id, owner_claim.version):
             return None
 
         handler.status = "running"

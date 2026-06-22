@@ -28,7 +28,7 @@ class RunLifecycleState(str, Enum):
 
 @dataclass(frozen=True)
 class ResumeClaim:
-    token: datetime | str
+    version: datetime | str
     previous_state: RunLifecycleState
 
 
@@ -71,20 +71,15 @@ class RunLifecycleLock(ABC):
         ...
 
     @abstractmethod
-    async def is_resume_owner(self, run_id: str, token: datetime | str) -> bool:
-        """Return whether token still owns the resuming row."""
-        ...
-
-    @abstractmethod
     async def refresh_resume_owner(
-        self, run_id: str, token: datetime | str
+        self, run_id: str, version: datetime | str
     ) -> ResumeClaim | None:
         """Refresh resume ownership timestamp and return the new owner claim."""
         ...
 
     @abstractmethod
-    async def complete_resume(self, run_id: str, token: datetime | str) -> bool:
-        """CAS: resuming with token -> active. Returns True on success."""
+    async def complete_resume(self, run_id: str, version: datetime | str) -> bool:
+        """CAS: resuming with version -> active. Returns True on success."""
         ...
 
 
@@ -161,27 +156,15 @@ class PostgresRunLifecycleLock(RunLifecycleLock):
                         run_id,
                     )
                     return ResumeClaim(
-                        token=claim_row["updated_at"],
+                        version=claim_row["updated_at"],
                         previous_state=state,
                     )
                 return state
 
-    async def is_resume_owner(self, run_id: str, token: datetime | str) -> bool:
-        if not isinstance(token, datetime):
-            return False
-        row = await self._pool.fetchrow(
-            f"SELECT run_id FROM {self._table_ref} "
-            f"WHERE run_id = $1 AND state = $2 AND updated_at = $3",
-            run_id,
-            RunLifecycleState.resuming.value,
-            token,
-        )
-        return row is not None
-
     async def refresh_resume_owner(
-        self, run_id: str, token: datetime | str
+        self, run_id: str, version: datetime | str
     ) -> ResumeClaim | None:
-        if not isinstance(token, datetime):
+        if not isinstance(version, datetime):
             return None
         row = await self._pool.fetchrow(
             f"UPDATE {self._table_ref} SET updated_at = $1 "
@@ -189,17 +172,17 @@ class PostgresRunLifecycleLock(RunLifecycleLock):
             datetime.now(timezone.utc),
             run_id,
             RunLifecycleState.resuming.value,
-            token,
+            version,
         )
         if row is None:
             return None
         return ResumeClaim(
-            token=row["updated_at"],
+            version=row["updated_at"],
             previous_state=RunLifecycleState.resuming,
         )
 
-    async def complete_resume(self, run_id: str, token: datetime | str) -> bool:
-        if not isinstance(token, datetime):
+    async def complete_resume(self, run_id: str, version: datetime | str) -> bool:
+        if not isinstance(version, datetime):
             return False
         row = await self._pool.fetchrow(
             f"UPDATE {self._table_ref} SET state = $1, updated_at = $2 "
@@ -208,7 +191,7 @@ class PostgresRunLifecycleLock(RunLifecycleLock):
             datetime.now(timezone.utc),
             run_id,
             RunLifecycleState.resuming.value,
-            token,
+            version,
         )
         return row is not None
 
@@ -311,57 +294,47 @@ class SqliteRunLifecycleLock(RunLifecycleLock):
                             ).total_seconds()
                             > crash_timeout_seconds
                         ):
-                            token = datetime.now(timezone.utc).isoformat()
+                            version = datetime.now(timezone.utc).isoformat()
                             conn.execute(
                                 f"UPDATE {self._table_ref} SET state = ?, updated_at = ? WHERE run_id = ?",
                                 (
                                     RunLifecycleState.resuming.value,
-                                    token,
+                                    version,
                                     run_id,
                                 ),
                             )
-                            result = ResumeClaim(token=token, previous_state=state)
+                            result = ResumeClaim(version=version, previous_state=state)
                     conn.commit()
                     return result
                 except Exception:
                     conn.rollback()
                     raise
 
-    async def is_resume_owner(self, run_id: str, token: datetime | str) -> bool:
-        async with self._lock(run_id):
-            with self._connect() as conn:
-                row = conn.execute(
-                    f"SELECT run_id FROM {self._table_ref} "
-                    f"WHERE run_id = ? AND state = ? AND updated_at = ?",
-                    (run_id, RunLifecycleState.resuming.value, token),
-                ).fetchone()
-                return row is not None
-
     async def refresh_resume_owner(
-        self, run_id: str, token: datetime | str
+        self, run_id: str, version: datetime | str
     ) -> ResumeClaim | None:
         async with self._lock(run_id):
             with self._connect() as conn:
-                new_token = datetime.now(timezone.utc).isoformat()
+                new_version = datetime.now(timezone.utc).isoformat()
                 cursor = conn.execute(
                     f"UPDATE {self._table_ref} SET updated_at = ? "
                     f"WHERE run_id = ? AND state = ? AND updated_at = ?",
                     (
-                        new_token,
+                        new_version,
                         run_id,
                         RunLifecycleState.resuming.value,
-                        token,
+                        version,
                     ),
                 )
                 conn.commit()
                 if cursor.rowcount == 0:
                     return None
                 return ResumeClaim(
-                    token=new_token,
+                    version=new_version,
                     previous_state=RunLifecycleState.resuming,
                 )
 
-    async def complete_resume(self, run_id: str, token: datetime | str) -> bool:
+    async def complete_resume(self, run_id: str, version: datetime | str) -> bool:
         async with self._lock(run_id):
             with self._connect() as conn:
                 cursor = conn.execute(
@@ -372,7 +345,7 @@ class SqliteRunLifecycleLock(RunLifecycleLock):
                         datetime.now(timezone.utc).isoformat(),
                         run_id,
                         RunLifecycleState.resuming.value,
-                        token,
+                        version,
                     ),
                 )
                 conn.commit()

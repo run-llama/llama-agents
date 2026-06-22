@@ -182,13 +182,12 @@ class FakeLifecycleLock(RunLifecycleLock):
     """In-memory lifecycle lock that implements the real state machine."""
 
     def __init__(self) -> None:
-        self._states: dict[str, tuple[RunLifecycleState, datetime, str | None]] = {}
+        self._states: dict[str, tuple[RunLifecycleState, datetime]] = {}
 
     async def create(self, run_id: str) -> None:
         self._states[run_id] = (
             RunLifecycleState.active,
             datetime.now(timezone.utc),
-            None,
         )
 
     async def begin_release(self, run_id: str) -> bool:
@@ -198,7 +197,6 @@ class FakeLifecycleLock(RunLifecycleLock):
         self._states[run_id] = (
             RunLifecycleState.releasing,
             datetime.now(timezone.utc),
-            None,
         )
         return True
 
@@ -208,7 +206,6 @@ class FakeLifecycleLock(RunLifecycleLock):
             self._states[run_id] = (
                 RunLifecycleState.released,
                 datetime.now(timezone.utc),
-                None,
             )
             return True
         return False
@@ -219,7 +216,7 @@ class FakeLifecycleLock(RunLifecycleLock):
         entry = self._states.get(run_id)
         if entry is None:
             return None
-        state, updated_at, _token = entry
+        state, updated_at = entry
         if state == RunLifecycleState.active:
             return None
         if state == RunLifecycleState.released or (
@@ -228,52 +225,49 @@ class FakeLifecycleLock(RunLifecycleLock):
             and (datetime.now(timezone.utc) - updated_at).total_seconds()
             > crash_timeout_seconds
         ):
-            token = datetime.now(timezone.utc)
+            version = datetime.now(timezone.utc)
             self._states[run_id] = (
                 RunLifecycleState.resuming,
-                token,
-                None,
+                version,
             )
-            return ResumeClaim(token=token, previous_state=state)
+            return ResumeClaim(version=version, previous_state=state)
         return state
 
-    async def is_resume_owner(self, run_id: str, token: datetime | str) -> bool:
-        entry = self._states.get(run_id)
-        return (
-            entry is not None
-            and entry[0] == RunLifecycleState.resuming
-            and entry[1] == token
-        )
-
     async def refresh_resume_owner(
-        self, run_id: str, token: datetime | str
+        self, run_id: str, version: datetime | str
     ) -> ResumeClaim | None:
-        if not await self.is_resume_owner(run_id, token):
+        entry = self._states.get(run_id)
+        if (
+            entry is None
+            or entry[0] != RunLifecycleState.resuming
+            or entry[1] != version
+        ):
             return None
-        new_token = datetime.now(timezone.utc)
+        new_version = datetime.now(timezone.utc)
         self._states[run_id] = (
             RunLifecycleState.resuming,
-            new_token,
-            None,
+            new_version,
         )
         return ResumeClaim(
-            token=new_token,
+            version=new_version,
             previous_state=RunLifecycleState.resuming,
         )
 
-    async def complete_resume(self, run_id: str, token: datetime | str) -> bool:
-        if not await self.is_resume_owner(run_id, token):
+    async def complete_resume(self, run_id: str, version: datetime | str) -> bool:
+        entry = self._states.get(run_id)
+        if (
+            entry is None
+            or entry[0] != RunLifecycleState.resuming
+            or entry[1] != version
+        ):
             return False
         self._states[run_id] = (
             RunLifecycleState.active,
             datetime.now(timezone.utc),
-            None,
         )
         return True
 
-    def get_state(
-        self, run_id: str
-    ) -> tuple[RunLifecycleState, datetime, str | None] | None:
+    def get_state(self, run_id: str) -> tuple[RunLifecycleState, datetime] | None:
         """Test-only helper for assertions."""
         return self._states.get(run_id)
 
@@ -281,7 +275,7 @@ class FakeLifecycleLock(RunLifecycleLock):
         """Test hook: override the updated_at timestamp for crash timeout testing."""
         entry = self._states.get(run_id)
         if entry is not None:
-            self._states[run_id] = (entry[0], updated_at, entry[2])
+            self._states[run_id] = (entry[0], updated_at)
 
 
 # -- Fixtures --------------------------------------------------------------
@@ -372,7 +366,6 @@ async def _claim_resume(
     lifecycle._states[run_id] = (
         previous_state,
         datetime.now(timezone.utc),
-        None,
     )
     claim = await lifecycle.try_begin_resume(run_id)
     assert isinstance(claim, ResumeClaim)
@@ -621,7 +614,6 @@ async def test_await_and_mark_released_skips_idle_since_if_release_not_owned(
     lifecycle._states["run-1"] = (
         RunLifecycleState.resuming,
         datetime.now(timezone.utc),
-        "token",
     )
 
     external = StubExternalAdapter(run_id="run-1")
@@ -645,7 +637,6 @@ async def test_send_event_resumes_when_released(
     lifecycle._states["run-1"] = (
         RunLifecycleState.released,
         datetime.now(timezone.utc),
-        None,
     )
 
     workflow = SimpleWorkflow()
@@ -715,7 +706,6 @@ async def test_send_event_waits_on_releasing_then_resumes(
     lifecycle._states["run-1"] = (
         RunLifecycleState.releasing,
         datetime.now(timezone.utc),
-        None,
     )
 
     workflow = SimpleWorkflow()
@@ -752,7 +742,6 @@ async def test_second_send_waits_while_resume_is_in_progress(
     lifecycle._states["run-1"] = (
         RunLifecycleState.released,
         datetime.now(timezone.utc),
-        None,
     )
     workflow = SimpleWorkflow()
     decorator.track_workflow(workflow)
@@ -773,7 +762,7 @@ async def test_second_send_waits_while_resume_is_in_progress(
     ) -> tuple[str, ExternalRunAdapter] | None:
         resume_started.set()
         await resume_continue.wait()
-        await lifecycle.complete_resume(run_id, resume_claim.token)
+        await lifecycle.complete_resume(run_id, resume_claim.version)
         return run_id, stub_runtime.get_external_adapter(run_id)
 
     decorator._do_resume = _slow_resume  # type: ignore[method-assign]
@@ -824,7 +813,6 @@ async def test_send_event_force_resumes_on_crash_timeout(
     lifecycle._states["run-1"] = (
         RunLifecycleState.releasing,
         datetime.now(timezone.utc),
-        None,
     )
     stale_time = datetime.now(timezone.utc) - timedelta(
         seconds=CRASH_TIMEOUT_SECONDS + 10
@@ -947,7 +935,6 @@ async def test_do_resume_stops_if_resume_ownership_was_lost(
     lifecycle._states["run-1"] = (
         RunLifecycleState.resuming,
         datetime.now(timezone.utc),
-        "new-owner",
     )
 
     result = await decorator._do_resume("run-1", resume_claim=claim)
@@ -981,7 +968,6 @@ async def test_do_resume_refreshes_owner_before_starting_replacement(
         lifecycle._states[run_id] = (
             RunLifecycleState.resuming,
             datetime.now(timezone.utc),
-            "new-owner",
         )
 
     mock_journal_crud.delete.side_effect = _delete_and_steal
@@ -1012,7 +998,6 @@ async def test_do_resume_stale_resuming_takeover_does_not_wait_for_dbos_result(
     lifecycle._states["run-1"] = (
         RunLifecycleState.resuming,
         datetime.now(timezone.utc) - timedelta(seconds=CRASH_TIMEOUT_SECONDS + 10),
-        "old-owner",
     )
     claim = await lifecycle.try_begin_resume(
         "run-1", crash_timeout_seconds=CRASH_TIMEOUT_SECONDS
@@ -1051,7 +1036,6 @@ async def test_send_event_polls_when_releasing_then_completes(
     lifecycle._states["run-1"] = (
         RunLifecycleState.releasing,
         datetime.now(timezone.utc),
-        None,
     )
 
     sleep_count = 0
@@ -1092,7 +1076,6 @@ async def test_send_event_crash_timeout_boundary_does_not_force_resume(
     lifecycle._states["run-1"] = (
         RunLifecycleState.releasing,
         datetime.now(timezone.utc),
-        None,
     )
     boundary_time = datetime.now(timezone.utc) - timedelta(
         seconds=CRASH_TIMEOUT_SECONDS
