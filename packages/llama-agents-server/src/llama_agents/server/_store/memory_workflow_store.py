@@ -70,7 +70,7 @@ class MemoryWorkflowStore(AbstractWorkflowStore):
         self.ticks: dict[str, list[StoredTick]] = {}
         # Strong refs: facades live until eviction. Public alias kept for
         # tests/plugins that inject stores; the ABC template reads the cache.
-        self.state_stores: dict[str, StateStoreFacade[Any]] = {}
+        self.state_stores: dict[tuple[str, tuple[str, ...]], StateStoreFacade[Any]] = {}
         self._state_store_cache = self.state_stores
         self._conditions: weakref.WeakValueDictionary[str, asyncio.Condition] = (
             weakref.WeakValueDictionary()
@@ -81,6 +81,7 @@ class MemoryWorkflowStore(AbstractWorkflowStore):
     def _build_state_store(
         self,
         run_id: str,
+        namespace: tuple[str, ...],
         state_type: type[Any] | None,
         serializer: BaseSerializer | None,
     ) -> InMemoryStateStore[Any]:
@@ -134,7 +135,7 @@ class MemoryWorkflowStore(AbstractWorkflowStore):
             if run_id is not None:
                 self.events.pop(run_id, None)
                 self.ticks.pop(run_id, None)
-                self.state_stores.pop(run_id, None)
+                self._evict_run_state_stores(run_id)
 
     def _get_or_create_condition(self, run_id: str) -> asyncio.Condition:
         cond = self._conditions.get(run_id)

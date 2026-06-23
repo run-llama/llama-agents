@@ -40,10 +40,14 @@ class _SqliteStateStorage:
         self,
         db_path: str,
         run_id: str,
+        namespace: tuple[str, ...] = (),
         connection: sqlite3.Connection | None = None,
     ) -> None:
         self._db_path = db_path
         self._run_id = run_id
+        self._namespace = namespace
+        # Persisted key: () -> "" (today's single root row), ("child",) -> "child".
+        self._namespace_key = "/".join(namespace)
         self._shared_conn = connection
 
     @property
@@ -73,7 +77,9 @@ class _SqliteStateStorage:
             return
         conn = sqlite3.connect(self._db_path, timeout=30.0)
         try:
-            yield _SqliteStateStorage(self._db_path, self._run_id, connection=conn)
+            yield _SqliteStateStorage(
+                self._db_path, self._run_id, self._namespace, connection=conn
+            )
         finally:
             conn.close()
 
@@ -82,8 +88,9 @@ class _SqliteStateStorage:
         with self._connect() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT state_json FROM workflow_state WHERE run_id = ?",
-                (self._run_id,),
+                "SELECT state_json FROM workflow_state "
+                "WHERE run_id = ? AND namespace = ?",
+                (self._run_id, self._namespace_key),
             )
             row = cursor.fetchone()
         if row is None:
@@ -96,9 +103,9 @@ class _SqliteStateStorage:
             now = _utc_now().isoformat()
             conn.execute(
                 """
-                INSERT INTO workflow_state (run_id, state_json, state_type, state_module, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(run_id) DO UPDATE SET
+                INSERT INTO workflow_state (run_id, namespace, state_json, state_type, state_module, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, namespace) DO UPDATE SET
                     state_json = excluded.state_json,
                     state_type = excluded.state_type,
                     state_module = excluded.state_module,
@@ -106,6 +113,7 @@ class _SqliteStateStorage:
                 """,
                 (
                     self._run_id,
+                    self._namespace_key,
                     record.data,
                     record.state_type,
                     record.state_module,
@@ -125,13 +133,18 @@ class _SqliteStateStorage:
         return SqliteSerializedState.model_validate(payload)
 
     async def copy_from_handle(self, handle: SqliteSerializedState) -> None:
-        """Copy state from another run's row using SQL INSERT...SELECT."""
+        """Copy every namespace row from another run using INSERT...SELECT.
+
+        The ``run_id`` filter spans all namespaces, so a single statement
+        copies the source run's root and every child namespace; ``namespace``
+        is carried through unchanged.
+        """
         with self._connect() as conn:
             now = _utc_now().isoformat()
             conn.execute(
                 """
-                INSERT OR REPLACE INTO workflow_state (run_id, state_json, state_type, state_module, created_at, updated_at)
-                SELECT ?, state_json, state_type, state_module, ?, ?
+                INSERT OR REPLACE INTO workflow_state (run_id, namespace, state_json, state_type, state_module, created_at, updated_at)
+                SELECT ?, namespace, state_json, state_type, state_module, ?, ?
                 FROM workflow_state WHERE run_id = ?
                 """,
                 (self._run_id, now, now, handle.run_id),
@@ -146,13 +159,16 @@ class SqliteStateStore(StateStoreFacade[MODEL_T], Generic[MODEL_T]):
         self,
         db_path: str,
         run_id: str,
+        namespace: tuple[str, ...] = (),
         state_type: type[MODEL_T] | None = None,
         serializer: BaseSerializer | None = None,
         connection: sqlite3.Connection | None = None,
     ) -> None:
         self._db_path = db_path
         super().__init__(
-            _SqliteStateStorage(db_path, run_id, connection), state_type, serializer
+            _SqliteStateStorage(db_path, run_id, namespace, connection),
+            state_type,
+            serializer,
         )
 
     @classmethod

@@ -40,11 +40,15 @@ class _PostgresStateStorage:
         self,
         pool: asyncpg.Pool,
         run_id: str,
+        namespace: tuple[str, ...] = (),
         schema: str | None = None,
         connection: asyncpg.Connection | asyncpg.pool.PoolConnectionProxy | None = None,
     ) -> None:
         self._pool = pool
         self._run_id = run_id
+        self._namespace = namespace
+        # Persisted key: () -> "" (today's single root row), ("child",) -> "child".
+        self._namespace_key = "/".join(namespace)
         self._schema = schema
         self._shared_conn = connection
 
@@ -81,15 +85,17 @@ class _PostgresStateStorage:
             return
         async with self._pool.acquire() as conn:
             yield _PostgresStateStorage(
-                self._pool, self._run_id, self._schema, connection=conn
+                self._pool, self._run_id, self._namespace, self._schema, connection=conn
             )
 
     async def load(self) -> StateRecord | None:
         """Load raw state from the database."""
         async with self._acquire() as conn:
             row = await conn.fetchrow(
-                f"SELECT state_json FROM {self._table_ref} WHERE run_id = $1",
+                f"SELECT state_json FROM {self._table_ref} "
+                "WHERE run_id = $1 AND namespace = $2",
                 self._run_id,
+                self._namespace_key,
             )
         if row is None:
             return None
@@ -101,15 +107,16 @@ class _PostgresStateStorage:
         async with self._acquire() as conn:
             await conn.execute(
                 f"""
-                INSERT INTO {self._table_ref} (run_id, state_json, state_type, state_module, created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6)
-                ON CONFLICT(run_id) DO UPDATE SET
+                INSERT INTO {self._table_ref} (run_id, namespace, state_json, state_type, state_module, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT(run_id, namespace) DO UPDATE SET
                     state_json = EXCLUDED.state_json,
                     state_type = EXCLUDED.state_type,
                     state_module = EXCLUDED.state_module,
                     updated_at = EXCLUDED.updated_at
                 """,
                 self._run_id,
+                self._namespace_key,
                 record.data,
                 record.state_type,
                 record.state_module,
@@ -129,15 +136,20 @@ class _PostgresStateStorage:
         return PostgresSerializedState.model_validate(payload)
 
     async def copy_from_handle(self, handle: PostgresSerializedState) -> None:
-        """Copy state from another run's row using SQL INSERT...SELECT."""
+        """Copy every namespace row from another run using INSERT...SELECT.
+
+        The ``run_id`` filter spans all namespaces, so a single statement
+        copies the source run's root and every child namespace; ``namespace``
+        is carried through unchanged.
+        """
         now = _utc_now()
         async with self._acquire() as conn:
             await conn.execute(
                 f"""
-                INSERT INTO {self._table_ref} (run_id, state_json, state_type, state_module, created_at, updated_at)
-                SELECT $1, state_json, state_type, state_module, $2, $3
+                INSERT INTO {self._table_ref} (run_id, namespace, state_json, state_type, state_module, created_at, updated_at)
+                SELECT $1, namespace, state_json, state_type, state_module, $2, $3
                 FROM {self._table_ref} WHERE run_id = $4
-                ON CONFLICT(run_id) DO UPDATE SET
+                ON CONFLICT(run_id, namespace) DO UPDATE SET
                     state_json = EXCLUDED.state_json,
                     state_type = EXCLUDED.state_type,
                     state_module = EXCLUDED.state_module,
@@ -157,12 +169,15 @@ class PostgresStateStore(StateStoreFacade[MODEL_T], Generic[MODEL_T]):
         self,
         pool: asyncpg.Pool,
         run_id: str,
+        namespace: tuple[str, ...] = (),
         state_type: type[MODEL_T] | None = None,
         serializer: BaseSerializer | None = None,
         schema: str | None = None,
     ) -> None:
         super().__init__(
-            _PostgresStateStorage(pool, run_id, schema), state_type, serializer
+            _PostgresStateStorage(pool, run_id, namespace, schema),
+            state_type,
+            serializer,
         )
 
     @classmethod

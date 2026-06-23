@@ -5,14 +5,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 from typing import (
     TYPE_CHECKING,
     Any,
+    ClassVar,
+    cast,
     get_args,
 )
 
 from llama_index_instrumentation import get_dispatcher
 from pydantic import ValidationError
+from typing_extensions import dataclass_transform
 
 if TYPE_CHECKING:  # pragma: no cover
     from .context import Context
@@ -23,20 +27,123 @@ from .errors import (
     WorkflowRuntimeError,
     WorkflowValidationError,
 )
-from .events import Event, StartEvent
+from .events import Event, StartEvent, StopEvent
 from .handler import WorkflowHandler
 from .resource import ResourceManager
+from .runtime.types.step_id import StepId
 from .types import RunResultT
 from .utils import get_steps_from_class, get_steps_from_instance
 
 dispatcher = get_dispatcher(__name__)
 logger = logging.getLogger(__name__)
 
+# Default run timeout. Referenced by the constructor and type-checker field.
+DEFAULT_TIMEOUT = 45.0
 
+
+def _resolve_child_slots(cls: type) -> dict[str, type]:
+    """Resolve workflow-typed annotations from ``cls`` and its bases."""
+    workflow_cls = globals().get("Workflow")
+    if workflow_cls is None:
+        return {}
+    slots: dict[str, type] = {}
+    for klass in reversed(cls.__mro__):
+        annotations = klass.__dict__.get("__annotations__") or getattr(
+            klass, "__annotations__", None
+        )
+        if not annotations:
+            continue
+        module = sys.modules.get(klass.__module__)
+        globalns = getattr(module, "__dict__", {})
+        localns = dict(vars(klass))
+        for field_name, annotation in annotations.items():
+            resolved: Any = annotation
+            if isinstance(annotation, str):
+                try:
+                    resolved = eval(annotation, globalns, localns)  # noqa: S307
+                except Exception:
+                    continue
+            if isinstance(resolved, type) and issubclass(resolved, workflow_cls):
+                slots[field_name] = resolved
+    return slots
+
+
+def _synthesized_workflow_init(self: Workflow, *args: Any, **kwargs: Any) -> None:
+    """Constructor synthesized for classes that only declare child slots."""
+    slots = type(self)._get_child_workflow_slots()
+    children: dict[str, Any] = {}
+    for slot_name in slots:
+        if slot_name in kwargs:
+            children[slot_name] = kwargs.pop(slot_name)
+    Workflow.__init__(self, *args, **kwargs)
+    for slot_name, child in children.items():
+        self._attach_child(slot_name, child)
+
+
+def _validate_includable_child(child: Workflow, slot_name: str) -> None:
+    """A workflow is includable as a child only if it declares custom
+    ``StartEvent`` and ``StopEvent`` subclasses — the typed IO is the routing
+    contract that maps each child's events to exactly one child.
+    """
+    cls_name = type(child).__name__
+    if child._start_event_class is StartEvent:
+        raise WorkflowValidationError(
+            f"Child workflow '{cls_name}' (slot '{slot_name}') must declare a "
+            "custom StartEvent subclass; a bare StartEvent cannot be routed to a "
+            "child unambiguously."
+        )
+    if child._stop_event_class is StopEvent:
+        raise WorkflowValidationError(
+            f"Child workflow '{cls_name}' (slot '{slot_name}') must declare a "
+            "custom StopEvent subclass; a bare StopEvent cannot be routed back "
+            "to the parent unambiguously."
+        )
+
+
+def _config_field(*, alias: str, default: Any = None) -> Any:
+    """dataclass_transform field specifier for Workflow config params."""
+    return default
+
+
+@dataclass_transform(kw_only_default=True, field_specifiers=(_config_field,))
 class WorkflowMeta(type):
+    # Defined only at runtime, hidden from type checkers. As a metaclass
+    # __call__ it is the single entry point for every instantiation and sits
+    # above the whole __init__/super() chain: type.__call__ drives __new__ and
+    # the complete chain as one unit, so when it returns — every derived
+    # __init__ done and all children assigned — _finalize_construction runs at
+    # the true outermost point of construction. Registration then sees the full
+    # child tree regardless of init style, subclassing depth, or launch timing.
+    #
+    # It is hidden behind ``if not TYPE_CHECKING`` because a typed metaclass
+    # __call__ can't satisfy both type checkers at once: basedpyright needs a
+    # generic ``cls: type[T] -> T`` self-type to preserve the constructed type,
+    # but that exact annotation makes ty reject the ``super().__call__`` as not
+    # bound to the metaclass. Hiding it lets both fall back to the correct
+    # dataclass_transform constructor typing (``Parent(...)`` -> ``Parent``).
+    if not TYPE_CHECKING:
+
+        def __call__(cls, *args: Any, **kwargs: Any) -> Any:
+            obj = super().__call__(*args, **kwargs)
+            obj._finalize_construction()
+            return obj
+
     def __init__(cls, name: str, bases: tuple[type, ...], dct: dict[str, Any]) -> None:
         super().__init__(name, bases, dct)
         cls._step_functions: dict[str, StepFunction] = {}
+
+        # A user-defined __init__ always wins.
+        workflow_cls = globals().get("Workflow")
+        if workflow_cls is None or "__init__" in dct:
+            return
+        if not _resolve_child_slots(cls):
+            return
+        inherited_init = getattr(cls, "__init__", None)
+        if (
+            inherited_init is workflow_cls.__init__
+            or inherited_init is _synthesized_workflow_init
+        ):
+            setattr(cls, "__init__", _synthesized_workflow_init)
 
 
 class Workflow(metaclass=WorkflowMeta):
@@ -87,16 +194,32 @@ class Workflow(metaclass=WorkflowMeta):
         - [RetryPolicy][workflows.retry_policy.RetryPolicy]
     """
 
-    # Populated by the metaclass; declared here for type checkers.
-    _step_functions: dict[str, StepFunction]
-    _step_functions_version: int = 0
+    # Class-level state (metaclass / per-class), NOT constructor fields.
+    _step_functions: ClassVar[dict[str, StepFunction]]
+    _step_functions_version: ClassVar[int] = 0
+    _child_workflow_slots_cache: ClassVar[dict[str, type] | None] = None
 
-    _runtime: Runtime
-    _workflow_name: str | None
+    # Phantom dataclass_transform fields for typed subclass constructors.
+    _timeout_arg: float | None = _config_field(alias="timeout", default=DEFAULT_TIMEOUT)
+    _disable_validation_arg: bool = _config_field(
+        alias="disable_validation", default=False
+    )
+    _verbose_arg: bool = _config_field(alias="verbose", default=False)
+    _resource_manager_arg: ResourceManager | None = _config_field(
+        alias="resource_manager", default=None
+    )
+    _num_concurrent_runs_arg: int | None = _config_field(
+        alias="num_concurrent_runs", default=None
+    )
+    _runtime_arg: Runtime | None = _config_field(alias="runtime", default=None)
+    _workflow_name_arg: str | None = _config_field(alias="workflow_name", default=None)
+    _skip_graph_checks_arg: set[WorkflowGraphCheck] | None = _config_field(
+        alias="skip_graph_checks", default=None
+    )
 
     def __init__(
         self,
-        timeout: float | None = 45.0,
+        timeout: float | None = DEFAULT_TIMEOUT,
         disable_validation: bool = False,
         verbose: bool = False,
         resource_manager: ResourceManager | None = None,
@@ -144,7 +267,7 @@ class Workflow(metaclass=WorkflowMeta):
         self._disable_validation = disable_validation
         self._num_concurrent_runs = num_concurrent_runs
         # Store explicit name (None means use computed name)
-        self._workflow_name = workflow_name
+        self._workflow_name: str | None = workflow_name
 
         step_configs = self._step_configs()
         cls_name = self.__class__.__name__
@@ -154,6 +277,8 @@ class Workflow(metaclass=WorkflowMeta):
         # Populated by _validate(); empty until a successful validation runs.
         self._catch_error_handlers: dict[str, CatchErrorHandler] = {}
         self._handler_for_step: dict[str, str] = {}
+        # Attached child-workflow instances, keyed by declared field name.
+        self._child_workflows: dict[str, Workflow] = {}
         self._events = _collect_events(step_configs)
         # Resource management
         self._resource_manager = resource_manager or ResourceManager()
@@ -175,9 +300,26 @@ class Workflow(metaclass=WorkflowMeta):
         self._skip_graph_checks: set[WorkflowGraphCheck] = checks
 
         # Runtime registration: explicit > context-scoped > basic_runtime
-        self._runtime = runtime if runtime is not None else get_current_runtime()
+        self._runtime: Runtime = (
+            runtime if runtime is not None else get_current_runtime()
+        )
         if self._verbose:
             self._runtime = VerboseDecorator(self._runtime)
+        # Tracking is deferred until subclass construction has finished.
+
+    def _finalize_construction(self) -> None:
+        """Attach declared children and track the workflow once."""
+        if not hasattr(self, "_runtime"):
+            # _runtime is the last attribute set by Workflow.__init__, so its
+            # absence means a subclass __init__ skipped super().__init__().
+            # __call__ runs this for every instance, so without the guard the
+            # next lines raise an opaque AttributeError on a private attribute.
+            raise WorkflowValidationError(
+                f"{type(self).__name__}.__init__ did not call super().__init__(). "
+                "Workflow subclasses with a custom __init__ must call "
+                "super().__init__(...) so the base workflow is initialized."
+            )
+        self._ensure_children_attached()
         # Register with runtime for tracking (no-op for BasicRuntime)
         self._runtime.track_workflow(self)
 
@@ -203,17 +345,73 @@ class Workflow(metaclass=WorkflowMeta):
         """The runtime this workflow is registered with."""
         return self._runtime
 
-    def _switch_runtime(self, new_runtime: Runtime) -> None:
-        if new_runtime is self._runtime:
+    def _switch_runtime(self, new_runtime: Runtime, *, register: bool = True) -> None:
+        """Reassign this workflow's runtime, propagating into children."""
+        if new_runtime is not self._runtime:
+            if self._runtime_locked:
+                raise RuntimeError(
+                    "Cannot reassign runtime after workflow has been launched"
+                )
+            self._runtime.untrack_workflow(self)
+            self._runtime = new_runtime
+            if register:
+                new_runtime.track_workflow(self)
+        # Descendants may have been attached after this node last switched.
+        for child in self._child_workflows.values():
+            was_locked = child._runtime_locked
+            child._runtime_locked = False
+            try:
+                child._switch_runtime(new_runtime, register=False)
+            finally:
+                child._runtime_locked = was_locked
+
+    @classmethod
+    def _get_child_workflow_slots(cls) -> dict[str, type]:
+        """Return ``{field_name: child_workflow_type}`` declared on this class.
+
+        Resolved from class annotations whose type is a ``Workflow`` subclass.
+        Cached per-class on first access.
+        """
+        cached = cls.__dict__.get("_child_workflow_slots_cache")
+        if cached is None:
+            cached = _resolve_child_slots(cls)
+            cls._child_workflow_slots_cache = cached
+        return cached
+
+    @property
+    def child_workflows(self) -> dict[str, Workflow]:
+        """Attached child-workflow instances, keyed by declared field name."""
+        return dict(self._child_workflows)
+
+    def _attach_child(self, name: str, child: Workflow) -> None:
+        """Wire a child workflow instance into this parent."""
+        if self._child_workflows.get(name) is child:
             return
-        if self._runtime_locked:
-            raise RuntimeError(
-                "Cannot reassign runtime after workflow has been launched"
+        if not isinstance(child, Workflow):
+            raise WorkflowValidationError(
+                f"Child workflow slot '{name}' on '{type(self).__name__}' must be "
+                f"a Workflow instance, got {type(child).__name__}."
             )
-        old = self._runtime
-        old.untrack_workflow(self)
-        self._runtime = new_runtime
-        new_runtime.track_workflow(self)
+        expected = type(self)._get_child_workflow_slots().get(name)
+        if expected is not None and not isinstance(child, expected):
+            raise WorkflowValidationError(
+                f"Child workflow slot '{name}' on '{type(self).__name__}' expects "
+                f"{expected.__name__}, got {type(child).__name__}."
+            )
+        _validate_includable_child(child, name)
+        child._switch_runtime(self._runtime)
+        child._runtime_locked = True
+        setattr(self, name, child)
+        self._child_workflows[name] = child
+
+    def _ensure_children_attached(self) -> None:
+        """Attach any declared child instances not yet wired in."""
+        for name in type(self)._get_child_workflow_slots():
+            if name in self._child_workflows:
+                continue
+            child = getattr(self, name, None)
+            if isinstance(child, Workflow):
+                self._attach_child(name, child)
 
     @property
     def workflow_name(self) -> str:
@@ -276,6 +474,18 @@ class Workflow(metaclass=WorkflowMeta):
         return {**get_steps_from_class(cls), **cls._step_functions}
 
     @classmethod
+    def _get_namespaced_steps_from_class(cls) -> dict[StepId, StepFunction]:
+        """Return class-declared steps keyed by namespaced ``StepId``."""
+        result: dict[StepId, StepFunction] = {
+            StepId((), name): func for name, func in cls._get_steps_from_class().items()
+        }
+        for field_name, child_type in cls._get_child_workflow_slots().items():
+            child_cls = cast("type[Workflow]", child_type)
+            for child_id, func in child_cls._get_namespaced_steps_from_class().items():
+                result[StepId((field_name, *child_id.namespace), child_id.name)] = func
+        return result
+
+    @classmethod
     def add_step(cls, func: StepFunction) -> None:
         """
         Adds a free function as step for this workflow instance.
@@ -297,6 +507,26 @@ class Workflow(metaclass=WorkflowMeta):
     def _get_steps(self) -> dict[str, StepFunction]:
         """Returns all the steps, whether defined as methods or free functions."""
         return {**get_steps_from_instance(self), **self.__class__._step_functions}
+
+    def _get_namespaced_steps(self) -> dict[StepId, StepFunction]:
+        """Return this workflow's steps keyed by namespaced ``StepId``."""
+        self._ensure_children_attached()
+        result: dict[StepId, StepFunction] = {
+            StepId((), name): func for name, func in self._get_steps().items()
+        }
+        for field_name, child in self._child_workflows.items():
+            for child_id, func in child._get_namespaced_steps().items():
+                result[StepId((field_name, *child_id.namespace), child_id.name)] = func
+        return result
+
+    def _namespace_instances(self) -> dict[tuple[str, ...], Workflow]:
+        """Map each namespace path to the workflow instance that owns it."""
+        self._ensure_children_attached()
+        result: dict[tuple[str, ...], Workflow] = {(): self}
+        for field_name, child in self._child_workflows.items():
+            for ns, inst in child._namespace_instances().items():
+                result[(field_name, *ns)] = inst
+        return result
 
     def _get_start_event_instance(
         self, start_event: StartEvent | None, **kwargs: Any
@@ -379,6 +609,8 @@ class Workflow(metaclass=WorkflowMeta):
         """
         from workflows.context import Context
 
+        self._ensure_children_attached()
+
         if not self._runtime_locked:
             # don't allow switching runtime after a workflow has been launched
             self._runtime_locked = True
@@ -446,6 +678,7 @@ class Workflow(metaclass=WorkflowMeta):
         validate_resources: bool = False,
         force: bool = False,
     ) -> bool:
+        self._ensure_children_attached()
         if self._disable_validation and not force:
             return False
         stale = self._validated_version != self.__class__._step_functions_version
@@ -454,6 +687,7 @@ class Workflow(metaclass=WorkflowMeta):
 
         # Inline import: ``representation`` transitively imports ``Workflow``.
         from .representation.validate import (
+            _validate_child_workflow_declarations,
             _validate_resource_configs,
             _validate_resources,
             _validate_workflow,
@@ -484,6 +718,14 @@ class Workflow(metaclass=WorkflowMeta):
                     "Resource validation failed:\n"
                     + "\n".join(f"  - {e}" for e in errors)
                 )
+
+        _validate_child_workflow_declarations(self)
+        for child in self._child_workflows.values():
+            child._validate(
+                validate_resource_configs=validate_resource_configs,
+                validate_resources=validate_resources,
+                force=force,
+            )
 
         self._validation_result = result.uses_hitl
         self._validated_version = self.__class__._step_functions_version
