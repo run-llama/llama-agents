@@ -60,7 +60,7 @@ class CollectionBinding:
     """
 
     id: str
-    source_step: StepId | str
+    source_step: StepId
     target_step: StepId
     item_types: tuple[type[Event], ...]
     policy: Collect
@@ -77,7 +77,7 @@ class CollectionStreamInstance:
     """
 
     stream_id: str
-    source_step: StepId | str
+    source_step: StepId
     scope_path: tuple[str, ...]
     open_work_items: int = 0
     accepting_binding_ids: tuple[str, ...] = ()
@@ -636,9 +636,7 @@ class BrokerConfig:
             },
         )
 
-    def bindings_for_source(
-        self, source_step: StepId | str
-    ) -> tuple[CollectionBinding, ...]:
+    def bindings_for_source(self, source_step: StepId) -> tuple[CollectionBinding, ...]:
         return tuple(
             binding
             for binding in self.collection_bindings.values()
