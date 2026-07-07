@@ -83,11 +83,13 @@ from workflows.runtime.types.results import (
 )
 from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import (
+    STAMPED_TICK_TYPES,
     TickAddEvent,
     TickCancelRun,
     TickIdleCheck,
     TickIdleRelease,
     TickPublishEvent,
+    TickSessionStart,
     TickStepResult,
     TickTimeout,
     TickWaiterTimeout,
@@ -201,12 +203,64 @@ async def rebuild_state_from_ticks_stream(
     return (await replay_ticks_stream(state, ticks, run_id=run_id)).state
 
 
+def _effective_now(tick: WorkflowTick, now_seconds: float) -> float:
+    """Prefer a journaled tick timestamp over the reducer's clock.
+
+    Fixes the replay clock: a tick stamped before ``on_tick`` carries the live
+    run's time, so replaying it makes the same time-based decisions. Old ticks
+    (no stamp) fall back to ``now_seconds``.
+    """
+    stamped = _tick_stamp(tick)
+    return stamped if stamped is not None else now_seconds
+
+
+def _tick_stamp(tick: WorkflowTick) -> float | None:
+    """The tick's journaled wall-clock stamp, or None for unstamped ticks.
+
+    Only stamped ticks accrue alive time. Old markerless journals carry no
+    stamps, so they replay with an empty budget and never fire a spurious
+    timeout under the legacy fallback.
+    """
+    return tick.stamped_at if isinstance(tick, STAMPED_TICK_TYPES) else None
+
+
+def _accrue_alive(broker: BrokerState, stamp: float) -> None:
+    """Accrue one broker's known-alive time up to ``stamp``.
+
+    ``elapsed_alive`` gains the gap since the last reference (the process was
+    alive across it); the reference then advances. The session-start marker moves
+    the reference without accruing, so inter-session downtime never counts.
+    """
+    if broker.last_alive_stamp is not None:
+        delta = stamp - broker.last_alive_stamp
+        if delta > 0:
+            broker.elapsed_alive += delta
+    broker.last_alive_stamp = stamp
+
+
+def _reset_alive_stamps(state: BrokerState, stamp: float | None) -> None:
+    """Session-start reset: advance every broker's accrual reference, no accrual.
+
+    Forgives the inter-session downtime (the gap between the previous session's
+    last tick and this resume) uniformly across the whole broker tree, on both
+    the snapshot-resume and full-journal-replay paths.
+    """
+
+    def walk(broker: BrokerState) -> None:
+        broker.last_alive_stamp = stamp
+        for child in broker.children.values():
+            walk(child)
+
+    walk(state)
+
+
 def _reduce_tick(
     tick: WorkflowTick,
     init: BrokerState,
     now_seconds: float,
     run_id: str | None = None,
 ) -> tuple[BrokerState, list[WorkflowCommand]]:
+    now_seconds = _effective_now(tick, now_seconds)
     if isinstance(tick, TickStepResult):
         state, commands = _process_step_result_tick(tick, init, now_seconds, run_id)
     elif isinstance(tick, TickAddEvent):
@@ -220,6 +274,13 @@ def _reduce_tick(
         state, commands = _process_publish_event_tick(tick, init)
     elif isinstance(tick, TickTimeout):
         state, commands = _process_timeout_tick(tick, init)
+    elif isinstance(tick, TickSessionStart):
+        # Session boundary: advance every broker's accrual reference to this
+        # stamp WITHOUT accruing, so the downtime since the previous session is
+        # forgiven. Never schedules further work.
+        state = init.deepcopy()
+        _reset_alive_stamps(state, _tick_stamp(tick))
+        return state, []
     elif isinstance(tick, TickWaiterTimeout):
         state, commands = _process_waiter_timeout_tick(tick, init, now_seconds)
     elif isinstance(tick, TickIdleCheck):
@@ -259,6 +320,13 @@ def _reduce_tick(
 class _Descent:
     broker: BrokerState
     path: tuple[str, ...]
+
+
+def _accrue_descent(descent: _Descent, stamp: float | None) -> None:
+    """Accrue alive time on the addressed broker."""
+    if stamp is None:
+        return
+    _accrue_alive(descent.broker, stamp)
 
 
 def _descend(root_state: BrokerState, path: tuple[str, ...]) -> _Descent | None:
@@ -953,6 +1021,7 @@ def _process_step_result_tick(
     descent = _descend(state, tick.invocation_namespace)
     if descent is None:
         return state, []
+    _accrue_descent(descent, _tick_stamp(tick))
     broker = descent.broker
     path = descent.path
     step_id = tick.step_id
@@ -1471,6 +1540,7 @@ def _process_add_event_tick(
     descent = _descend(state, tick.origin_namespace)
     if descent is None:
         return state, _unhandled_event_commands(tick, state)
+    _accrue_descent(descent, _tick_stamp(tick))
     broker = descent.broker
     path = descent.path
     if tick.work_item_id is None:

@@ -52,8 +52,10 @@ from workflows.runtime.types.results import (
 )
 from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import (
+    STAMPED_TICK_TYPES,
     TickAddEvent,
     TickIdleCheck,
+    TickSessionStart,
     TickStepResult,
     TickTimeout,
     TickWaiterTimeout,
@@ -73,6 +75,19 @@ from workflows.runtime.control_loop.reduce import (
 )
 
 logger = logging.getLogger("workflows.runtime.control_loop")
+
+
+def _stamp_tick(tick: WorkflowTick, now: float) -> WorkflowTick:
+    """Stamp a tick's journaled timestamp with the live-run clock, if it has one.
+
+    Ticks that carry a ``stamped_at`` field record ``now`` before journaling so a
+    later replay makes the same time-based decisions as the live run instead of
+    reading the replay clock. Ticks without the field (cancel, publish, etc.) and
+    already-stamped ticks pass through unchanged.
+    """
+    if isinstance(tick, STAMPED_TICK_TYPES) and tick.stamped_at is None:
+        return tick.model_copy(update={"stamped_at": now})
+    return tick
 
 
 def _is_shutdown_error(e: BaseException) -> bool:
@@ -407,18 +422,26 @@ class _ControlLoopRunner:
             The final StopEvent from the workflow
         """
 
+        start = await self.adapter.get_now()
+        # Journal a session-start marker at every run()/resume. It marks the
+        # alive-session boundary so downtime never accrues. It leads the journal
+        # so replay sees the boundary before any work of this session.
+        self.tick_buffer.insert(0, TickSessionStart(stamped_at=start))
+
         # Queue initial event
         if start_event is not None:
             self.tick_buffer.append(TickAddEvent(event=start_event))
 
-        start = await self.adapter.get_now()
-        # Schedule workflow timeout if configured
+        # Schedule the root timeout on its remaining alive-time budget. Across a
+        # resume the root keeps the alive time it already spent (elapsed_alive),
+        # instead of the old fresh-budget-per-resume reset; downtime is forgiven
+        # by the session-start marker. A fresh run has elapsed_alive == 0, so
+        # this is the full timeout.
         if start_with_timeout and self.workflow._timeout is not None:
-            # Get initial time
-            timeout_time = start + self.workflow._timeout
+            remaining = max(0.0, self.workflow._timeout - self.state.elapsed_alive)
             self.schedule_tick(
                 TickTimeout(timeout=self.workflow._timeout),
-                at_time=timeout_time,
+                at_time=start + remaining,
             )
 
         # Resume any in-progress work
@@ -575,6 +598,9 @@ class _ControlLoopRunner:
         """Process a single tick and return StopEvent if workflow completes."""
         try:
             start = await self.adapter.get_now()
+            # Stamp the live-run time before journaling so replay reads the same
+            # clock the live run used.
+            tick = _stamp_tick(tick, start)
             self.state, commands = _reduce_tick(
                 tick, self.state, start, run_id=self.adapter.run_id
             )
