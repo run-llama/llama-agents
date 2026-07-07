@@ -141,7 +141,14 @@ async def test_workflow_step_send_event_to_None() -> None:
 
     assert isinstance(result.ctx._face, ExternalContext)
     replay = result.ctx._face._tick_log
-    assert TickAddEvent(event=OneTestEvent()) in replay
+    # stamped_at is the journaled live-run clock; normalize it away to compare
+    # the semantic tick contents.
+    add_events = [
+        t.model_copy(update={"stamped_at": None})
+        for t in replay
+        if isinstance(t, TickAddEvent)
+    ]
+    assert TickAddEvent(event=OneTestEvent()) in add_events
 
 
 @pytest.mark.asyncio

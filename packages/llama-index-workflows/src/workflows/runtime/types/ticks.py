@@ -49,6 +49,10 @@ class TickStepResult(BaseModel):
     invocation_namespace: tuple[str, ...] = Field(default=(), exclude=True)
     event: SerializableEvent
     result: list[Annotated[StepFunctionResult, Discriminator("type")]]
+    # Wall-clock stamp recorded before ``on_tick`` journaling, so replay reads
+    # the same time the live run used instead of the replay clock. Additive:
+    # old journals default to None and fall back to the reducer's ``now``.
+    stamped_at: float | None = None
 
 
 class TickAddEvent(BaseModel):
@@ -74,6 +78,8 @@ class TickAddEvent(BaseModel):
     collection_release_payload: SerializableCollectionReleasePayload = None
     # Stable identity for this work item when re-delivering suspended work.
     work_item_id: str | None = None
+    # See TickStepResult.stamped_at.
+    stamped_at: float | None = None
 
 
 class TickCancelRun(BaseModel):
@@ -116,6 +122,21 @@ class TickWaiterTimeout(BaseModel):
     invocation_namespace: tuple[str, ...] = Field(default=(), exclude=True)
 
 
+class TickSessionStart(BaseModel):
+    """Session-start marker journaled at each ``run()`` start and resume.
+
+    Drives the elapsed-alive timeout budget: it marks the boundary between alive
+    sessions, resetting every broker's ``last_alive_stamp`` without accruing, so
+    the inter-session gap (downtime) never enters any broker's budget — on the
+    snapshot-resume path and the full-journal-replay path identically. Additive
+    to the journal; old journals simply lack it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+    type: Literal["session_start"] = "session_start"
+    stamped_at: float | None = None
+
+
 class TickIdleCheck(BaseModel):
     """Scheduled after state appears idle, to re-check after async sends run.
 
@@ -146,6 +167,13 @@ class TickWakeup(BaseModel):
     due: float
 
 
+# Ticks that carry a journaled wall-clock stamp. See TickStepResult.stamped_at.
+STAMPED_TICK_TYPES = (
+    TickStepResult,
+    TickAddEvent,
+    TickSessionStart,
+)
+
 WorkflowTick = Annotated[
     TickStepResult
     | TickAddEvent
@@ -153,6 +181,7 @@ WorkflowTick = Annotated[
     | TickPublishEvent
     | TickTimeout
     | TickWaiterTimeout
+    | TickSessionStart
     | TickIdleCheck
     | TickIdleRelease
     | TickWakeup,

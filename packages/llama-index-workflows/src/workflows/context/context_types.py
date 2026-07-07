@@ -215,6 +215,14 @@ class SerializedContext(BaseModel):
     collection_release_states: dict[str, SerializedCollectionReleaseState] = Field(
         default_factory=dict
     )
+    # Elapsed known-alive time (seconds) this broker has consumed against its
+    # timeout budget. Persisted so a resumed run keeps its spent budget instead
+    # of resetting; downtime between sessions never accrues (see the reducer's
+    # session-start marker handling). ``last_alive_stamp`` is the accrual
+    # reference point; it is reset by the session marker on resume, so its
+    # persisted value is informational.
+    elapsed_alive: float = Field(default=0.0)
+    last_alive_stamp: float | None = Field(default=None)
 
     @staticmethod
     def from_v0(v0: SerializedContextV0) -> "SerializedContext":

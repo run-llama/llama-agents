@@ -100,6 +100,10 @@ def test_golden_journal_replays_from_canonical_state() -> None:
 
     assert result is not None
     assert result.result == journal["result"]
+    # Legacy fallback: the pre-child journal has no stamps or session markers, so
+    # the elapsed-alive budget never accrues and no spurious timeout can fire.
+    assert state.elapsed_alive == 0.0
+    assert state.last_alive_stamp is None
 
 
 @pytest.mark.asyncio

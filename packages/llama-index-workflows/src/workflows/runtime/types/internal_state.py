@@ -119,6 +119,10 @@ class BrokerState:
         stream_seq: Monotonic counter used to mint deterministic collection stream ids
         streams: Open collection streams keyed by stream id
         collection_release_states: Per-binding release buffers keyed by stream and binding
+        elapsed_alive: Known-alive seconds this broker has spent against its
+            timeout budget.
+        last_alive_stamp: Accrual reference point (the last stamp seen), reset by
+            session-start markers without accruing downtime.
     """
 
     is_running: bool
@@ -131,6 +135,8 @@ class BrokerState:
         default_factory=dict
     )
     children: dict[str, BrokerState] = field(default_factory=dict)
+    elapsed_alive: float = 0.0
+    last_alive_stamp: float | None = None
 
     def __post_init__(self) -> None:
         self._normalize_worker_keys()
@@ -139,6 +145,10 @@ class BrokerState:
         self.__dict__.update(state)
         if "children" not in state:
             self.children = {}
+        if "elapsed_alive" not in state:
+            self.elapsed_alive = 0.0
+        if "last_alive_stamp" not in state:
+            self.last_alive_stamp = None
         self._normalize_worker_keys()
 
     def _normalize_worker_keys(self) -> None:
@@ -163,6 +173,8 @@ class BrokerState:
                 for key, state in self.collection_release_states.items()
             },
             children={key: child.deepcopy() for key, child in self.children.items()},
+            elapsed_alive=self.elapsed_alive,
+            last_alive_stamp=self.last_alive_stamp,
         )
 
     @staticmethod
@@ -399,6 +411,8 @@ def _broker_to_serialized(
             )
             for key, release in state.collection_release_states.items()
         },
+        elapsed_alive=state.elapsed_alive,
+        last_alive_stamp=state.last_alive_stamp,
     )
 
 
@@ -410,6 +424,8 @@ def _load_broker_from_serialized(
     base_state.is_running = serialized.is_running
     base_state.stream_seq = serialized.stream_seq
     base_state.work_item_seq = serialized.work_item_seq
+    base_state.elapsed_alive = serialized.elapsed_alive
+    base_state.last_alive_stamp = serialized.last_alive_stamp
     base_state.streams = {
         sid: CollectionStreamInstance(
             stream_id=stream.stream_id,
