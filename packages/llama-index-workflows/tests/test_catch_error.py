@@ -36,6 +36,7 @@ from workflows.retry_policy import (
     wait_fixed,
 )
 from workflows.runtime.types.internal_state import BrokerState, EventAttempt
+from workflows.runtime.types.step_id import StepId
 
 
 def _retry(attempts: int) -> Any:
@@ -118,7 +119,7 @@ def test_last_exception_serialization_roundtrip() -> None:
 
     wf = Flow()
     state = BrokerState.from_workflow(wf)
-    state.workers["a"].queue.append(
+    state.workers[StepId.root("a")].queue.append(
         EventAttempt(
             event=StartEvent(),
             attempts=1,
@@ -129,7 +130,7 @@ def test_last_exception_serialization_roundtrip() -> None:
     )
     serialized = state.to_serialized(JsonSerializer())
     restored = BrokerState.from_serialized(serialized, wf, JsonSerializer())
-    restored_attempt = restored.workers["a"].queue[0]
+    restored_attempt = restored.workers[StepId.root("a")].queue[0]
     assert isinstance(restored_attempt.last_exception, ValueError)
     assert str(restored_attempt.last_exception) == "boom"
     assert restored_attempt.last_failed_at == 123.456
@@ -517,7 +518,7 @@ def test_recovery_counts_serialization_roundtrip() -> None:
     wf = Flow()
     wf._validate()
     state = BrokerState.from_workflow(wf)
-    state.workers["a"].queue.append(
+    state.workers[StepId.root("a")].queue.append(
         EventAttempt(
             event=StartEvent(),
             attempts=1,
@@ -527,5 +528,5 @@ def test_recovery_counts_serialization_roundtrip() -> None:
     )
     serialized = state.to_serialized(JsonSerializer())
     restored = BrokerState.from_serialized(serialized, wf, JsonSerializer())
-    restored_attempt = restored.workers["a"].queue[0]
+    restored_attempt = restored.workers[StepId.root("a")].queue[0]
     assert restored_attempt.recovery_counts == {"handler": 1}

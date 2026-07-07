@@ -69,7 +69,6 @@ if TYPE_CHECKING:
 from workflows.runtime.control_loop.reduce import (
     _decide_retry_delay,
     _reduce_tick,
-    _root_step_key,
     rewind_in_progress,
 )
 
@@ -134,12 +133,23 @@ class _ControlLoopRunner:
         self._wakeup_sequence = 0
         # Pull task sequence counter for deterministic journaling
         self._pull_sequence = 0
-        # Map from worker task to (step_id, worker_id) key
-        self._task_keys: dict[asyncio.Task[TickStepResult], tuple[StepId, int]] = {}
+        # Map from worker task to (step_id, invocation_namespace, worker_id) key
+        self._task_keys: dict[
+            asyncio.Task[TickStepResult], tuple[StepId, tuple[str, ...], int]
+        ] = {}
         # Whether a TickIdleCheck is currently in tick_buffer
         self._idle_check_pending = False
         # Pending worker coroutines not yet started (started by adapter in wait_for_next_task)
         self._pending_workers: list[PendingStart] = []
+
+    def _broker_for_namespace(self, namespace: tuple[str, ...]) -> BrokerState | None:
+        broker = self.state
+        for seg in namespace:
+            child = broker.children.get(seg)
+            if child is None:
+                return None
+            broker = child
+        return broker
 
     def schedule_tick(self, tick: WorkflowTick, at_time: float) -> None:
         """Schedule a tick to be processed at a specific time."""
@@ -176,12 +186,17 @@ class _ControlLoopRunner:
 
         async def _run_worker() -> TickStepResult:
             worker: InProgressState | None = None
-            step_name = _root_step_key(command.step_id)
+            step_name = str(command.step_id)
             try:
+                broker = self._broker_for_namespace(command.invocation_namespace)
+                if broker is None:
+                    raise WorkflowRuntimeError(
+                        f"Broker {command.invocation_namespace} not found. This should not happen."
+                    )
                 worker = next(
                     (
                         w
-                        for w in self.state.workers[step_name].in_progress
+                        for w in broker.workers[command.step_id].in_progress
                         if w.worker_id == command.id
                     ),
                     None,
@@ -211,8 +226,14 @@ class _ControlLoopRunner:
                 return TickStepResult(
                     step_id=command.step_id,
                     worker_id=command.id,
+                    invocation_namespace=command.invocation_namespace,
                     event=command.event,
-                    result=self._stamp_retry_decisions(command.step_id, worker, result),
+                    result=self._stamp_retry_decisions(
+                        command.step_id,
+                        command.invocation_namespace,
+                        worker,
+                        result,
+                    ),
                 )
             except Exception as e:
                 if _is_shutdown_error(e):
@@ -227,19 +248,29 @@ class _ControlLoopRunner:
                 return TickStepResult(
                     step_id=command.step_id,
                     worker_id=command.id,
+                    invocation_namespace=command.invocation_namespace,
                     event=command.event,
                     result=self._stamp_retry_decisions(
-                        command.step_id, worker, [failed]
+                        command.step_id,
+                        command.invocation_namespace,
+                        worker,
+                        [failed],
                     ),
                 )
 
         self._pending_workers.append(
-            PendingWorker(command.step_id, command.id, _run_worker())
+            PendingWorker(
+                command.step_id,
+                command.id,
+                _run_worker(),
+                invocation_namespace=command.invocation_namespace,
+            )
         )
 
     def _stamp_retry_decisions(
         self,
         step_id: StepId,
+        invocation_namespace: tuple[str, ...],
         worker: InProgressState | None,
         results: list[StepFunctionResult],
     ) -> list[StepFunctionResult]:
@@ -253,8 +284,11 @@ class _ControlLoopRunner:
         """
         if worker is None:
             return results
-        step_name = _root_step_key(step_id)
-        policy = self.state.workers[step_name].config.retry_policy
+        step_name = str(step_id)
+        broker = self._broker_for_namespace(invocation_namespace)
+        if broker is None:
+            return results
+        policy = broker.workers[step_id].config.retry_policy
         out: list[StepFunctionResult] = []
         for result in results:
             if isinstance(result, StepWorkerFailed) and result.retry_decision is None:
@@ -282,6 +316,7 @@ class _ControlLoopRunner:
                 TickAddEvent(
                     event=command.event,
                     step_id=command.step_id,
+                    origin_namespace=command.origin_namespace,
                     recovery_counts=dict(command.recovery_counts),
                     scope_path=command.scope_path,
                 )
@@ -311,7 +346,11 @@ class _ControlLoopRunner:
         elif isinstance(command, CommandScheduleWaiterTimeout):
             now = await self.adapter.get_now()
             self.schedule_tick(
-                TickWaiterTimeout(step_id=command.step_id, waiter_id=command.waiter_id),
+                TickWaiterTimeout(
+                    step_id=command.step_id,
+                    waiter_id=command.waiter_id,
+                    invocation_namespace=command.invocation_namespace,
+                ),
                 at_time=now + command.timeout,
             )
             return None
@@ -439,7 +478,12 @@ class _ControlLoopRunner:
 
                 # Build running list from existing tasks
                 running: list[WorkerTask | PullTask] = [
-                    WorkerTask(key[0], key[1], task)
+                    WorkerTask(
+                        key[0],
+                        key[2],
+                        task,
+                        invocation_namespace=key[1],
+                    )
                     for task in self.worker_tasks
                     for key in [self._task_keys.get(task)]
                     if key is not None
@@ -464,7 +508,11 @@ class _ControlLoopRunner:
                         pull_task = nt.task
                     elif isinstance(nt, WorkerTask):
                         self.worker_tasks.add(nt.task)
-                        self._task_keys[nt.task] = (nt.step_id, nt.worker_id)
+                        self._task_keys[nt.task] = (
+                            nt.step_id,
+                            nt.invocation_namespace,
+                            nt.worker_id,
+                        )
 
                 completed_task = result.completed
 

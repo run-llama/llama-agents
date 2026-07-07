@@ -27,6 +27,7 @@ class CommandRunWorker:
     step_id: StepId
     event: Event
     id: int
+    invocation_namespace: tuple[str, ...] = ()
     bound_events: dict[str, Event] | None = None
 
 
@@ -34,6 +35,7 @@ class CommandRunWorker:
 class CommandQueueEvent:
     event: Event
     step_id: StepId | None = None
+    origin_namespace: tuple[str, ...] = ()
     recovery_counts: dict[str, int] = field(default_factory=dict)
     scope_path: tuple[str, ...] = field(default_factory=tuple)
 
@@ -57,6 +59,7 @@ class CommandFailWorkflow:
 @dataclass(frozen=True)
 class CommandPublishEvent:
     event: Event
+    origin_namespace: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -64,6 +67,7 @@ class CommandScheduleWaiterTimeout:
     step_id: StepId
     waiter_id: str
     timeout: float
+    invocation_namespace: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
