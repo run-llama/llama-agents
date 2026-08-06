@@ -395,6 +395,30 @@ class DummyWorkflowForConcurrentRunsTest(Workflow):
         return self.num_active_runs_history
 
 
+@pytest.mark.parametrize("num_concurrent_runs", [0, -1, True, 1.5, "1"])
+def test_workflow_rejects_invalid_num_concurrent_runs(
+    num_concurrent_runs: Any,
+) -> None:
+    with pytest.raises(
+        WorkflowValidationError,
+        match="num_concurrent_runs must be an integer greater than 0",
+    ):
+        DummyWorkflowForConcurrentRunsTest(
+            num_concurrent_runs=num_concurrent_runs,
+        )
+
+
+@pytest.mark.parametrize("num_concurrent_runs", [None, 1, 8])
+def test_workflow_accepts_valid_num_concurrent_runs(
+    num_concurrent_runs: int | None,
+) -> None:
+    workflow = DummyWorkflowForConcurrentRunsTest(
+        num_concurrent_runs=num_concurrent_runs,
+    )
+
+    assert workflow._num_concurrent_runs == num_concurrent_runs
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     (

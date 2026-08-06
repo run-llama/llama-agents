@@ -139,6 +139,14 @@ class Workflow(metaclass=WorkflowMeta):
         )
 
         # Configuration
+        if num_concurrent_runs is not None and (
+            isinstance(num_concurrent_runs, bool)
+            or not isinstance(num_concurrent_runs, int)
+            or num_concurrent_runs <= 0
+        ):
+            raise WorkflowValidationError(
+                "num_concurrent_runs must be an integer greater than 0 or None"
+            )
         self._timeout = timeout
         self._verbose = verbose
         self._disable_validation = disable_validation
