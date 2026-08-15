@@ -11,6 +11,10 @@ and replay unchanged at the behavioral level:
 - `journal.json` — `{"result": 12, "ticks": [...]}`: a full tick journal for a
   fan-out + `collect_events` run. Replaying the ticks from a canonical
   `BrokerState.from_workflow` must reach `StopEvent(result=12)`.
+- `current_journal.json` — the same completed workflow journal in the current
+  format, including a `session_start` marker and non-null stamps on stamped
+  ticks. It pins additions to the current journal shape without changing the
+  legacy compatibility fixture.
 
 Regenerate only when intentionally updating the pinned main serialization
 formats; see `tests/test_golden_serialization_fixtures.py` for the workflow

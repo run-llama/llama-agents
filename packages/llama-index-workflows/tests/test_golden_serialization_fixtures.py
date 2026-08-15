@@ -25,7 +25,11 @@ from workflows.events import Event, HumanResponseEvent, StartEvent, StopEvent
 from workflows.runtime.control_loop.reduce import _reduce_tick, rewind_in_progress
 from workflows.runtime.types.commands import CommandCompleteRun
 from workflows.runtime.types.internal_state import BrokerState
-from workflows.runtime.types.ticks import WorkflowTickAdapter
+from workflows.runtime.types.ticks import (
+    STAMPED_TICK_TYPES,
+    TickSessionStart,
+    WorkflowTickAdapter,
+)
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "golden_serialization"
 
@@ -105,6 +109,30 @@ def test_golden_journal_replays_from_canonical_state() -> None:
     # the elapsed-alive budget never accrues and no spurious timeout can fire.
     assert state.elapsed_alive == 0.0
     assert state.last_alive_stamp is None
+
+
+def test_current_golden_journal_replays_with_stamped_ticks() -> None:
+    journal = _load("current_journal.json")
+    ticks = [WorkflowTickAdapter.validate_python(t) for t in journal["ticks"]]
+
+    assert isinstance(ticks[0], TickSessionStart)
+    stamped_ticks = [tick for tick in ticks if isinstance(tick, STAMPED_TICK_TYPES)]
+    assert stamped_ticks
+    assert all(tick.stamped_at is not None for tick in stamped_ticks)
+
+    state = BrokerState.from_workflow(GoldenJournalWorkflow())
+    state, _ = rewind_in_progress(state, time.time())
+    result: Any = None
+    for tick in ticks:
+        state, commands = _reduce_tick(tick, state, time.time())
+        for command in commands:
+            if isinstance(command, CommandCompleteRun):
+                result = command.result
+
+    assert result is not None
+    assert result.result == journal["result"]
+    assert state.elapsed_alive > 0.0
+    assert state.last_alive_stamp is not None
 
 
 @pytest.mark.asyncio
