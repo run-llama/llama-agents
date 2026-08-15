@@ -22,6 +22,10 @@ and replay unchanged at the behavioral level:
   as DBOS so the workflows package does not require DBOS. Loading it must
   preserve collection routing and pending work. The test accepts additional
   fixture names for later pickle epochs.
+- `current_journal.json` — the same completed workflow journal in the current
+  format, including a `session_start` marker and non-null stamps on stamped
+  ticks. It pins additions to the current journal shape without changing the
+  legacy compatibility fixture.
 
 Regenerate only when intentionally updating the pinned main serialization
 formats; see `tests/test_golden_serialization_fixtures.py` for the workflow

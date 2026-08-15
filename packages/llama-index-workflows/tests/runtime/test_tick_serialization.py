@@ -158,6 +158,7 @@ def test_event_type_roundtrip() -> None:
                 step_id=StepId.root("my_step"),
                 attempts=3,
                 first_attempt_at=1234567890.0,
+                stamped_at=1234567891.0,
             ),
             id="add_event",
         ),
@@ -174,12 +175,20 @@ def test_event_type_roundtrip() -> None:
             id="session_start",
         ),
         pytest.param(
-            TickTimeout(timeout=30.5),
+            TickTimeout(timeout=30.5, stamped_at=1234567892.0),
             id="timeout",
         ),
         pytest.param(
-            TickWakeup(due=12345.5),
+            TickWakeup(due=12345.5, stamped_at=1234567893.0),
             id="wakeup",
+        ),
+        pytest.param(
+            TickWaiterTimeout(
+                step_id=StepId.root("waiter"),
+                waiter_id="w-1",
+                stamped_at=1234567894.0,
+            ),
+            id="waiter_timeout",
         ),
         pytest.param(
             TickStepResult(
