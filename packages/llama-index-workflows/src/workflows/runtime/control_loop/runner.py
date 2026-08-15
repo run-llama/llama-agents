@@ -472,6 +472,12 @@ class _ControlLoopRunner:
                 # Get current time
                 now = await self.adapter.get_now()
 
+                # A completed worker or pull task must not starve scheduled work.
+                # Append due ticks after anything already buffered so the buffer's
+                # existing processing order remains stable.
+                for due_tick in self.pop_due_ticks(now):
+                    self.tick_buffer.append(due_tick)
+
                 # optimization, only reload "now" if any work was done
                 was_buffered = bool(self.tick_buffer)
                 # Drain and process buffered ticks first (from rehydration, queue_tick, etc.)
