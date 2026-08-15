@@ -15,6 +15,7 @@ from workflows.runtime.control_loop.reduce import _reduce_tick
 from workflows.runtime.control_loop.runner import _ControlLoopRunner
 from workflows.runtime.types.commands import CommandHalt, CommandScheduleTimeout
 from workflows.runtime.types.internal_state import BrokerState
+from workflows.runtime.types.results import StepWorkerWaiter
 from workflows.runtime.types.step_function import as_step_worker_functions
 from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import (
@@ -148,6 +149,17 @@ async def test_resume_with_exhausted_budget_halts_before_running_step() -> None:
     workflow = CountingWorkflow(timeout=5.0)
     state = BrokerState.from_workflow(workflow)
     state.elapsed_alive = 5.0
+    state.workers[StepId.root("start")].collected_waiters.append(
+        StepWorkerWaiter(
+            waiter_id="rehydrated-waiter",
+            event=StartEvent(),
+            waiting_for_event=StopEvent,
+            requirements={},
+            has_requirements=True,
+            resolved_event=None,
+        )
+    )
+    assert any(isinstance(tick, TickAddEvent) for tick in state.rehydrate_with_ticks())
     adapter = MockRunAdapter(run_id="test")
     runner = _ControlLoopRunner(
         workflow,
@@ -158,7 +170,7 @@ async def test_resume_with_exhausted_budget_halts_before_running_step() -> None:
     )
 
     with pytest.raises(WorkflowTimeoutError):
-        await runner.run(start_event=StartEvent())
+        await runner.run()
 
     assert calls == []
     assert not any(isinstance(tick, TickAddEvent) for tick in adapter.replay())
