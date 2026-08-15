@@ -23,6 +23,7 @@ from workflows.runtime.types.commands import (
     CommandQueueEvent,
     CommandRunWorker,
     CommandScheduleIdleCheck,
+    CommandScheduleTimeout,
     CommandScheduleWaiterTimeout,
     CommandScheduleWakeup,
     WorkflowCommand,
@@ -369,6 +370,11 @@ class _ControlLoopRunner:
                 at_time=now + command.timeout,
             )
             return None
+        elif isinstance(command, CommandScheduleTimeout):
+            self.schedule_tick(
+                TickTimeout(timeout=command.timeout), at_time=command.at_time
+            )
+            return None
         elif isinstance(command, CommandScheduleWakeup):
             self.schedule_tick(TickWakeup(due=command.at_time), at_time=command.at_time)
             return None
@@ -439,10 +445,11 @@ class _ControlLoopRunner:
         # this is the full timeout.
         if start_with_timeout and self.workflow._timeout is not None:
             remaining = max(0.0, self.workflow._timeout - self.state.elapsed_alive)
-            self.schedule_tick(
-                TickTimeout(timeout=self.workflow._timeout),
-                at_time=start + remaining,
-            )
+            timeout_tick = TickTimeout(timeout=self.workflow._timeout)
+            if remaining <= 0:
+                self.tick_buffer.insert(1, timeout_tick)
+            else:
+                self.schedule_tick(timeout_tick, at_time=start + remaining)
 
         # Resume any in-progress work
         self.state, commands = rewind_in_progress(self.state, start)

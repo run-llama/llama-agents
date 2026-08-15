@@ -83,6 +83,14 @@ class CommandScheduleWakeup:
 
 
 @dataclass(frozen=True)
+class CommandScheduleTimeout:
+    """Schedule the root workflow timeout at an absolute adapter time."""
+
+    timeout: float
+    at_time: float
+
+
+@dataclass(frozen=True)
 class CommandScheduleIdleCheck:
     """Schedule a deferred idle check via TickIdleCheck.
 
@@ -103,6 +111,7 @@ WorkflowCommand = (
     | CommandFailWorkflow
     | CommandPublishEvent
     | CommandScheduleIdleCheck
+    | CommandScheduleTimeout
     | CommandScheduleWaiterTimeout
     | CommandScheduleWakeup
 )
