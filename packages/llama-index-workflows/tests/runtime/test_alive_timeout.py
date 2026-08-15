@@ -112,6 +112,21 @@ def test_timeout_tick_rearms_when_budget_is_not_spent() -> None:
     assert schedules == [CommandScheduleTimeout(timeout=5.0, at_time=15.0)]
 
 
+def test_stale_timeout_tick_rearms_from_monotonic_anchor() -> None:
+    state = BrokerState.from_workflow(_AliveBudgetWorkflow())
+    state.elapsed_alive = 4.0
+    state.last_alive_stamp = 100.0
+
+    _, commands = _reduce_tick(
+        TickTimeout(timeout=10.0, stamped_at=90.0), state, 999.0
+    )
+
+    schedules = [
+        command for command in commands if isinstance(command, CommandScheduleTimeout)
+    ]
+    assert schedules == [CommandScheduleTimeout(timeout=10.0, at_time=106.0)]
+
+
 def test_legacy_unstamped_timeout_tick_halts_unconditionally() -> None:
     state = BrokerState.from_workflow(_AliveBudgetWorkflow())
 

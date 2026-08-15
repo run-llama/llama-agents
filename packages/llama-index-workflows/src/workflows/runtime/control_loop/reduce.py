@@ -1643,10 +1643,11 @@ def _process_timeout_tick(
         _accrue_alive(state, stamp)
         if state.elapsed_alive + 1e-9 < tick.timeout:
             remaining = tick.timeout - state.elapsed_alive
+            base = max(stamp, state.last_alive_stamp or stamp)
             return state, [
                 CommandScheduleTimeout(
                     timeout=tick.timeout,
-                    at_time=stamp + remaining,
+                    at_time=base + remaining,
                 )
             ]
     state.is_running = False
