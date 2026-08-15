@@ -118,9 +118,7 @@ def test_stale_timeout_tick_rearms_from_monotonic_anchor() -> None:
     state.elapsed_alive = 4.0
     state.last_alive_stamp = 100.0
 
-    _, commands = _reduce_tick(
-        TickTimeout(timeout=10.0, stamped_at=90.0), state, 999.0
-    )
+    _, commands = _reduce_tick(TickTimeout(timeout=10.0, stamped_at=90.0), state, 999.0)
 
     schedules = [
         command for command in commands if isinstance(command, CommandScheduleTimeout)
