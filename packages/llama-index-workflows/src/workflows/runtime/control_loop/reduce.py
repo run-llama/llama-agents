@@ -58,6 +58,7 @@ from workflows.runtime.types.commands import (
     CommandQueueEvent,
     CommandRunWorker,
     CommandScheduleIdleCheck,
+    CommandScheduleTimeout,
     CommandScheduleWaiterTimeout,
     CommandScheduleWakeup,
     WorkflowCommand,
@@ -235,7 +236,12 @@ def _accrue_alive(broker: BrokerState, stamp: float) -> None:
         delta = stamp - broker.last_alive_stamp
         if delta > 0:
             broker.elapsed_alive += delta
-    broker.last_alive_stamp = stamp
+    # An out-of-order tick must not move the anchor backwards and inflate a later gap.
+    broker.last_alive_stamp = (
+        stamp
+        if broker.last_alive_stamp is None
+        else max(broker.last_alive_stamp, stamp)
+    )
 
 
 def _reset_alive_stamps(state: BrokerState, stamp: float | None) -> None:
@@ -320,23 +326,27 @@ def _reduce_tick(
 class _Descent:
     broker: BrokerState
     path: tuple[str, ...]
+    chain: tuple[BrokerState, ...]
 
 
 def _accrue_descent(descent: _Descent, stamp: float | None) -> None:
-    """Accrue alive time on the addressed broker."""
+    """Accrue alive time on every broker from the root to the addressed broker."""
     if stamp is None:
         return
-    _accrue_alive(descent.broker, stamp)
+    for broker in descent.chain:
+        _accrue_alive(broker, stamp)
 
 
 def _descend(root_state: BrokerState, path: tuple[str, ...]) -> _Descent | None:
     broker = root_state
+    chain = [broker]
     for seg in path:
         child = broker.children.get(seg)
         if child is None:
             return None
         broker = child
-    return _Descent(broker=broker, path=path)
+        chain.append(broker)
+    return _Descent(broker=broker, path=path, chain=tuple(chain))
 
 
 def _is_eligible(attempt: EventAttempt) -> bool:
@@ -1628,6 +1638,17 @@ def _process_timeout_tick(
     tick: TickTimeout, init: BrokerState
 ) -> tuple[BrokerState, list[WorkflowCommand]]:
     state = init.deepcopy()
+    stamp = _tick_stamp(tick)
+    if stamp is not None:
+        _accrue_alive(state, stamp)
+        if state.elapsed_alive + 1e-9 < tick.timeout:
+            remaining = tick.timeout - state.elapsed_alive
+            return state, [
+                CommandScheduleTimeout(
+                    timeout=tick.timeout,
+                    at_time=stamp + remaining,
+                )
+            ]
     state.is_running = False
     _clear_collection_state(state)
     active_steps = [
@@ -1670,6 +1691,7 @@ def _process_wakeup_tick(
     descent = _descend(state, ())
     if descent is None:
         return state, commands
+    _accrue_descent(descent, _tick_stamp(tick))
     for step_id, worker_state in sorted(
         descent.broker.workers.items(), key=lambda x: str(x[0])
     ):
@@ -1690,6 +1712,7 @@ def _process_waiter_timeout_tick(
     descent = _descend(state, tick.invocation_namespace)
     if descent is None:
         return state, commands
+    _accrue_descent(descent, _tick_stamp(tick))
     broker = descent.broker
     step_id = tick.step_id
     if step_id not in broker.workers:
