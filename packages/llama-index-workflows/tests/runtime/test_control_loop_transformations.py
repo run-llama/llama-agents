@@ -14,7 +14,6 @@ from collections.abc import AsyncIterator
 from typing import cast
 
 import pytest
-from workflows.decorators import StepConfig
 from workflows.errors import WorkflowTimeoutError
 from workflows.events import (
     Event,
@@ -93,6 +92,8 @@ from workflows.runtime.types.ticks import (
 )
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
+TEST_STEP_ID = StepId.root("test_step")
+OTHER_STEP_ID = StepId.root("other_step")
 
 
 class MyTestEvent(Event):
@@ -106,20 +107,16 @@ class OtherEvent(Event):
 @pytest.fixture
 def base_state() -> BrokerState:
     """Create a minimal BrokerState for testing."""
-    step_config = StepConfig(
+    step_config = InternalStepConfig(
         accepted_events=[MyTestEvent, StartEvent],
-        event_name="ev",
-        return_types=[StopEvent, OtherEvent, type(None)],
-        context_parameter="ctx",
         retry_policy=None,
         num_workers=1,
-        resources=[],
     )
     return BrokerState(
         is_running=True,
         config=BrokerConfig(
             steps={
-                "test_step": InternalStepConfig(
+                TEST_STEP_ID: InternalStepConfig(
                     accepted_events=[MyTestEvent, StartEvent],
                     retry_policy=None,
                     num_workers=1,
@@ -128,7 +125,7 @@ def base_state() -> BrokerState:
             timeout=None,
         ),
         workers={
-            "test_step": InternalStepWorkerState(
+            TEST_STEP_ID: InternalStepWorkerState(
                 queue=[],
                 config=step_config,
                 in_progress=[],
@@ -147,7 +144,7 @@ def add_worker(
     snapshot_collected: dict[str, list[Event]] | None = None,
 ) -> None:
     """Helper to add an in-progress worker to state."""
-    state.workers["test_step"].in_progress.append(
+    state.workers[TEST_STEP_ID].in_progress.append(
         InProgressState(
             event=event,
             worker_id=worker_id,
@@ -214,7 +211,7 @@ def test_add_event_matches_waiter_does_not_emit_unhandled(
     base_state: BrokerState,
 ) -> None:
     """Events that satisfy a waiter should not emit UnhandledEvent."""
-    base_state.workers["test_step"].collected_waiters.append(
+    base_state.workers[TEST_STEP_ID].collected_waiters.append(
         StepWorkerWaiter(
             waiter_id="waiter-1",
             event=StartEvent(),
@@ -269,12 +266,12 @@ def test_step_worker_results(
             assert isinstance(commands[i], expected_type)
 
     # Worker should be removed from in_progress
-    assert len(new_state.workers["test_step"].in_progress) == 0
+    assert len(new_state.workers[TEST_STEP_ID].in_progress) == 0
 
 
 def test_step_worker_failed_with_retry(base_state: BrokerState) -> None:
     """Test that failures with retry policy re-queue a retry in state."""
-    base_state.workers["test_step"].config.retry_policy = ConstantDelayRetryPolicy(
+    base_state.workers[TEST_STEP_ID].config.retry_policy = ConstantDelayRetryPolicy(
         maximum_attempts=3, delay=1.0
     )
     event = MyTestEvent(value=42)
@@ -290,7 +287,7 @@ def test_step_worker_failed_with_retry(base_state: BrokerState) -> None:
     new_state, commands = _process_step_result_tick(tick, base_state, now_seconds=110.0)
 
     # The retry lives in the worker queue with its eligibility time
-    queue = new_state.workers["test_step"].queue
+    queue = new_state.workers[TEST_STEP_ID].queue
     assert len(queue) == 1
     assert queue[0].attempts == 1
     assert queue[0].not_before == 111.0
@@ -336,14 +333,14 @@ def test_collected_events(base_state: BrokerState) -> None:
         result=[AddCollectedEvent(event_id="buf1", event=OtherEvent(data="e1"))],
     )
     new_state, _ = _process_step_result_tick(tick, base_state, now_seconds=110.0)
-    assert "buf1" in new_state.workers["test_step"].collected_events
+    assert "buf1" in new_state.workers[TEST_STEP_ID].collected_events
 
     # Delete event from the matching legacy collect_events() snapshot.
     add_worker(
         new_state,
         event,
         snapshot_collected={
-            "buf1": list(new_state.workers["test_step"].collected_events["buf1"])
+            "buf1": list(new_state.workers[TEST_STEP_ID].collected_events["buf1"])
         },
     )
     tick = TickStepResult(
@@ -356,7 +353,7 @@ def test_collected_events(base_state: BrokerState) -> None:
         ],
     )
     new_state, _ = _process_step_result_tick(tick, new_state, now_seconds=110.0)
-    assert "buf1" not in new_state.workers["test_step"].collected_events
+    assert "buf1" not in new_state.workers[TEST_STEP_ID].collected_events
 
 
 def test_stale_collect_events_firing_reruns_without_deleting_buffer(
@@ -365,7 +362,7 @@ def test_stale_collect_events_firing_reruns_without_deleting_buffer(
     event = MyTestEvent(value=42)
     live = OtherEvent(data="live")
     stale = OtherEvent(data="stale")
-    base_state.workers["test_step"].collected_events["buf1"] = [live]
+    base_state.workers[TEST_STEP_ID].collected_events["buf1"] = [live]
     add_worker(base_state, event, snapshot_collected={"buf1": [stale]})
 
     tick = TickStepResult(
@@ -380,7 +377,7 @@ def test_stale_collect_events_firing_reruns_without_deleting_buffer(
 
     new_state, commands = _process_step_result_tick(tick, base_state, now_seconds=110.0)
 
-    assert new_state.workers["test_step"].collected_events["buf1"] == [live]
+    assert new_state.workers[TEST_STEP_ID].collected_events["buf1"] == [live]
     run_cmds = [c for c in commands if isinstance(c, CommandRunWorker)]
     assert len(run_cmds) == 1
     assert run_cmds[0].event is event
@@ -409,7 +406,7 @@ def test_waiters(base_state: BrokerState) -> None:
         ],
     )
     new_state, _ = _process_step_result_tick(tick, base_state, now_seconds=110.0)
-    assert len(new_state.workers["test_step"].collected_waiters) == 1
+    assert len(new_state.workers[TEST_STEP_ID].collected_waiters) == 1
 
     # Delete waiter
     add_worker(new_state, event)
@@ -423,7 +420,7 @@ def test_waiters(base_state: BrokerState) -> None:
         ],
     )
     new_state, _ = _process_step_result_tick(tick, new_state, now_seconds=110.0)
-    assert len(new_state.workers["test_step"].collected_waiters) == 0
+    assert len(new_state.workers[TEST_STEP_ID].collected_waiters) == 0
 
 
 def test_start_event_sets_running(base_state: BrokerState) -> None:
@@ -463,19 +460,15 @@ def test_per_step_explicit_routing_accepts_only_matching_types(
 def test_explicit_routing_requires_acceptance(base_state: BrokerState) -> None:
     """Explicit step routing should still require accepted event types."""
     # Add a second step that does NOT accept MyTestEvent
-    other_step_cfg = StepConfig(
+    other_step_cfg = InternalStepConfig(
         accepted_events=[StartEvent],
-        event_name="ev",
-        return_types=[StopEvent, OtherEvent, type(None)],
-        context_parameter="ctx",
         retry_policy=None,
         num_workers=1,
-        resources=[],
     )
-    base_state.config.steps["other_step"] = InternalStepConfig(
+    base_state.config.steps[OTHER_STEP_ID] = InternalStepConfig(
         accepted_events=[StartEvent], retry_policy=None, num_workers=1
     )
-    base_state.workers["other_step"] = InternalStepWorkerState(
+    base_state.workers[OTHER_STEP_ID] = InternalStepWorkerState(
         queue=[],
         config=other_step_cfg,
         in_progress=[],
@@ -511,13 +504,13 @@ def test_waiter_resolution(base_state: BrokerState) -> None:
         has_requirements=True,
         resolved_event=None,
     )
-    base_state.workers["test_step"].collected_waiters.append(waiter)
+    base_state.workers[TEST_STEP_ID].collected_waiters.append(waiter)
 
     tick = TickAddEvent(event=OtherEvent(data="expected"))
     new_state, commands = _process_add_event_tick(tick, base_state, now_seconds=100.0)
 
     assert (
-        new_state.workers["test_step"].collected_waiters[0].resolved_event is not None
+        new_state.workers[TEST_STEP_ID].collected_waiters[0].resolved_event is not None
     )
     run_cmds = [c for c in commands if isinstance(c, CommandRunWorker)]
     assert any(c.event == original_event for c in run_cmds)
@@ -614,11 +607,12 @@ def test_add_when_capacity_available(base_state: BrokerState) -> None:
     commands = _add_or_enqueue_event(
         EventAttempt(event=event),
         StepId.root("test_step"),
-        base_state.workers["test_step"],
+        base_state.workers[TEST_STEP_ID],
+        (),
         now_seconds=100.0,
     )
 
-    assert len(base_state.workers["test_step"].in_progress) == 1
+    assert len(base_state.workers[TEST_STEP_ID].in_progress) == 1
     assert any(isinstance(c, CommandRunWorker) for c in commands)
     assert any(
         isinstance(c, CommandPublishEvent)
@@ -638,11 +632,12 @@ def test_enqueue_when_no_capacity(base_state: BrokerState) -> None:
     commands = _add_or_enqueue_event(
         EventAttempt(event=event),
         StepId.root("test_step"),
-        base_state.workers["test_step"],
+        base_state.workers[TEST_STEP_ID],
+        (),
         now_seconds=100.0,
     )
 
-    assert len(base_state.workers["test_step"].queue) == 1
+    assert len(base_state.workers[TEST_STEP_ID].queue) == 1
     # PREPARING should be published when we enqueue
     assert isinstance(commands[0], CommandPublishEvent)
     assert isinstance(commands[0].event, StepStateChanged)
@@ -651,8 +646,8 @@ def test_enqueue_when_no_capacity(base_state: BrokerState) -> None:
 
 def test_rewind_restarts_workers(base_state: BrokerState) -> None:
     """Test that in_progress workers are restarted."""
-    base_state.workers["test_step"].config.num_workers = 2
-    base_state.config.steps["test_step"].num_workers = 2
+    base_state.workers[TEST_STEP_ID].config.num_workers = 2
+    base_state.config.steps[TEST_STEP_ID].num_workers = 2
 
     add_worker(base_state, MyTestEvent(value=1), worker_id=0)
     add_worker(base_state, MyTestEvent(value=2), worker_id=1)
@@ -662,7 +657,7 @@ def test_rewind_restarts_workers(base_state: BrokerState) -> None:
     # Both should be restarted
     run_cmds = [c for c in commands if isinstance(c, CommandRunWorker)]
     assert len(run_cmds) == 2
-    assert len(new_state.workers["test_step"].in_progress) == 2
+    assert len(new_state.workers[TEST_STEP_ID].in_progress) == 2
 
 
 def test_add_event_tick_preserves_retry_metadata(base_state: BrokerState) -> None:
@@ -684,7 +679,7 @@ def test_add_event_tick_preserves_retry_metadata(base_state: BrokerState) -> Non
     assert len(run_cmds) == 1
 
     # Verify retry metadata was preserved in the InProgressState
-    in_progress = new_state.workers["test_step"].in_progress
+    in_progress = new_state.workers[TEST_STEP_ID].in_progress
     assert len(in_progress) == 1
     assert in_progress[0].attempts == attempts
     assert in_progress[0].first_attempt_at == first_attempt_time
@@ -700,7 +695,7 @@ def test_add_event_tick_uses_now_when_no_retry_metadata(
 
     new_state, _ = _process_add_event_tick(tick, base_state, now_seconds=now)
 
-    in_progress = new_state.workers["test_step"].in_progress
+    in_progress = new_state.workers[TEST_STEP_ID].in_progress
     assert len(in_progress) == 1
     assert in_progress[0].attempts == 0
     assert in_progress[0].first_attempt_at == now
@@ -709,7 +704,7 @@ def test_add_event_tick_uses_now_when_no_retry_metadata(
 def test_step_worker_failed_retry_preserves_delay(base_state: BrokerState) -> None:
     """Test that the re-queued retry carries the delay as an absolute not_before."""
     retry_delay = 5.0
-    base_state.workers["test_step"].config.retry_policy = ConstantDelayRetryPolicy(
+    base_state.workers[TEST_STEP_ID].config.retry_policy = ConstantDelayRetryPolicy(
         maximum_attempts=3, delay=retry_delay
     )
     event = MyTestEvent(value=42)
@@ -724,14 +719,14 @@ def test_step_worker_failed_retry_preserves_delay(base_state: BrokerState) -> No
 
     new_state, commands = _process_step_result_tick(tick, base_state, now_seconds=110.0)
 
-    queue = new_state.workers["test_step"].queue
+    queue = new_state.workers[TEST_STEP_ID].queue
     assert len(queue) == 1
     assert queue[0].not_before == 110.0 + retry_delay
     assert queue[0].attempts == 1
     assert queue[0].first_attempt_at == 100.0  # from add_worker fixture
     # The retry must not be dispatched within this reduction
     assert not any(isinstance(c, CommandRunWorker) for c in commands)
-    assert len(new_state.workers["test_step"].in_progress) == 0
+    assert len(new_state.workers[TEST_STEP_ID].in_progress) == 0
 
 
 @pytest.mark.parametrize(
@@ -774,14 +769,14 @@ def test_step_worker_failed_retry_preserves_first_attempt_at(
     base_state: BrokerState,
 ) -> None:
     """Test that first_attempt_at stays constant across retries."""
-    base_state.workers["test_step"].config.retry_policy = ConstantDelayRetryPolicy(
+    base_state.workers[TEST_STEP_ID].config.retry_policy = ConstantDelayRetryPolicy(
         maximum_attempts=5, delay=1.0
     )
     event = MyTestEvent(value=42)
 
     original_first_attempt_at = 50.0
     # Simulate a worker that's already been retried twice
-    base_state.workers["test_step"].in_progress.append(
+    base_state.workers[TEST_STEP_ID].in_progress.append(
         InProgressState(
             event=event,
             worker_id=0,
@@ -804,7 +799,7 @@ def test_step_worker_failed_retry_preserves_first_attempt_at(
 
     new_state, _ = _process_step_result_tick(tick, base_state, now_seconds=200.0)
 
-    queue = new_state.workers["test_step"].queue
+    queue = new_state.workers[TEST_STEP_ID].queue
     assert len(queue) == 1
     assert queue[0].attempts == 3  # incremented from 2
     assert queue[0].first_attempt_at == original_first_attempt_at  # preserved!
@@ -821,7 +816,7 @@ def test_step_worker_failed_exponential_jitter_deterministic(
         maximum_attempts=5,
         jitter=True,
     )
-    base_state.workers["test_step"].config.retry_policy = policy
+    base_state.workers[TEST_STEP_ID].config.retry_policy = policy
     event = MyTestEvent(value=42)
     add_worker(base_state, event)
 
@@ -856,8 +851,8 @@ def test_step_worker_failed_exponential_jitter_deterministic(
         tick, base_state, now_seconds=110.0, run_id=run_id
     )
 
-    first_not_before = state_first.workers["test_step"].queue[0].not_before
-    second_not_before = state_second.workers["test_step"].queue[0].not_before
+    first_not_before = state_first.workers[TEST_STEP_ID].queue[0].not_before
+    second_not_before = state_second.workers[TEST_STEP_ID].queue[0].not_before
     assert first_not_before is not None
     assert first_not_before == second_not_before == 110.0 + expected_delay
 
@@ -869,7 +864,7 @@ def test_step_worker_failed_exponential_jitter_deterministic(
 
 def test_wakeup_dispatches_eligible_attempt(base_state: BrokerState) -> None:
     """TickWakeup dispatches attempts whose not_before is covered by its due."""
-    base_state.workers["test_step"].queue.append(
+    base_state.workers[TEST_STEP_ID].queue.append(
         EventAttempt(event=MyTestEvent(value=1), attempts=1, not_before=110.0)
     )
 
@@ -878,14 +873,14 @@ def test_wakeup_dispatches_eligible_attempt(base_state: BrokerState) -> None:
         TickWakeup(due=105.0), base_state, 105.0
     )
     assert not any(isinstance(c, CommandRunWorker) for c in commands_before)
-    assert len(state_before.workers["test_step"].queue) == 1
+    assert len(state_before.workers[TEST_STEP_ID].queue) == 1
 
     # Wakeup due at eligibility: dispatched
     state_after, commands_after = _reduce_tick(TickWakeup(due=110.0), base_state, 110.0)
     run_cmds = [c for c in commands_after if isinstance(c, CommandRunWorker)]
     assert len(run_cmds) == 1
-    assert len(state_after.workers["test_step"].queue) == 0
-    assert state_after.workers["test_step"].in_progress[0].attempts == 1
+    assert len(state_after.workers[TEST_STEP_ID].queue) == 0
+    assert state_after.workers[TEST_STEP_ID].in_progress[0].attempts == 1
 
 
 def test_wakeup_eligibility_is_due_driven_not_clock_driven(
@@ -897,7 +892,7 @@ def test_wakeup_eligibility_is_due_driven_not_clock_driven(
     wakeup identically to the live run, even though the replay-time clock is
     far past every not_before.
     """
-    base_state.workers["test_step"].queue.append(
+    base_state.workers[TEST_STEP_ID].queue.append(
         EventAttempt(event=MyTestEvent(value=1), attempts=1, not_before=110.0)
     )
 
@@ -905,7 +900,7 @@ def test_wakeup_eligibility_is_due_driven_not_clock_driven(
     # still NOT dispatch — the live run didn't dispatch on it either.
     state, commands = _reduce_tick(TickWakeup(due=105.0), base_state, 99_999.0)
     assert not any(isinstance(c, CommandRunWorker) for c in commands)
-    queue = state.workers["test_step"].queue
+    queue = state.workers[TEST_STEP_ID].queue
     assert len(queue) == 1
     assert queue[0].not_before == 110.0
 
@@ -914,7 +909,7 @@ def test_ineligible_attempt_does_not_block_eligible_behind_it(
     base_state: BrokerState,
 ) -> None:
     """An ineligible attempt at the queue head must not starve eligible work."""
-    worker_state = base_state.workers["test_step"]
+    worker_state = base_state.workers[TEST_STEP_ID]
     worker_state.queue.append(
         EventAttempt(event=MyTestEvent(value=1), attempts=1, not_before=999.0)
     )
@@ -927,14 +922,14 @@ def test_ineligible_attempt_does_not_block_eligible_behind_it(
     assert isinstance(run_cmds[0].event, MyTestEvent)
     assert run_cmds[0].event.value == 2
     # Delayed attempt remains queued, not consuming the worker slot
-    remaining = state.workers["test_step"].queue
+    remaining = state.workers[TEST_STEP_ID].queue
     assert len(remaining) == 1
     assert remaining[0].not_before == 999.0
 
 
 def test_retry_with_zero_delay_dispatches_immediately(base_state: BrokerState) -> None:
     """A zero-delay retry is re-dispatched within the same reduction."""
-    base_state.workers["test_step"].config.retry_policy = ConstantDelayRetryPolicy(
+    base_state.workers[TEST_STEP_ID].config.retry_policy = ConstantDelayRetryPolicy(
         maximum_attempts=3, delay=0
     )
     event = MyTestEvent(value=42)
@@ -952,13 +947,13 @@ def test_retry_with_zero_delay_dispatches_immediately(base_state: BrokerState) -
     run_cmds = [c for c in commands if isinstance(c, CommandRunWorker)]
     assert len(run_cmds) == 1
     assert not any(isinstance(c, CommandScheduleWakeup) for c in commands)
-    assert len(new_state.workers["test_step"].queue) == 0
-    assert new_state.workers["test_step"].in_progress[0].attempts == 1
+    assert len(new_state.workers[TEST_STEP_ID].queue) == 0
+    assert new_state.workers[TEST_STEP_ID].in_progress[0].attempts == 1
 
 
 def test_rewind_rearms_wakeup_for_delayed_attempt(base_state: BrokerState) -> None:
     """Resume re-arms a wakeup for queued future-not_before attempts."""
-    base_state.workers["test_step"].queue.append(
+    base_state.workers[TEST_STEP_ID].queue.append(
         EventAttempt(event=MyTestEvent(value=1), attempts=2, not_before=150.0)
     )
 
@@ -966,7 +961,7 @@ def test_rewind_rearms_wakeup_for_delayed_attempt(base_state: BrokerState) -> No
 
     # Not dispatched, stays queued with retry info intact
     assert not any(isinstance(c, CommandRunWorker) for c in commands)
-    queue = new_state.workers["test_step"].queue
+    queue = new_state.workers[TEST_STEP_ID].queue
     assert len(queue) == 1
     assert queue[0].attempts == 2
     # Poke re-armed at the eligibility time
@@ -982,7 +977,7 @@ def test_rewind_rearms_wakeup_even_when_past_due(base_state: BrokerState) -> Non
     The runner fires a past-due wakeup immediately, so delivery is prompt —
     but it arrives as a journaled tick, keeping replay deterministic.
     """
-    base_state.workers["test_step"].queue.append(
+    base_state.workers[TEST_STEP_ID].queue.append(
         EventAttempt(event=MyTestEvent(value=1), attempts=2, not_before=110.0)
     )
 
@@ -992,7 +987,7 @@ def test_rewind_rearms_wakeup_even_when_past_due(base_state: BrokerState) -> Non
     wakeups = [c for c in commands if isinstance(c, CommandScheduleWakeup)]
     assert len(wakeups) == 1
     assert wakeups[0].at_time == 110.0
-    queue = new_state.workers["test_step"].queue
+    queue = new_state.workers[TEST_STEP_ID].queue
     assert len(queue) == 1
     assert queue[0].attempts == 2
 
@@ -1000,8 +995,8 @@ def test_rewind_rearms_wakeup_even_when_past_due(base_state: BrokerState) -> Non
     final_state, wake_commands = _reduce_tick(TickWakeup(due=110.0), new_state, 120.0)
     run_cmds = [c for c in wake_commands if isinstance(c, CommandRunWorker)]
     assert len(run_cmds) == 1
-    assert len(final_state.workers["test_step"].queue) == 0
-    assert final_state.workers["test_step"].in_progress[0].attempts == 2
+    assert len(final_state.workers[TEST_STEP_ID].queue) == 0
+    assert final_state.workers[TEST_STEP_ID].in_progress[0].attempts == 2
 
 
 def test_old_journal_retry_add_event_supersedes_queued_delayed_attempt(
@@ -1015,7 +1010,7 @@ def test_old_journal_retry_add_event_supersedes_queued_delayed_attempt(
     the TickAddEvent must consume that queued attempt instead of dispatching
     a duplicate that would re-run the step after a resume.
     """
-    base_state.workers["test_step"].config.retry_policy = ConstantDelayRetryPolicy(
+    base_state.workers[TEST_STEP_ID].config.retry_policy = ConstantDelayRetryPolicy(
         maximum_attempts=3, delay=1.0
     )
     event = MyTestEvent(value=42)
@@ -1027,7 +1022,7 @@ def test_old_journal_retry_add_event_supersedes_queued_delayed_attempt(
         result=[StepWorkerFailed(exception=ValueError("test"), failed_at=110.0)],
     )
     state, _ = _process_step_result_tick(fail_tick, base_state, now_seconds=110.0)
-    assert state.workers["test_step"].queue[0].not_before == 111.0
+    assert state.workers[TEST_STEP_ID].queue[0].not_before == 111.0
 
     # Old-format journal re-delivers the retry after the delay elapsed
     add_tick = TickAddEvent(
@@ -1041,16 +1036,16 @@ def test_old_journal_retry_add_event_supersedes_queued_delayed_attempt(
 
     run_cmds = [c for c in commands if isinstance(c, CommandRunWorker)]
     assert len(run_cmds) == 1
-    assert final_state.workers["test_step"].queue == []
-    assert len(final_state.workers["test_step"].in_progress) == 1
-    assert final_state.workers["test_step"].in_progress[0].attempts == 1
+    assert final_state.workers[TEST_STEP_ID].queue == []
+    assert len(final_state.workers[TEST_STEP_ID].in_progress) == 1
+    assert final_state.workers[TEST_STEP_ID].in_progress[0].attempts == 1
 
 
 def test_plain_add_event_does_not_consume_queued_delayed_attempt(
     base_state: BrokerState,
 ) -> None:
     """A normal event (no retry metadata) leaves a queued delayed retry alone."""
-    base_state.workers["test_step"].queue.append(
+    base_state.workers[TEST_STEP_ID].queue.append(
         EventAttempt(event=MyTestEvent(value=1), attempts=1, not_before=999.0)
     )
 
@@ -1062,7 +1057,7 @@ def test_plain_add_event_does_not_consume_queued_delayed_attempt(
     assert len(run_cmds) == 1
     assert isinstance(run_cmds[0].event, MyTestEvent)
     assert run_cmds[0].event.value == 2
-    remaining = state.workers["test_step"].queue
+    remaining = state.workers[TEST_STEP_ID].queue
     assert len(remaining) == 1
     assert remaining[0].not_before == 999.0
 
@@ -1078,7 +1073,7 @@ def test_replay_recomputes_jittered_not_before_with_run_id(
     step-result tick crashed with "Worker not found in in_progress".
     """
     run_id = "test-run-id"
-    base_state.workers["test_step"].config.retry_policy = retry_policy(
+    base_state.workers[TEST_STEP_ID].config.retry_policy = retry_policy(
         wait=wait_exponential_jitter(initial=0.5, exp_base=2.0, max=60.0, jitter=10.0),
         stop=stop_after_attempt(5),
     )
@@ -1100,15 +1095,15 @@ def test_replay_recomputes_jittered_not_before_with_run_id(
     # so the journaled wakeup flips the attempt during replay
     replayed = rebuild_state_from_ticks(base_state, [fail_tick], run_id=run_id)
     assert (
-        replayed.workers["test_step"].queue[0].not_before
-        == live_state.workers["test_step"].queue[0].not_before
+        replayed.workers[TEST_STEP_ID].queue[0].not_before
+        == live_state.workers[TEST_STEP_ID].queue[0].not_before
         == live_wakeup.at_time
     )
     flipped, flip_commands = _reduce_tick(
         TickWakeup(due=live_wakeup.at_time), replayed, 99_999.0
     )
     assert any(isinstance(c, CommandRunWorker) for c in flip_commands)
-    assert flipped.workers["test_step"].queue == []
+    assert flipped.workers[TEST_STEP_ID].queue == []
 
 
 class _MustNotBeInvokedPolicy:
@@ -1135,7 +1130,7 @@ def test_journaled_retry_decision_is_used_without_invoking_policy(
     The live runner stamps the decision into StepWorkerFailed before the tick
     is journaled; reduction (live and replay alike) consumes it as data.
     """
-    base_state.workers["test_step"].config.retry_policy = _MustNotBeInvokedPolicy()
+    base_state.workers[TEST_STEP_ID].config.retry_policy = _MustNotBeInvokedPolicy()
     event = MyTestEvent(value=42)
     add_worker(base_state, event)
     fail_tick: TickStepResult = TickStepResult(
@@ -1153,7 +1148,7 @@ def test_journaled_retry_decision_is_used_without_invoking_policy(
 
     state, commands = _process_step_result_tick(fail_tick, base_state, 110.0)
 
-    assert state.workers["test_step"].queue[0].not_before == 111.0
+    assert state.workers[TEST_STEP_ID].queue[0].not_before == 111.0
     wakeups = [c for c in commands if isinstance(c, CommandScheduleWakeup)]
     assert len(wakeups) == 1
     assert wakeups[0].at_time == 111.0
@@ -1163,7 +1158,7 @@ def test_journaled_stop_decision_fails_workflow_even_if_policy_would_retry(
     base_state: BrokerState,
 ) -> None:
     """RetryDecision(delay=None) means stop, regardless of current policy."""
-    base_state.workers["test_step"].config.retry_policy = ConstantDelayRetryPolicy(
+    base_state.workers[TEST_STEP_ID].config.retry_policy = ConstantDelayRetryPolicy(
         maximum_attempts=10, delay=1.0
     )
     event = MyTestEvent(value=42)
@@ -1183,7 +1178,7 @@ def test_journaled_stop_decision_fails_workflow_even_if_policy_would_retry(
 
     state, commands = _process_step_result_tick(fail_tick, base_state, 110.0)
 
-    assert state.workers["test_step"].queue == []
+    assert state.workers[TEST_STEP_ID].queue == []
     assert any(isinstance(c, CommandFailWorkflow) for c in commands)
 
 
@@ -1213,18 +1208,18 @@ def test_replay_with_changed_policy_honors_journaled_decision(
     )
 
     # The policy was reconfigured between the live run and this replay
-    base_state.workers["test_step"].config.retry_policy = retry_policy(
+    base_state.workers[TEST_STEP_ID].config.retry_policy = retry_policy(
         wait=wait_fixed(50.0), stop=stop_after_attempt(5)
     )
     add_worker(base_state, event)
 
     replayed = rebuild_state_from_ticks(base_state, [fail_tick], run_id="test-run-id")
-    assert replayed.workers["test_step"].queue[0].not_before == 111.0
+    assert replayed.workers[TEST_STEP_ID].queue[0].not_before == 111.0
 
     flipped, commands = _reduce_tick(TickWakeup(due=111.0), replayed, 99_999.0)
     assert any(isinstance(c, CommandRunWorker) for c in commands)
-    assert flipped.workers["test_step"].queue == []
-    assert flipped.workers["test_step"].in_progress[0].attempts == 1
+    assert flipped.workers[TEST_STEP_ID].queue == []
+    assert flipped.workers[TEST_STEP_ID].in_progress[0].attempts == 1
 
 
 def test_journaled_first_attempt_at_survives_rebuilt_state(
@@ -1237,7 +1232,7 @@ def test_journaled_first_attempt_at_survives_rebuilt_state(
     rebuild clock, so elapsed-based retry budgets (stop_after_delay)
     silently restarted on every snapshot/resume.
     """
-    base_state.workers["test_step"].config.retry_policy = ConstantDelayRetryPolicy(
+    base_state.workers[TEST_STEP_ID].config.retry_policy = ConstantDelayRetryPolicy(
         maximum_attempts=3, delay=1.0
     )
     event = MyTestEvent(value=42)
@@ -1260,7 +1255,7 @@ def test_journaled_first_attempt_at_survives_rebuilt_state(
 
     state, _ = _process_step_result_tick(fail_tick, base_state, 110.0)
 
-    assert state.workers["test_step"].queue[0].first_attempt_at == 100.0
+    assert state.workers[TEST_STEP_ID].queue[0].first_attempt_at == 100.0
 
 
 def test_journaled_first_attempt_at_used_for_elapsed_on_failure(
@@ -1309,7 +1304,7 @@ def test_check_idle_state_not_running(base_state: BrokerState) -> None:
 
 def test_check_idle_state_has_queued_events(base_state: BrokerState) -> None:
     """A workflow with queued events is not idle."""
-    base_state.workers["test_step"].queue.append(
+    base_state.workers[TEST_STEP_ID].queue.append(
         EventAttempt(event=MyTestEvent(value=1))
     )
     assert _check_idle_state(base_state) is False
@@ -1322,7 +1317,7 @@ def test_check_idle_state_delayed_retry_is_pending_work(
 
     This is what defers idle release (e.g. DBOS) during a retry-delay window.
     """
-    base_state.workers["test_step"].queue.append(
+    base_state.workers[TEST_STEP_ID].queue.append(
         EventAttempt(event=MyTestEvent(value=1), attempts=1, not_before=10_000.0)
     )
     assert _check_idle_state(base_state) is False
@@ -1349,7 +1344,7 @@ def test_check_idle_state_is_idle_with_waiter(base_state: BrokerState) -> None:
         has_requirements=False,
         resolved_event=None,
     )
-    base_state.workers["test_step"].collected_waiters.append(waiter)
+    base_state.workers[TEST_STEP_ID].collected_waiters.append(waiter)
     assert _check_idle_state(base_state) is True
 
 
@@ -1386,19 +1381,15 @@ def test_check_idle_state_multi_step_not_idle_if_one_has_work(
 ) -> None:
     """With multiple steps, not idle if any step has work."""
     # Add a second step
-    other_step_cfg = StepConfig(
+    other_step_cfg = InternalStepConfig(
         accepted_events=[OtherEvent],
-        event_name="ev",
-        return_types=[StopEvent, type(None)],
-        context_parameter="ctx",
         retry_policy=None,
         num_workers=1,
-        resources=[],
     )
-    base_state.config.steps["other_step"] = InternalStepConfig(
+    base_state.config.steps[OTHER_STEP_ID] = InternalStepConfig(
         accepted_events=[OtherEvent], retry_policy=None, num_workers=1
     )
-    base_state.workers["other_step"] = InternalStepWorkerState(
+    base_state.workers[OTHER_STEP_ID] = InternalStepWorkerState(
         queue=[],
         config=other_step_cfg,
         in_progress=[],
@@ -1415,13 +1406,13 @@ def test_check_idle_state_multi_step_not_idle_if_one_has_work(
         has_requirements=False,
         resolved_event=None,
     )
-    base_state.workers["test_step"].collected_waiters.append(waiter)
+    base_state.workers[TEST_STEP_ID].collected_waiters.append(waiter)
 
     # Without work in other_step, workflow is idle
     assert _check_idle_state(base_state) is True
 
     # Add in_progress work to other_step - now not idle
-    base_state.workers["other_step"].in_progress.append(
+    base_state.workers[OTHER_STEP_ID].in_progress.append(
         InProgressState(
             event=OtherEvent(data="test"),
             worker_id=0,
@@ -1437,8 +1428,8 @@ def test_check_idle_state_multi_step_not_idle_if_one_has_work(
     assert _check_idle_state(base_state) is False
 
     # Or with queued work
-    base_state.workers["other_step"].in_progress = []
-    base_state.workers["other_step"].queue.append(
+    base_state.workers[OTHER_STEP_ID].in_progress = []
+    base_state.workers[OTHER_STEP_ID].queue.append(
         EventAttempt(event=OtherEvent(data="queued"))
     )
     assert _check_idle_state(base_state) is False
@@ -1450,7 +1441,7 @@ def test_no_idle_event_when_work_remains(base_state: BrokerState) -> None:
     add_worker(base_state, event)
 
     # Queue another event so work remains after processing
-    base_state.workers["test_step"].queue.append(
+    base_state.workers[TEST_STEP_ID].queue.append(
         EventAttempt(event=MyTestEvent(value=99))
     )
 
@@ -1485,7 +1476,7 @@ def test_no_idle_event_when_workflow_completes(base_state: BrokerState) -> None:
         has_requirements=False,
         resolved_event=None,
     )
-    base_state.workers["test_step"].collected_waiters.append(waiter)
+    base_state.workers[TEST_STEP_ID].collected_waiters.append(waiter)
 
     # Complete the workflow with StopEvent
     tick: TickStepResult = TickStepResult(
@@ -1537,7 +1528,7 @@ def test_rebuild_state_from_ticks_clears_in_progress(base_state: BrokerState) ->
         collected_events={},
         collected_waiters=[],
     )
-    base_state.workers["test_step"].in_progress = [
+    base_state.workers[TEST_STEP_ID].in_progress = [
         InProgressState(
             event=event1,
             worker_id=1,  # Original worker ID from checkpoint
@@ -1583,7 +1574,7 @@ def test_rebuild_state_from_ticks_clears_in_progress(base_state: BrokerState) ->
 
     # Verify the workflow completed
     assert final_state.is_running is False
-    assert len(final_state.workers["test_step"].in_progress) == 0
+    assert len(final_state.workers[TEST_STEP_ID].in_progress) == 0
 
 
 def test_rebuild_state_from_ticks_preserves_queue_order(
@@ -1606,7 +1597,7 @@ def test_rebuild_state_from_ticks_preserves_queue_order(
         collected_events={},
         collected_waiters=[],
     )
-    base_state.workers["test_step"].in_progress = [
+    base_state.workers[TEST_STEP_ID].in_progress = [
         InProgressState(
             event=event1,
             worker_id=0,
@@ -1616,7 +1607,7 @@ def test_rebuild_state_from_ticks_preserves_queue_order(
         ),
     ]
     # Also has queued event
-    base_state.workers["test_step"].queue = [
+    base_state.workers[TEST_STEP_ID].queue = [
         EventAttempt(event=event2, attempts=0, first_attempt_at=None)
     ]
 
@@ -1625,13 +1616,13 @@ def test_rebuild_state_from_ticks_preserves_queue_order(
 
     # rewind_in_progress re-starts workers, so event1 should be back in in_progress
     # with worker_id=0 (reassigned) and retry info preserved
-    assert len(result.workers["test_step"].in_progress) == 1
-    assert result.workers["test_step"].in_progress[0].event == event1
-    assert result.workers["test_step"].in_progress[0].worker_id == 0
-    assert result.workers["test_step"].in_progress[0].attempts == 2
+    assert len(result.workers[TEST_STEP_ID].in_progress) == 1
+    assert result.workers[TEST_STEP_ID].in_progress[0].event == event1
+    assert result.workers[TEST_STEP_ID].in_progress[0].worker_id == 0
+    assert result.workers[TEST_STEP_ID].in_progress[0].attempts == 2
     # Queue should have event2 (since num_workers=1, only 1 can be in_progress)
-    assert len(result.workers["test_step"].queue) == 1
-    assert result.workers["test_step"].queue[0].event == event2
+    assert len(result.workers[TEST_STEP_ID].queue) == 1
+    assert result.workers[TEST_STEP_ID].queue[0].event == event2
 
 
 async def _aiter(ticks: list[WorkflowTick]) -> AsyncIterator[WorkflowTick]:
@@ -1665,7 +1656,7 @@ async def test_rebuild_state_from_ticks_stream_empty(base_state: BrokerState) ->
         step_name="test_step", collected_events={}, collected_waiters=[]
     )
     event1 = MyTestEvent(value=1)
-    base_state.workers["test_step"].in_progress = [
+    base_state.workers[TEST_STEP_ID].in_progress = [
         InProgressState(
             event=event1,
             worker_id=0,
@@ -1678,9 +1669,9 @@ async def test_rebuild_state_from_ticks_stream_empty(base_state: BrokerState) ->
     streamed = await rebuild_state_from_ticks_stream(base_state, _aiter([]))
 
     # rewind_in_progress re-assigns worker_id=0 starting fresh; in_progress preserved.
-    assert len(streamed.workers["test_step"].in_progress) == 1
-    assert streamed.workers["test_step"].in_progress[0].worker_id == 0
-    assert streamed.workers["test_step"].in_progress[0].event == event1
+    assert len(streamed.workers[TEST_STEP_ID].in_progress) == 1
+    assert streamed.workers[TEST_STEP_ID].in_progress[0].worker_id == 0
+    assert streamed.workers[TEST_STEP_ID].in_progress[0].event == event1
 
 
 async def test_rebuild_state_from_ticks_stream_single_tick(
@@ -1731,7 +1722,7 @@ async def test_rebuild_state_from_ticks_stream_clears_in_progress(
     shared_state = StepWorkerState(
         step_name="test_step", collected_events={}, collected_waiters=[]
     )
-    base_state.workers["test_step"].in_progress = [
+    base_state.workers[TEST_STEP_ID].in_progress = [
         InProgressState(
             event=event1,
             worker_id=1,
@@ -1767,7 +1758,7 @@ async def test_rebuild_state_from_ticks_stream_clears_in_progress(
     final_state = await rebuild_state_from_ticks_stream(base_state, _aiter(ticks))
 
     assert final_state.is_running is False
-    assert len(final_state.workers["test_step"].in_progress) == 0
+    assert len(final_state.workers[TEST_STEP_ID].in_progress) == 0
 
 
 async def test_replay_ticks_stream_surfaces_stop_event(base_state: BrokerState) -> None:

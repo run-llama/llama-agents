@@ -132,7 +132,9 @@ class ExternalContext(Generic[MODEL_T, RunResultT]):
         """Get list of currently running step names."""
         state = self._state
         return [
-            step for step in state.workers.keys() if state.workers[step].in_progress
+            str(step)
+            for step in state.workers.keys()
+            if state.workers[step].in_progress
         ]
 
     def _require_v2_runtime_compatibility(self) -> V2RuntimeCompatibilityShim:

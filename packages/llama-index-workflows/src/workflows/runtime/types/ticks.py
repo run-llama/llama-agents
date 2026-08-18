@@ -17,13 +17,24 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Discriminator, Field, TypeAdapter
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    Field,
+    TypeAdapter,
+)
 from workflows.events import SerializableEvent, SerializableOptionalException
 from workflows.runtime.types.results import (
     SerializableCollectionReleasePayload,
     StepFunctionResult,
 )
 from workflows.runtime.types.step_id import StepId
+
+# Pre-StepId journals serialized this field as ``step_name``; accept both so
+# persisted ticks still deserialize. New ticks serialize under ``step_id``.
+_STEP_ID_ALIAS = AliasChoices("step_id", "step_name")
 
 
 class TickStepResult(BaseModel):
@@ -33,8 +44,9 @@ class TickStepResult(BaseModel):
         frozen=True, arbitrary_types_allowed=True, populate_by_name=True
     )
     type: Literal["step_result"] = "step_result"
-    step_id: StepId = Field(validation_alias="step_name")
+    step_id: StepId = Field(validation_alias=_STEP_ID_ALIAS)
     worker_id: int
+    invocation_namespace: tuple[str, ...] = Field(default=(), exclude=True)
     event: SerializableEvent
     result: list[Annotated[StepFunctionResult, Discriminator("type")]]
 
@@ -47,8 +59,9 @@ class TickAddEvent(BaseModel):
     )
     type: Literal["add_event"] = "add_event"
     event: SerializableEvent
-    step_id: StepId | None = Field(default=None, validation_alias="step_name")
+    step_id: StepId | None = Field(default=None, validation_alias=_STEP_ID_ALIAS)
     bound_events: dict[str, SerializableEvent] | None = None
+    origin_namespace: tuple[str, ...] = Field(default=(), exclude=True)
     attempts: int | None = None
     first_attempt_at: float | None = None
     last_exception: SerializableOptionalException = None
@@ -98,8 +111,9 @@ class TickWaiterTimeout(BaseModel):
 
     model_config = ConfigDict(frozen=True, populate_by_name=True)
     type: Literal["waiter_timeout"] = "waiter_timeout"
-    step_id: StepId = Field(validation_alias="step_name")
+    step_id: StepId = Field(validation_alias=_STEP_ID_ALIAS)
     waiter_id: str
+    invocation_namespace: tuple[str, ...] = Field(default=(), exclude=True)
 
 
 class TickIdleCheck(BaseModel):

@@ -23,10 +23,14 @@ class WorkerTask:
     step_id: StepId
     worker_id: int
     task: Task[Any]
+    invocation_namespace: tuple[str, ...] = ()
 
     @property
     def key(self) -> str:
-        return f"{self.step_id}:{self.worker_id}"
+        if self.invocation_namespace == ():
+            return f"{self.step_id}:{self.worker_id}"
+        invocation = "/".join(self.invocation_namespace)
+        return f"{self.step_id}:{invocation}:{self.worker_id}"
 
 
 @dataclass
@@ -94,14 +98,23 @@ class PendingWorker:
     step_id: StepId
     worker_id: int
     coro: Coroutine[Any, Any, Any]
+    invocation_namespace: tuple[str, ...] = ()
 
     @property
     def key(self) -> str:
-        return f"{self.step_id}:{self.worker_id}"
+        if self.invocation_namespace == ():
+            return f"{self.step_id}:{self.worker_id}"
+        invocation = "/".join(self.invocation_namespace)
+        return f"{self.step_id}:{invocation}:{self.worker_id}"
 
     def start(self, task: Task[Any]) -> WorkerTask:
         """Convert to a started WorkerTask."""
-        return WorkerTask(self.step_id, self.worker_id, task)
+        return WorkerTask(
+            self.step_id,
+            self.worker_id,
+            task,
+            invocation_namespace=self.invocation_namespace,
+        )
 
 
 @dataclass
