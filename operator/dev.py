@@ -12,6 +12,7 @@ Local development environment for cloud_llama_deploy.
 Targets:
   kind            — (default) creates a kind cluster
   docker-desktop  — uses Docker Desktop's built-in Kubernetes
+  k3s             — uses the local k3s cluster in the default context
 """
 
 import os
@@ -26,10 +27,11 @@ PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 NAMESPACE = "llama-agents"
 APPS_NAMESPACE = "llama-agents-apps"
 
-TARGETS = ("kind", "docker-desktop")
+TARGETS = ("kind", "docker-desktop", "k3s")
 K8S_CONTEXTS = {
     "kind": "kind-kind",
     "docker-desktop": "docker-desktop",
+    "k3s": "default",
 }
 
 
@@ -137,6 +139,23 @@ def ensure_docker_desktop_cluster() -> None:
     # Switch to the docker-desktop context
     run(["kubectl", "config", "use-context", context])
     install_ingress_controller("docker-desktop")
+
+
+def ensure_k3s_cluster() -> None:
+    context = K8S_CONTEXTS["k3s"]
+    result = run(
+        ["kubectl", "--context", context, "cluster-info"],
+        check=False,
+        capture=True,
+    )
+    if result.returncode != 0:
+        print(
+            f"Kubernetes context '{context}' is not reachable.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    run(["kubectl", "config", "use-context", context])
 
 
 # ---------------------------------------------------------------------------
@@ -263,8 +282,10 @@ def up(ctx: click.Context, target: str | None, apps_namespace: str | None) -> No
 
     if target == "kind":
         ensure_kind_cluster()
-    else:
+    elif target == "docker-desktop":
         ensure_docker_desktop_cluster()
+    else:
+        ensure_k3s_cluster()
 
     # Ensure namespaces exist
     for ns in [NAMESPACE] + ([apps_namespace] if apps_namespace else []):

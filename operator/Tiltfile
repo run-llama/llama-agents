@@ -1,8 +1,8 @@
 # Tiltfile for llama-agents local development
-# Supports kind (default) and docker-desktop targets.
-# Pass target via: tilt up -- --target=docker-desktop
+# Supports kind (default), docker-desktop, and local k3s targets.
+# Pass target via: tilt up -- --target=k3s
 
-config.define_string('target', args=True, usage='Cluster target: kind or docker-desktop')
+config.define_string('target', args=True, usage='Cluster target: kind, docker-desktop, or k3s')
 config.define_string('apps-namespace', args=False, usage='Namespace for LlamaDeployment CRs and app resources. Unset = release namespace.')
 cfg = config.parse()
 target = cfg.get('target', 'kind')
@@ -11,6 +11,7 @@ apps_namespace = cfg.get('apps-namespace', '')
 K8S_CONTEXTS = {
     'kind': 'kind-kind',
     'docker-desktop': 'docker-desktop',
+    'k3s': 'default',
 }
 allow_k8s_contexts(K8S_CONTEXTS[target])
 
@@ -18,13 +19,34 @@ allow_k8s_contexts(K8S_CONTEXTS[target])
 # Docker images
 # ---------------------------------------------------------------------------
 
+def dev_docker_build(ref, context, dockerfile, build_target, deps):
+    if target == 'k3s':
+        target_arg = ' --target %s' % build_target if build_target else ''
+        local_deps = []
+        for dep in deps:
+            local_deps.append('%s/%s' % (context, dep[2:] if dep.startswith('./') else dep))
+        custom_build(
+            ref,
+            'docker build -t $EXPECTED_REF -f %s%s %s' % (dockerfile, target_arg, context),
+            deps=local_deps,
+            disable_push=True,
+        )
+    else:
+        docker_build(
+            ref,
+            context=context,
+            dockerfile=dockerfile,
+            target=build_target,
+            only=deps,
+        )
+
 # Control plane (Python) — Tilt auto-injects into the deployment's image: field
-docker_build(
+dev_docker_build(
     'llama-agents-control-plane',
     context='..',
     dockerfile='../docker/Dockerfile',
-    target='controlplane',
-    only=[
+    build_target='controlplane',
+    deps=[
         './packages/',
         './docker/Dockerfile',
         './pyproject.toml',
@@ -34,11 +56,12 @@ docker_build(
 )
 
 # Operator (Go) — Tilt auto-injects into the deployment's image: field
-docker_build(
+dev_docker_build(
     'llama-agents-operator',
     context='..',
     dockerfile='../docker/operator.Dockerfile',
-    only=[
+    build_target='',
+    deps=[
         './operator/',
         './docker/operator.Dockerfile',
     ],
@@ -53,7 +76,7 @@ APPSERVER_IMG = 'llama-agents-appserver:%s' % APPSERVER_TAG
 if target == 'kind':
     _appserver_cmd = 'docker build -t %s -f ../docker/Dockerfile --target appserver .. && kind load docker-image %s --name kind' % (APPSERVER_IMG, APPSERVER_IMG)
 else:
-    # docker-desktop shares the Docker daemon — no load step needed
+    # docker-desktop and Docker-backed k3s share the Docker daemon.
     _appserver_cmd = 'docker build -t %s -f ../docker/Dockerfile --target appserver ..' % APPSERVER_IMG
 
 local_resource(
@@ -96,7 +119,7 @@ if os.path.exists('../.env'):
 # ---------------------------------------------------------------------------
 
 local(
-    'helm upgrade --install llama-agents-crds ../charts/llama-agents-crds -n llama-agents --create-namespace',
+    'helm upgrade --install llama-agents-crds ../charts/llama-agents-crds -n llama-agents --create-namespace --server-side=false',
     quiet=True,
 )
 
@@ -127,6 +150,7 @@ k8s_yaml(
         namespace='llama-agents',
         values=['tilt/helm/values-dev.yaml'],
         set=helm_sets,
+        skip_crds=True,
     ),
 )
 

@@ -207,6 +207,21 @@ func (r *LlamaDeploymentReconciler) ensureFinalizer(ctx context.Context, ld *lla
 // schema migration to prevent infinite loops.
 func (r *LlamaDeploymentReconciler) handleAlreadyFailed(ctx context.Context, ld *llamadeployv1.LlamaDeployment, needsFullReconcile bool) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+	if ld.Status.Phase == PhaseFailed {
+		deployment := &appsv1.Deployment{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(ld), deployment); err != nil {
+			if !errors.IsNotFound(err) {
+				return ctrl.Result{}, err
+			}
+		} else if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 0 {
+			patch := client.MergeFrom(deployment.DeepCopy())
+			deployment.Spec.Replicas = ptr(int32(0))
+			if err := r.Patch(ctx, deployment, patch); err != nil {
+				return ctrl.Result{}, err
+			}
+			logger.Info("Restored failed Deployment to zero replicas")
+		}
+	}
 	if needsFullReconcile {
 		if err := r.updateVersionTracking(ctx, ld); err != nil {
 			logger.Error(err, "Failed to update version tracking for terminal deployment")
@@ -346,10 +361,7 @@ func (r *LlamaDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 	if isFailedPhase(phase) && ld.Status.FailedRolloutGeneration != ld.Generation {
-		if result := r.remediateFailedRollout(ctx, ld, phase, buildId); result != nil {
-			return *result, nil
-		}
-		statusDirty = true
+		return r.remediateAndFinalizeFailure(ctx, ld, phase, message, requeueAfter, buildId)
 	}
 
 	return r.finalizePhase(ctx, ld, phase, message, requeueAfter, statusDirty)

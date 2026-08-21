@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	llamadeployv1 "llama-agents-operator/api/v1"
@@ -165,6 +167,39 @@ func TestHandleAlreadyFailed_SkipsWhenNoFullReconcile(t *testing.T) {
 	}
 	if result.RequeueAfter != 0 {
 		t.Errorf("expected empty result, got %+v", result)
+	}
+}
+
+func TestHandleAlreadyFailed_RestoresFailedDeploymentToZeroReplicas(t *testing.T) {
+	scheme := testSchemeWithApps()
+	ld := &llamadeployv1.LlamaDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-app", Namespace: "default", Generation: 1},
+		Spec:       llamadeployv1.LlamaDeploymentSpec{ProjectId: "p", RepoUrl: "r"},
+		Status: llamadeployv1.LlamaDeploymentStatus{
+			Phase:                   PhaseFailed,
+			FailedRolloutGeneration: 1,
+		},
+	}
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: ld.Name, Namespace: ld.Namespace},
+		Spec:       appsv1.DeploymentSpec{Replicas: ptr(int32(1))},
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(ld, deployment).
+		WithStatusSubresource(ld).
+		Build()
+	r := &LlamaDeploymentReconciler{Client: fakeClient, Scheme: scheme}
+	ctx := context.Background()
+
+	if _, err := r.handleAlreadyFailed(ctx, ld, false); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: ld.Name, Namespace: ld.Namespace}, deployment); err != nil {
+		t.Fatalf("failed to get Deployment: %v", err)
+	}
+	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 0 {
+		t.Fatalf("expected replicas=0, got %v", deployment.Spec.Replicas)
 	}
 }
 

@@ -11,6 +11,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	llamadeployv1 "llama-agents-operator/api/v1"
@@ -27,6 +29,225 @@ func testSchemeWithApps() *runtime.Scheme {
 // ---------------------------------------------------------------------------
 // assessDeploymentHealth tests
 // ---------------------------------------------------------------------------
+
+func newPendingRolloutObjects(status appsv1.DeploymentStatus, objects ...client.Object) (*LlamaDeploymentReconciler, *llamadeployv1.LlamaDeployment) {
+	scheme := testSchemeWithApps()
+	replicas := int32(1)
+	startedAt := metav1.NewTime(time.Now().Add(-time.Minute))
+	ld := &llamadeployv1.LlamaDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-app", Namespace: "default"},
+		Spec:       llamadeployv1.LlamaDeploymentSpec{ProjectId: "p", RepoUrl: "r"},
+		Status: llamadeployv1.LlamaDeploymentStatus{
+			Phase:            PhasePending,
+			RolloutStartedAt: &startedAt,
+		},
+	}
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-app", Namespace: "default", UID: types.UID("deployment-uid")},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "my-app"}},
+		},
+		Status: status,
+	}
+	allObjects := []client.Object{ld, deployment}
+	allObjects = append(allObjects, objects...)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(allObjects...).
+		WithStatusSubresource(ld).
+		Build()
+	return &LlamaDeploymentReconciler{
+		Client:       fakeClient,
+		DirectClient: fakeClient,
+		Scheme:       scheme,
+	}, ld
+}
+
+func rolloutReplicaSet(name, revision string, uid types.UID, availableReplicas int32) *appsv1.ReplicaSet {
+	replicas := int32(1)
+	return &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   "default",
+			UID:         uid,
+			Labels:      map[string]string{"app": "my-app"},
+			Annotations: map[string]string{"deployment.kubernetes.io/revision": revision},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "apps/v1",
+				Kind:       "Deployment",
+				Name:       "my-app",
+				UID:        types.UID("deployment-uid"),
+				Controller: ptr(true),
+			}},
+		},
+		Spec: appsv1.ReplicaSetSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "my-app"}},
+		},
+		Status: appsv1.ReplicaSetStatus{
+			Replicas:          1,
+			AvailableReplicas: availableReplicas,
+		},
+	}
+}
+
+func crashLoopPod(name string, ownerUID types.UID) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "default",
+			Labels:    map[string]string{"app": "my-app"},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "apps/v1",
+				Kind:       "ReplicaSet",
+				Name:       "owner",
+				UID:        ownerUID,
+				Controller: ptr(true),
+			}},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "busybox"}}},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "app",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason: "CrashLoopBackOff",
+				}},
+			}},
+		},
+	}
+}
+
+func pendingDeploymentStatus(availableReplicas, replicas int32) appsv1.DeploymentStatus {
+	return appsv1.DeploymentStatus{
+		AvailableReplicas: availableReplicas,
+		Replicas:          replicas,
+		Conditions: []appsv1.DeploymentCondition{{
+			Type:   appsv1.DeploymentProgressing,
+			Status: corev1.ConditionTrue,
+		}},
+	}
+}
+
+func TestAssessDeploymentHealth_CurrentReplicaSetCrashLoopFailsBeforeTimeout(t *testing.T) {
+	currentRS := rolloutReplicaSet("my-app-current", "2", types.UID("current-rs-uid"), 0)
+	pod := crashLoopPod("my-app-crash", currentRS.UID)
+	r, ld := newPendingRolloutObjects(pendingDeploymentStatus(0, 1), currentRS, pod)
+
+	phase, _, _, _, err := r.assessDeploymentHealth(context.Background(), ld)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if phase != PhaseFailed {
+		t.Errorf("expected phase %q for a crash-looping sole ReplicaSet, got %q", PhaseFailed, phase)
+	}
+}
+
+func TestAssessDeploymentHealth_CurrentReplicaSetCrashLoopPreservesOldReplicaSet(t *testing.T) {
+	oldRS := rolloutReplicaSet("my-app-old", "1", types.UID("old-rs-uid"), 1)
+	currentRS := rolloutReplicaSet("my-app-current", "2", types.UID("current-rs-uid"), 0)
+	pod := crashLoopPod("my-app-crash", currentRS.UID)
+	r, ld := newPendingRolloutObjects(pendingDeploymentStatus(1, 2), oldRS, currentRS, pod)
+
+	phase, _, _, _, err := r.assessDeploymentHealth(context.Background(), ld)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if phase != PhaseRolloutFailed {
+		t.Errorf("expected phase %q when an old ReplicaSet remains available, got %q", PhaseRolloutFailed, phase)
+	}
+}
+
+func TestAssessDeploymentHealth_HealthyPendingRolloutPollsWithinThirtySeconds(t *testing.T) {
+	currentRS := rolloutReplicaSet("my-app-current", "1", types.UID("current-rs-uid"), 0)
+	r, ld := newPendingRolloutObjects(pendingDeploymentStatus(0, 1), currentRS)
+
+	phase, _, requeueAfter, _, err := r.assessDeploymentHealth(context.Background(), ld)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if phase != PhasePending {
+		t.Errorf("expected phase %q, got %q", PhasePending, phase)
+	}
+	if requeueAfter <= 0 || requeueAfter > 30*time.Second {
+		t.Errorf("expected active rollout requeue within 30s, got %v", requeueAfter)
+	}
+}
+
+func TestAssessDeploymentHealth_IgnoresOldReplicaSetCrashLoop(t *testing.T) {
+	oldRS := rolloutReplicaSet("my-app-old", "1", types.UID("old-rs-uid"), 0)
+	currentRS := rolloutReplicaSet("my-app-current", "2", types.UID("current-rs-uid"), 0)
+	oldPod := crashLoopPod("my-app-old-crash", oldRS.UID)
+	r, ld := newPendingRolloutObjects(pendingDeploymentStatus(0, 1), oldRS, currentRS, oldPod)
+
+	phase, _, _, _, err := r.assessDeploymentHealth(context.Background(), ld)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if phase != PhasePending {
+		t.Errorf("expected old ReplicaSet crash loop to be ignored, got phase %q", phase)
+	}
+}
+
+func TestAssessDeploymentHealth_IgnoresTerminatingCrashLoopPod(t *testing.T) {
+	currentRS := rolloutReplicaSet("my-app-current", "1", types.UID("current-rs-uid"), 0)
+	pod := crashLoopPod("my-app-terminating", currentRS.UID)
+	deletionTime := metav1.Now()
+	pod.DeletionTimestamp = &deletionTime
+	pod.Finalizers = []string{"test.llamaindex.ai/keep-terminating"}
+	r, ld := newPendingRolloutObjects(pendingDeploymentStatus(0, 1), currentRS, pod)
+
+	phase, _, _, _, err := r.assessDeploymentHealth(context.Background(), ld)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if phase != PhasePending {
+		t.Errorf("expected terminating crash-loop pod to be ignored, got phase %q", phase)
+	}
+}
+
+func TestAssessDeploymentHealth_SoleCurrentReplicaSetOverridesStaleDeploymentAvailability(t *testing.T) {
+	currentRS := rolloutReplicaSet("my-app-current", "1", types.UID("current-rs-uid"), 0)
+	pod := crashLoopPod("my-app-crash", currentRS.UID)
+	r, ld := newPendingRolloutObjects(pendingDeploymentStatus(1, 1), currentRS, pod)
+
+	phase, _, _, _, err := r.assessDeploymentHealth(context.Background(), ld)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if phase != PhaseFailed {
+		t.Errorf("expected phase %q when the only ReplicaSet is crash-looping, got %q", PhaseFailed, phase)
+	}
+}
+
+func TestRemediateFailedRollout_ScaleDownErrorKeepsGenerationRetryable(t *testing.T) {
+	scheme := testSchemeWithApps()
+	startedAt := metav1.Now()
+	ld := &llamadeployv1.LlamaDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-app", Namespace: "default", Generation: 7},
+		Status: llamadeployv1.LlamaDeploymentStatus{
+			Phase:            PhaseRollingOut,
+			RolloutStartedAt: &startedAt,
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ld).Build()
+	r := &LlamaDeploymentReconciler{Client: fakeClient, DirectClient: fakeClient, Scheme: scheme}
+
+	result, err := r.remediateFailedRollout(context.Background(), ld, PhaseRolloutFailed, "")
+	if err == nil {
+		t.Fatal("expected missing Deployment to make scale-down fail")
+	}
+	if result != nil {
+		t.Errorf("expected no reconcile result on scale-down error, got %+v", result)
+	}
+	if ld.Status.FailedRolloutGeneration != 0 {
+		t.Errorf("expected failed generation to remain retryable, got %d", ld.Status.FailedRolloutGeneration)
+	}
+	if ld.Status.RolloutStartedAt == nil {
+		t.Error("expected rollout start time to remain set for retry")
+	}
+}
 
 func TestAssessDeploymentHealth_RolloutTimeout(t *testing.T) {
 	scheme := testSchemeWithApps()

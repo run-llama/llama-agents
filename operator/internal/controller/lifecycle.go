@@ -11,11 +11,17 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	llamadeployv1 "llama-agents-operator/api/v1"
+)
+
+const (
+	activeRolloutPollInterval = 30 * time.Second
+	crashLoopBackOffReason    = "CrashLoopBackOff"
 )
 
 // isFailedPhase returns true for phases where failure remediation may be needed.
@@ -221,16 +227,80 @@ func (r *LlamaDeploymentReconciler) assessDeploymentHealth(ctx context.Context, 
 
 	// Check operator-level rollout timeout for in-progress phases
 	if phase == PhasePending || phase == PhaseRollingOut {
-		toResult := r.checkRolloutTimeout(ctx, ld)
-		if toResult.TimedOut {
-			phase = toResult.Phase
-			message = toResult.Message
-		} else if toResult.RequeueAfter > 0 {
-			requeueAfter = toResult.RequeueAfter
+		if crashPhase, crashMessage, found := r.detectCurrentRolloutCrashLoop(ctx, ld); found {
+			phase = crashPhase
+			message = crashMessage
+		} else {
+			toResult := r.checkRolloutTimeout(ctx, ld)
+			if toResult.TimedOut {
+				phase = toResult.Phase
+				message = toResult.Message
+			} else if toResult.RequeueAfter > 0 {
+				requeueAfter = min(toResult.RequeueAfter, activeRolloutPollInterval)
+			} else {
+				requeueAfter = activeRolloutPollInterval
+			}
 		}
 	}
 
 	return phase, message, requeueAfter, statusDirty, nil
+}
+
+// detectCurrentRolloutCrashLoop checks only the newest ReplicaSet's active pods.
+// Pod and ReplicaSet reads bypass the informer cache, so active rollouts poll.
+func (r *LlamaDeploymentReconciler) detectCurrentRolloutCrashLoop(ctx context.Context, ld *llamadeployv1.LlamaDeployment) (string, string, bool) {
+	if r.DirectClient == nil {
+		return "", "", false
+	}
+
+	logger := log.FromContext(ctx)
+	deployment, newestRS, hasOlderAvailable, err := r.currentRolloutReplicaSet(ctx, ld)
+	if err != nil {
+		logger.Error(err, "Failed to inspect current rollout ReplicaSet")
+		return "", "", false
+	}
+	if newestRS == nil {
+		return "", "", false
+	}
+
+	pods := &corev1.PodList{}
+	if err := r.directClient().List(ctx, pods,
+		client.InNamespace(ld.Namespace),
+		client.MatchingLabels(deployment.Spec.Selector.MatchLabels),
+	); err != nil {
+		logger.Error(err, "Failed to inspect current rollout pods")
+		return "", "", false
+	}
+
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		owner := metav1.GetControllerOf(pod)
+		if !pod.DeletionTimestamp.IsZero() || owner == nil || owner.UID != newestRS.UID {
+			continue
+		}
+		if podHasAppCrashLoop(pod) {
+			if hasOlderAvailable {
+				return PhaseRolloutFailed, "New rollout is crash-looping; previous version remains available", true
+			}
+			return PhaseFailed, "Deployment app is crash-looping; failing pods stopped", true
+		}
+	}
+
+	return "", "", false
+}
+
+func podHasAppCrashLoop(pod *corev1.Pod) bool {
+	for _, status := range pod.Status.InitContainerStatuses {
+		if status.State.Waiting != nil && status.State.Waiting.Reason == crashLoopBackOffReason {
+			return true
+		}
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == ContainerNameApp && status.State.Waiting != nil && status.State.Waiting.Reason == crashLoopBackOffReason {
+			return true
+		}
+	}
+	return false
 }
 
 // determineDeploymentPhase analyzes the deployment status and returns the appropriate phase and message
@@ -353,7 +423,7 @@ func (r *LlamaDeploymentReconciler) checkRolloutTimeout(ctx context.Context, lla
 // remediateFailedRollout handles failure remediation: classifies pod failures,
 // records the failed generation, and scales down the appropriate resources.
 // Returns a non-nil result to short-circuit the reconcile (infra failures).
-func (r *LlamaDeploymentReconciler) remediateFailedRollout(ctx context.Context, ld *llamadeployv1.LlamaDeployment, phase string, buildId string) *ctrl.Result {
+func (r *LlamaDeploymentReconciler) remediateFailedRollout(ctx context.Context, ld *llamadeployv1.LlamaDeployment, phase string, buildId string) (*ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
 	// Classify pod failures before acting — infrastructure issues should not
@@ -367,25 +437,27 @@ func (r *LlamaDeploymentReconciler) remediateFailedRollout(ctx context.Context, 
 				"Pods are being evicted or preempted; not scaling down — check node/resource configuration")
 		}
 		result := ctrl.Result{RequeueAfter: 30 * time.Second}
-		return &result
+		return &result, nil
 	}
-
-	ld.Status.FailedRolloutGeneration = ld.Generation
-	ld.Status.RolloutStartedAt = nil
 
 	if phase == PhaseRolloutFailed {
 		// Rollout failed but old RS has healthy traffic — pause and scale
 		// down the newest RS to stop crash-looping while preserving old pods.
 		if scaleErr := r.scaleDownFailingReplicaSet(ctx, ld); scaleErr != nil {
-			logger.Error(scaleErr, "Failed to scale down failing ReplicaSet")
+			return nil, scaleErr
 		}
 	} else {
 		// Fully failed (no healthy pods) — set replicas=0 via the normal
 		// SSA path. Set phase before reconcileDeployment so
 		// createDeploymentForLlama sees PhaseFailed and produces replicas=0.
+		oldPhase := ld.Status.Phase
+		oldFailedGeneration := ld.Status.FailedRolloutGeneration
 		ld.Status.Phase = PhaseFailed
+		ld.Status.FailedRolloutGeneration = ld.Generation
 		if reconcileErr := r.reconcileDeployment(ctx, ld, buildId); reconcileErr != nil {
-			logger.Error(reconcileErr, "Failed to scale down deployment via replicas")
+			ld.Status.Phase = oldPhase
+			ld.Status.FailedRolloutGeneration = oldFailedGeneration
+			return nil, reconcileErr
 		}
 		if r.Recorder != nil {
 			r.Recorder.Event(ld, corev1.EventTypeWarning, "DeploymentScaledDown",
@@ -393,7 +465,20 @@ func (r *LlamaDeploymentReconciler) remediateFailedRollout(ctx context.Context, 
 		}
 	}
 
-	return nil
+	ld.Status.FailedRolloutGeneration = ld.Generation
+	ld.Status.RolloutStartedAt = nil
+	return nil, nil
+}
+
+func (r *LlamaDeploymentReconciler) remediateAndFinalizeFailure(ctx context.Context, ld *llamadeployv1.LlamaDeployment, phase, message string, requeueAfter time.Duration, buildId string) (ctrl.Result, error) {
+	result, err := r.remediateFailedRollout(ctx, ld, phase, buildId)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if result != nil {
+		return *result, nil
+	}
+	return r.finalizePhase(ctx, ld, phase, message, requeueAfter, true)
 }
 
 // failureType classifies the kind of pod failure.
@@ -471,7 +556,7 @@ func classifyPod(pod *corev1.Pod) failureType {
 		for _, cs := range statuses {
 			if cs.State.Waiting != nil {
 				switch cs.State.Waiting.Reason {
-				case "CrashLoopBackOff", "ImagePullBackOff", "ErrImagePull", "CreateContainerConfigError":
+				case crashLoopBackOffReason, "ImagePullBackOff", "ErrImagePull", "CreateContainerConfigError":
 					return failureApp
 				}
 			}
@@ -494,16 +579,12 @@ func classifyPod(pod *corev1.Pod) failureType {
 func (r *LlamaDeploymentReconciler) scaleDownFailingReplicaSet(ctx context.Context, llamaDeploy *llamadeployv1.LlamaDeployment) error {
 	logger := log.FromContext(ctx)
 
-	// Get the Deployment
-	deployment := &appsv1.Deployment{}
-	if err := r.Get(ctx, client.ObjectKey{
-		Name:      llamaDeploy.Name,
-		Namespace: llamaDeploy.Namespace,
-	}, deployment); err != nil {
-		return fmt.Errorf("failed to get deployment: %w", err)
+	deployment, newestRS, hasOtherHealthyRS, err := r.currentRolloutReplicaSet(ctx, llamaDeploy)
+	if err != nil {
+		return err
 	}
 
-	// Pause the Deployment so the Deployment controller does not fight our RS changes
+	// Pause the Deployment so the Deployment controller does not fight our RS changes.
 	if !deployment.Spec.Paused {
 		patch := client.MergeFrom(deployment.DeepCopy())
 		deployment.Spec.Paused = true
@@ -511,66 +592,6 @@ func (r *LlamaDeploymentReconciler) scaleDownFailingReplicaSet(ctx context.Conte
 			return fmt.Errorf("failed to pause deployment: %w", err)
 		}
 		logger.Info("Paused Deployment for rollout timeout remediation")
-	}
-
-	// Use DirectClient for ReplicaSet operations to avoid starting an informer
-	// that would cache ALL ReplicaSets in the namespace. With hundreds of
-	// Deployments this can consume gigabytes of memory.
-	rsClient := r.directClient()
-
-	// List ReplicaSets with matching labels
-	rsList := &appsv1.ReplicaSetList{}
-	if err := rsClient.List(ctx, rsList,
-		client.InNamespace(llamaDeploy.Namespace),
-		client.MatchingLabels(deployment.Spec.Selector.MatchLabels),
-	); err != nil {
-		return fmt.Errorf("failed to list ReplicaSets: %w", err)
-	}
-
-	// Filter to ReplicaSets owned by this Deployment and find the newest by revision
-	var newestRS *appsv1.ReplicaSet
-	var maxRevision int64 = -1
-	hasOtherHealthyRS := false
-
-	for i := range rsList.Items {
-		rs := &rsList.Items[i]
-
-		// Check ownership
-		owned := false
-		for _, ownerRef := range rs.OwnerReferences {
-			if ownerRef.UID == deployment.UID {
-				owned = true
-				break
-			}
-		}
-		if !owned {
-			continue
-		}
-
-		// Track whether newest once determined
-		revStr := rs.Annotations["deployment.kubernetes.io/revision"]
-		rev, err := strconv.ParseInt(revStr, 10, 64)
-		if err != nil {
-			if newestRS == nil || rs.CreationTimestamp.After(newestRS.CreationTimestamp.Time) {
-				// Track whether previous newest had healthy replicas
-				if newestRS != nil && newestRS.Status.AvailableReplicas > 0 {
-					hasOtherHealthyRS = true
-				}
-				newestRS = rs
-			} else if rs.Status.AvailableReplicas > 0 {
-				hasOtherHealthyRS = true
-			}
-			continue
-		}
-		if rev > maxRevision {
-			if newestRS != nil && newestRS.Status.AvailableReplicas > 0 {
-				hasOtherHealthyRS = true
-			}
-			maxRevision = rev
-			newestRS = rs
-		} else if rs.Status.AvailableReplicas > 0 {
-			hasOtherHealthyRS = true
-		}
 	}
 
 	if newestRS == nil {
@@ -598,7 +619,7 @@ func (r *LlamaDeploymentReconciler) scaleDownFailingReplicaSet(ctx context.Conte
 	}
 
 	newestRS.Spec.Replicas = ptr(int32(0))
-	if err := rsClient.Update(ctx, newestRS); err != nil {
+	if err := r.directClient().Update(ctx, newestRS); err != nil {
 		return fmt.Errorf("failed to scale down ReplicaSet %s: %w", newestRS.Name, err)
 	}
 
@@ -612,6 +633,75 @@ func (r *LlamaDeploymentReconciler) scaleDownFailingReplicaSet(ctx context.Conte
 	}
 
 	return nil
+}
+
+// currentRolloutReplicaSet returns the newest owned ReplicaSet and whether a
+// distinct older ReplicaSet is still available.
+func (r *LlamaDeploymentReconciler) currentRolloutReplicaSet(ctx context.Context, ld *llamadeployv1.LlamaDeployment) (*appsv1.Deployment, *appsv1.ReplicaSet, bool, error) {
+	directClient := r.directClient()
+	deployment := &appsv1.Deployment{}
+	if err := directClient.Get(ctx, client.ObjectKey{Name: ld.Name, Namespace: ld.Namespace}, deployment); err != nil {
+		return nil, nil, false, fmt.Errorf("failed to get deployment: %w", err)
+	}
+
+	replicaSets := &appsv1.ReplicaSetList{}
+	if err := directClient.List(ctx, replicaSets,
+		client.InNamespace(ld.Namespace),
+		client.MatchingLabels(deployment.Spec.Selector.MatchLabels),
+	); err != nil {
+		return nil, nil, false, fmt.Errorf("failed to list ReplicaSets: %w", err)
+	}
+
+	var newest *appsv1.ReplicaSet
+	for i := range replicaSets.Items {
+		candidate := &replicaSets.Items[i]
+		if !hasOwnerUID(candidate.OwnerReferences, deployment.UID) {
+			continue
+		}
+		if newest == nil || replicaSetIsNewer(candidate, newest) {
+			newest = candidate
+		}
+	}
+	if newest == nil {
+		return deployment, nil, false, nil
+	}
+
+	hasOlderAvailable := false
+	for i := range replicaSets.Items {
+		candidate := &replicaSets.Items[i]
+		if candidate.UID != newest.UID && hasOwnerUID(candidate.OwnerReferences, deployment.UID) && candidate.Status.AvailableReplicas > 0 {
+			hasOlderAvailable = true
+			break
+		}
+	}
+
+	return deployment, newest, hasOlderAvailable, nil
+}
+
+func hasOwnerUID(ownerReferences []metav1.OwnerReference, uid types.UID) bool {
+	for _, owner := range ownerReferences {
+		if owner.UID == uid {
+			return true
+		}
+	}
+	return false
+}
+
+func replicaSetIsNewer(candidate, current *appsv1.ReplicaSet) bool {
+	candidateRevision, candidateOK := replicaSetRevision(candidate)
+	currentRevision, currentOK := replicaSetRevision(current)
+	if candidateOK != currentOK {
+		return candidateOK
+	}
+	if candidateOK && candidateRevision != currentRevision {
+		return candidateRevision > currentRevision
+	}
+	return candidate.CreationTimestamp.After(current.CreationTimestamp.Time)
+}
+
+func replicaSetRevision(replicaSet *appsv1.ReplicaSet) (int64, bool) {
+	revision, err := strconv.ParseInt(replicaSet.Annotations["deployment.kubernetes.io/revision"], 10, 64)
+	return revision, err == nil
 }
 
 // finalizePhase writes the assessed phase to the status subresource and emits

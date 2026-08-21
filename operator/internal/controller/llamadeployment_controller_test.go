@@ -2853,6 +2853,15 @@ var _ = Describe("LlamaDeployment Controller", func() {
 						Name:      testName + "-crash",
 						Namespace: testNamespace,
 						Labels:    map[string]string{"app": testName},
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion: "apps/v1",
+								Kind:       "ReplicaSet",
+								Name:       newRS.Name,
+								UID:        newRS.UID,
+								Controller: ptr(true),
+							},
+						},
 					},
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
@@ -2875,13 +2884,13 @@ var _ = Describe("LlamaDeployment Controller", func() {
 				}
 				Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
 
-				By("Simulating ProgressDeadlineExceeded on the Deployment")
+				By("Keeping the Deployment rollout in progress")
 				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: testName, Namespace: testNamespace}, deployment)).To(Succeed())
 				deployment.Status.ReadyReplicas = 1
 				deployment.Status.AvailableReplicas = 1
 				deployment.Status.Replicas = 2
 				deployment.Status.Conditions = []appsv1.DeploymentCondition{
-					{Type: appsv1.DeploymentProgressing, Status: corev1.ConditionFalse, Reason: "ProgressDeadlineExceeded"},
+					{Type: appsv1.DeploymentProgressing, Status: corev1.ConditionTrue, Reason: "ReplicaSetUpdated"},
 				}
 				Expect(k8sClient.Status().Update(ctx, deployment)).To(Succeed())
 
