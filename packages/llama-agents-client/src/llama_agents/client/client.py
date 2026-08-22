@@ -26,6 +26,7 @@ from .protocol import (
     SendEventResponse,
     Status,
     WorkflowsListResponse,
+    is_status_completed,
 )
 from .protocol.serializable_events import (
     EventEnvelope,
@@ -508,6 +509,50 @@ class WorkflowClient:
             _raise_for_status_with_body(response)
 
             return HandlerData.model_validate(response.json())
+
+    async def wait_for_handler(
+        self,
+        handler_id: str,
+        *,
+        timeout: float | None = None,
+        poll_interval: float = 0.5,
+    ) -> HandlerData:
+        """Wait until a workflow handler reaches a terminal status.
+
+        Args:
+            handler_id: ID of the handler to poll.
+            timeout: Maximum number of seconds to wait. ``None`` waits
+                indefinitely.
+            poll_interval: Number of seconds between status requests.
+
+        Raises:
+            TimeoutError: If the handler is still running after ``timeout``.
+            ValueError: If ``timeout`` or ``poll_interval`` is negative.
+            httpx.HTTPStatusError: If a status request fails.
+        """
+        if timeout is not None and timeout < 0:
+            raise ValueError("timeout must be non-negative or None")
+        if poll_interval < 0:
+            raise ValueError("poll_interval must be non-negative")
+
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout is None else loop.time() + timeout
+
+        while True:
+            handler = await self.get_handler(handler_id)
+            if is_status_completed(handler.status):
+                return handler
+
+            if deadline is None:
+                await asyncio.sleep(poll_interval)
+                continue
+
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Handler {handler_id!r} did not complete within {timeout} seconds"
+                )
+            await asyncio.sleep(min(poll_interval, remaining))
 
     async def cancel_handler(
         self, handler_id: str, purge: bool = False
