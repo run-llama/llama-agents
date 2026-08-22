@@ -59,7 +59,7 @@ class WorkflowServer:
         middleware: list[Middleware] | None = None,
         exception_handlers: Mapping[Any, Any] | None = None,
         workflow_store: AbstractWorkflowStore | None = None,
-        persistence_backoff: list[float] = [0.5, 3],
+        persistence_backoff: list[float] | None = None,
         runtime: Runtime | None = None,
         idle_timeout: float = 60.0,
         sse_heartbeat_interval: float | None = 25.0,
@@ -98,6 +98,8 @@ class WorkflowServer:
                 instantiate arbitrary Pydantic objects via ``importlib``, so
                 only enable this on trusted networks.
         """
+        if persistence_backoff is None:
+            persistence_backoff = [0.5, 3]
         if runtime is None:
             self._runtime_core = _DurableWorkflowRuntime(
                 workflow_store=workflow_store,

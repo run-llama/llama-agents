@@ -311,9 +311,10 @@ def run_uv(
     source_root: Path,
     path: Path,
     cmd: str,
-    args: list[str] = [],
+    args: list[str] | None = None,
     extra_env: dict[str, str] | None = None,
 ) -> None:
+    args = args or []
     env = os.environ.copy()
     if extra_env:
         env.update(extra_env)

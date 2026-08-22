@@ -27,12 +27,12 @@ class EventEnvelopeWithMetadata(BaseModel):
     type: str
     types: list[str] | None
 
-    def load_event(self, registry: list[type[Event]] = []) -> Event:
+    def load_event(self, registry: list[type[Event]] | None = None) -> Event:
         """
         Attempts to load the event data as a python class based on the envelope metadata.
         Looks up the event from the registry, if provided. Falls back to the qualified_name, attempting to load from the module path.
         """
-        registry_lookup = {e.__name__: e for e in registry}
+        registry_lookup = {e.__name__: e for e in registry or []}
         as_event_envelope = EventEnvelope(
             value=self.value, type=self.type, qualified_name=self.qualified_name
         ).model_dump()
