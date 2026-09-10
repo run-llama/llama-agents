@@ -1,6 +1,6 @@
 {
   "name": "llama-agents-client",
-  "version": "0.3.12",
+  "version": "0.3.13",
   "private": false,
   "license": "MIT",
   "scripts": {},
