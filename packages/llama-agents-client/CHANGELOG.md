@@ -1,5 +1,11 @@
 # llama-agents-client
 
+## 0.3.13
+
+### Patch Changes
+
+- d6b0a15: Add a polling helper with configurable backoff for workflow handler completion
+
 ## 0.3.12
 
 ### Patch Changes
