@@ -29,6 +29,7 @@ from .protocol import (
     WorkflowGraphResponse,
     WorkflowSchemaResponse,
     WorkflowsListResponse,
+    is_status_completed,
 )
 from .protocol.serializable_events import (
     EventEnvelope,
@@ -55,6 +56,20 @@ def _raise_for_status_with_body(response: httpx.Response) -> None:
                 response=e.response,
             ) from e
         raise
+
+
+def _next_poll_interval(
+    current_interval: float,
+    backoff: Literal["constant", "linear", "exponential"],
+    max_interval: float,
+) -> float:
+    if backoff == "constant":
+        return current_interval
+    if backoff == "linear":
+        return min(current_interval + 1.0, max_interval)
+    if backoff == "exponential":
+        return min(current_interval * 2.0, max_interval)
+    raise ValueError(f"invalid backoff strategy: {backoff}")
 
 
 @dataclass(frozen=True)
@@ -534,6 +549,68 @@ class WorkflowClient:
             _raise_for_status_with_body(response)
 
             return HandlerData.model_validate(response.json())
+
+    async def wait_for_handler(
+        self,
+        handler_id: str,
+        *,
+        timeout: float | None = None,
+        poll_interval: float = 0.5,
+        max_poll_interval: float = 5.0,
+        backoff: Literal["constant", "linear", "exponential"] = "linear",
+    ) -> HandlerData:
+        """Wait until a workflow handler reaches a terminal status.
+
+        Args:
+            handler_id: ID of the handler to poll.
+            timeout: Maximum number of seconds to wait. ``None`` waits
+                indefinitely.
+            poll_interval: Initial number of seconds between status requests.
+            max_poll_interval: Maximum number of seconds between requests.
+            backoff: Strategy for increasing the polling interval after each
+                non-terminal response.
+
+        Raises:
+            TimeoutError: If the handler is still running after ``timeout``.
+            ValueError: If ``timeout`` or ``poll_interval`` is negative.
+            httpx.HTTPStatusError: If a status request fails.
+        """
+        if timeout is not None and timeout < 0:
+            raise ValueError("timeout must be non-negative or None")
+        if poll_interval < 0:
+            raise ValueError("poll_interval must be non-negative")
+        if max_poll_interval < 0:
+            raise ValueError("max_poll_interval must be non-negative")
+        if max_poll_interval < poll_interval:
+            raise ValueError(
+                "max_poll_interval must be greater than or equal to poll_interval"
+            )
+        if backoff not in ("constant", "linear", "exponential"):
+            raise ValueError(f"invalid backoff strategy: {backoff}")
+
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout is None else loop.time() + timeout
+        current_interval = poll_interval
+
+        while True:
+            handler = await self.get_handler(handler_id)
+            if is_status_completed(handler.status):
+                return handler
+
+            if deadline is None:
+                sleep_interval = current_interval
+            else:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"Handler {handler_id!r} did not complete within {timeout} seconds"
+                    )
+                sleep_interval = min(current_interval, remaining)
+
+            await asyncio.sleep(sleep_interval)
+            current_interval = _next_poll_interval(
+                current_interval, backoff, max_poll_interval
+            )
 
     async def cancel_handler(
         self, handler_id: str, purge: bool = False

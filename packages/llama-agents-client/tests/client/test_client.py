@@ -1,9 +1,10 @@
 # ty: ignore[invalid-argument-type, not-iterable]
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Callable
-from unittest.mock import AsyncMock
+from typing import Any, AsyncIterator, Callable, Literal
+from unittest.mock import AsyncMock, call
 
 import httpx
 import pytest
@@ -152,6 +153,191 @@ async def test_get_handler(client: WorkflowClient) -> None:
     assert handler_data.started_at is not None
     assert handler_data.updated_at is not None
     assert handler_data.completed_at is not None
+
+
+def _handler_payload(status: str) -> dict[str, Any]:
+    is_terminal = status != "running"
+    return {
+        "handler_id": "handler-1",
+        "workflow_name": "greeting",
+        "run_id": "run-1",
+        "error": "workflow failed" if status == "failed" else None,
+        "result": None,
+        "status": status,
+        "started_at": "2026-08-18T00:00:00+00:00",
+        "updated_at": "2026-08-18T00:00:01+00:00",
+        "completed_at": "2026-08-18T00:00:01+00:00" if is_terminal else None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["completed", "failed", "cancelled"])
+async def test_wait_for_handler_returns_terminal_status(status: str) -> None:
+    requests = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(200, json=_handler_payload(status))
+
+    async with _mock_client(respond) as http_client:
+        wf_client = WorkflowClient(httpx_client=http_client)
+        handler = await wf_client.wait_for_handler("handler-1")
+
+    assert handler.status == status
+    assert requests == 1
+
+
+@pytest.mark.asyncio
+async def test_wait_for_handler_observes_completion() -> None:
+    statuses = iter(["running", "completed"])
+    requests = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(200, json=_handler_payload(next(statuses)))
+
+    async with _mock_client(respond) as http_client:
+        wf_client = WorkflowClient(httpx_client=http_client)
+        handler = await wf_client.wait_for_handler(
+            "handler-1", timeout=1, poll_interval=0
+        )
+
+    assert handler.status == "completed"
+    assert requests == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("backoff", "expected_sleeps"),
+    [
+        ("constant", [call(0.5), call(0.5), call(0.5)]),
+        ("linear", [call(0.5), call(1.5), call(2.5)]),
+        ("exponential", [call(0.5), call(1.0), call(2.0)]),
+    ],
+)
+async def test_wait_for_handler_applies_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+    backoff: Literal["constant", "linear", "exponential"],
+    expected_sleeps: list[Any],
+) -> None:
+    statuses = iter(["running", "running", "running", "completed"])
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_handler_payload(next(statuses)))
+
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+
+    async with _mock_client(respond) as http_client:
+        wf_client = WorkflowClient(httpx_client=http_client)
+        await wf_client.wait_for_handler("handler-1", backoff=backoff)
+
+    assert sleep.await_args_list == expected_sleeps
+
+
+@pytest.mark.asyncio
+async def test_wait_for_handler_default_backoff_caps_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statuses = iter(["running"] * 7 + ["completed"])
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_handler_payload(next(statuses)))
+
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+
+    async with _mock_client(respond) as http_client:
+        wf_client = WorkflowClient(httpx_client=http_client)
+        await wf_client.wait_for_handler("handler-1")
+
+    assert sleep.await_args_list == [
+        call(0.5),
+        call(1.5),
+        call(2.5),
+        call(3.5),
+        call(4.5),
+        call(5.0),
+        call(5.0),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_handler_zero_timeout_fetches_once() -> None:
+    requests = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(200, json=_handler_payload("running"))
+
+    async with _mock_client(respond) as http_client:
+        wf_client = WorkflowClient(httpx_client=http_client)
+        with pytest.raises(TimeoutError, match="handler-1.*0"):
+            await wf_client.wait_for_handler("handler-1", timeout=0)
+
+    assert requests == 1
+
+
+@pytest.mark.asyncio
+async def test_wait_for_handler_caps_sleep_at_timeout() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_handler_payload("running"))
+
+    async with _mock_client(respond) as http_client:
+        wf_client = WorkflowClient(httpx_client=http_client)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        with pytest.raises(TimeoutError):
+            await wf_client.wait_for_handler("handler-1", timeout=0.02, poll_interval=1)
+        elapsed = loop.time() - started
+
+    assert elapsed < 0.2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"timeout": -1}, "timeout must be non-negative or None"),
+        ({"poll_interval": -1}, "poll_interval must be non-negative"),
+        ({"max_poll_interval": -1}, "max_poll_interval must be non-negative"),
+        (
+            {"poll_interval": 2, "max_poll_interval": 1},
+            "max_poll_interval must be greater than or equal to poll_interval",
+        ),
+        ({"backoff": "invalid"}, "invalid backoff strategy"),
+    ],
+)
+async def test_wait_for_handler_validates_before_request(
+    kwargs: dict[str, Any], message: str
+) -> None:
+    requests = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(200, json=_handler_payload("completed"))
+
+    async with _mock_client(respond) as http_client:
+        wf_client = WorkflowClient(httpx_client=http_client)
+        with pytest.raises(ValueError, match=message):
+            await wf_client.wait_for_handler("handler-1", **kwargs)
+
+    assert requests == 0
+
+
+@pytest.mark.asyncio
+async def test_wait_for_handler_unknown_handler_raises() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"detail": "Handler not found"})
+
+    async with _mock_client(respond) as http_client:
+        wf_client = WorkflowClient(httpx_client=http_client)
+        with pytest.raises(httpx.HTTPStatusError, match="404 Not Found"):
+            await wf_client.wait_for_handler("missing")
 
 
 @pytest.mark.asyncio
