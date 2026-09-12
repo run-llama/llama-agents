@@ -6,4 +6,4 @@
 "llama-agents-appserver": patch
 ---
 
-Preserve configured internal serializers through execution and replay while decoding public JSON with an explicitly configured JSON serializer.
+Register concrete classes for JSON decoding and preserve configured internal serializers through execution and replay.
