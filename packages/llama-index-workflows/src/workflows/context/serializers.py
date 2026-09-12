@@ -104,6 +104,10 @@ class JsonSerializer(BaseSerializer):
                 if isinstance(entry, str):
                     names.add(entry)
                     continue
+                if not isinstance(entry, type) or entry is Any:
+                    raise TypeError(
+                        "allowed_types entries must be concrete classes or legacy names"
+                    )
                 # Records carry the legacy ``module.__name__`` written by
                 # get_qualified_name; __qualname__ is what allowed_types has
                 # always matched on. Both come from the class itself.

@@ -1,10 +1,7 @@
-# SPDX-License-Identifier: MIT
-# Copyright (c) 2026 LlamaIndex Inc.
-
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
 from pydantic import BaseModel, TypeAdapter
@@ -248,3 +245,11 @@ def test_explicit_pickle_remains_available() -> None:
     serializer = PickleSerializer(dynamic_import=False)
     value = {1, 2}
     assert serializer.deserialize(serializer.serialize(value)) == value
+
+
+@pytest.mark.parametrize(
+    "annotation", [Any, list[Payload], Annotated[Payload, "metadata"]]
+)
+def test_registration_rejects_annotations(annotation: Any) -> None:
+    with pytest.raises(TypeError, match="concrete classes"):
+        JsonSerializer(allowed_types=[annotation], dynamic_import=False)
