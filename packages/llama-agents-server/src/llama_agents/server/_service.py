@@ -32,8 +32,10 @@ from workflows.workflow import Workflow
 from ._store.abstract_workflow_store import (
     AbstractWorkflowStore,
     HandlerQuery,
+    HandlerResultDecoder,
     PersistentHandler,
     is_terminal_status,
+    query_handlers,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,9 +104,12 @@ class _WorkflowService:
         self,
         runtime: ServerRuntimeDecorator,
         store: AbstractWorkflowStore,
+        *,
+        result_decoder: HandlerResultDecoder | None = None,
     ) -> None:
         self._runtime: ServerRuntimeDecorator = runtime
         self._store = store
+        self._result_decoder = result_decoder
 
     # ------------------------------------------------------------------
     # Workflow registration
@@ -135,15 +140,28 @@ class _WorkflowService:
     def store(self) -> AbstractWorkflowStore:
         return self._store
 
+    def json_serializer(self, workflow_name: str) -> JsonSerializer:
+        """The public JSON decoder bound to a registered workflow."""
+        workflow = self._runtime.get_workflow(workflow_name)
+        if workflow is None:
+            raise ValueError(f"Workflow {workflow_name} not found")
+        return self._runtime.get_json_serializer(workflow)
+
     async def query_handlers(self, query: HandlerQuery) -> list[PersistentHandler]:
-        return await self._store.query(query)
+        return await query_handlers(
+            self._store, result_decoder=self._result_decoder, query=query
+        )
 
     # ------------------------------------------------------------------
     # Handler lifecycle
     # ------------------------------------------------------------------
 
     async def load_handler(self, handler_id: str) -> HandlerData | None:
-        found = await self._store.query(HandlerQuery(handler_id_in=[handler_id]))
+        found = await query_handlers(
+            self._store,
+            result_decoder=self._result_decoder,
+            query=HandlerQuery(handler_id_in=[handler_id]),
+        )
         if not found:
             return None
         return handler_data_from_persistent(found[0])
@@ -184,7 +202,11 @@ class _WorkflowService:
     async def cancel_handler(
         self, handler_id: str, purge: bool = False
     ) -> Literal["cancelled", "deleted"] | None:
-        found = await self._store.query(HandlerQuery(handler_id_in=[handler_id]))
+        found = await query_handlers(
+            self._store,
+            result_decoder=self._result_decoder,
+            query=HandlerQuery(handler_id_in=[handler_id]),
+        )
         if not found:
             return None
         persisted = handler_data_from_persistent(found[0])
@@ -288,7 +310,11 @@ class _WorkflowService:
 
         Returns None if the handler doesn't exist, isn't completed, or has no state.
         """
-        found = await self._store.query(HandlerQuery(handler_id_in=[handler_id]))
+        found = await query_handlers(
+            self._store,
+            result_decoder=self._result_decoder,
+            query=HandlerQuery(handler_id_in=[handler_id]),
+        )
         if not found:
             return None
         handler = found[0]
@@ -296,14 +322,17 @@ class _WorkflowService:
             return None
 
         try:
-            old_state_store = self._store.create_state_store(handler.run_id)
-            state_dict = await state_store_handoff(old_state_store, JsonSerializer())
+            serializer = self._runtime.get_serializer(workflow)
+            old_state_store = self._store.create_state_store(
+                handler.run_id, serializer=serializer
+            )
+            state_dict = await state_store_handoff(old_state_store, serializer)
             if not state_dict:
                 return None
             return Context.from_dict(
                 workflow=workflow,
                 data={"version": 1, "state": state_dict},
-                serializer=JsonSerializer(),
+                serializer=serializer,
             )
         except Exception:
             logger.warning(

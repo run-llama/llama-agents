@@ -44,15 +44,17 @@ from workflows.runtime.types.plugin import (
 from workflows.runtime.types.ticks import (
     TickStepResult,
     WorkflowTick,
-    WorkflowTickAdapter,
 )
 from workflows.workflow import Workflow
 
 from .._store.abstract_workflow_store import (
     AbstractWorkflowStore,
     HandlerQuery,
+    HandlerResultDecoder,
     Status,
     as_legacy_context_store,
+    query_handlers,
+    result_decoder_kwargs,
     stream_workflow_ticks,
 )
 from .._store.sqlite.sqlite_state_store import SqliteStateStore
@@ -103,14 +105,17 @@ class _PersistenceInternalRunAdapter(BaseInternalRunAdapterDecorator):
         self,
         decorated: InternalRunAdapter,
         store: AbstractWorkflowStore,
+        *,
+        serializer: BaseSerializer | None = None,
     ) -> None:
         super().__init__(decorated)
         self._store = store
+        self._serializer = serializer if serializer is not None else JsonSerializer()
 
     @override
     async def on_tick(self, tick: WorkflowTick) -> None:
         await super().on_tick(tick)
-        tick_data = WorkflowTickAdapter.dump_python(tick, mode="json")
+        tick_data = {"serialized_tick": self._serializer.serialize(tick)}
         try:
             await self._store.append_tick(self.run_id, tick_data)
         except Exception:
@@ -124,7 +129,7 @@ class _PersistenceInternalRunAdapter(BaseInternalRunAdapterDecorator):
         await super().after_tick(tick)
         if not isinstance(tick, TickStepResult):
             return
-        tick_data = WorkflowTickAdapter.dump_python(tick, mode="json")
+        tick_data = {"serialized_tick": self._serializer.serialize(tick)}
         try:
             await self._store.after_tick(self.run_id, tick_data)
         except Exception:
@@ -145,9 +150,12 @@ class TickPersistenceDecorator(BaseRuntimeDecorator):
         self,
         decorated: Runtime,
         store: AbstractWorkflowStore,
+        *,
+        result_decoder: HandlerResultDecoder | None = None,
     ) -> None:
         super().__init__(decorated)
         self._store = store
+        self._result_decoder = result_decoder
         self._workflows_by_name: dict[str, Workflow] = {}
         self._active_run_ids: set[str] = set()
 
@@ -174,7 +182,11 @@ class TickPersistenceDecorator(BaseRuntimeDecorator):
     @override
     def get_internal_adapter(self, workflow: Workflow) -> InternalRunAdapter:
         inner_adapter = self._decorated.get_internal_adapter(workflow)
-        return _PersistenceInternalRunAdapter(inner_adapter, self._store)
+        return _PersistenceInternalRunAdapter(
+            inner_adapter,
+            self._store,
+            serializer=workflow.runtime.get_serializer(workflow),
+        )
 
     @override
     def track_workflow(self, workflow: Workflow) -> None:
@@ -199,10 +211,10 @@ class TickPersistenceDecorator(BaseRuntimeDecorator):
         stream already terminated. Callers use ``exit_command`` to finalize
         handlers instead of resuming them.
         """
-        serializer = JsonSerializer()
+        serializer = workflow.runtime.get_serializer(workflow)
         legacy_ctx = self._get_legacy_ctx(run_id)
 
-        tick_stream = stream_workflow_ticks(self._store, run_id)
+        tick_stream = stream_workflow_ticks(self._store, run_id, serializer=serializer)
         try:
             first_tick = await tick_stream.__anext__()
         except StopAsyncIteration:
@@ -212,8 +224,8 @@ class TickPersistenceDecorator(BaseRuntimeDecorator):
             return None
 
         if legacy_ctx:
-            await self._seed_legacy_state(run_id, legacy_ctx)
-            parsed = SerializedContext.from_dict_auto(legacy_ctx)
+            await self._seed_legacy_state(run_id, legacy_ctx, serializer)
+            parsed = SerializedContext.from_dict_auto(legacy_ctx, serializer)
             init_state = BrokerState.from_serialized(parsed, workflow, serializer)
         else:
             init_state = BrokerState.from_workflow(workflow)
@@ -250,14 +262,16 @@ class TickPersistenceDecorator(BaseRuntimeDecorator):
             )
             return None
 
-    async def _seed_legacy_state(self, run_id: str, legacy_ctx: dict[str, Any]) -> None:
+    async def _seed_legacy_state(
+        self, run_id: str, legacy_ctx: dict[str, Any], serializer: BaseSerializer
+    ) -> None:
         """Eagerly migrate a legacy ctx state snapshot into the state table.
 
         No-op when the state table already has a row for the run (a previous
         partial run's state must win over the legacy snapshot).
         """
         try:
-            parsed = SerializedContext.from_dict_auto(legacy_ctx)
+            parsed = SerializedContext.from_dict_auto(legacy_ctx, serializer)
         except Exception:
             logger.warning(
                 "Failed to parse legacy ctx for state migration, run %s", run_id
@@ -268,7 +282,7 @@ class TickPersistenceDecorator(BaseRuntimeDecorator):
         if not state_data:
             return
 
-        state_store = self._store.create_state_store(run_id)
+        state_store = self._store.create_state_store(run_id, serializer=serializer)
         if not isinstance(state_store, SqliteStateStore):
             return
 
@@ -282,7 +296,7 @@ class TickPersistenceDecorator(BaseRuntimeDecorator):
         finally:
             conn.close()
 
-        state = decode_seed_state(state_data, JsonSerializer())
+        state = decode_seed_state(state_data, serializer)
         await state_store.set_state(state)
 
 
@@ -298,8 +312,9 @@ class PersistenceDecorator(TickPersistenceDecorator):
         store: AbstractWorkflowStore,
         *,
         resume_fresh_handler_grace: timedelta | None = RESUME_FRESH_HANDLER_GRACE,
+        result_decoder: HandlerResultDecoder | None = None,
     ) -> None:
-        super().__init__(decorated, store)
+        super().__init__(decorated, store, result_decoder=result_decoder)
         self._resume_fresh_handler_grace = resume_fresh_handler_grace
         self._background_tasks: set[asyncio.Task[None]] = set()
         self.resume_task: asyncio.Task[None] | None = None
@@ -324,12 +339,14 @@ class PersistenceDecorator(TickPersistenceDecorator):
         resume_started_at: datetime,
     ) -> None:
         """Resume previously running (non-idle) workflows from persistence."""
-        handlers = await self._store.query(
-            HandlerQuery(
+        handlers = await query_handlers(
+            self._store,
+            result_decoder=self._result_decoder,
+            query=HandlerQuery(
                 status_in=["running"],
                 workflow_name_in=list(registered_workflows.keys()),
                 is_idle=False,
-            )
+            ),
         )
         for persistent in handlers:
             if (
@@ -365,7 +382,8 @@ class PersistenceDecorator(TickPersistenceDecorator):
                         persistent.workflow_name,
                     )
                     await self._store.update_handler_status(
-                        run_id,
+                        **result_decoder_kwargs(self._result_decoder),
+                        run_id=run_id,
                         status="failed",
                         error="handler crashed before persisting any state; cannot resume",
                     )
@@ -386,7 +404,8 @@ class PersistenceDecorator(TickPersistenceDecorator):
                         status,
                     )
                     await self._store.update_handler_status(
-                        run_id,
+                        **result_decoder_kwargs(self._result_decoder),
+                        run_id=run_id,
                         status=status,
                         result=result,
                         error=error,
@@ -400,7 +419,10 @@ class PersistenceDecorator(TickPersistenceDecorator):
                 )
                 try:
                     await self._store.update_handler_status(
-                        run_id, status="failed", error=str(e)
+                        **result_decoder_kwargs(self._result_decoder),
+                        run_id=run_id,
+                        status="failed",
+                        error=str(e),
                     )
                 except Exception:
                     logger.exception(

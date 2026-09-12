@@ -35,9 +35,11 @@ from llama_agents.server._store import (
 from llama_agents.server._store.abstract_workflow_store import (
     AbstractWorkflowStore,
     HandlerQuery,
+    HandlerResultDecoder,
     PersistentHandler,
     StoredEvent,
     StoredTick,
+    query_handlers,
 )
 from llama_agents.server._store.postgres.migrate import (
     run_migrations as pg_run_migrations,
@@ -195,8 +197,12 @@ class DBOSWorkflowStore(AbstractWorkflowStore):
             run_id, namespace, state_type, serializer
         )
 
-    async def query(self, query: HandlerQuery) -> list[PersistentHandler]:
-        return await self._resolve().query(query)
+    async def query(
+        self, query: HandlerQuery, *, result_decoder: HandlerResultDecoder | None = None
+    ) -> list[PersistentHandler]:
+        return await query_handlers(
+            self._resolve(), query, result_decoder=result_decoder
+        )
 
     async def update(self, handler: PersistentHandler) -> None:
         await self._resolve().update(handler)
@@ -648,7 +654,11 @@ class DBOSRuntime(Runtime):
             )
 
         # Capture values needed in the async task closure
-        active_serializer = serializer or JsonSerializer()
+        active_serializer = (
+            serializer
+            if serializer is not None
+            else workflow.runtime.get_serializer(workflow)
+        )
 
         async def _run_workflow() -> WorkflowHandleAsync[Any]:
             with SetWorkflowID(run_id):
@@ -732,6 +742,7 @@ class DBOSRuntime(Runtime):
             else None,
             resolved_pool=self._pool,
             db_path=self._db_path,
+            serializer=workflow.runtime.get_serializer(workflow),
         )
 
     def get_external_adapter(self, run_id: str) -> ExternalRunAdapter:
@@ -927,7 +938,12 @@ class DBOSRuntime(Runtime):
         if self.config.get("run_migrations_on_launch", True):
             await self.run_migrations()
 
-    def build_server_runtime(self, *, idle_timeout: float = 600.0) -> Runtime:
+    def build_server_runtime(
+        self,
+        *,
+        idle_timeout: float = 600.0,
+        result_decoder: HandlerResultDecoder | None = None,
+    ) -> Runtime:
         """Build the decorator chain for use with WorkflowServer.
 
         Wraps the DBOS runtime with:
@@ -946,11 +962,14 @@ class DBOSRuntime(Runtime):
         to ``WorkflowServer``.
         """
         store = self.create_workflow_store()
-        tick_persistence = TickPersistenceDecorator(self, store)
+        tick_persistence = TickPersistenceDecorator(
+            self, store, result_decoder=result_decoder
+        )
         return DBOSIdleReleaseDecorator(
             EventInterceptorDecorator(tick_persistence),
             store=store,
             idle_timeout=idle_timeout,
+            result_decoder=result_decoder,
             journal_crud=self._create_journal_crud_factory(),
             lifecycle_lock=self._create_lifecycle_lock_factory(),
         )
@@ -1110,7 +1129,9 @@ class InternalDBOSAdapter(InternalRunAdapter):
         pool: PoolProvider | None = None,
         resolved_pool: asyncpg.Pool | None = None,
         db_path: str | None = None,
+        serializer: BaseSerializer | None = None,
     ) -> None:
+        self._serializer = serializer if serializer is not None else JsonSerializer()
         self._run_id = run_id
         self._engine = engine
         self._state_type = state_type
@@ -1208,6 +1229,7 @@ class InternalDBOSAdapter(InternalRunAdapter):
                     run_id=self._run_id,
                     namespace=namespace,
                     state_type=cast(type[Any], self._state_type),
+                    serializer=self._serializer,
                     schema=self._schema,
                 )
             elif self._db_path is not None:
@@ -1216,6 +1238,7 @@ class InternalDBOSAdapter(InternalRunAdapter):
                     run_id=self._run_id,
                     namespace=namespace,
                     state_type=cast(type[Any], self._state_type),
+                    serializer=self._serializer,
                 )
             else:
                 raise RuntimeError(

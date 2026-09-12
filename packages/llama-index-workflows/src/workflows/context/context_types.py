@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic.functional_validators import model_validator
 from typing_extensions import TypeVar
 
+from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import DictState
 from workflows.events import SerializableOptionalException
 
@@ -308,7 +309,9 @@ class SerializedContext(BaseModel):
         return SerializedContext.model_validate(migrated)
 
     @staticmethod
-    def from_dict_auto(data: dict[str, Any]) -> "SerializedContext":
+    def from_dict_auto(
+        data: dict[str, Any], serializer: BaseSerializer | None = None
+    ) -> "SerializedContext":
         """Parse a dict as V0, v1, or current format and return the current format.
 
         A missing ``version`` routes to the legacy V0 parser. An unrecognized
@@ -316,21 +319,23 @@ class SerializedContext(BaseModel):
         loudly: routing it to an older parser would "succeed" while silently
         dropping state (workers, streams).
         """
-        version = data.get("version")
-        if version is None:
+        selected = serializer if serializer is not None else JsonSerializer()
+        with selected.validation_context():
+            version = data.get("version")
+            if version is None:
+                v0 = SerializedContextV0.model_validate(data)
+                return SerializedContext.from_v0(v0)
+            if not isinstance(version, int) or version > CURRENT_SERIALIZED_VERSION:
+                raise ValueError(
+                    f"Cannot load serialized workflow context with "
+                    f"version={version!r}; this library supports up to version "
+                    f"{CURRENT_SERIALIZED_VERSION}. The payload was likely written "
+                    "by a newer version of llama-index-workflows."
+                )
+            if version == CURRENT_SERIALIZED_VERSION:
+                return SerializedContext.model_validate(data)
+            if version == 1:
+                return SerializedContext.from_v1(data)
+            # Older int version markers (e.g. an explicit 0): legacy V0 format.
             v0 = SerializedContextV0.model_validate(data)
             return SerializedContext.from_v0(v0)
-        if not isinstance(version, int) or version > CURRENT_SERIALIZED_VERSION:
-            raise ValueError(
-                f"Cannot load serialized workflow context with "
-                f"version={version!r}; this library supports up to version "
-                f"{CURRENT_SERIALIZED_VERSION}. The payload was likely written "
-                "by a newer version of llama-index-workflows."
-            )
-        if version == CURRENT_SERIALIZED_VERSION:
-            return SerializedContext.model_validate(data)
-        if version == 1:
-            return SerializedContext.from_v1(data)
-        # Older int version markers (e.g. an explicit 0): legacy V0 format.
-        v0 = SerializedContextV0.model_validate(data)
-        return SerializedContext.from_v0(v0)

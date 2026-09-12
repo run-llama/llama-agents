@@ -11,6 +11,7 @@ from warnings import catch_warnings, simplefilter
 
 from llama_agents.client.protocol import HandlerData
 from workflows import Context, Workflow
+from workflows.context.serializers import BaseSerializer
 from workflows.events import Event, StartEvent
 from workflows.handler import WorkflowHandler
 from workflows.plugins.basic import BasicRuntime
@@ -27,8 +28,10 @@ from ._service import EventSendError, _WorkflowService
 from ._store.abstract_workflow_store import (
     AbstractWorkflowStore,
     HandlerQuery,
+    HandlerResultDecoder,
     PersistentHandler,
     is_terminal_status,
+    query_handlers,
 )
 from ._store.memory_workflow_store import MemoryWorkflowStore
 
@@ -40,6 +43,7 @@ def _durable_runtime(
     resume_existing: bool,
     resume_fresh_handler_grace: timedelta | None,
     idle_timeout: float | None,
+    result_decoder: HandlerResultDecoder | None = None,
 ) -> tuple[Runtime, PersistenceDecorator | None]:
     persistence: PersistenceDecorator | None = None
     if resume_existing:
@@ -49,14 +53,22 @@ def _durable_runtime(
             runtime,
             store=store,
             resume_fresh_handler_grace=resume_fresh_handler_grace,
+            result_decoder=result_decoder,
         )
         persisted: TickPersistenceDecorator = persistence
     else:
-        persisted = TickPersistenceDecorator(runtime, store=store)
+        persisted = TickPersistenceDecorator(
+            runtime, store=store, result_decoder=result_decoder
+        )
     if idle_timeout is None:
         return persisted, persistence
     return (
-        IdleReleaseDecorator(persisted, store=store, idle_timeout=idle_timeout),
+        IdleReleaseDecorator(
+            persisted,
+            store=store,
+            idle_timeout=idle_timeout,
+            result_decoder=result_decoder,
+        ),
         persistence,
     )
 
@@ -77,7 +89,10 @@ class _DurableWorkflowRuntime:
         start_store_before_runtime: bool = True,
         persistence_backoff: list[float] | None = None,
         wrap_runtime: bool = True,
+        serializer: BaseSerializer | None = None,
+        result_decoder: HandlerResultDecoder | None = None,
     ) -> None:
+        self._result_decoder = result_decoder
         store = workflow_store if workflow_store is not None else MemoryWorkflowStore()
         if wrap_runtime:
             durable, persistence = _durable_runtime(
@@ -85,6 +100,7 @@ class _DurableWorkflowRuntime:
                 store=store,
                 resume_existing=resume_existing,
                 resume_fresh_handler_grace=resume_fresh_handler_grace,
+                result_decoder=result_decoder,
                 idle_timeout=idle_timeout if resume_existing else None,
             )
         else:
@@ -100,8 +116,12 @@ class _DurableWorkflowRuntime:
             durable,
             store=self._store,
             persistence_backoff=persistence_backoff,
+            serializer=serializer,
+            result_decoder=result_decoder,
         )
-        self._service = _WorkflowService(runtime=self._runtime, store=self._store)
+        self._service = _WorkflowService(
+            runtime=self._runtime, store=self._store, result_decoder=result_decoder
+        )
         self._active_handlers: dict[str, WorkflowHandler] = {}
         self._started = False
 
@@ -231,13 +251,21 @@ class _DurableWorkflowRuntime:
             await asyncio.sleep(0)
 
     async def _get_handler(self, handler_id: str) -> PersistentHandler:
-        found = await self._store.query(HandlerQuery(handler_id_in=[handler_id]))
+        found = await query_handlers(
+            self._store,
+            result_decoder=self._result_decoder,
+            query=HandlerQuery(handler_id_in=[handler_id]),
+        )
         if not found:
             raise KeyError(f"Handler {handler_id!r} not found")
         return found[0]
 
     async def _raise_if_active_handler_exists(self, handler_id: str) -> None:
-        found = await self._store.query(HandlerQuery(handler_id_in=[handler_id]))
+        found = await query_handlers(
+            self._store,
+            result_decoder=self._result_decoder,
+            query=HandlerQuery(handler_id_in=[handler_id]),
+        )
         if not found:
             return
         existing = found[0]

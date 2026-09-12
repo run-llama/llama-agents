@@ -24,6 +24,8 @@ from llama_agents.dbos.journal.lifecycle import (
 from llama_agents.server._store.abstract_workflow_store import (
     AbstractWorkflowStore,
     HandlerQuery,
+    HandlerResultDecoder,
+    query_handlers,
     stream_workflow_ticks,
 )
 from typing_extensions import override
@@ -168,9 +170,12 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
         lifecycle_lock: Callable[[], Awaitable[RunLifecycleLock]]
         | Callable[[], RunLifecycleLock]
         | None = None,
+        *,
+        result_decoder: HandlerResultDecoder | None = None,
     ) -> None:
         super().__init__(decorated)
         self._store = store
+        self._result_decoder = result_decoder
         self._deferred_release_tasks: dict[str, asyncio.Task[None]] = {}
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._idle_timeout = idle_timeout
@@ -208,6 +213,14 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
     def untrack_workflow(self, workflow: Workflow) -> None:
         self._workflows.pop(workflow.workflow_name, None)
         super().untrack_workflow(workflow)
+
+    def _get_result_decoder(self, workflow_name: str) -> JsonSerializer:
+        if self._result_decoder is not None:
+            return self._result_decoder(workflow_name)
+        workflow = self._workflows.get(workflow_name)
+        if workflow is None:
+            raise ValueError(f"Workflow {workflow_name} not found")
+        return workflow.runtime.get_json_serializer(workflow)
 
     def _spawn_task(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         task = asyncio.create_task(coro)
@@ -276,7 +289,10 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
 
             # Set idle_since NOW — after the workflow is fully released
             await self._store.update_handler_status(
-                run_id, status="running", idle_since=datetime.now(timezone.utc)
+                run_id,
+                status="running",
+                idle_since=datetime.now(timezone.utc),
+                result_decoder=self._get_result_decoder,
             )
 
             logger.info(f"Marked handler as released [run_id={run_id}]")
@@ -291,7 +307,13 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
         """Rebuild BrokerState from persisted ticks."""
         init_state = BrokerState.from_workflow(workflow)
         return await rebuild_state_from_ticks_stream(
-            init_state, stream_workflow_ticks(self._store, run_id), run_id=run_id
+            init_state,
+            stream_workflow_ticks(
+                self._store,
+                run_id,
+                serializer=workflow.runtime.get_serializer(workflow),
+            ),
+            run_id=run_id,
         )
 
     async def _await_old_workflow_for_resume(
@@ -355,7 +377,11 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
             return None
 
         # Look up handler to get workflow_name
-        handlers = await self._store.query(HandlerQuery(run_id_in=[run_id]))
+        handlers = await query_handlers(
+            self._store,
+            HandlerQuery(run_id_in=[run_id]),
+            result_decoder=self._get_result_decoder,
+        )
         if len(handlers) != 1:
             raise ValueError(
                 f"Expected 1 handler for run {run_id}, got {len(handlers)}"
@@ -377,13 +403,13 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
             )
 
         # Carry over state from old run's state store
-        serializer = JsonSerializer()
+        serializer = workflow.runtime.get_serializer(workflow)
         serialized_state: dict[str, Any] | None = None
         state_type = infer_state_type(workflow)
         if state_type is not None:
             try:
                 old_state_store = self._store.create_state_store(
-                    run_id, state_type=state_type
+                    run_id, state_type=state_type, serializer=serializer
                 )
                 serialized_state = await state_store_handoff(
                     old_state_store, serializer

@@ -293,13 +293,10 @@ def decode_state(
     if isinstance(state_data, dict):
         if "_data" in state_data:
             return deserialize_dict_state_data(state_data, serializer)
-        # Already-parsed typed payload. JsonSerializer-style serializers can
-        # reconstruct it from the embedded self-description.
-        deserialize_value = getattr(serializer, "deserialize_value", None)
-        if callable(deserialize_value):
-            value = deserialize_value(state_data)
-            if isinstance(value, BaseModel):
-                return value
+        # Legacy JSON objects still pass through the selected string decoder.
+        value = serializer.deserialize(json.dumps(state_data))
+        if isinstance(value, BaseModel):
+            return value
         raise ValueError(
             "Unrecognized state payload: dict without a '_data' wrapper that "
             "the serializer could not reconstruct into a model"
@@ -885,7 +882,7 @@ class StateStoreFacade(Generic[MODEL_T]):
             storage if isinstance(storage, StateStorage) else None
         )
         self.state_type = state_type or DictState  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
-        self._serializer = serializer or JsonSerializer()
+        self._serializer = serializer if serializer is not None else JsonSerializer()
         self._pending_seed: _CopySeed | _PayloadSeed | None = None
 
     @property

@@ -22,6 +22,7 @@ from typing import (
     Protocol,
 )
 
+from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import StateStore
 from workflows.events import Event, StartEvent, StopEvent
 from workflows.runtime.types.named_task import (
@@ -33,7 +34,6 @@ from workflows.runtime.types.named_task import (
 
 if TYPE_CHECKING:
     from workflows.context.context import Context
-    from workflows.context.serializers import BaseSerializer
     from workflows.runtime.types.internal_state import BrokerState
     from workflows.runtime.types.step_function import StepWorkerFunction
     from workflows.workflow import Workflow
@@ -471,6 +471,8 @@ class Runtime(ABC):
     """
 
     def __init__(self) -> None:
+        self._default_json_serializer = JsonSerializer()
+        self._default_serializer = self._default_json_serializer
         self._pending: WorkflowSet = WorkflowSet()
         self._launched: bool = False
 
@@ -577,6 +579,18 @@ class Runtime(ABC):
     def destroy_sync(self) -> None:
         """Synchronous convenience wrapper for :meth:`destroy`."""
         asyncio.run(self.destroy())
+
+    def get_json_serializer(self, workflow: Workflow) -> JsonSerializer:
+        """Return the public JSON decoder independently of internal encoding."""
+        return self._default_json_serializer
+
+    def get_serializer(self, workflow: Workflow) -> BaseSerializer:
+        """Return the workflow override or this runtime's stable legacy default."""
+        return (
+            workflow.serializer
+            if workflow.serializer is not None
+            else self._default_serializer
+        )
 
     def track_workflow(self, workflow: Workflow) -> None:
         """

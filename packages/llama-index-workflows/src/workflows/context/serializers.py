@@ -8,7 +8,8 @@ import contextvars
 import json
 import pickle
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from pydantic import BaseModel
@@ -51,6 +52,11 @@ class BaseSerializer(ABC):
         - [JsonSerializer][workflows.context.serializers.JsonSerializer]
         - [PickleSerializer][workflows.context.serializers.PickleSerializer]
     """
+
+    @contextmanager
+    def validation_context(self) -> Iterator[None]:
+        """Scope metadata validation without decoding application payloads."""
+        yield
 
     @abstractmethod
     def serialize(self, value: Any) -> str: ...
@@ -141,6 +147,15 @@ class JsonSerializer(BaseSerializer):
                 "Pass it via allowed_types to the JsonSerializer constructor."
             )
 
+    @contextmanager
+    def validation_context(self) -> Iterator[None]:
+        """Carry JSON class lookup through synchronous Pydantic validation."""
+        serializer_token = _active_serializer.set(self)
+        try:
+            yield
+        finally:
+            _active_serializer.reset(serializer_token)
+
     def resolve_class(self, qualified_name: str) -> type[Any]:
         """Resolve a class name to a registered class, or import it.
 
@@ -227,18 +242,12 @@ class JsonSerializer(BaseSerializer):
         if isinstance(data, dict):
             if data.get("__is_pydantic") and data.get("qualified_name"):
                 module_class = self.resolve_class(data["qualified_name"])
-                serializer_token = _active_serializer.set(self)
-                try:
+                with self.validation_context():
                     return module_class.model_validate(data["value"])
-                finally:
-                    _active_serializer.reset(serializer_token)
             elif data.get("__is_component") and data.get("qualified_name"):
                 module_class = self.resolve_class(data["qualified_name"])
-                serializer_token = _active_serializer.set(self)
-                try:
+                with self.validation_context():
                     return module_class.from_dict(data["value"])
-                finally:
-                    _active_serializer.reset(serializer_token)
             return {k: self.deserialize_value(v) for k, v in data.items()}
         elif isinstance(data, list):
             return [self.deserialize_value(item) for item in data]

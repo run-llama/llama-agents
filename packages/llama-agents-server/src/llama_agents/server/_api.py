@@ -640,7 +640,9 @@ class _WorkflowAPI:
         store = self._service.store
 
         # Resolve handler_id → run_id via persistence
-        found = await store.query(HandlerQuery(handler_id_in=[handler_id]))
+        found = await self._service.query_handlers(
+            HandlerQuery(handler_id_in=[handler_id])
+        )
         if not found:
             raise HTTPException(detail="Handler not found", status_code=404)
 
@@ -1139,7 +1141,11 @@ class _WorkflowAPI:
 
         try:
             event = EventEnvelope.parse(
-                event_data, self.event_registry(handler_data.workflow_name)
+                event_data,
+                self.event_registry(handler_data.workflow_name),
+                json_serializer=self._service.json_serializer(
+                    handler_data.workflow_name
+                ),
             )
         except EventValidationError as e:
             raise HTTPException(detail=str(e), status_code=400)
@@ -1240,6 +1246,7 @@ class _WorkflowAPI:
                         start_event_data,
                         self.event_registry(workflow_name),
                         explicit_event=workflow.start_event_class,
+                        json_serializer=self._service.json_serializer(workflow_name),
                     )
 
                 except Exception as e:
@@ -1263,7 +1270,11 @@ class _WorkflowAPI:
                         detail="Context API is disabled. Set accept_context_api=True on WorkflowServer to enable it.",
                         status_code=400,
                     )
-                context = Context.from_dict(workflow=workflow, data=context_data)
+                context = Context.from_dict(
+                    workflow=workflow,
+                    data=context_data,
+                    serializer=workflow.runtime.get_serializer(workflow),
+                )
 
             handler_id = handler_id or nanoid()
             return (context, start_event, handler_id)

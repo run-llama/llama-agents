@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 from llama_index_instrumentation import get_dispatcher
 
-from workflows.context.serializers import BaseSerializer, JsonSerializer
+from workflows.context.serializers import BaseSerializer
 from workflows.context.state_store import (
     InMemoryStateStore,
     StateStore,
@@ -288,7 +288,11 @@ class BasicRuntime(Runtime):
         registered = self.get_or_register(workflow)
 
         # Create state store from serialized state or infer type from workflow
-        active_serializer = serializer or JsonSerializer()
+        active_serializer = (
+            serializer
+            if serializer is not None
+            else workflow.runtime.get_serializer(workflow)
+        )
         if serialized_state:
             if is_durable_serialized_state(serialized_state):
                 store_type = serialized_state.get("store_type")

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Any
 from unittest import mock
 
@@ -9,12 +11,15 @@ from llama_agents.appserver.routers.deployments import (
     create_deployments_router,
 )
 from llama_agents.appserver.types import TaskDefinition
+from workflows.context import JsonSerializer
 
 
 def build_app(name: str, deployment: Deployment) -> TestClient:
     app = FastAPI()
     app.include_router(create_base_router(name))
-    app.include_router(create_deployments_router(name, deployment))
+    app.include_router(
+        create_deployments_router(name, deployment, json_serializer=JsonSerializer())
+    )
     return TestClient(app)
 
 

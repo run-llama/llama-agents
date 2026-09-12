@@ -33,7 +33,9 @@ def create_base_router(name: str) -> APIRouter:
     return base_router
 
 
-def create_deployments_router(name: str, deployment: Deployment) -> APIRouter:
+def create_deployments_router(
+    name: str, deployment: Deployment, *, json_serializer: JsonSerializer
+) -> APIRouter:
     deployments_router = APIRouter(
         prefix="/deployments/{name}",
     )
@@ -101,8 +103,7 @@ def create_deployments_router(name: str, deployment: Deployment) -> APIRouter:
     ) -> EventDefinition:
         """Send a human response event to a service for a specific task and session."""
         ctx = deployment._contexts[session_id]
-        serializer = JsonSerializer()
-        event = serializer.deserialize(event_def.event_obj_str)
+        event = json_serializer.deserialize(event_def.event_obj_str)
         ctx.send_event(event)
 
         return event_def

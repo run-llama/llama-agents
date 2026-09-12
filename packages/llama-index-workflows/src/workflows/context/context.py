@@ -43,7 +43,7 @@ from workflows.runtime.types.results import InternalContextVar
 from workflows.types import RunResultT
 from workflows.utils import _nanoid as nanoid
 
-from .serializers import BaseSerializer, JsonSerializer
+from .serializers import BaseSerializer
 from .state_store import MODEL_T, StateStore
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -248,7 +248,7 @@ class Context(Generic[MODEL_T]):
         cls,
         workflow: Workflow,
         external_adapter: ExternalRunAdapter,
-        serializer: BaseSerializer = JsonSerializer(),
+        serializer: BaseSerializer | None = None,
     ) -> Context[MODEL_T]:
         """Create a Context directly in external face state with a broker."""
 
@@ -260,7 +260,9 @@ class Context(Generic[MODEL_T]):
             ExternalContext(
                 workflow=workflow,
                 external_adapter=external_adapter,
-                serializer=serializer,
+                serializer=serializer
+                if serializer is not None
+                else workflow.runtime.get_serializer(workflow),
             ),
         )
         return new_ctx
