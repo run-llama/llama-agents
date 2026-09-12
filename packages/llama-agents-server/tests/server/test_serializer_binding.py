@@ -5,16 +5,21 @@ from __future__ import annotations
 import base64
 import pickle
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from llama_agents.server import WorkflowServer
+from llama_agents.server import MemoryWorkflowStore, WorkflowServer
 from llama_agents.server._store.abstract_workflow_store import (
+    AbstractWorkflowStore,
+    HandlerQuery,
     PersistentHandler,
+    Status,
+    query_handlers,
     stream_workflow_ticks,
 )
 from llama_agents.server._store.sqlite.sqlite_workflow_store import SqliteWorkflowStore
+from llama_agents.server.runtime import _DurableWorkflowRuntime
 from workflows import Context, Workflow, step
 from workflows.context.serializers import (
     BaseSerializer,
@@ -147,3 +152,50 @@ async def test_unreadable_persisted_result_is_reported_over_http(
     assert result.status_code == 422
     assert listing.status_code == 200
     assert listing.json()["handlers"][0]["result"] is None
+
+
+async def test_legacy_custom_query_signature_is_used_without_decoder(
+    tmp_path: Path,
+) -> None:
+    class LegacyStore:
+        async def query(self, query: HandlerQuery) -> list[PersistentHandler]:
+            return []
+
+    store = cast(AbstractWorkflowStore, LegacyStore())
+    assert await query_handlers(store, HandlerQuery()) == []
+    assert (
+        await query_handlers(
+            store, HandlerQuery(), result_decoder=lambda name: JsonSerializer()
+        )
+        == []
+    )
+
+
+async def test_legacy_status_override_receives_no_new_keyword(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = MemoryWorkflowStore()
+    calls: list[str] = []
+
+    async def update(
+        run_id: str,
+        *,
+        status: Status | None = None,
+        result: StopEvent | None = None,
+        error: str | None = None,
+    ) -> None:
+        calls.append(run_id)
+        await MemoryWorkflowStore.update_handler_status(
+            store, run_id, status=status, result=result, error=error
+        )
+
+    monkeypatch.setattr(store, "update_handler_status", update)
+    runtime = _DurableWorkflowRuntime(
+        workflow_store=store, serializer=PickleSerializer()
+    )
+    runtime.add_workflow("python", PythonWorkflow())
+    async with runtime.contextmanager():
+        result = await runtime.run("python")
+        completed = await runtime._service.await_workflow(result)
+        assert completed.status == "completed"
+    assert calls

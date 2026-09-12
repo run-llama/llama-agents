@@ -4,22 +4,98 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator
 
 import uvicorn
 from starlette.middleware import Middleware
 from workflows import Workflow
-from workflows.context.serializers import BaseSerializer
-from workflows.events import Event
+from workflows.context.serializers import BaseSerializer, JsonSerializer
+from workflows.context.state_store import DictState, infer_state_type
+from workflows.errors import (
+    ContextSerdeError,
+    ContextStateError,
+    WorkflowCancelledByUser,
+    WorkflowConfigurationError,
+    WorkflowDone,
+    WorkflowRuntimeError,
+    WorkflowStepDoesNotExistError,
+    WorkflowTimeoutError,
+    WorkflowValidationError,
+)
+from workflows.events import (
+    CollectionReleaseEvent,
+    Event,
+    HumanResponseEvent,
+    IdleReleasedEvent,
+    InputRequiredEvent,
+    StartEvent,
+    StepFailedEvent,
+    StepStateChanged,
+    StopEvent,
+    UnhandledEvent,
+    WorkflowCancelledEvent,
+    WorkflowFailedEvent,
+    WorkflowIdleEvent,
+    WorkflowTimedOutEvent,
+)
 from workflows.runtime.types.plugin import Runtime
+from workflows.runtime.types.ticks import (
+    TickAddEvent,
+    TickCancelRun,
+    TickIdleCheck,
+    TickIdleRelease,
+    TickPublishEvent,
+    TickStepResult,
+    TickTimeout,
+    TickWaiterTimeout,
+    TickWakeup,
+)
 
 from ._api import _WorkflowAPI
 from ._runtime.persistence_runtime import RESUME_FRESH_HANDLER_GRACE
 from ._store.abstract_workflow_store import AbstractWorkflowStore
 from ._store.memory_workflow_store import MemoryWorkflowStore
 from .runtime import _DurableWorkflowRuntime
+
+# Classes the framework itself writes into stored records and HTTP payloads.
+_FRAMEWORK_TYPES: tuple[type[Any], ...] = (
+    TickAddEvent,
+    TickCancelRun,
+    TickIdleCheck,
+    TickIdleRelease,
+    TickPublishEvent,
+    TickStepResult,
+    TickTimeout,
+    TickWaiterTimeout,
+    TickWakeup,
+    DictState,
+    Event,
+    StartEvent,
+    StopEvent,
+    WorkflowTimedOutEvent,
+    WorkflowCancelledEvent,
+    IdleReleasedEvent,
+    WorkflowFailedEvent,
+    CollectionReleaseEvent,
+    StepFailedEvent,
+    InputRequiredEvent,
+    HumanResponseEvent,
+    WorkflowIdleEvent,
+    UnhandledEvent,
+    StepStateChanged,
+    WorkflowValidationError,
+    WorkflowTimeoutError,
+    WorkflowRuntimeError,
+    WorkflowDone,
+    WorkflowCancelledByUser,
+    WorkflowStepDoesNotExistError,
+    WorkflowConfigurationError,
+    ContextSerdeError,
+    ContextStateError,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +142,8 @@ class WorkflowServer:
         sse_heartbeat_interval: float | None = 25.0,
         accept_context_api: bool = False,
         serializer: BaseSerializer | None = None,
+        json_serializer: JsonSerializer | None = None,
+        extra_types: Iterable[type[Any]] = (),
     ):
         """Create a new workflow server.
 
@@ -96,13 +174,33 @@ class WorkflowServer:
                 Set to ``None`` to disable heartbeats. Only applies to SSE
                 mode; NDJSON streams are unaffected.
             serializer: Internal state and event serializer for workflows without
-                their own override. None preserves the legacy JSON default.
+                their own override. None uses the public JSON decoder.
+            json_serializer: Decoder for public JSON events and stored handler
+                results. None decodes only the declared types: framework
+                classes, each workflow's events and state type, registered
+                additional events, and ``extra_types``.
+            extra_types: Classes to add to the default decoder. Models that are
+                stored inside an envelope of their own rather than as a field
+                of a declared model need to be listed here.
             accept_context_api: Allow the ``"context"`` field in run request
-                bodies. Defaults to ``False``. Context deserialization can
-                instantiate arbitrary Pydantic objects via ``importlib``, so
-                only enable this on trusted networks.
+                bodies. Defaults to ``False``. Submitted state is decoded with
+                the workflow's selected serializer, so only enable this when
+                callers should be allowed to restore workflow state.
         """
         self._serializer = serializer
+        self._explicit_json_serializer = json_serializer
+        self._extra_types = tuple(extra_types)
+        self._json_serializer = (
+            json_serializer
+            if json_serializer is not None
+            else JsonSerializer(
+                allowed_types=(*_FRAMEWORK_TYPES, *self._extra_types),
+            )
+        )
+
+        def result_decoder(workflow_name: str) -> JsonSerializer:
+            return self.json_serializer
+
         if runtime is None:
             self._runtime_core = _DurableWorkflowRuntime(
                 workflow_store=workflow_store,
@@ -113,6 +211,7 @@ class WorkflowServer:
                 abort_active_on_stop=False,
                 persistence_backoff=list(persistence_backoff),
                 serializer=serializer,
+                result_decoder=result_decoder,
             )
         else:
             self._runtime_core = _DurableWorkflowRuntime(
@@ -123,6 +222,7 @@ class WorkflowServer:
                 start_store_before_runtime=False,
                 persistence_backoff=list(persistence_backoff),
                 serializer=serializer,
+                result_decoder=result_decoder,
                 wrap_runtime=False,
             )
         self._workflow_store = self._runtime_core._store
@@ -143,8 +243,17 @@ class WorkflowServer:
     # ------------------------------------------------------------------
 
     @property
+    def json_serializer(self) -> JsonSerializer:
+        """The decoder for public JSON events and handler results.
+
+        Without an explicit one this is a snapshot of the declared types, so it
+        stays valid after the workflows move to another server.
+        """
+        return self._json_serializer
+
+    @property
     def serializer(self) -> BaseSerializer | None:
-        """The explicitly configured internal default, or None for legacy JSON."""
+        """The explicit internal default, or None to use the declared types."""
         return self._serializer
 
     def add_workflow(
@@ -170,6 +279,15 @@ class WorkflowServer:
 
         if additional_events is not None:
             self._api.register_additional_events(name, additional_events)
+
+        if self._explicit_json_serializer is None:
+            declared: list[type[Any]] = [*_FRAMEWORK_TYPES, *self._extra_types]
+            for registered_name, registered in self.get_workflows().items():
+                declared.extend(self._api.get_workflow_events(registered_name))
+                declared.append(infer_state_type(registered))
+            # Replace the registration snapshot, never a decoder already held by
+            # an execution, state store, or a server receiving these workflows.
+            self._json_serializer = JsonSerializer(allowed_types=declared)
 
     def get_workflows(self) -> dict[str, Workflow]:
         """Return registered workflows as a dict by name. Only available after start()."""

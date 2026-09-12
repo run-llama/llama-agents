@@ -27,7 +27,7 @@ authors = [
 requires-python = ">=3.10, <4"
 dependencies = [
   "llama-index-workflows>=2.23.4,<3.0.0",
-  "llama-agents-server>=0.7.2",
+  "llama-agents-server>=0.8.0",
   "pydantic-settings>=2.10.1",
   "fastapi>=0.137.0,<1",
   "websockets>=12.0",

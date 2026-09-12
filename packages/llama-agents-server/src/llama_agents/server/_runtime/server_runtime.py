@@ -44,6 +44,7 @@ from workflows.workflow import Workflow
 
 from .._store.abstract_workflow_store import (
     AbstractWorkflowStore,
+    HandlerResultDecoder,
     PersistentHandler,
     Status,
 )
@@ -182,12 +183,12 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
         *,
         persistence_backoff: list[float] | None = None,
         serializer: BaseSerializer | None = None,
+        result_decoder: HandlerResultDecoder | None = None,
     ) -> None:
         super().__init__(decorated)
         self._store: AbstractWorkflowStore = store
-        self._default_serializer = (
-            serializer if serializer is not None else JsonSerializer()
-        )
+        self._default_serializer = serializer
+        self._result_decoder = result_decoder
         self._registered_workflows: dict[str, Workflow] = {}
         self._additional_events: dict[str, tuple[type[Event], ...]] = {}
         self._initial_state: dict[str, Any] = {}
@@ -230,7 +231,13 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
         super().untrack_workflow(workflow)
 
     def get_serializer(self, workflow: Workflow) -> BaseSerializer:
-        serializer = workflow.serializer or self._default_serializer
+        if workflow.serializer is not None:
+            serializer = workflow.serializer
+        elif self._default_serializer is not None:
+            serializer = self._default_serializer
+        else:
+            serializer = self.get_json_serializer(workflow)
+
         return self._compose_serializer(
             workflow,
             serializer,

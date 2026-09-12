@@ -23,7 +23,7 @@ from server_test_fixtures import (  # type: ignore[import]
     wait_for_requested_external_event,
 )
 from workflows import Context, Workflow
-from workflows.context.serializers import BaseSerializer
+from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import DictState, InMemoryStateStore
 from workflows.decorators import step
 from workflows.events import StartEvent, StopEvent
@@ -401,9 +401,9 @@ async def test_typed_state_continuation_via_memory_store(
 async def test_dict_state_pydantic_value_continuation_via_memory_store(
     memory_store: MemoryWorkflowStore,
 ) -> None:
-    """Pydantic values in DictState must survive handler continuation undegraded."""
+    """An explicit legacy serializer preserves undeclared DictState model values."""
     server = WorkflowServer(workflow_store=memory_store, idle_timeout=0.01)
-    wf = _DictHandoffWorkflow()
+    wf = _DictHandoffWorkflow(serializer=JsonSerializer())
     server.add_workflow("dictwf", wf)
     await memory_store.update(
         PersistentHandler(
