@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+from collections.abc import Iterable
 from typing import Any, Tuple
 from urllib.parse import quote_plus
 
@@ -38,6 +39,7 @@ class Deployment:
         workflows: dict[str, Workflow],
         *,
         serializer: BaseSerializer | None = None,
+        extra_types: Iterable[type[Any]] = (),
     ) -> None:
         """Creates a Deployment instance.
 
@@ -48,6 +50,7 @@ class Deployment:
         """
 
         self._serializer = serializer
+        self._extra_types = tuple(extra_types)
         self._default_service: Workflow | None = workflows.get(DEFAULT_SERVICE_ID)
         self._service_tasks: list[asyncio.Task] = []
         # Ready to load services
@@ -135,6 +138,7 @@ class Deployment:
         server = WorkflowServer(
             workflow_store=persistence,
             serializer=self._serializer,
+            extra_types=self._extra_types,
         )
         for service_id, workflow in self._workflow_services.items():
             server.add_workflow(service_id, workflow)

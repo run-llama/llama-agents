@@ -236,7 +236,7 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
         elif self._default_serializer is not None:
             serializer = self._default_serializer
         else:
-            serializer = self.get_json_serializer(workflow)
+            serializer = self._get_json_decoder(workflow)
 
         return self._compose_serializer(
             workflow,

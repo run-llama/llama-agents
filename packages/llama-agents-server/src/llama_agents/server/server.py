@@ -142,7 +142,6 @@ class WorkflowServer:
         sse_heartbeat_interval: float | None = 25.0,
         accept_context_api: bool = False,
         serializer: BaseSerializer | None = None,
-        json_serializer: JsonSerializer | None = None,
         extra_types: Iterable[type[Any]] = (),
     ):
         """Create a new workflow server.
@@ -174,11 +173,7 @@ class WorkflowServer:
                 Set to ``None`` to disable heartbeats. Only applies to SSE
                 mode; NDJSON streams are unaffected.
             serializer: Internal state and event serializer for workflows without
-                their own override. None uses the public JSON decoder.
-            json_serializer: Decoder for public JSON events and stored handler
-                results. None decodes only the declared types: framework
-                classes, each workflow's events and state type, registered
-                additional events, and ``extra_types``.
+                their own override. None uses the declared concrete classes.
             extra_types: Classes to add to the default decoder. Models that are
                 stored inside an envelope of their own rather than as a field
                 of a declared model need to be listed here.
@@ -188,18 +183,13 @@ class WorkflowServer:
                 callers should be allowed to restore workflow state.
         """
         self._serializer = serializer
-        self._explicit_json_serializer = json_serializer
         self._extra_types = tuple(extra_types)
-        self._json_serializer = (
-            json_serializer
-            if json_serializer is not None
-            else JsonSerializer(
-                allowed_types=(*_FRAMEWORK_TYPES, *self._extra_types),
-            )
+        self._json_decoder = JsonSerializer(
+            allowed_types=(*_FRAMEWORK_TYPES, *self._extra_types)
         )
 
         def result_decoder(workflow_name: str) -> JsonSerializer:
-            return self.json_serializer
+            return self._json_decoder
 
         if runtime is None:
             self._runtime_core = _DurableWorkflowRuntime(
@@ -243,15 +233,6 @@ class WorkflowServer:
     # ------------------------------------------------------------------
 
     @property
-    def json_serializer(self) -> JsonSerializer:
-        """The decoder for public JSON events and handler results.
-
-        Without an explicit one this is a snapshot of the declared types, so it
-        stays valid after the workflows move to another server.
-        """
-        return self._json_serializer
-
-    @property
     def serializer(self) -> BaseSerializer | None:
         """The explicit internal default, or None to use the declared types."""
         return self._serializer
@@ -280,14 +261,15 @@ class WorkflowServer:
         if additional_events is not None:
             self._api.register_additional_events(name, additional_events)
 
-        if self._explicit_json_serializer is None:
-            declared: list[type[Any]] = [*_FRAMEWORK_TYPES, *self._extra_types]
-            for registered_name, registered in self.get_workflows().items():
-                declared.extend(self._api.get_workflow_events(registered_name))
-                declared.append(infer_state_type(registered))
-            # Replace the registration snapshot, never a decoder already held by
-            # an execution, state store, or a server receiving these workflows.
-            self._json_serializer = JsonSerializer(allowed_types=declared)
+        self._json_decoder = JsonSerializer(allowed_types=self.get_declared_types())
+
+    def get_declared_types(self) -> tuple[type[Any], ...]:
+        """Return concrete classes declared for JSON decoding."""
+        declared: list[type[Any]] = [*_FRAMEWORK_TYPES, *self._extra_types]
+        for name, workflow in self.get_workflows().items():
+            declared.extend(self._api.get_workflow_events(name))
+            declared.append(infer_state_type(workflow))
+        return tuple(dict.fromkeys(declared))
 
     def get_workflows(self) -> dict[str, Workflow]:
         """Return registered workflows as a dict by name. Only available after start()."""
