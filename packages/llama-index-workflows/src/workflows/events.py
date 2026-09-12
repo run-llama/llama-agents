@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import builtins
 from _collections_abc import dict_items, dict_keys, dict_values
 from datetime import datetime
 from enum import Enum
@@ -18,7 +19,11 @@ from pydantic import (
     model_serializer,
 )
 
-from workflows.context.serializers import JsonSerializer, allowed_type_names_var
+from workflows.context.serializers import (
+    JsonSerializer,
+    _active_serializer,
+    allowed_type_names_var,
+)
 from workflows.context.utils import import_module_from_qualified_name
 
 
@@ -162,7 +167,7 @@ def _serialize_event(event: Event) -> Any:
 
 
 def _deserialize_event(data: Any) -> Event:
-    return _json_serializer.deserialize_value(data)
+    return (_active_serializer.get() or _json_serializer).deserialize_value(data)
 
 
 SerializableEvent = Annotated[
@@ -181,7 +186,7 @@ def _serialize_optional_event(event: Event | None) -> Any:
 def _deserialize_optional_event(data: Any) -> Event | None:
     if data is None:
         return None
-    return _json_serializer.deserialize_value(data)
+    return (_active_serializer.get() or _json_serializer).deserialize_value(data)
 
 
 SerializableOptionalEvent = Annotated[
@@ -261,7 +266,15 @@ def _deserialize_exception(data: Any) -> Exception:
     if not _exception_type_permitted(exc_type):
         return UnreconstructedException(exc_message, original_type=exc_type)
     try:
-        exc_cls = import_module_from_qualified_name(exc_type)
+        serializer = _active_serializer.get()
+        if exc_type.startswith("builtins."):
+            exc_cls = getattr(builtins, exc_type.removeprefix("builtins."))
+        elif exc_type == _UNRECONSTRUCTED_EXCEPTION_NAME:
+            exc_cls = UnreconstructedException
+        elif serializer is None:
+            exc_cls = import_module_from_qualified_name(exc_type)
+        else:
+            exc_cls = serializer.resolve_class(exc_type)
         # Only construct genuine exception types. The qualified name comes from a
         # serialized blob and could resolve to any callable (e.g. ``builtins.eval``,
         # which the ``builtins`` allowlist exemption would otherwise permit) —
@@ -306,7 +319,7 @@ def _serialize_event_type(event_type: type[Event]) -> str:
 def _deserialize_event_type(data: Any) -> type[Event]:
     if isinstance(data, type):
         return data
-    return import_module_from_qualified_name(data)
+    return (_active_serializer.get() or _json_serializer).resolve_class(data)
 
 
 SerializableEventType = Annotated[

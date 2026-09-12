@@ -26,6 +26,15 @@ allowed_type_names_var: contextvars.ContextVar[frozenset[str] | None] = (
 )
 
 
+# Event constructors drop Pydantic validation context, and component from_dict
+# has no context parameter. Scope the active serializer around both reconstruction
+# paths so nested event validators inherit it, then reset it even when validation
+# fails.
+_active_serializer: contextvars.ContextVar[JsonSerializer | None] = (
+    contextvars.ContextVar("workflow_json_serializer", default=None)
+)
+
+
 class BaseSerializer(ABC):
     """
     Interface for value serialization used by the workflow context and state store.
@@ -56,6 +65,13 @@ class JsonSerializer(BaseSerializer):
       serialized to their dict form alongside the qualified class name.
     - Dicts and lists are handled recursively.
 
+    ``allowed_types`` restricts which class names may be reconstructed, as
+    before. Entries that are classes also register those classes, so their
+    payloads are rebuilt without importing anything. ``dynamic_import=False``
+    refuses names that were not registered instead of importing them. Two
+    different classes that serialize under the same name are rejected here,
+    because a record cannot say which one it meant.
+
     Fallback for unsupported objects is to attempt JSON encoding directly; if it
     fails, a `ValueError` is raised.
 
@@ -76,14 +92,35 @@ class JsonSerializer(BaseSerializer):
         self,
         *,
         allowed_types: Iterable[type[Any] | str] | None = None,
+        dynamic_import: bool = True,
     ) -> None:
+        self._dynamic_import = dynamic_import
+        self._registered_types: dict[str, type[Any]] = {}
         if allowed_types is None:
             self._allowed_type_names: frozenset[str] | None = None
         else:
-            self._allowed_type_names = frozenset(
-                t if isinstance(t, str) else f"{t.__module__}.{t.__qualname__}"
-                for t in allowed_types
-            )
+            names: set[str] = set()
+            for entry in allowed_types:
+                if isinstance(entry, str):
+                    names.add(entry)
+                    continue
+                # Records carry the legacy ``module.__name__`` written by
+                # get_qualified_name; __qualname__ is what allowed_types has
+                # always matched on. Both come from the class itself.
+                for name in (
+                    f"{entry.__module__}.{entry.__qualname__}",
+                    f"{entry.__module__}.{entry.__name__}",
+                ):
+                    claimed = self._registered_types.get(name)
+                    if claimed is not None and claimed is not entry:
+                        raise ValueError(
+                            f"Two classes claim the serialized name {name}: "
+                            f"{claimed!r} and {entry!r}. Records cannot tell "
+                            "them apart, so only one of them can be registered."
+                        )
+                    names.add(name)
+                    self._registered_types[name] = entry
+            self._allowed_type_names = frozenset(names)
 
     def _validate_qualified_name(self, qualified_name: str) -> None:
         if self._allowed_type_names is None:
@@ -93,6 +130,29 @@ class JsonSerializer(BaseSerializer):
                 f"Refusing to import disallowed workflow state type: {qualified_name}. "
                 "Pass it via allowed_types to the JsonSerializer constructor."
             )
+
+    def resolve_class(self, qualified_name: str) -> type[Any]:
+        """Resolve a class name to a registered class, or import it.
+
+        Classes passed to ``allowed_types`` resolve directly. Anything else
+        is imported, unless ``dynamic_import`` is off.
+        """
+        self._validate_qualified_name(qualified_name)
+        registered = self._registered_types.get(qualified_name)
+        if registered is not None:
+            return registered
+        if not self._dynamic_import:
+            raise ValueError(
+                f"Refusing to import unregistered workflow state type: "
+                f"{qualified_name}. Pass the class via allowed_types to the "
+                "JsonSerializer constructor."
+            )
+        cls = import_module_from_qualified_name(qualified_name)
+        if not isinstance(cls, type):
+            raise ValueError(
+                f"Resolved workflow state type is not a class: {qualified_name}"
+            )
+        return cls
 
     def serialize_value(self, value: Any) -> Any:
         """
@@ -158,17 +218,23 @@ class JsonSerializer(BaseSerializer):
         """
         if isinstance(data, dict):
             if data.get("__is_pydantic") and data.get("qualified_name"):
-                self._validate_qualified_name(data["qualified_name"])
-                module_class = import_module_from_qualified_name(data["qualified_name"])
+                module_class = self.resolve_class(data["qualified_name"])
+                serializer_token = _active_serializer.set(self)
                 token = allowed_type_names_var.set(self._allowed_type_names)
                 try:
                     return module_class.model_validate(data["value"])
                 finally:
                     allowed_type_names_var.reset(token)
+                    _active_serializer.reset(serializer_token)
             elif data.get("__is_component") and data.get("qualified_name"):
-                self._validate_qualified_name(data["qualified_name"])
-                module_class = import_module_from_qualified_name(data["qualified_name"])
-                return module_class.from_dict(data["value"])
+                module_class = self.resolve_class(data["qualified_name"])
+                serializer_token = _active_serializer.set(self)
+                token = allowed_type_names_var.set(self._allowed_type_names)
+                try:
+                    return module_class.from_dict(data["value"])
+                finally:
+                    allowed_type_names_var.reset(token)
+                    _active_serializer.reset(serializer_token)
             return {k: self.deserialize_value(v) for k, v in data.items()}
         elif isinstance(data, list):
             return [self.deserialize_value(item) for item in data]
