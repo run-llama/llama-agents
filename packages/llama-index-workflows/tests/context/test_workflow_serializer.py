@@ -51,7 +51,7 @@ def test_snapshot_retry_exception_uses_selected_serializer(
     monkeypatch.setattr(
         "workflows.events.import_module_from_qualified_name", forbid_import
     )
-    serializer = JsonSerializer(allowed_types=[StartEvent], dynamic_import=False)
+    serializer = JsonSerializer(allowed_types=[StartEvent])
     workflow = ExampleWorkflow(serializer=serializer)
     data = {
         "version": 2,

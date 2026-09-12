@@ -50,7 +50,7 @@ class HiddenStop(StopEvent):
 def test_prebuilt_dbos_chain_selects_public_decoder_from_outer_binding(
     monkeypatch: pytest.MonkeyPatch, explicit_decoder: bool
 ) -> None:
-    selected = JsonSerializer(allowed_types=[HiddenStop], dynamic_import=False)
+    selected = JsonSerializer(allowed_types=[HiddenStop])
     chain = DBOSRuntime().build_server_runtime(
         result_decoder=(lambda name: selected) if explicit_decoder else None
     )
@@ -60,9 +60,7 @@ def test_prebuilt_dbos_chain_selects_public_decoder_from_outer_binding(
         runtime=chain,
         workflow_store=MemoryWorkflowStore(),
         serializer=internal,
-        json_serializer=JsonSerializer(
-            allowed_types=[StartEvent, StopEvent], dynamic_import=False
-        ),
+        json_serializer=JsonSerializer(allowed_types=[StartEvent, StopEvent]),
     )
     workflow = BoundWorkflow()
     server.add_workflow("bound", workflow)

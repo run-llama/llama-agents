@@ -121,8 +121,8 @@ async def test_store_selects_decoder_by_row_workflow_before_validation(
             )
         )
     decoders = {
-        "first": JsonSerializer(allowed_types=[FirstStop], dynamic_import=False),
-        "second": JsonSerializer(allowed_types=[SecondStop], dynamic_import=False),
+        "first": JsonSerializer(allowed_types=[FirstStop]),
+        "second": JsonSerializer(allowed_types=[SecondStop]),
     }
     handlers = await store.query(HandlerQuery(), result_decoder=decoders.__getitem__)
     assert {type(handler.result) for handler in handlers} == {FirstStop, SecondStop}

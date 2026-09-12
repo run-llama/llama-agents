@@ -66,7 +66,7 @@ and custom implementations of the string `serialize`/`deserialize` methods.
 HTTP events and persisted handler results keep their JSON representation.
 
 `WorkflowServer(json_serializer=...)` configures public JSON decoding separately.
-Pass `JsonSerializer(allowed_types=[...], dynamic_import=False)` to reconstruct only
+Pass `JsonSerializer(allowed_types=[MyState, MyEvent])` to reconstruct only
 registered classes. These optional settings also survive appserver loading of a
 configured source server. Omitting them preserves legacy defaults.
 

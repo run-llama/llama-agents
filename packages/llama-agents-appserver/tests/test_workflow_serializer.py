@@ -46,9 +46,7 @@ def test_source_server_options_survive_hosted_loading(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     serializer = PickleSerializer()
-    json_serializer = JsonSerializer(
-        allowed_types=[StartEvent, StopEvent], dynamic_import=False
-    )
+    json_serializer = JsonSerializer(allowed_types=[StartEvent, StopEvent])
     source = WorkflowServer(serializer=serializer, json_serializer=json_serializer)
     workflow = ExampleWorkflow()
     source.add_workflow("example", workflow)
@@ -76,9 +74,7 @@ def test_source_server_options_survive_hosted_loading(
 def test_legacy_event_route_uses_hosted_json_decoder(
     monkeypatch: pytest.MonkeyPatch, allow_event: bool
 ) -> None:
-    json_serializer = JsonSerializer(
-        allowed_types=[StartEvent] if allow_event else [], dynamic_import=False
-    )
+    json_serializer = JsonSerializer(allowed_types=[StartEvent] if allow_event else [])
     deployment = Deployment(
         {"example": ExampleWorkflow()},
         serializer=PickleSerializer(),

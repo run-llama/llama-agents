@@ -23,9 +23,7 @@ def test_registered_types_decode_nested_events() -> None:
     restored = EventEnvelope.parse(
         envelope,
         registry={"NestedEvent": NestedEvent},
-        json_serializer=JsonSerializer(
-            allowed_types=[NestedEvent, ChildEvent], dynamic_import=False
-        ),
+        json_serializer=JsonSerializer(allowed_types=[NestedEvent, ChildEvent]),
     )
     assert isinstance(restored, NestedEvent)
     assert type(restored.nested) is ChildEvent
@@ -37,9 +35,7 @@ def test_unregistered_nested_events_are_rejected() -> None:
         EventEnvelope.parse(
             envelope,
             registry={"NestedEvent": NestedEvent},
-            json_serializer=JsonSerializer(
-                allowed_types=[NestedEvent], dynamic_import=False
-            ),
+            json_serializer=JsonSerializer(allowed_types=[NestedEvent]),
         )
 
 
@@ -48,10 +44,10 @@ def test_qualified_name_lookup_uses_registered_types() -> None:
         "qualified_name": f"{ChildEvent.__module__}.{ChildEvent.__name__}",
         "value": {},
     }
-    serializer = JsonSerializer(allowed_types=[ChildEvent], dynamic_import=False)
+    serializer = JsonSerializer(allowed_types=[ChildEvent])
     assert type(EventEnvelope.parse(envelope, json_serializer=serializer)) is ChildEvent
     with pytest.raises(EventValidationError, match="Refusing to import"):
         EventEnvelope.parse(
             envelope,
-            json_serializer=JsonSerializer(allowed_types=[], dynamic_import=False),
+            json_serializer=JsonSerializer(allowed_types=[]),
         )
