@@ -28,9 +28,7 @@ def test_preflight_validate_success(
     monkeypatch.setattr(
         app_mod,
         "load_workflow_server",
-        lambda cfg: SimpleNamespace(
-            get_workflows=lambda: {}, serializer=None, json_serializer=None
-        ),
+        lambda cfg: SimpleNamespace(get_workflows=lambda: {}, serializer=None),
     )
     monkeypatch.setattr(
         app_mod, "Deployment", lambda workflows, **options: SimpleNamespace()
@@ -62,7 +60,6 @@ def test_preflight_validate_collects_errors(
         lambda cfg: SimpleNamespace(
             get_workflows=lambda: {"svc": BadWorkflow()},
             serializer=None,
-            json_serializer=None,
         ),
     )
 

@@ -1143,9 +1143,6 @@ class _WorkflowAPI:
             event = EventEnvelope.parse(
                 event_data,
                 self.event_registry(handler_data.workflow_name),
-                json_serializer=self._service.json_serializer(
-                    handler_data.workflow_name
-                ),
             )
         except EventValidationError as e:
             raise HTTPException(detail=str(e), status_code=400)
@@ -1246,7 +1243,6 @@ class _WorkflowAPI:
                         start_event_data,
                         self.event_registry(workflow_name),
                         explicit_event=workflow.start_event_class,
-                        json_serializer=self._service.json_serializer(workflow_name),
                     )
 
                 except Exception as e:

@@ -23,7 +23,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse
 from starlette.routing import Route
 from workflows import Context, Workflow
-from workflows.context.serializers import BaseSerializer, JsonSerializer
+from workflows.context.serializers import BaseSerializer
 from workflows.handler import WorkflowHandler
 
 logger = logging.getLogger()
@@ -38,7 +38,6 @@ class Deployment:
         workflows: dict[str, Workflow],
         *,
         serializer: BaseSerializer | None = None,
-        json_serializer: JsonSerializer | None = None,
     ) -> None:
         """Creates a Deployment instance.
 
@@ -49,7 +48,6 @@ class Deployment:
         """
 
         self._serializer = serializer
-        self._json_serializer = json_serializer
         self._default_service: Workflow | None = workflows.get(DEFAULT_SERVICE_ID)
         self._service_tasks: list[asyncio.Task] = []
         # Ready to load services
@@ -137,7 +135,6 @@ class Deployment:
         server = WorkflowServer(
             workflow_store=persistence,
             serializer=self._serializer,
-            json_serializer=self._json_serializer,
         )
         for service_id, workflow in self._workflow_services.items():
             server.add_workflow(service_id, workflow)

@@ -125,3 +125,5 @@ can encode. Put clients and other non-serializable objects in
 [resources](/python/llamaagents/workflows/resources) instead.
 
 For custom values, either make them Pydantic-serializable or provide a custom serializer when calling `Context.to_dict()` and `Context.from_dict()`.
+
+Set `serializer=` on a workflow to choose its internal context and checkpoint encoding, or on `WorkflowServer` to set the server default. A workflow override takes precedence. Appserver preserves the configured serializer when hosting the workflow. This setting does not change the HTTP API JSON format.

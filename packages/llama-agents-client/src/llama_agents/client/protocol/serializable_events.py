@@ -8,8 +8,7 @@ import json
 from collections.abc import Sequence
 from typing import Any
 
-from pydantic import BaseModel, model_validator
-from workflows.context.serializers import JsonSerializer
+from pydantic import BaseModel, ValidationError, model_validator
 from workflows.context.utils import import_module_from_qualified_name
 from workflows.events import Event
 
@@ -29,12 +28,7 @@ class EventEnvelopeWithMetadata(BaseModel):
     type: str
     types: list[str] | None
 
-    def load_event(
-        self,
-        registry: Sequence[type[Event]] = (),
-        *,
-        json_serializer: JsonSerializer | None = None,
-    ) -> Event:
+    def load_event(self, registry: Sequence[type[Event]] = ()) -> Event:
         """
         Attempts to load the event data as a python class based on the envelope metadata.
         Looks up the event from the registry, if provided. Falls back to the qualified_name, attempting to load from the module path.
@@ -44,9 +38,7 @@ class EventEnvelopeWithMetadata(BaseModel):
             value=self.value, type=self.type, qualified_name=self.qualified_name
         ).model_dump()
         return EventEnvelope.parse(
-            client_data=as_event_envelope,
-            registry=registry_lookup,
-            json_serializer=json_serializer,
+            client_data=as_event_envelope, registry=registry_lookup
         )
 
     @classmethod
@@ -109,8 +101,6 @@ class EventEnvelope(BaseModel):
         client_data: dict[str, Any] | str,
         registry: dict[str, builtins.type[Event]] | None = None,
         explicit_event: builtins.type[Event] | None = None,
-        *,
-        json_serializer: JsonSerializer | None = None,
     ) -> Event:
         """
         Parse client data into an Event. Raises an EventValidationError if the client data is invalid.
@@ -154,25 +144,16 @@ class EventEnvelope(BaseModel):
                         f"Invalid event type: {event.type}. Expected one of {', '.join(registry.keys())}"
                     )
                 else:
-                    return _validate_event(
-                        registry[event.type], event.value, json_serializer
-                    )
+                    return registry[event.type].model_validate(event.value)
             if event.qualified_name:
-                module_class = (
-                    json_serializer.resolve_class(event.qualified_name)
-                    if json_serializer is not None
-                    else import_module_from_qualified_name(event.qualified_name)
-                )
-                if not (
-                    isinstance(module_class, builtins.type)
-                    and issubclass(module_class, Event)
-                ):
+                module_class = import_module_from_qualified_name(event.qualified_name)
+                if not issubclass(module_class, Event):
                     errors.append(
                         f"Invalid client data. Qualified name {event.qualified_name} does not correspond to an Event subclass"
                     )
                 else:
-                    return _validate_event(module_class, event.value, json_serializer)
-        except (ValueError, ImportError, AttributeError) as e:
+                    return module_class.model_validate(event.value)
+        except ValidationError as e:
             errors.append(f"Failed to deserialize event: {str(e)}")
         errors = (
             errors
@@ -206,12 +187,3 @@ def _get_qualified_name(event: type[Event]) -> str:
 
 class EventValidationError(Exception):
     """Raised when the client data is invalid."""
-
-
-def _validate_event(
-    cls: type[Event], value: Any, json_serializer: JsonSerializer | None
-) -> Event:
-    """Validate into an already selected event class under its nested lookup."""
-    serializer = json_serializer if json_serializer is not None else JsonSerializer()
-    with serializer.validation_context():
-        return cls.model_validate(value)

@@ -11,7 +11,7 @@ from typing import Any, AsyncGenerator
 import uvicorn
 from starlette.middleware import Middleware
 from workflows import Workflow
-from workflows.context.serializers import BaseSerializer, JsonSerializer
+from workflows.context.serializers import BaseSerializer
 from workflows.events import Event
 from workflows.runtime.types.plugin import Runtime
 
@@ -66,7 +66,6 @@ class WorkflowServer:
         sse_heartbeat_interval: float | None = 25.0,
         accept_context_api: bool = False,
         serializer: BaseSerializer | None = None,
-        json_serializer: JsonSerializer | None = None,
     ):
         """Create a new workflow server.
 
@@ -98,23 +97,12 @@ class WorkflowServer:
                 mode; NDJSON streams are unaffected.
             serializer: Internal state and event serializer for workflows without
                 their own override. None preserves the legacy JSON default.
-            json_serializer: Decoder for public JSON events and stored handler
-                results. None retains dynamic imports.
             accept_context_api: Allow the ``"context"`` field in run request
                 bodies. Defaults to ``False``. Context deserialization can
                 instantiate arbitrary Pydantic objects via ``importlib``, so
                 only enable this on trusted networks.
         """
         self._serializer = serializer
-        selected_json = (
-            json_serializer if json_serializer is not None else JsonSerializer()
-        )
-        self._json_serializer = selected_json
-
-        def result_decoder(workflow_name: str) -> JsonSerializer:
-            return selected_json
-
-        decoder = result_decoder if json_serializer is not None else None
         if runtime is None:
             self._runtime_core = _DurableWorkflowRuntime(
                 workflow_store=workflow_store,
@@ -125,7 +113,6 @@ class WorkflowServer:
                 abort_active_on_stop=False,
                 persistence_backoff=list(persistence_backoff),
                 serializer=serializer,
-                result_decoder=decoder,
             )
         else:
             self._runtime_core = _DurableWorkflowRuntime(
@@ -136,7 +123,6 @@ class WorkflowServer:
                 start_store_before_runtime=False,
                 persistence_backoff=list(persistence_backoff),
                 serializer=serializer,
-                result_decoder=decoder,
                 wrap_runtime=False,
             )
         self._workflow_store = self._runtime_core._store
@@ -155,11 +141,6 @@ class WorkflowServer:
     # ------------------------------------------------------------------
     # Workflow registration
     # ------------------------------------------------------------------
-
-    @property
-    def json_serializer(self) -> JsonSerializer:
-        """The effective decoder for public JSON events and handler results."""
-        return self._json_serializer
 
     @property
     def serializer(self) -> BaseSerializer | None:

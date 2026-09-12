@@ -22,7 +22,6 @@ from llama_agents.client.protocol.serializable_events import (
 from llama_agents.server._runtime.server_runtime import ServerRuntimeDecorator
 from llama_index_instrumentation.dispatcher import instrument_tags
 from workflows import Context
-from workflows.context.serializers import JsonSerializer
 from workflows.context.state_store_integration import state_store_handoff
 from workflows.events import Event, StartEvent
 from workflows.handler import WorkflowHandler
@@ -139,13 +138,6 @@ class _WorkflowService:
     @property
     def store(self) -> AbstractWorkflowStore:
         return self._store
-
-    def json_serializer(self, workflow_name: str) -> JsonSerializer:
-        """The public JSON decoder bound to a registered workflow."""
-        workflow = self._runtime.get_workflow(workflow_name)
-        if workflow is None:
-            raise ValueError(f"Workflow {workflow_name} not found")
-        return self._runtime.get_json_serializer(workflow)
 
     async def query_handlers(self, query: HandlerQuery) -> list[PersistentHandler]:
         return await query_handlers(

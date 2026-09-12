@@ -58,26 +58,3 @@ Use [`llama-agents-client`](https://pypi.org/project/llama-agents-client/) to in
 ## Documentation
 
 See the full [deployment guide](https://developers.llamaindex.ai/python/llamaagents/workflows/deployment/) for API details, persistence configuration, and more.
-
-`Workflow(serializer=...)` configures internal state and event encoding for that
-workflow. `WorkflowServer(serializer=...)` supplies the default for workflows
-without an override. Both accept `BaseSerializer`, including `PickleSerializer`
-and custom implementations of the string `serialize`/`deserialize` methods.
-HTTP events and persisted handler results keep their JSON representation.
-
-`WorkflowServer(json_serializer=...)` configures public JSON decoding separately.
-Pass `JsonSerializer(allowed_types=[MyState, MyEvent])` to reconstruct only
-registered classes. These optional settings also survive appserver loading of a
-configured source server. Omitting them preserves legacy defaults.
-
-Custom workflow stores can accept keyword-only `result_decoder` on `query` and
-`update_handler_status`. It maps a workflow name to a `JsonSerializer`; select it
-before validating each stored handler. The keyword is omitted when unconfigured.
-Stores used with an explicit JSON serializer must support it. DBOS runtime chains can
-receive the same callback through `build_server_runtime(result_decoder=...)`.
-Without that callback, DBOS selects public JSON decoding from each tracked
-workflow’s current runtime binding via `get_json_serializer(workflow)`.
-
-`BaseSerializer.validation_context()` is a no-op by default. JSON serializers
-use this synchronous scope to carry class lookup through metadata validation;
-it does not encode or decode metadata with the application serializer.

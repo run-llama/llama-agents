@@ -220,7 +220,7 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
         workflow = self._workflows.get(workflow_name)
         if workflow is None:
             raise ValueError(f"Workflow {workflow_name} not found")
-        return workflow.runtime.get_json_serializer(workflow)
+        return workflow.runtime._get_json_decoder(workflow)
 
     def _spawn_task(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         task = asyncio.create_task(coro)
