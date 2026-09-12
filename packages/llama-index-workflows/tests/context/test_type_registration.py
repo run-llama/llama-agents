@@ -56,7 +56,7 @@ def forbid_imports(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def registered(*types: type[Any]) -> JsonSerializer:
-    return JsonSerializer(allowed_types=list(types), dynamic_import=False)
+    return JsonSerializer(allowed_types=list(types))
 
 
 def test_registered_classes_roundtrip_without_imports(forbid_imports: None) -> None:
@@ -125,11 +125,8 @@ def test_string_entries_stay_name_restrictions() -> None:
     payload = Payload(value=2)
     assert permissive.deserialize(permissive.serialize(payload)) == payload
 
-    restricted = JsonSerializer(
-        allowed_types=[qualified(Payload)], dynamic_import=False
-    )
-    with pytest.raises(ValueError, match="Refusing to import unregistered"):
-        restricted.deserialize(restricted.serialize(payload))
+    with pytest.raises(ValueError, match="Refusing to import disallowed"):
+        permissive.deserialize(JsonSerializer().serialize(Event()))
 
 
 def test_released_defaults_keep_dynamic_lookup() -> None:
@@ -242,7 +239,7 @@ def test_active_serializer_is_restored_after_error() -> None:
 
 
 def test_explicit_pickle_remains_available() -> None:
-    serializer = PickleSerializer(dynamic_import=False)
+    serializer = PickleSerializer()
     value = {1, 2}
     assert serializer.deserialize(serializer.serialize(value)) == value
 
@@ -252,4 +249,4 @@ def test_explicit_pickle_remains_available() -> None:
 )
 def test_registration_rejects_annotations(annotation: Any) -> None:
     with pytest.raises(TypeError, match="concrete classes"):
-        JsonSerializer(allowed_types=[annotation], dynamic_import=False)
+        JsonSerializer(allowed_types=[annotation])

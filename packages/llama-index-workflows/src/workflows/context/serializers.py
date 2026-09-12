@@ -67,10 +67,11 @@ class JsonSerializer(BaseSerializer):
 
     ``allowed_types`` restricts which class names may be reconstructed, as
     before. Entries that are classes also register those classes, so their
-    payloads are rebuilt without importing anything. ``dynamic_import=False``
-    refuses names that were not registered instead of importing them. Two
-    different classes that serialize under the same name are rejected here,
-    because a record cannot say which one it meant.
+    payloads are rebuilt without importing anything. Unlisted names are rejected.
+    None retains unrestricted imports, and legacy string entries allow imports
+    of those names. An empty collection rejects every name. Two different
+    classes that serialize under the same name are rejected because a record
+    cannot say which one it meant.
 
     Fallback for unsupported objects is to attempt JSON encoding directly; if it
     fails, a `ValueError` is raised.
@@ -92,9 +93,7 @@ class JsonSerializer(BaseSerializer):
         self,
         *,
         allowed_types: Iterable[type[Any] | str] | None = None,
-        dynamic_import: bool = True,
     ) -> None:
-        self._dynamic_import = dynamic_import
         self._registered_types: dict[str, type[Any]] = {}
         if allowed_types is None:
             self._allowed_type_names: frozenset[str] | None = None
@@ -138,19 +137,13 @@ class JsonSerializer(BaseSerializer):
     def resolve_class(self, qualified_name: str) -> type[Any]:
         """Resolve a class name to a registered class, or import it.
 
-        Classes passed to ``allowed_types`` resolve directly. Anything else
-        is imported, unless ``dynamic_import`` is off.
+        Classes passed to ``allowed_types`` resolve directly. Imports are allowed
+        only when ``allowed_types`` is None or contains the name as a legacy string.
         """
         self._validate_qualified_name(qualified_name)
         registered = self._registered_types.get(qualified_name)
         if registered is not None:
             return registered
-        if not self._dynamic_import:
-            raise ValueError(
-                f"Refusing to import unregistered workflow state type: "
-                f"{qualified_name}. Pass the class via allowed_types to the "
-                "JsonSerializer constructor."
-            )
         cls = import_module_from_qualified_name(qualified_name)
         if not isinstance(cls, type):
             raise ValueError(
