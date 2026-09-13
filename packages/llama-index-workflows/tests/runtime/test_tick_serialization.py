@@ -31,6 +31,7 @@ from workflows.runtime.types.results import (
 )
 from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import (
+    _WORKFLOW_TICK_TYPES,
     TickAddEvent,
     TickCancelRun,
     TickPublishEvent,
@@ -40,7 +41,6 @@ from workflows.runtime.types.ticks import (
     TickWakeup,
     WorkflowTick,
     WorkflowTickAdapter,
-    _WORKFLOW_TICK_TYPES,
 )
 
 
