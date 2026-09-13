@@ -155,6 +155,8 @@ class DBOSWorkflowStore(AbstractWorkflowStore):
     to the resolved store.
     """
 
+    _supports_result_decoding = True
+
     def __init__(self, factory: Callable[[], AbstractWorkflowStore]) -> None:
         super().__init__()
         self._factory = factory
