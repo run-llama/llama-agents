@@ -167,7 +167,10 @@ def _serialize_event(event: Event) -> Any:
 
 
 def _deserialize_event(data: Any) -> Event:
-    return (_active_serializer.get() or _json_serializer).deserialize_value(data)
+    event = (_active_serializer.get() or _json_serializer).deserialize_value(data)
+    if not isinstance(event, Event):
+        raise ValueError("SerializableEvent must resolve to an Event instance")
+    return event
 
 
 SerializableEvent = Annotated[
@@ -186,7 +189,12 @@ def _serialize_optional_event(event: Event | None) -> Any:
 def _deserialize_optional_event(data: Any) -> Event | None:
     if data is None:
         return None
-    return (_active_serializer.get() or _json_serializer).deserialize_value(data)
+    event = (_active_serializer.get() or _json_serializer).deserialize_value(data)
+    if not isinstance(event, Event):
+        raise ValueError(
+            "SerializableOptionalEvent must resolve to an Event instance or None"
+        )
+    return event
 
 
 SerializableOptionalEvent = Annotated[
@@ -317,9 +325,14 @@ def _serialize_event_type(event_type: type[Event]) -> str:
 
 
 def _deserialize_event_type(data: Any) -> type[Event]:
-    if isinstance(data, type):
-        return data
-    return (_active_serializer.get() or _json_serializer).resolve_class(data)
+    event_type = (
+        data
+        if isinstance(data, type)
+        else (_active_serializer.get() or _json_serializer).resolve_class(data)
+    )
+    if not isinstance(event_type, type) or not issubclass(event_type, Event):
+        raise ValueError("SerializableEventType must resolve to an Event class")
+    return event_type
 
 
 SerializableEventType = Annotated[

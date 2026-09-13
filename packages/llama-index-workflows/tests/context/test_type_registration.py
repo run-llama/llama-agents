@@ -147,14 +147,13 @@ def test_component_roundtrip_without_imports(forbid_imports: None) -> None:
 
 
 @pytest.mark.parametrize("field", ["event", "optional_event", "event_type"])
-def test_nested_events_share_the_registry(field: str, forbid_imports: None) -> None:
+def test_nested_event_contracts_reject_registered_non_events(
+    field: str, forbid_imports: None
+) -> None:
     class Allowed(Event):
         pass
 
-    class Denied(Event):
-        pass
-
-    serializer = registered(NestedEvent, Allowed)
+    serializer = registered(NestedEvent, Allowed, Payload)
     event = NestedEvent(event=Allowed(), optional_event=Allowed(), event_type=Allowed)
     payload = serializer.serialize(event)
     restored = serializer.deserialize(payload)
@@ -164,11 +163,11 @@ def test_nested_events_share_the_registry(field: str, forbid_imports: None) -> N
 
     data = json.loads(payload)
     data["value"][field] = (
-        qualified(Denied)
+        qualified(Payload)
         if field == "event_type"
-        else JsonSerializer().serialize_value(Denied())
+        else JsonSerializer().serialize_value(Payload(value=9))
     )
-    with pytest.raises(ValueError, match="Refusing to import"):
+    with pytest.raises(ValueError, match="must resolve to an Event"):
         serializer.deserialize(json.dumps(data))
 
 
