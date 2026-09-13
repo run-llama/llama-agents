@@ -4,17 +4,18 @@ import json
 import sqlite3
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from llama_agents.server import WorkflowServer
+from llama_agents.server import MemoryWorkflowStore, WorkflowServer
 from llama_agents.server._store.abstract_workflow_store import (
+    HandlerQuery,
     PersistentHandler,
     decode_persistent_handler,
 )
 from llama_agents.server._store.sqlite.sqlite_workflow_store import SqliteWorkflowStore
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from workflows import Context, Workflow, step
 from workflows.context.pre_context import PreContext
 from workflows.context.serializers import (
@@ -48,6 +49,16 @@ class OutputEvent(StopEvent):
     pass
 
 
+class ValidatedOutputEvent(StopEvent):
+    validation_calls: ClassVar[int] = 0
+
+    @model_validator(mode="before")
+    @classmethod
+    def count_validation(cls, value: Any) -> Any:
+        cls.validation_calls += 1
+        return value
+
+
 class DeclaredWorkflow(Workflow):
     @step
     async def start(self, ctx: Context[State], ev: InputEvent) -> OutputEvent:
@@ -61,6 +72,20 @@ class DictStateWorkflow(Workflow):
     @step
     async def start(self, ctx: Context, ev: StartEvent) -> StopEvent:
         return StopEvent(result="done")
+
+
+class ValidatedOutputWorkflow(Workflow):
+    @step
+    async def start(self, ev: StartEvent) -> ValidatedOutputEvent:
+        return ValidatedOutputEvent.model_validate({"result": "done"})
+
+
+class LegacyMemoryWorkflowStore(MemoryWorkflowStore):
+    # This was a valid override before result decoders were added to built-in stores.
+    async def query(  # ty: ignore[invalid-method-override]  # pyright: ignore[reportIncompatibleMethodOverride]
+        self, query: HandlerQuery
+    ) -> list[PersistentHandler]:
+        return await super().query(query)
 
 
 def make_server(path: Path, serializer: BaseSerializer | None = None) -> WorkflowServer:
@@ -215,6 +240,62 @@ async def test_unknown_persisted_result_never_imports(
     response = await http.post("/handlers/stored/cancel?purge=true")
     assert response.status_code == 200
     assert response.json() == {"status": "deleted"}
+
+
+async def test_legacy_custom_store_query_signature_works_through_handler_apis(
+    forbid_imports: None,
+) -> None:
+    store = LegacyMemoryWorkflowStore()
+    server = WorkflowServer(workflow_store=store)
+    server.add_workflow("declared", DeclaredWorkflow())
+    await store.update(
+        PersistentHandler(
+            handler_id="legacy",
+            workflow_name="declared",
+            status="completed",
+            result=OutputEvent.model_validate({"result": "done"}),
+        )
+    )
+    async with (
+        server.contextmanager(),
+        AsyncClient(
+            transport=ASGITransport(app=server.app), base_url="http://test"
+        ) as client,
+    ):
+        listing = await client.get("/handlers")
+        assert listing.status_code == 200
+        assert listing.json()["handlers"][0]["handler_id"] == "legacy"
+        assert (await client.get("/handlers/legacy")).status_code == 200
+        assert (await client.get("/results/legacy")).status_code == 200
+        assert (await client.post("/handlers/legacy/cancel")).status_code == 404
+        purged = await client.post("/handlers/legacy/cancel?purge=true")
+        assert purged.status_code == 200
+        assert purged.json() == {"status": "deleted"}
+
+
+async def test_purge_does_not_validate_persisted_result(tmp_path: Path) -> None:
+    store = SqliteWorkflowStore(db_path=str(tmp_path / "purge.db"))
+    server = WorkflowServer(workflow_store=store)
+    server.add_workflow("validated", ValidatedOutputWorkflow())
+    async with (
+        server.contextmanager(),
+        AsyncClient(
+            transport=ASGITransport(app=server.app), base_url="http://test"
+        ) as client,
+    ):
+        await store.update(
+            PersistentHandler(
+                handler_id="purge",
+                workflow_name="validated",
+                status="completed",
+                result=ValidatedOutputEvent.model_validate({"result": "done"}),
+            )
+        )
+        ValidatedOutputEvent.validation_calls = 0
+        response = await client.post("/handlers/purge/cancel?purge=true")
+    assert response.status_code == 200
+    assert response.json() == {"status": "deleted"}
+    assert ValidatedOutputEvent.validation_calls == 0
 
 
 async def test_restart_loads_declared_result_and_continues_typed_state(
