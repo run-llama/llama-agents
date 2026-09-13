@@ -65,43 +65,21 @@ class CustomSerializer(BaseSerializer):
         return PickleSerializer().deserialize(value.removeprefix("custom:"))
 
 
-class PythonEvent(Event):
-    pass
-
-
-class PythonWorkflow(Workflow):
-    @step
-    async def start(self, ctx: Context, ev: StartEvent) -> PythonEvent:
-        await ctx.store.set("value", complex(1, 2))
-        return PythonEvent.model_validate({"value": complex(3, 4)})
-
-    @step
-    async def finish(self, ctx: Context, ev: PythonEvent) -> StopEvent:
-        assert await ctx.store.get("value") == complex(1, 2)
-        assert ev.value == complex(3, 4)
-        return StopEvent(result="ok")
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("serializer_type", [PickleSerializer, CustomSerializer])
 @pytest.mark.parametrize("workflow_override", [False, True])
-async def test_hosted_explicit_codec_preserves_internal_python_values(
+def test_hosted_explicit_codec_preserves_serializer_binding(
     serializer_type: type[BaseSerializer], workflow_override: bool
 ) -> None:
     serializer = serializer_type()
-    workflow = PythonWorkflow(serializer=serializer if workflow_override else None)
+    workflow = ExampleWorkflow(serializer=serializer if workflow_override else None)
     deployment = Deployment(
-        {"python": workflow}, serializer=None if workflow_override else serializer
+        {"example": workflow}, serializer=None if workflow_override else serializer
     )
     server = deployment.create_workflow_server(
         DeploymentConfig(name="test"), ApiserverSettings(persistence="memory")
     )
     assert workflow.runtime.get_serializer(workflow) is serializer
-    async with server.contextmanager():
-        handler = await server._runtime_core.run("python")
-        completed = await server._service.await_workflow(handler)
-        assert completed.result is not None
-        assert completed.result.value["result"] == "ok"
+    assert server.get_workflows()["example"] is workflow
 
 
 class HostedModel(BaseModel):

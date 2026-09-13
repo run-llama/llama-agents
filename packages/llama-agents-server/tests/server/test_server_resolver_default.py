@@ -112,6 +112,9 @@ async def test_declared_and_additional_events_and_typed_state_work(
     assert selected.deserialize(selected.serialize(state)) == state
 
 
+@pytest.mark.parametrize(
+    "client", [None, JsonSerializer(), PickleSerializer()], indirect=True
+)
 @pytest.mark.parametrize("nested", [False, True])
 async def test_unknown_api_metadata_never_imports(
     client: tuple[WorkflowServer, AsyncClient, Path],
@@ -335,37 +338,6 @@ async def test_run_after_registration_uses_new_declarations(
         completed = await server._service.await_workflow(handler)
         assert completed.result is not None
         assert completed.result.value["result"] == 8
-
-
-@pytest.mark.parametrize("serializer", [JsonSerializer(), PickleSerializer()])
-@pytest.mark.parametrize("nested", [False, True])
-async def test_internal_codec_does_not_relax_api_decoding(
-    serializer: BaseSerializer,
-    nested: bool,
-    forbid_imports: None,
-) -> None:
-    server = WorkflowServer(serializer=serializer)
-    server.add_workflow("declared", DeclaredWorkflow(), additional_events=[ExtraEvent])
-    payload = (
-        input_payload("unregistered_payload.Model")
-        if nested
-        else {
-            "qualified_name": "unregistered_payload.Event",
-            "value": {},
-        }
-    )
-    async with (
-        server.contextmanager(),
-        AsyncClient(
-            transport=ASGITransport(app=server.app),
-            base_url="http://test",
-        ) as client,
-    ):
-        response = await client.post(
-            "/workflows/declared/run", json={"start_event": payload}
-        )
-    assert response.status_code == 400
-    assert "Refusing to import" in response.text
 
 
 async def test_registered_model_is_not_an_outer_event(forbid_imports: None) -> None:
