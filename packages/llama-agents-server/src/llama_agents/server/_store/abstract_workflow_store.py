@@ -17,6 +17,7 @@ from llama_agents.client.protocol.serializable_events import (
 )
 from pydantic import (
     BaseModel,
+    PrivateAttr,
     ValidationInfo,
     field_serializer,
     field_validator,
@@ -62,6 +63,8 @@ class HandlerQuery:
 
 
 class PersistentHandler(BaseModel):
+    _result_decoding_failed: bool = PrivateAttr(default=False)
+
     handler_id: str
     workflow_name: str
     status: Status
@@ -324,12 +327,29 @@ async def stream_workflow_ticks(
 def decode_persistent_handler(
     data: dict[str, Any], result_decoder: HandlerResultDecoder | None = None
 ) -> PersistentHandler:
-    context = (
-        {"json_serializer": result_decoder(data["workflow_name"])}
-        if result_decoder is not None
-        else None
-    )
-    return PersistentHandler.model_validate(data, context=context)
+    try:
+        context = (
+            {"json_serializer": result_decoder(data["workflow_name"])}
+            if result_decoder is not None and data.get("result") is not None
+            else None
+        )
+        return PersistentHandler.model_validate(data, context=context)
+    except Exception as exc:
+        if data.get("result") is None:
+            raise
+        handler = PersistentHandler.model_validate({**data, "result": None})
+        handler._result_decoding_failed = True
+        logger.warning(
+            "Rejected persisted handler result: handler_id=%r workflow_name=%r error=%s",
+            data.get("handler_id"),
+            data.get("workflow_name"),
+            type(exc).__name__,
+        )
+        return handler
+
+
+def _handler_result_decoding_failed(handler: PersistentHandler) -> bool:
+    return handler._result_decoding_failed
 
 
 async def query_handlers(

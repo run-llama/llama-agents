@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import pickle
 from pathlib import Path
 from typing import Any, cast
@@ -12,6 +13,7 @@ from llama_agents.server._store.abstract_workflow_store import (
     HandlerQuery,
     PersistentHandler,
     Status,
+    _handler_result_decoding_failed,
     query_handlers,
     stream_workflow_ticks,
 )
@@ -107,7 +109,7 @@ class SecondStop(StopEvent):
 
 
 async def test_store_selects_decoder_by_row_workflow_before_validation(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     store = SqliteWorkflowStore(db_path=str(tmp_path / "results.db"))
     await store.start()
@@ -126,8 +128,34 @@ async def test_store_selects_decoder_by_row_workflow_before_validation(
     }
     handlers = await store.query(HandlerQuery(), result_decoder=decoders.__getitem__)
     assert {type(handler.result) for handler in handlers} == {FirstStop, SecondStop}
-    with pytest.raises(ValueError, match="Refusing to import"):
-        await store.query(HandlerQuery(), result_decoder=lambda name: decoders["first"])
+
+    def fail(name: str) -> Any:
+        pytest.fail(f"Unexpected metadata import: {name}")
+
+    monkeypatch.setattr("workflows.context.utils.import_module", fail)
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE handlers SET result = ? WHERE handler_id = ?",
+            (
+                json.dumps(
+                    {
+                        "__is_pydantic": True,
+                        "qualified_name": "unregistered_payload.Result",
+                        "value": {"secret": "do-not-log"},
+                    }
+                ),
+                "first",
+            ),
+        )
+        connection.commit()
+    handlers = await store.query(HandlerQuery(), result_decoder=decoders.__getitem__)
+    restored = {handler.handler_id: handler for handler in handlers}
+    assert restored["first"].result is None
+    assert _handler_result_decoding_failed(restored["first"])
+    assert isinstance(restored["second"].result, SecondStop)
+    assert "handler_id='first' workflow_name='first' error=" in caplog.text
+    assert "unregistered_payload" not in caplog.text
+    assert "do-not-log" not in caplog.text
 
 
 async def test_legacy_custom_query_signature_is_used_without_decoder(

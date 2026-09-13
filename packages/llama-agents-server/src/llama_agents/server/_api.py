@@ -44,11 +44,13 @@ from ._service import (
     HandlerCompletedError,
     HandlerNotFoundError,
     _WorkflowService,
+    handler_data_from_persistent,
 )
 from ._store.abstract_workflow_store import (
     AbstractWorkflowStore,
     HandlerQuery,
     Status,
+    _handler_result_decoding_failed,
     is_terminal_status,
 )
 
@@ -608,10 +610,14 @@ class _WorkflowAPI:
         return JSONResponse(handler_data.model_dump())
 
     async def _load_handler(self, handler_id: str) -> HandlerData:
-        handler_data = await self._service.load_handler(handler_id)
-        if handler_data is None:
+        persistent = await self._service.load_persistent_handler(handler_id)
+        if persistent is None:
             raise HTTPException(detail="Handler not found", status_code=404)
-        return handler_data
+        if _handler_result_decoding_failed(persistent):
+            raise HTTPException(
+                detail="Stored handler result cannot be decoded", status_code=422
+            )
+        return handler_data_from_persistent(persistent)
 
     async def _resolve_event_stream(
         self,
@@ -717,6 +723,8 @@ class _WorkflowAPI:
                   type: object
           404:
             description: Handler not found
+          422:
+            description: Stored result cannot be decoded
           500:
             description: Error computing result
             content:
@@ -777,6 +785,8 @@ class _WorkflowAPI:
                   $ref: '#/components/schemas/Handler'
           404:
             description: Handler not found
+          422:
+            description: Stored result cannot be decoded
           500:
             description: Error computing result
             content:

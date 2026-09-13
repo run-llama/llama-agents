@@ -149,10 +149,18 @@ class _WorkflowService:
     # ------------------------------------------------------------------
 
     async def load_handler(self, handler_id: str) -> HandlerData | None:
+        persistent = await self.load_persistent_handler(handler_id)
+        return (
+            handler_data_from_persistent(persistent) if persistent is not None else None
+        )
+
+    async def load_persistent_handler(
+        self, handler_id: str
+    ) -> PersistentHandler | None:
         found = await self.query_handlers(HandlerQuery(handler_id_in=[handler_id]))
         if not found:
             return None
-        return handler_data_from_persistent(found[0])
+        return found[0]
 
     async def resolve_handler(self, handler_id: str) -> HandlerData:
         handler_data = await self.load_handler(handler_id)
