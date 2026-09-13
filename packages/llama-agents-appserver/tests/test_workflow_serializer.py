@@ -46,7 +46,8 @@ def test_source_server_options_survive_hosted_loading(
     deployment = Deployment(
         loaded.get_workflows(),
         serializer=loaded.serializer,
-        extra_types=loaded.get_declared_types(),
+        extra_types=loaded.extra_types,
+        additional_events=loaded.additional_events,
     )
     hosted = deployment.create_workflow_server(
         config, ApiserverSettings(persistence="memory")
@@ -108,8 +109,11 @@ async def test_source_additional_event_snapshot_survives_hosted_transfer(
     source = WorkflowServer(extra_types=[HostedModel])
     workflow = ExtraWorkflow()
     source.add_workflow("extra", workflow, additional_events=[HostedExtraEvent])
-    declared = source.get_declared_types()
-    deployment = Deployment(source.get_workflows(), extra_types=declared)
+    deployment = Deployment(
+        source.get_workflows(),
+        extra_types=source.extra_types,
+        additional_events=source.additional_events,
+    )
     hosted = deployment.create_workflow_server(
         DeploymentConfig(name="test"), ApiserverSettings(persistence="memory")
     )

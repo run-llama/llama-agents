@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import os
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any, Tuple
 from urllib.parse import quote_plus
 
@@ -25,6 +25,7 @@ from starlette.responses import HTMLResponse
 from starlette.routing import Route
 from workflows import Context, Workflow
 from workflows.context.serializers import BaseSerializer
+from workflows.events import Event
 from workflows.handler import WorkflowHandler
 
 logger = logging.getLogger()
@@ -40,6 +41,7 @@ class Deployment:
         *,
         serializer: BaseSerializer | None = None,
         extra_types: Iterable[type[Any]] = (),
+        additional_events: Mapping[str, Iterable[type[Event]]] | None = None,
     ) -> None:
         """Creates a Deployment instance.
 
@@ -51,6 +53,9 @@ class Deployment:
 
         self._serializer = serializer
         self._extra_types = tuple(extra_types)
+        self._additional_events = {
+            name: tuple(events) for name, events in (additional_events or {}).items()
+        }
         self._default_service: Workflow | None = workflows.get(DEFAULT_SERVICE_ID)
         self._service_tasks: list[asyncio.Task] = []
         # Ready to load services
@@ -141,7 +146,14 @@ class Deployment:
             extra_types=self._extra_types,
         )
         for service_id, workflow in self._workflow_services.items():
-            server.add_workflow(service_id, workflow)
+            additional_events = self._additional_events.get(service_id)
+            server.add_workflow(
+                service_id,
+                workflow,
+                additional_events=list(additional_events)
+                if additional_events is not None
+                else None,
+            )
         return server
 
     def mount_workflow_server(self, app: FastAPI) -> WorkflowServer:

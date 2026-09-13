@@ -12,90 +12,16 @@ import uvicorn
 from starlette.middleware import Middleware
 from workflows import Workflow
 from workflows.context.serializers import BaseSerializer, JsonSerializer
-from workflows.context.state_store import DictState, infer_state_type
-from workflows.errors import (
-    ContextSerdeError,
-    ContextStateError,
-    WorkflowCancelledByUser,
-    WorkflowConfigurationError,
-    WorkflowDone,
-    WorkflowRuntimeError,
-    WorkflowStepDoesNotExistError,
-    WorkflowTimeoutError,
-    WorkflowValidationError,
-)
-from workflows.events import (
-    CollectionReleaseEvent,
-    Event,
-    HumanResponseEvent,
-    IdleReleasedEvent,
-    InputRequiredEvent,
-    StartEvent,
-    StepFailedEvent,
-    StepStateChanged,
-    StopEvent,
-    UnhandledEvent,
-    WorkflowCancelledEvent,
-    WorkflowFailedEvent,
-    WorkflowIdleEvent,
-    WorkflowTimedOutEvent,
-)
+from workflows.context.state_store import infer_state_type
+from workflows.events import _PERSISTED_FRAMEWORK_EVENT_TYPES, Event
 from workflows.runtime.types.plugin import Runtime
-from workflows.runtime.types.ticks import (
-    TickAddEvent,
-    TickCancelRun,
-    TickIdleCheck,
-    TickIdleRelease,
-    TickPublishEvent,
-    TickStepResult,
-    TickTimeout,
-    TickWaiterTimeout,
-    TickWakeup,
-)
+from workflows.runtime.types.ticks import _WORKFLOW_TICK_TYPES
 
 from ._api import _WorkflowAPI
 from ._runtime.persistence_runtime import RESUME_FRESH_HANDLER_GRACE
 from ._store.abstract_workflow_store import AbstractWorkflowStore
 from ._store.memory_workflow_store import MemoryWorkflowStore
 from .runtime import _DurableWorkflowRuntime
-
-# Classes the framework itself writes into stored records and HTTP payloads.
-_FRAMEWORK_TYPES: tuple[type[Any], ...] = (
-    TickAddEvent,
-    TickCancelRun,
-    TickIdleCheck,
-    TickIdleRelease,
-    TickPublishEvent,
-    TickStepResult,
-    TickTimeout,
-    TickWaiterTimeout,
-    TickWakeup,
-    DictState,
-    Event,
-    StartEvent,
-    StopEvent,
-    WorkflowTimedOutEvent,
-    WorkflowCancelledEvent,
-    IdleReleasedEvent,
-    WorkflowFailedEvent,
-    CollectionReleaseEvent,
-    StepFailedEvent,
-    InputRequiredEvent,
-    HumanResponseEvent,
-    WorkflowIdleEvent,
-    UnhandledEvent,
-    StepStateChanged,
-    WorkflowValidationError,
-    WorkflowTimeoutError,
-    WorkflowRuntimeError,
-    WorkflowDone,
-    WorkflowCancelledByUser,
-    WorkflowStepDoesNotExistError,
-    WorkflowConfigurationError,
-    ContextSerdeError,
-    ContextStateError,
-)
-
 
 logger = logging.getLogger(__name__)
 
@@ -184,12 +110,11 @@ class WorkflowServer:
         """
         self._serializer = serializer
         self._extra_types = tuple(extra_types)
-        self._json_decoder = JsonSerializer(
-            allowed_types=(*_FRAMEWORK_TYPES, *self._extra_types)
-        )
+        self._additional_events: dict[str, tuple[type[Event], ...]] = {}
+        self._json_decoders: dict[str, JsonSerializer] = {}
 
         def result_decoder(workflow_name: str) -> JsonSerializer:
-            return self._json_decoder
+            return self._json_decoders[workflow_name]
 
         if runtime is None:
             self._runtime_core = _DurableWorkflowRuntime(
@@ -237,6 +162,16 @@ class WorkflowServer:
         """The explicit internal default, or None to use the declared types."""
         return self._serializer
 
+    @property
+    def extra_types(self) -> tuple[type[Any], ...]:
+        """Return the explicit extra JSON types configured on this server."""
+        return self._extra_types
+
+    @property
+    def additional_events(self) -> Mapping[str, tuple[type[Event], ...]]:
+        """Return explicit additional events by workflow name."""
+        return dict(self._additional_events)
+
     def add_workflow(
         self,
         name: str,
@@ -260,16 +195,18 @@ class WorkflowServer:
 
         if additional_events is not None:
             self._api.register_additional_events(name, additional_events)
+            self._additional_events[name] = tuple(additional_events)
 
-        self._json_decoder = JsonSerializer(allowed_types=self.get_declared_types())
-
-    def get_declared_types(self) -> tuple[type[Any], ...]:
-        """Return concrete classes declared for JSON decoding."""
-        declared: list[type[Any]] = [*_FRAMEWORK_TYPES, *self._extra_types]
-        for name, workflow in self.get_workflows().items():
-            declared.extend(self._api.get_workflow_events(name))
-            declared.append(infer_state_type(workflow))
-        return tuple(dict.fromkeys(declared))
+        declared = (
+            *_WORKFLOW_TICK_TYPES,
+            *_PERSISTED_FRAMEWORK_EVENT_TYPES,
+            *self._extra_types,
+            *self._api.get_workflow_events(name),
+            infer_state_type(workflow),
+        )
+        self._json_decoders[name] = JsonSerializer(
+            allowed_types=tuple(dict.fromkeys(declared))
+        )
 
     def get_workflows(self) -> dict[str, Workflow]:
         """Return registered workflows as a dict by name. Only available after start()."""

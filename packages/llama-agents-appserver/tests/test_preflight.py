@@ -29,7 +29,10 @@ def test_preflight_validate_success(
         app_mod,
         "load_workflow_server",
         lambda cfg: SimpleNamespace(
-            get_workflows=lambda: {}, serializer=None, get_declared_types=lambda: ()
+            get_workflows=lambda: {},
+            serializer=None,
+            extra_types=(),
+            additional_events={},
         ),
     )
     monkeypatch.setattr(
@@ -62,7 +65,8 @@ def test_preflight_validate_collects_errors(
         lambda cfg: SimpleNamespace(
             get_workflows=lambda: {"svc": BadWorkflow()},
             serializer=None,
-            get_declared_types=lambda: (),
+            extra_types=(),
+            additional_events={},
         ),
     )
 

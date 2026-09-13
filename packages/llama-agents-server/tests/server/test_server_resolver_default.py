@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from httpx import ASGITransport, AsyncClient
 from llama_agents.server import WorkflowServer
+from llama_agents.server._store.abstract_workflow_store import decode_persistent_handler
 from llama_agents.server._store.sqlite.sqlite_workflow_store import SqliteWorkflowStore
 from pydantic import BaseModel
 from workflows import Context, Workflow, step
@@ -18,7 +19,6 @@ from workflows.context.serializers import (
     JsonSerializer,
     PickleSerializer,
 )
-from workflows.errors import WorkflowRuntimeError
 from workflows.events import (
     Event,
     SerializableEvent,
@@ -93,6 +93,11 @@ def input_payload(qualified_name: str | None = None) -> dict[str, Any]:
     if qualified_name is not None:
         nested["qualified_name"] = qualified_name
     return {"type": "InputEvent", "value": {"nested": nested}}
+
+
+def workflow_decoder(server: WorkflowServer, name: str) -> JsonSerializer:
+    workflow = server.get_workflows()[name]
+    return workflow.runtime._get_json_decoder(workflow)
 
 
 async def test_declared_and_additional_events_and_typed_state_work(
@@ -212,7 +217,7 @@ def test_explicit_json_serializer_only_controls_internal_encoding() -> None:
     value = State(count=3)
     assert selected.deserialize(selected.serialize(value)) == value
     assert selected is dynamic
-    assert server._json_decoder is not dynamic
+    assert workflow_decoder(server, "declared") is not dynamic
 
 
 def test_extra_types_register_independently_stored_models() -> None:
@@ -221,30 +226,16 @@ def test_extra_types_register_independently_stored_models() -> None:
 
     server = WorkflowServer(extra_types=[Stored])
     server.add_workflow("declared", DeclaredWorkflow())
-    selected = server._json_decoder
+    selected = workflow_decoder(server, "declared")
     value = Stored(value=5)
     assert selected.deserialize(selected.serialize(value)) == value
-
-
-def test_declarations_follow_workflow_registration() -> None:
-    server = WorkflowServer()
-    name = f"{ExtraEvent.__module__}.{ExtraEvent.__name__}"
-    with pytest.raises(ValueError, match="Refusing to import"):
-        server._json_decoder.resolve_class(name)
-    server.add_workflow("declared", DeclaredWorkflow(), additional_events=[ExtraEvent])
-    assert server._json_decoder.resolve_class(name) is ExtraEvent
-    # A captured registration snapshot survives transfer to another server.
-    snapshot = server._json_decoder
-    WorkflowServer().add_workflow("declared", server.get_workflows()["declared"])
-    assert server._json_decoder is snapshot
-    assert snapshot.resolve_class(name) is ExtraEvent
 
 
 @pytest.mark.parametrize(
     ("qualified_name", "expected_type"),
     [
         ("builtins.ValueError", ValueError),
-        ("workflows.errors.WorkflowRuntimeError", WorkflowRuntimeError),
+        ("workflows.errors.WorkflowRuntimeError", UnreconstructedException),
         ("unknown_metadata.Error", UnreconstructedException),
     ],
 )
@@ -256,6 +247,7 @@ def test_server_context_retry_exception_uses_selected_serializer(
 ) -> None:
     server = make_server(tmp_path / "exceptions.db")
     workflow = server.get_workflows()["declared"]
+    decoder = workflow_decoder(server, "declared")
     event = InputEvent(nested=ExtraEvent())
     context = Context.from_dict(
         workflow,
@@ -265,7 +257,7 @@ def test_server_context_retry_exception_uses_selected_serializer(
                 "start": {
                     "queue": [
                         {
-                            "event": server._json_decoder.serialize(event),
+                            "event": decoder.serialize(event),
                             "last_exception": {
                                 "exception_type": qualified_name,
                                 "exception_message": "retry failed",
@@ -281,29 +273,18 @@ def test_server_context_retry_exception_uses_selected_serializer(
     assert isinstance(error, expected_type)
 
 
-def test_registration_replaces_snapshot_without_changing_existing_decoders(
+def test_registering_another_workflow_keeps_existing_decoder_restricted(
     forbid_imports: None,
 ) -> None:
     server = WorkflowServer()
     workflow = DeclaredWorkflow()
     server.add_workflow("first", workflow)
-    old_context = Context(workflow)
-    before = workflow.runtime.get_serializer(workflow)
-    assert before is server._json_decoder
+    before = workflow_decoder(server, "first")
     server.add_workflow("second", DeclaredWorkflow(), additional_events=[ExtraEvent])
-    after = workflow.runtime.get_serializer(workflow)
-    assert after is server._json_decoder
-    assert after is not before
-    new_context = Context(workflow)
-    assert isinstance(old_context._face, PreContext)
-    assert isinstance(new_context._face, PreContext)
-    assert old_context._face._serializer is before
-    assert new_context._face._serializer is after
-    assert workflow.runtime._get_json_decoder(workflow) is after
+    assert workflow_decoder(server, "first") is before
     value = ExtraEvent()
     with pytest.raises(ValueError, match="Refusing to import"):
         before.deserialize(before.serialize(value))
-    assert after.deserialize(after.serialize(value)) == value
 
 
 class LaterInput(StartEvent):
@@ -322,22 +303,79 @@ class LaterWorkflow(Workflow):
         return LaterOutput.model_validate({"result": ev.value})
 
 
-async def test_run_after_registration_uses_new_declarations(
-    forbid_imports: None,
-) -> None:
+async def test_workflow_registered_later_uses_own_declarations() -> None:
     server = WorkflowServer()
     server.add_workflow("first", DeclaredWorkflow())
-    captured = server._json_decoder
     later = LaterWorkflow()
     server.add_workflow("later", later)
     event = LaterInput(value=8)
-    with pytest.raises(ValueError, match="Refusing to import"):
-        captured.deserialize(captured.serialize(event))
     async with server.contextmanager():
         handler = await server._runtime_core.run("later", start_event=event)
         completed = await server._service.await_workflow(handler)
         assert completed.result is not None
         assert completed.result.value["result"] == 8
+
+
+async def test_run_api_rejects_another_workflows_event() -> None:
+    server = WorkflowServer()
+    server.add_workflow("first", DeclaredWorkflow())
+    server.add_workflow("later", LaterWorkflow())
+    async with (
+        server.contextmanager(),
+        AsyncClient(
+            transport=ASGITransport(app=server.app), base_url="http://test"
+        ) as client,
+    ):
+        response = await client.post(
+            "/workflows/first/run",
+            json={
+                "start_event": {
+                    "qualified_name": f"{LaterInput.__module__}.{LaterInput.__qualname__}",
+                    "value": {"value": 1},
+                }
+            },
+        )
+    assert response.status_code == 400
+    assert "Refusing to import" in response.text
+
+
+def test_qualified_name_collisions_are_scoped_to_each_workflow() -> None:
+    def make_event() -> type[Event]:
+        class Collision(Event):
+            pass
+
+        return Collision
+
+    first, second = make_event(), make_event()
+    server = WorkflowServer()
+    server.add_workflow("first", DeclaredWorkflow(), additional_events=[first])
+    server.add_workflow("second", DeclaredWorkflow(), additional_events=[second])
+    qualified_name = f"{first.__module__}.{first.__qualname__}"
+    assert workflow_decoder(server, "first").resolve_class(qualified_name) is first
+    assert workflow_decoder(server, "second").resolve_class(qualified_name) is second
+
+
+def test_stored_result_decoder_uses_handler_workflow_name() -> None:
+    server = WorkflowServer()
+    server.add_workflow("first", DeclaredWorkflow())
+    server.add_workflow("later", LaterWorkflow())
+    data = {
+        "handler_id": "handler",
+        "workflow_name": "first",
+        "status": "completed",
+        "result": JsonSerializer().serialize_value(
+            LaterOutput.model_validate({"result": 1})
+        ),
+    }
+
+    def result_decoder(name: str) -> JsonSerializer:
+        return workflow_decoder(server, name)
+
+    with pytest.raises(ValueError, match="Refusing to import"):
+        decode_persistent_handler(data, result_decoder)
+    data["workflow_name"] = "later"
+    restored = decode_persistent_handler(data, result_decoder)
+    assert isinstance(restored.result, LaterOutput)
 
 
 async def test_registered_model_is_not_an_outer_event(forbid_imports: None) -> None:

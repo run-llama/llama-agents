@@ -68,7 +68,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, Any]:
     deployment = Deployment(
         source_server.get_workflows(),
         serializer=source_server.serializer,
-        extra_types=source_server.get_declared_types(),
+        extra_types=source_server.extra_types,
+        additional_events=source_server.additional_events,
     )
     base_router = create_base_router(config.name)
     deploy_router = create_deployments_router(config.name, deployment)
@@ -442,7 +443,8 @@ def preflight_validate(
     _ = Deployment(
         workflows,
         serializer=source_server.serializer,
-        extra_types=source_server.get_declared_types(),
+        extra_types=source_server.extra_types,
+        additional_events=source_server.additional_events,
     )
     # Run workflow-level validations if present
     errors: list[tuple[str, str]] = []
