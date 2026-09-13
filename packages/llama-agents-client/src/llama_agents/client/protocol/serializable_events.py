@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from pydantic import BaseModel, ValidationError, model_validator
+from workflows.context.serializers import JsonSerializer
 from workflows.context.utils import import_module_from_qualified_name
 from workflows.events import Event
 
@@ -101,6 +102,7 @@ class EventEnvelope(BaseModel):
         client_data: dict[str, Any] | str,
         registry: dict[str, builtins.type[Event]] | None = None,
         explicit_event: builtins.type[Event] | None = None,
+        decoder: JsonSerializer | None = None,
     ) -> Event:
         """
         Parse client data into an Event. Raises an EventValidationError if the client data is invalid.
@@ -109,6 +111,7 @@ class EventEnvelope(BaseModel):
             client_data: The client data to parse. Can be a dictionary, a string, or an explicit Event class.
             registry: The registry of event type names to Event classes.
             explicit_event: An explicit Event class to treat the dict as
+            decoder: Optional JSON class resolver for qualified and nested types.
 
         Returns:
             The parsed Event.
@@ -144,15 +147,26 @@ class EventEnvelope(BaseModel):
                         f"Invalid event type: {event.type}. Expected one of {', '.join(registry.keys())}"
                     )
                 else:
-                    return registry[event.type].model_validate(event.value)
+                    event_class = registry[event.type]
+                    if decoder is None:
+                        return event_class.model_validate(event.value)
+                    with decoder.validation_context():
+                        return event_class.model_validate(event.value)
             if event.qualified_name:
-                module_class = import_module_from_qualified_name(event.qualified_name)
+                module_class = (
+                    decoder.resolve_class(event.qualified_name)
+                    if decoder is not None
+                    else import_module_from_qualified_name(event.qualified_name)
+                )
                 if not issubclass(module_class, Event):
                     errors.append(
                         f"Invalid client data. Qualified name {event.qualified_name} does not correspond to an Event subclass"
                     )
                 else:
-                    return module_class.model_validate(event.value)
+                    if decoder is None:
+                        return module_class.model_validate(event.value)
+                    with decoder.validation_context():
+                        return module_class.model_validate(event.value)
         except ValidationError as e:
             errors.append(f"Failed to deserialize event: {str(e)}")
         errors = (
