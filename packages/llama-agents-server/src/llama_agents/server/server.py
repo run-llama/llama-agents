@@ -13,7 +13,7 @@ from starlette.middleware import Middleware
 from workflows import Workflow
 from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import DictState, infer_state_type
-from workflows.events import _PERSISTED_FRAMEWORK_EVENT_TYPES, Event, StopEvent
+from workflows.events import _PERSISTED_FRAMEWORK_EVENT_TYPES, Event
 from workflows.runtime.types.plugin import Runtime
 from workflows.runtime.types.ticks import _WORKFLOW_TICK_TYPES
 
@@ -112,10 +112,6 @@ class WorkflowServer:
         self._extra_types = tuple(extra_types)
         self._additional_events: dict[str, tuple[type[Event], ...]] = {}
         self._json_decoders: dict[str, JsonSerializer] = {}
-        self._standard_result_decoder = JsonSerializer(allowed_types=[StopEvent])
-
-        def result_decoder(workflow_name: str) -> JsonSerializer:
-            return self._json_decoders.get(workflow_name, self._standard_result_decoder)
 
         if runtime is None:
             self._runtime_core = _DurableWorkflowRuntime(
@@ -127,7 +123,7 @@ class WorkflowServer:
                 abort_active_on_stop=False,
                 persistence_backoff=list(persistence_backoff),
                 serializer=serializer,
-                result_decoder=result_decoder,
+                result_decoder=self._json_decoders.__getitem__,
             )
         else:
             self._runtime_core = _DurableWorkflowRuntime(
@@ -138,7 +134,7 @@ class WorkflowServer:
                 start_store_before_runtime=False,
                 persistence_backoff=list(persistence_backoff),
                 serializer=serializer,
-                result_decoder=result_decoder,
+                result_decoder=self._json_decoders.__getitem__,
                 wrap_runtime=False,
             )
         self._workflow_store = self._runtime_core._store

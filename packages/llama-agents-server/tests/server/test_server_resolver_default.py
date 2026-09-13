@@ -179,6 +179,11 @@ async def test_unknown_persisted_result_never_imports(
         json={"handler_id": "stored", "start_event": input_payload()},
     )
     assert response.status_code == 200, response.text
+    response = await http.post(
+        "/workflows/declared/run",
+        json={"handler_id": "healthy", "start_event": input_payload()},
+    )
+    assert response.status_code == 200, response.text
     bad = {
         "__is_pydantic": True,
         "qualified_name": "unregistered_payload.Result",
@@ -190,7 +195,26 @@ async def test_unknown_persisted_result_never_imports(
             (json.dumps(bad), "stored"),
         )
     response = await http.get("/handlers/stored")
-    assert response.status_code == 500
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Stored handler result cannot be decoded"}
+    response = await http.get("/results/stored")
+    assert response.status_code == 422
+    response = await http.get("/handlers")
+    assert response.status_code == 200, response.text
+    handlers = {item["handler_id"]: item for item in response.json()["handlers"]}
+    stored = handlers["stored"]
+    assert stored["handler_id"] == "stored"
+    assert stored["workflow_name"] == "declared"
+    assert stored["status"] == "completed"
+    assert stored["result"] is None
+    assert handlers["healthy"]["result"]["qualified_name"] == (
+        f"{OutputEvent.__module__}.{OutputEvent.__qualname__}"
+    )
+    response = await http.post("/handlers/stored/cancel")
+    assert response.status_code == 404
+    response = await http.post("/handlers/stored/cancel?purge=true")
+    assert response.status_code == 200
+    assert response.json() == {"status": "deleted"}
 
 
 async def test_restart_loads_declared_result_and_continues_typed_state(
@@ -397,15 +421,16 @@ def test_stored_result_decoder_uses_handler_workflow_name() -> None:
     def result_decoder(name: str) -> JsonSerializer:
         return workflow_decoder(server, name)
 
-    with pytest.raises(ValueError, match="Refusing to import"):
-        decode_persistent_handler(data, result_decoder)
+    rejected = decode_persistent_handler(data, result_decoder)
+    assert rejected.result is None
     data["workflow_name"] = "later"
     restored = decode_persistent_handler(data, result_decoder)
     assert isinstance(restored.result, LaterOutput)
 
 
-async def test_stale_workflow_standard_stop_result_remains_readable(
+async def test_stale_workflow_custom_stop_result_does_not_block_purge(
     tmp_path: Path,
+    forbid_imports: None,
 ) -> None:
     server = WorkflowServer(
         workflow_store=SqliteWorkflowStore(db_path=str(tmp_path / "stale.db"))
@@ -422,12 +447,24 @@ async def test_stale_workflow_standard_stop_result_remains_readable(
                 handler_id="stale",
                 workflow_name="removed",
                 status="completed",
-                result=StopEvent.model_validate({"result": "done"}),
+                result=OutputEvent.model_validate({"result": "done"}),
             )
         )
+        listing = await client.get("/handlers")
+        assert listing.status_code == 200, listing.text
+        [stale] = listing.json()["handlers"]
+        assert stale["handler_id"] == "stale"
+        assert stale["workflow_name"] == "removed"
+        assert stale["result"] is None
         response = await client.get("/handlers/stale")
-    assert response.status_code == 200, response.text
-    assert response.json()["result"]["value"]["result"] == "done"
+        assert response.status_code == 422
+        response = await client.get("/results/stale")
+        assert response.status_code == 422
+        response = await client.post("/handlers/stale/cancel")
+        assert response.status_code == 404
+        response = await client.post("/handlers/stale/cancel?purge=true")
+        assert response.status_code == 200
+        assert response.json() == {"status": "deleted"}
 
 
 async def test_registered_model_is_not_an_outer_event(forbid_imports: None) -> None:
