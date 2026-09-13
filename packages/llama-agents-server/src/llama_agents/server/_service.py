@@ -149,11 +149,7 @@ class _WorkflowService:
     # ------------------------------------------------------------------
 
     async def load_handler(self, handler_id: str) -> HandlerData | None:
-        found = await query_handlers(
-            self._store,
-            result_decoder=self._result_decoder,
-            query=HandlerQuery(handler_id_in=[handler_id]),
-        )
+        found = await self.query_handlers(HandlerQuery(handler_id_in=[handler_id]))
         if not found:
             return None
         return handler_data_from_persistent(found[0])
@@ -194,11 +190,7 @@ class _WorkflowService:
     async def cancel_handler(
         self, handler_id: str, purge: bool = False
     ) -> Literal["cancelled", "deleted"] | None:
-        found = await query_handlers(
-            self._store,
-            result_decoder=self._result_decoder,
-            query=HandlerQuery(handler_id_in=[handler_id]),
-        )
+        found = await self.query_handlers(HandlerQuery(handler_id_in=[handler_id]))
         if not found:
             return None
         persisted = handler_data_from_persistent(found[0])
@@ -302,11 +294,7 @@ class _WorkflowService:
 
         Returns None if the handler doesn't exist, isn't completed, or has no state.
         """
-        found = await query_handlers(
-            self._store,
-            result_decoder=self._result_decoder,
-            query=HandlerQuery(handler_id_in=[handler_id]),
-        )
+        found = await self.query_handlers(HandlerQuery(handler_id_in=[handler_id]))
         if not found:
             return None
         handler = found[0]

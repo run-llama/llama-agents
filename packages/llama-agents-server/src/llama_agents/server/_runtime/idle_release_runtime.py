@@ -88,7 +88,6 @@ class IdleReleaseExternalRunAdapter(BaseExternalRunAdapterDecorator):
     def __init__(self, runtime: IdleReleaseDecorator, run_id: str) -> None:
         # Intentionally skip super().__init__ — _decorated is a lazy property.
         self._runtime = runtime
-        self._result_decoder = runtime._result_decoder
         self._run_id = run_id
 
     @property  # type: ignore[override]
