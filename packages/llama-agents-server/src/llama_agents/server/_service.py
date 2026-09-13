@@ -198,6 +198,12 @@ class _WorkflowService:
     async def cancel_handler(
         self, handler_id: str, purge: bool = False
     ) -> Literal["cancelled", "deleted"] | None:
+        if purge:
+            n_deleted = await self._store.delete(
+                HandlerQuery(handler_id_in=[handler_id])
+            )
+            return "deleted" if n_deleted else None
+
         found = await self.query_handlers(HandlerQuery(handler_id_in=[handler_id]))
         if not found:
             return None
@@ -214,14 +220,7 @@ class _WorkflowService:
             )
             await self._cancel_run(handler)
 
-        if purge:
-            n_deleted = await self._store.delete(
-                HandlerQuery(handler_id_in=[handler_id])
-            )
-            if n_deleted == 0:
-                return None
-
-        return "deleted" if purge else "cancelled"
+        return "cancelled"
 
     async def start_workflow(
         self,

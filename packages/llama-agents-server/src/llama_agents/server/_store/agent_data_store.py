@@ -33,6 +33,8 @@ _TICK_PAGE_SIZE = 100
 
 
 class AgentDataStore(AbstractWorkflowStore):
+    _supports_result_decoding = True
+
     """Workflow store backed by the LlamaCloud Agent Data API.
 
     Optimized for streaming performance:

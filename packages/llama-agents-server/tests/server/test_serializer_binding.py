@@ -167,10 +167,12 @@ async def test_legacy_custom_query_signature_is_used_without_decoder(
 
     store = cast(AbstractWorkflowStore, LegacyStore())
     assert await query_handlers(store, HandlerQuery()) == []
-    with pytest.raises(TypeError, match="result_decoder"):
+    assert (
         await query_handlers(
             store, HandlerQuery(), result_decoder=lambda name: JsonSerializer()
         )
+        == []
+    )
 
 
 async def test_legacy_status_override_receives_no_new_keyword(

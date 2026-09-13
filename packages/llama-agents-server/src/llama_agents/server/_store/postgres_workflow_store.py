@@ -45,6 +45,8 @@ def _utc_now() -> datetime:
 
 
 class PostgresWorkflowStore(AbstractWorkflowStore):
+    _supports_result_decoding = True
+
     """Async Postgres workflow store using asyncpg with LISTEN/NOTIFY."""
 
     def __init__(

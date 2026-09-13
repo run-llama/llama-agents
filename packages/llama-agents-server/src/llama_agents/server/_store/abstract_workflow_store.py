@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator, Callable, MutableMapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Literal, Protocol, TypedDict, runtime_checkable
+from typing import Any, ClassVar, Literal, Protocol, TypedDict, cast, runtime_checkable
 
 from llama_agents.client.protocol.serializable_events import (
     EventEnvelopeWithMetadata,
@@ -116,7 +116,14 @@ class StoredEvent(BaseModel):
 
 
 class AbstractWorkflowStore(ABC):
+    _supports_result_decoding: ClassVar[bool] = False
     poll_interval: float = 0.1
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        # A query override must explicitly accept the decoder keyword.
+        if "query" in cls.__dict__ and "_supports_result_decoding" not in cls.__dict__:
+            cls._supports_result_decoding = False
 
     def __init__(self) -> None:
         # Per-run facade cache: the single memoization site for state stores.
@@ -179,9 +186,7 @@ class AbstractWorkflowStore(ABC):
         """Construct the backend facade for a (run, namespace). No caching."""
 
     @abstractmethod
-    async def query(
-        self, query: HandlerQuery, *, result_decoder: HandlerResultDecoder | None = None
-    ) -> list[PersistentHandler]: ...
+    async def query(self, query: HandlerQuery) -> list[PersistentHandler]: ...
 
     @abstractmethod
     async def update(self, handler: PersistentHandler) -> None: ...
@@ -358,9 +363,16 @@ async def query_handlers(
     *,
     result_decoder: HandlerResultDecoder | None = None,
 ) -> list[PersistentHandler]:
-    if result_decoder is None:
+    if result_decoder is None or not getattr(store, "_supports_result_decoding", False):
         return await store.query(query)
-    return await store.query(query, result_decoder=result_decoder)
+    decoding_store = cast(_ResultDecodingWorkflowStore, store)
+    return await decoding_store.query(query, result_decoder=result_decoder)
+
+
+class _ResultDecodingWorkflowStore(Protocol):
+    async def query(
+        self, query: HandlerQuery, *, result_decoder: HandlerResultDecoder
+    ) -> list[PersistentHandler]: ...
 
 
 class _ResultDecoderKwargs(TypedDict, total=False):

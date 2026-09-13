@@ -35,6 +35,8 @@ _TICK_PAGE_SIZE = 100
 
 
 class SqliteWorkflowStore(AbstractWorkflowStore):
+    _supports_result_decoding = True
+
     def __init__(
         self,
         db_path: str,
