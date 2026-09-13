@@ -514,6 +514,15 @@ class StepFailedEvent(Event):
     failed_at: datetime
 
 
+# Framework events that can appear inside SerializableEvent fields in persisted
+# values. Other framework events are stored as plain envelopes or are declared
+# by each workflow.
+_PERSISTED_FRAMEWORK_EVENT_TYPES = (
+    CollectionReleaseEvent,
+    StepFailedEvent,
+)
+
+
 class InputRequiredEvent(Event):
     """Emitted when human input is required to proceed.
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import time
+from typing import get_args
 
 import pytest
 from pydantic import TypeAdapter
@@ -39,6 +40,7 @@ from workflows.runtime.types.ticks import (
     TickWakeup,
     WorkflowTick,
     WorkflowTickAdapter,
+    _WORKFLOW_TICK_TYPES,
 )
 
 
@@ -317,6 +319,11 @@ def test_tick_step_result_with_add_waiter() -> None:
 
 
 # -- WorkflowTick discriminated union tests --
+
+
+def test_persisted_tick_roots_match_workflow_tick_union() -> None:
+    tick_union = get_args(WorkflowTick)[0]
+    assert set(_WORKFLOW_TICK_TYPES) == set(get_args(tick_union))
 
 
 def test_workflow_tick_discriminated_union_roundtrip() -> None:

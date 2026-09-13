@@ -145,4 +145,18 @@ WorkflowTick = Annotated[
     Discriminator("type"),
 ]
 
+# Concrete roots written by the outer JSON tick persistence format. Nested
+# result variants are reconstructed by WorkflowTick's discriminated unions.
+_WORKFLOW_TICK_TYPES = (
+    TickStepResult,
+    TickAddEvent,
+    TickCancelRun,
+    TickPublishEvent,
+    TickTimeout,
+    TickWaiterTimeout,
+    TickIdleCheck,
+    TickIdleRelease,
+    TickWakeup,
+)
+
 WorkflowTickAdapter: TypeAdapter[WorkflowTick] = TypeAdapter(WorkflowTick)
