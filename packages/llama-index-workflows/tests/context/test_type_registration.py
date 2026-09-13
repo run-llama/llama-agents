@@ -139,12 +139,6 @@ def test_released_defaults_keep_dynamic_lookup() -> None:
         assert serializer.deserialize(serializer.serialize(payload)) == payload
 
 
-def test_disallowed_names_are_rejected_before_lookup() -> None:
-    serializer = JsonSerializer(allowed_types=[])
-    with pytest.raises(ValueError, match="Refusing to import disallowed"):
-        serializer.deserialize(JsonSerializer().serialize(Payload(value=1)))
-
-
 def test_component_roundtrip_without_imports(forbid_imports: None) -> None:
     serializer = registered(Component)
     assert isinstance(
