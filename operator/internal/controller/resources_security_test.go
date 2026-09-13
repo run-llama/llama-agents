@@ -81,6 +81,19 @@ func TestCreateBuildJob_SecurityContext(t *testing.T) {
 	assertFullSecurityContext(t, c.SecurityContext, AppServerUID, AppServerGID)
 }
 
+func TestCreateBuildJob_DisablesServiceLinks(t *testing.T) {
+	r := &LlamaDeploymentReconciler{}
+	ld := &llamadeployv1.LlamaDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-app", Namespace: "default"},
+	}
+
+	job := r.createBuildJob(ld, "abc123")
+
+	if job.Spec.Template.Spec.EnableServiceLinks == nil || *job.Spec.Template.Spec.EnableServiceLinks {
+		t.Error("expected build job service links to be disabled")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Deployment security context tests
 // ---------------------------------------------------------------------------
@@ -144,6 +157,19 @@ func TestCreateDeployment_SecurityContexts(t *testing.T) {
 			t.Error("expected RunAsNonRoot to be nil on app container (backward compat)")
 		}
 	})
+}
+
+func TestCreateDeployment_DisablesServiceLinks(t *testing.T) {
+	r := &LlamaDeploymentReconciler{}
+	ld := &llamadeployv1.LlamaDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-app", Namespace: "default"},
+	}
+
+	dep := r.createDeploymentForLlama(ld, "")
+
+	if dep.Spec.Template.Spec.EnableServiceLinks == nil || *dep.Spec.Template.Spec.EnableServiceLinks {
+		t.Error("expected deployment service links to be disabled")
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +305,56 @@ func TestApplyBuildJobTemplateOverlay_PropagatesSecurityContext(t *testing.T) {
 			t.Error("expected pod SecurityContext FSGroup to be overridden to 3000")
 		}
 	})
+}
+
+func TestApplyBuildJobTemplateOverlay_CannotEnableServiceLinks(t *testing.T) {
+	scheme := newTestScheme()
+	tmpl := &llamadeployv1.LlamaDeploymentTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
+		Spec: llamadeployv1.LlamaDeploymentTemplateSpec{
+			PodSpec: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{EnableServiceLinks: ptr(true)},
+			},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tmpl).Build()
+	r := &LlamaDeploymentReconciler{Client: fakeClient, Scheme: scheme}
+	ld := &llamadeployv1.LlamaDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-app", Namespace: "default"},
+	}
+	job := r.createBuildJob(ld, "abc123")
+
+	if err := r.applyBuildJobTemplateOverlay(context.Background(), ld, job); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if job.Spec.Template.Spec.EnableServiceLinks == nil || *job.Spec.Template.Spec.EnableServiceLinks {
+		t.Error("expected build job template overlay not to enable service links")
+	}
+}
+
+func TestApplyTemplateOverlay_CannotEnableServiceLinks(t *testing.T) {
+	scheme := newTestScheme()
+	tmpl := &llamadeployv1.LlamaDeploymentTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
+		Spec: llamadeployv1.LlamaDeploymentTemplateSpec{
+			PodSpec: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{EnableServiceLinks: ptr(true)},
+			},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tmpl).Build()
+	r := &LlamaDeploymentReconciler{Client: fakeClient, Scheme: scheme}
+	ld := &llamadeployv1.LlamaDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-app", Namespace: "default"},
+	}
+	dep := r.createDeploymentForLlama(ld, "")
+
+	if err := r.applyTemplateOverlay(context.Background(), ld, dep); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dep.Spec.Template.Spec.EnableServiceLinks == nil || *dep.Spec.Template.Spec.EnableServiceLinks {
+		t.Error("expected deployment template overlay not to enable service links")
+	}
 }
 
 // ---------------------------------------------------------------------------
