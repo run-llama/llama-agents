@@ -12,8 +12,8 @@ import uvicorn
 from starlette.middleware import Middleware
 from workflows import Workflow
 from workflows.context.serializers import BaseSerializer, JsonSerializer
-from workflows.context.state_store import infer_state_type
-from workflows.events import _PERSISTED_FRAMEWORK_EVENT_TYPES, Event
+from workflows.context.state_store import DictState, infer_state_type
+from workflows.events import _PERSISTED_FRAMEWORK_EVENT_TYPES, Event, StopEvent
 from workflows.runtime.types.plugin import Runtime
 from workflows.runtime.types.ticks import _WORKFLOW_TICK_TYPES
 
@@ -112,9 +112,10 @@ class WorkflowServer:
         self._extra_types = tuple(extra_types)
         self._additional_events: dict[str, tuple[type[Event], ...]] = {}
         self._json_decoders: dict[str, JsonSerializer] = {}
+        self._standard_result_decoder = JsonSerializer(allowed_types=[StopEvent])
 
         def result_decoder(workflow_name: str) -> JsonSerializer:
-            return self._json_decoders[workflow_name]
+            return self._json_decoders.get(workflow_name, self._standard_result_decoder)
 
         if runtime is None:
             self._runtime_core = _DurableWorkflowRuntime(
@@ -197,12 +198,13 @@ class WorkflowServer:
             self._api.register_additional_events(name, additional_events)
             self._additional_events[name] = tuple(additional_events)
 
+        state_type = infer_state_type(workflow)
         declared = (
             *_WORKFLOW_TICK_TYPES,
             *_PERSISTED_FRAMEWORK_EVENT_TYPES,
             *self._extra_types,
             *self._api.get_workflow_events(name),
-            infer_state_type(workflow),
+            *((state_type,) if state_type is not DictState else ()),
         )
         self._json_decoders[name] = JsonSerializer(
             allowed_types=tuple(dict.fromkeys(declared))

@@ -9,7 +9,10 @@ from typing import Any
 import pytest
 from httpx import ASGITransport, AsyncClient
 from llama_agents.server import WorkflowServer
-from llama_agents.server._store.abstract_workflow_store import decode_persistent_handler
+from llama_agents.server._store.abstract_workflow_store import (
+    PersistentHandler,
+    decode_persistent_handler,
+)
 from llama_agents.server._store.sqlite.sqlite_workflow_store import SqliteWorkflowStore
 from pydantic import BaseModel
 from workflows import Context, Workflow, step
@@ -19,6 +22,7 @@ from workflows.context.serializers import (
     JsonSerializer,
     PickleSerializer,
 )
+from workflows.context.state_store import DictState
 from workflows.events import (
     Event,
     SerializableEvent,
@@ -51,6 +55,12 @@ class DeclaredWorkflow(Workflow):
             state.count += 1
             count = state.count
         return OutputEvent.model_validate({"result": count})
+
+
+class DictStateWorkflow(Workflow):
+    @step
+    async def start(self, ctx: Context, ev: StartEvent) -> StopEvent:
+        return StopEvent(result="done")
 
 
 def make_server(path: Path, serializer: BaseSerializer | None = None) -> WorkflowServer:
@@ -231,6 +241,22 @@ def test_extra_types_register_independently_stored_models() -> None:
     assert selected.deserialize(selected.serialize(value)) == value
 
 
+def test_default_dict_state_is_not_registered_but_typed_state_is() -> None:
+    server = WorkflowServer()
+    server.add_workflow("typed", DeclaredWorkflow())
+    server.add_workflow("dict", DictStateWorkflow())
+    assert (
+        workflow_decoder(server, "typed").resolve_class(
+            f"{State.__module__}.{State.__qualname__}"
+        )
+        is State
+    )
+    with pytest.raises(ValueError, match="Refusing to import"):
+        workflow_decoder(server, "dict").resolve_class(
+            f"{DictState.__module__}.{DictState.__qualname__}"
+        )
+
+
 @pytest.mark.parametrize(
     ("qualified_name", "expected_type"),
     [
@@ -376,6 +402,32 @@ def test_stored_result_decoder_uses_handler_workflow_name() -> None:
     data["workflow_name"] = "later"
     restored = decode_persistent_handler(data, result_decoder)
     assert isinstance(restored.result, LaterOutput)
+
+
+async def test_stale_workflow_standard_stop_result_remains_readable(
+    tmp_path: Path,
+) -> None:
+    server = WorkflowServer(
+        workflow_store=SqliteWorkflowStore(db_path=str(tmp_path / "stale.db"))
+    )
+    server.add_workflow("renamed", DeclaredWorkflow())
+    async with (
+        server.contextmanager(),
+        AsyncClient(
+            transport=ASGITransport(app=server.app), base_url="http://test"
+        ) as client,
+    ):
+        await server._workflow_store.update(
+            PersistentHandler(
+                handler_id="stale",
+                workflow_name="removed",
+                status="completed",
+                result=StopEvent.model_validate({"result": "done"}),
+            )
+        )
+        response = await client.get("/handlers/stale")
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["value"]["result"] == "done"
 
 
 async def test_registered_model_is_not_an_outer_event(forbid_imports: None) -> None:
