@@ -260,8 +260,8 @@ class _DurableWorkflowRuntime:
     async def _get_handler(self, handler_id: str) -> PersistentHandler:
         found = await query_handlers(
             self._store,
+            HandlerQuery(handler_id_in=[handler_id]),
             result_decoder=self._result_decoder,
-            query=HandlerQuery(handler_id_in=[handler_id]),
         )
         if not found:
             raise KeyError(f"Handler {handler_id!r} not found")
@@ -270,8 +270,8 @@ class _DurableWorkflowRuntime:
     async def _raise_if_active_handler_exists(self, handler_id: str) -> None:
         found = await query_handlers(
             self._store,
+            HandlerQuery(handler_id_in=[handler_id]),
             result_decoder=self._result_decoder,
-            query=HandlerQuery(handler_id_in=[handler_id]),
         )
         if not found:
             return

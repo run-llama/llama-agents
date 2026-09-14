@@ -185,8 +185,8 @@ class IdleReleaseDecorator(BaseRuntimeDecorator):
         async with self._reload_lock(run_id):
             handlers = await query_handlers(
                 self._store,
+                HandlerQuery(run_id_in=[run_id]),
                 result_decoder=self._result_decoder,
-                query=HandlerQuery(run_id_in=[run_id]),
             )
             if len(handlers) != 1 or handlers[0].idle_since is None:
                 return
@@ -223,8 +223,8 @@ class IdleReleaseDecorator(BaseRuntimeDecorator):
             return
         handlers = await query_handlers(
             self._store,
+            HandlerQuery(run_id_in=[run_id]),
             result_decoder=self._result_decoder,
-            query=HandlerQuery(run_id_in=[run_id]),
         )
         if len(handlers) != 1:
             raise ValueError(

@@ -340,12 +340,12 @@ class PersistenceDecorator(TickPersistenceDecorator):
         """Resume previously running (non-idle) workflows from persistence."""
         handlers = await query_handlers(
             self._store,
-            result_decoder=self._result_decoder,
-            query=HandlerQuery(
+            HandlerQuery(
                 status_in=["running"],
                 workflow_name_in=list(registered_workflows.keys()),
                 is_idle=False,
             ),
+            result_decoder=self._result_decoder,
         )
         for persistent in handlers:
             if (
@@ -381,7 +381,7 @@ class PersistenceDecorator(TickPersistenceDecorator):
                         persistent.workflow_name,
                     )
                     await self._store.update_handler_status(
-                        run_id=run_id,
+                        run_id,
                         status="failed",
                         error="handler crashed before persisting any state; cannot resume",
                         result_decoder=self._result_decoder,
@@ -403,7 +403,7 @@ class PersistenceDecorator(TickPersistenceDecorator):
                         status,
                     )
                     await self._store.update_handler_status(
-                        run_id=run_id,
+                        run_id,
                         status=status,
                         result=result,
                         error=error,
@@ -418,7 +418,7 @@ class PersistenceDecorator(TickPersistenceDecorator):
                 )
                 try:
                     await self._store.update_handler_status(
-                        run_id=run_id,
+                        run_id,
                         status="failed",
                         error=str(e),
                         result_decoder=self._result_decoder,

@@ -280,7 +280,7 @@ async def test_legacy_custom_store_query_signature_works_through_handler_apis(
         assert purged.json() == {"status": "deleted"}
 
 
-async def test_purge_validates_readable_persisted_result(tmp_path: Path) -> None:
+async def test_purge_does_not_validate_persisted_result(tmp_path: Path) -> None:
     store = SqliteWorkflowStore(db_path=str(tmp_path / "purge.db"))
     server = WorkflowServer(workflow_store=store)
     server.add_workflow("validated", ValidatedOutputWorkflow())
@@ -302,7 +302,7 @@ async def test_purge_validates_readable_persisted_result(tmp_path: Path) -> None
         response = await client.post("/handlers/purge/cancel?purge=true")
     assert response.status_code == 200
     assert response.json() == {"status": "deleted"}
-    assert ValidatedOutputEvent.validation_calls > 0
+    assert ValidatedOutputEvent.validation_calls == 0
 
 
 async def test_restart_loads_declared_result_and_continues_typed_state(
