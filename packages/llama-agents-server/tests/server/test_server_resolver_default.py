@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 LlamaIndex Inc.
 from __future__ import annotations
 
 import json
@@ -12,6 +14,7 @@ from llama_agents.server import MemoryWorkflowStore, WorkflowServer
 from llama_agents.server._store.abstract_workflow_store import (
     HandlerQuery,
     PersistentHandler,
+    _handler_result_decoding_failed,
     decode_persistent_handler,
 )
 from llama_agents.server._store.sqlite.sqlite_workflow_store import SqliteWorkflowStore
@@ -46,6 +49,10 @@ class InputEvent(StartEvent):
 
 
 class OutputEvent(StopEvent):
+    pass
+
+
+class ExcludedOutputEvent(StopEvent):
     pass
 
 
@@ -507,6 +514,28 @@ def test_stored_result_decoder_uses_handler_workflow_name() -> None:
     data["workflow_name"] = "later"
     restored = decode_persistent_handler(data, result_decoder)
     assert isinstance(restored.result, LaterOutput)
+
+
+async def test_server_rejects_persisted_result_excluded_from_workflow_types(
+    tmp_path: Path,
+) -> None:
+    store = SqliteWorkflowStore(db_path=str(tmp_path / "excluded-result.db"))
+    server = WorkflowServer(workflow_store=store)
+    server.add_workflow("declared", DeclaredWorkflow())
+    await store.update(
+        PersistentHandler(
+            handler_id="excluded",
+            workflow_name="declared",
+            status="completed",
+            result=ExcludedOutputEvent.model_validate({"result": "hidden"}),
+        )
+    )
+
+    restored = await server._service.load_persistent_handler("excluded")
+
+    assert restored is not None
+    assert restored.result is None
+    assert _handler_result_decoding_failed(restored)
 
 
 @pytest.mark.parametrize("status", ["completed", "running"])

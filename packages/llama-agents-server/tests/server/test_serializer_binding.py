@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import pickle
 from pathlib import Path
 from typing import Any, cast
@@ -15,6 +16,7 @@ from llama_agents.server._store.abstract_workflow_store import (
     HandlerQuery,
     PersistentHandler,
     Status,
+    _handler_result_decoding_failed,
     query_handlers,
     stream_workflow_ticks,
 )
@@ -116,6 +118,64 @@ async def test_bound_serializer_handles_internal_python_values(
     if isinstance(selected, CustomSerializer):
         assert selected.encodes > 0
         assert selected.decodes > 0
+
+
+class FirstStop(StopEvent):
+    pass
+
+
+class SecondStop(StopEvent):
+    pass
+
+
+async def test_store_selects_decoder_by_row_workflow_before_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = SqliteWorkflowStore(db_path=str(tmp_path / "results.db"))
+    await store.start()
+    for name, event_type in [("first", FirstStop), ("second", SecondStop)]:
+        await store.update(
+            PersistentHandler(
+                handler_id=name,
+                workflow_name=name,
+                status="completed",
+                result=event_type.model_validate({"result": name}),
+            )
+        )
+    decoders = {
+        "first": JsonSerializer(allowed_types=[FirstStop]),
+        "second": JsonSerializer(allowed_types=[SecondStop]),
+    }
+    handlers = await store.query(HandlerQuery(), result_decoder=decoders.__getitem__)
+    assert {type(handler.result) for handler in handlers} == {FirstStop, SecondStop}
+
+    def fail(name: str) -> Any:
+        pytest.fail(f"Unexpected metadata import: {name}")
+
+    monkeypatch.setattr("workflows.context.utils.import_module", fail)
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE handlers SET result = ? WHERE handler_id = ?",
+            (
+                json.dumps(
+                    {
+                        "__is_pydantic": True,
+                        "qualified_name": "unregistered_payload.Result",
+                        "value": {"secret": "do-not-log"},
+                    }
+                ),
+                "first",
+            ),
+        )
+        connection.commit()
+    handlers = await store.query(HandlerQuery(), result_decoder=decoders.__getitem__)
+    restored = {handler.handler_id: handler for handler in handlers}
+    assert restored["first"].result is None
+    assert _handler_result_decoding_failed(restored["first"])
+    assert isinstance(restored["second"].result, SecondStop)
+    assert "handler_id='first' workflow_name='first' error=" in caplog.text
+    assert "unregistered_payload" not in caplog.text
+    assert "do-not-log" not in caplog.text
 
 
 async def test_unreadable_persisted_result_is_reported_over_http(

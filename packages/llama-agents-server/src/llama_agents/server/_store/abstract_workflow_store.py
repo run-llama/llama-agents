@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import weakref
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, MutableMapping
+from collections.abc import AsyncIterator, Callable, MutableMapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, TypedDict, runtime_checkable
 
 from llama_agents.client.protocol.serializable_events import (
     EventEnvelopeWithMetadata,
@@ -18,6 +19,7 @@ from llama_agents.client.protocol.serializable_events import (
 from pydantic import (
     BaseModel,
     PrivateAttr,
+    ValidationInfo,
     field_serializer,
     field_validator,
 )
@@ -30,6 +32,8 @@ from workflows.runtime.types.ticks import WorkflowTick, WorkflowTickAdapter
 logger = logging.getLogger(__name__)
 
 Status = Literal["running", "completed", "failed", "cancelled"]
+
+HandlerResultDecoder = Callable[[str], JsonSerializer]
 
 TERMINAL_STATUSES: frozenset[Status] = frozenset(("completed", "failed", "cancelled"))
 
@@ -75,11 +79,12 @@ class PersistentHandler(BaseModel):
 
     @field_validator("result", mode="before")
     @classmethod
-    def _parse_stop_event(cls, data: Any) -> StopEvent | None:
+    def _parse_stop_event(cls, data: Any, info: ValidationInfo) -> StopEvent | None:
         if isinstance(data, StopEvent):
             return data
         elif isinstance(data, dict):
-            deserialized = JsonSerializer().deserialize_value(data)
+            decoder = (info.context or {}).get("json_serializer") or JsonSerializer()
+            deserialized = decoder.deserialize_value(data)
             if isinstance(deserialized, StopEvent):
                 return deserialized
             else:
@@ -175,7 +180,9 @@ class AbstractWorkflowStore(ABC):
         """Construct the backend facade for a (run, namespace). No caching."""
 
     @abstractmethod
-    async def query(self, query: HandlerQuery) -> list[PersistentHandler]: ...
+    async def query(
+        self, query: HandlerQuery, *, result_decoder: HandlerResultDecoder | None = None
+    ) -> list[PersistentHandler]: ...
 
     @abstractmethod
     async def update(self, handler: PersistentHandler) -> None: ...
@@ -224,13 +231,16 @@ class AbstractWorkflowStore(ABC):
         result: StopEvent | None = None,
         error: str | None = None,
         idle_since: datetime | None | _Unset = _UNSET,
+        result_decoder: HandlerResultDecoder | None = None,
     ) -> None:
         """Update status and related fields for an existing handler.
 
         Loads the handler by run_id, updates status/timestamps/provided fields,
         and writes back. If the handler is not found, logs a warning and returns.
         """
-        found = await self.query(HandlerQuery(run_id_in=[run_id]))
+        found = await query_handlers(
+            self, HandlerQuery(run_id_in=[run_id]), result_decoder=result_decoder
+        )
         if not found:
             logger.warning("update_handler_status: run %s not found, skipping", run_id)
             return
@@ -315,9 +325,16 @@ async def stream_workflow_ticks(
         yield tick
 
 
-def decode_persistent_handler(data: dict[str, Any]) -> PersistentHandler:
+def decode_persistent_handler(
+    data: dict[str, Any], result_decoder: HandlerResultDecoder | None = None
+) -> PersistentHandler:
     try:
-        return PersistentHandler.model_validate(data)
+        context = (
+            {"json_serializer": result_decoder(data["workflow_name"])}
+            if result_decoder is not None and data.get("result") is not None
+            else None
+        )
+        return PersistentHandler.model_validate(data, context=context)
     except Exception as exc:
         if data.get("result") is None:
             raise
@@ -334,3 +351,26 @@ def decode_persistent_handler(data: dict[str, Any]) -> PersistentHandler:
 
 def _handler_result_decoding_failed(handler: PersistentHandler) -> bool:
     return handler._result_decoding_failed
+
+
+async def query_handlers(
+    store: AbstractWorkflowStore,
+    query: HandlerQuery,
+    *,
+    result_decoder: HandlerResultDecoder | None = None,
+) -> list[PersistentHandler]:
+    if (
+        result_decoder is None
+        or "result_decoder" not in inspect.signature(store.query).parameters
+    ):
+        return await store.query(query)
+    return await store.query(query, result_decoder=result_decoder)
+
+
+class _ResultDecoderKwargs(TypedDict, total=False):
+    result_decoder: HandlerResultDecoder
+
+
+def result_decoder_kwargs(decoder: HandlerResultDecoder | None) -> _ResultDecoderKwargs:
+    """Omit the new keyword for legacy custom store status-update overrides."""
+    return {} if decoder is None else {"result_decoder": decoder}

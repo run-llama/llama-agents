@@ -13,7 +13,7 @@ import logging
 from contextlib import contextmanager
 from typing import Any, AsyncGenerator, Generator
 
-from workflows.context.serializers import BaseSerializer
+from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import StateStore
 from workflows.events import (
     Event,
@@ -85,6 +85,9 @@ class BaseRuntimeDecorator(Runtime):
 
     async def destroy(self) -> None:
         await self._decorated.destroy()
+
+    def _get_json_decoder(self, workflow: Workflow) -> JsonSerializer:
+        return self._decorated._get_json_decoder(workflow)
 
     def get_serializer(self, workflow: Workflow) -> BaseSerializer:
         return self._decorated.get_serializer(workflow)

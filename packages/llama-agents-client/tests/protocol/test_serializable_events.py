@@ -11,8 +11,10 @@ from llama_agents.client.protocol.serializable_events import (
     EventEnvelopeWithMetadata,
     EventValidationError,
 )
+from workflows.context.serializers import JsonSerializer
 from workflows.events import (
     Event,
+    SerializableEvent,
     StepState,
     StepStateChanged,
     StopEvent,
@@ -85,6 +87,14 @@ class ModuleScopeOtherEvent(Event):
     y: int
 
 
+class NestedEnvelopeEvent(Event):
+    nested: SerializableEvent
+
+
+class NestedPayloadEvent(Event):
+    value: int
+
+
 def test_parse_with_registry_type_success() -> None:
     class MyEvent(Event):
         x: int
@@ -93,6 +103,24 @@ def test_parse_with_registry_type_success() -> None:
     ev = EventEnvelope.parse(client_data=payload, registry={"MyEvent": MyEvent})
     assert isinstance(ev, MyEvent)
     assert ev.x == 1
+
+
+def test_parse_uses_explicit_decoder_for_nested_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(name: str) -> None:
+        pytest.fail(f"Unexpected dynamic import: {name}")
+
+    monkeypatch.setattr("workflows.context.utils.import_module", fail)
+    decoder = JsonSerializer(allowed_types=[NestedPayloadEvent])
+    nested = JsonSerializer().serialize_value(NestedPayloadEvent(value=4))
+    event = EventEnvelope.parse(
+        client_data={"type": "NestedEnvelopeEvent", "value": {"nested": nested}},
+        registry={"NestedEnvelopeEvent": NestedEnvelopeEvent},
+        decoder=decoder,
+    )
+    assert isinstance(event, NestedEnvelopeEvent)
+    assert isinstance(event.nested, NestedPayloadEvent)
 
 
 def test_parse_with_qualified_name_fallback_success() -> None:

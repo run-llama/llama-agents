@@ -47,6 +47,7 @@ from .._store.abstract_workflow_store import (
     HandlerResultDecoder,
     PersistentHandler,
     Status,
+    result_decoder_kwargs,
 )
 
 logger = logging.getLogger(__name__)
@@ -230,6 +231,11 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
         self._registered_workflows.pop(workflow.workflow_name, None)
         super().untrack_workflow(workflow)
 
+    def _get_json_decoder(self, workflow: Workflow) -> JsonSerializer:
+        if self._result_decoder is not None:
+            return self._result_decoder(workflow.workflow_name)
+        return super()._get_json_decoder(workflow)
+
     def get_serializer(self, workflow: Workflow) -> BaseSerializer:
         if workflow.serializer is not None:
             serializer = workflow.serializer
@@ -272,7 +278,11 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
         """Callback for adapter terminal-event status updates."""
         await self._retry_store_write(
             lambda: self._store.update_handler_status(
-                run_id, status=status, result=result, error=error
+                **result_decoder_kwargs(self._result_decoder),
+                run_id=run_id,
+                status=status,
+                result=result,
+                error=error,
             )
         )
 

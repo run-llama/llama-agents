@@ -13,6 +13,7 @@ from httpx import ASGITransport, AsyncClient
 from llama_agents.server import MemoryWorkflowStore, WorkflowServer
 from llama_agents.server._store.abstract_workflow_store import (
     HandlerQuery,
+    HandlerResultDecoder,
     PersistentHandler,
 )
 from workflows import Workflow, step
@@ -44,10 +45,12 @@ class CrashingStore(MemoryWorkflowStore):
             raise ConnectionError("database connection lost")
         return await super().update(handler)
 
-    async def query(self, query: HandlerQuery) -> list[PersistentHandler]:
+    async def query(
+        self, query: HandlerQuery, *, result_decoder: HandlerResultDecoder | None = None
+    ) -> list[PersistentHandler]:
         if self.fail_query:
             raise ConnectionError("database connection lost")
-        return await super().query(query)
+        return await super().query(query, result_decoder=result_decoder)
 
 
 @pytest.fixture

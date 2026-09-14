@@ -18,6 +18,7 @@ from .._lru_cache import LRUCache
 from .abstract_workflow_store import (
     AbstractWorkflowStore,
     HandlerQuery,
+    HandlerResultDecoder,
     PersistentHandler,
     StoredEvent,
     StoredTick,
@@ -236,18 +237,22 @@ class AgentDataStore(AbstractWorkflowStore):
         return filters
 
     @staticmethod
-    def _item_to_handler(item: dict[str, Any]) -> PersistentHandler:
+    def _item_to_handler(
+        item: dict[str, Any], result_decoder: HandlerResultDecoder | None = None
+    ) -> PersistentHandler:
         """Convert an Agent Data API item to a PersistentHandler."""
         data = item["data"]
-        return decode_persistent_handler(data)
+        return decode_persistent_handler(data, result_decoder)
 
-    async def query(self, query: HandlerQuery) -> list[PersistentHandler]:
+    async def query(
+        self, query: HandlerQuery, *, result_decoder: HandlerResultDecoder | None = None
+    ) -> list[PersistentHandler]:
         filters = self._build_handler_filters(query)
         if filters is None:
             return []
 
         items = await self._client.search(self._collection, filters or None)
-        handlers = [self._item_to_handler(item) for item in items]
+        handlers = [self._item_to_handler(item, result_decoder) for item in items]
         return handlers
 
     async def update(self, handler: PersistentHandler) -> None:

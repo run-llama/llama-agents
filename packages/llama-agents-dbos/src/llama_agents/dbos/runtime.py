@@ -35,9 +35,11 @@ from llama_agents.server._store import (
 from llama_agents.server._store.abstract_workflow_store import (
     AbstractWorkflowStore,
     HandlerQuery,
+    HandlerResultDecoder,
     PersistentHandler,
     StoredEvent,
     StoredTick,
+    query_handlers,
 )
 from llama_agents.server._store.postgres.migrate import (
     run_migrations as pg_run_migrations,
@@ -195,8 +197,12 @@ class DBOSWorkflowStore(AbstractWorkflowStore):
             run_id, namespace, state_type, serializer
         )
 
-    async def query(self, query: HandlerQuery) -> list[PersistentHandler]:
-        return await self._resolve().query(query)
+    async def query(
+        self, query: HandlerQuery, *, result_decoder: HandlerResultDecoder | None = None
+    ) -> list[PersistentHandler]:
+        return await query_handlers(
+            self._resolve(), query, result_decoder=result_decoder
+        )
 
     async def update(self, handler: PersistentHandler) -> None:
         await self._resolve().update(handler)
@@ -932,7 +938,12 @@ class DBOSRuntime(Runtime):
         if self.config.get("run_migrations_on_launch", True):
             await self.run_migrations()
 
-    def build_server_runtime(self, *, idle_timeout: float = 600.0) -> Runtime:
+    def build_server_runtime(
+        self,
+        *,
+        idle_timeout: float = 600.0,
+        result_decoder: HandlerResultDecoder | None = None,
+    ) -> Runtime:
         """Build the decorator chain for use with WorkflowServer.
 
         Wraps the DBOS runtime with:
@@ -951,11 +962,14 @@ class DBOSRuntime(Runtime):
         to ``WorkflowServer``.
         """
         store = self.create_workflow_store()
-        tick_persistence = TickPersistenceDecorator(self, store)
+        tick_persistence = TickPersistenceDecorator(
+            self, store, result_decoder=result_decoder
+        )
         return DBOSIdleReleaseDecorator(
             EventInterceptorDecorator(tick_persistence),
             store=store,
             idle_timeout=idle_timeout,
+            result_decoder=result_decoder,
             journal_crud=self._create_journal_crud_factory(),
             lifecycle_lock=self._create_lifecycle_lock_factory(),
         )
