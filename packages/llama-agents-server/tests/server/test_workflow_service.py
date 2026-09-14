@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from llama_agents.server import (
@@ -423,3 +425,70 @@ async def test_dict_state_pydantic_value_continuation_via_memory_store(
         handler = wf.run(ctx=ctx)
         result = await handler
         assert result == "_InnerValue", f"pydantic value degraded to {result}"
+
+
+class _PurgeRunningWorkflow(Workflow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.stopped = asyncio.Event()
+
+    @step
+    async def run_until_cancelled(self, ev: StartEvent) -> StopEvent:
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            self.stopped.set()
+        return StopEvent()
+
+
+@pytest.mark.asyncio
+async def test_purge_running_handler_cancels_execution(
+    memory_store: MemoryWorkflowStore,
+) -> None:
+    workflow = _PurgeRunningWorkflow()
+    server = WorkflowServer(workflow_store=memory_store)
+    server.add_workflow("purge-running", workflow)
+    async with server.contextmanager():
+        await server._service.start_workflow(workflow, "purge-running")
+        await asyncio.wait_for(workflow.started.wait(), timeout=2)
+        assert (
+            await server._service.cancel_handler("purge-running", purge=True)
+            == "deleted"
+        )
+        assert workflow.stopped.is_set()
+        assert (
+            await memory_store.query(HandlerQuery(handler_id_in=["purge-running"]))
+            == []
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["query", "cancel", "delete"])
+async def test_purge_propagates_unrelated_failures(
+    memory_store: MemoryWorkflowStore,
+    interactive_workflow: Workflow,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    server = WorkflowServer(workflow_store=memory_store)
+    server.add_workflow("interactive", interactive_workflow)
+    await memory_store.update(
+        PersistentHandler(
+            handler_id="purge-failure",
+            workflow_name="interactive",
+            status="running",
+            run_id="run",
+        )
+    )
+    error = RuntimeError("unrelated failure")
+    cancel = AsyncMock(side_effect=error if failure == "cancel" else None)
+    monkeypatch.setattr(server._service, "_workflow_run_handler", lambda *args: None)
+    monkeypatch.setattr(server._service, "_cancel_run", cancel)
+    if failure in ("query", "delete"):
+        monkeypatch.setattr(memory_store, failure, AsyncMock(side_effect=error))
+    with pytest.raises(RuntimeError, match="unrelated failure") as raised:
+        await server._service.cancel_handler("purge-failure", purge=True)
+    assert raised.value is error
+    assert "purge-failure" in memory_store.handlers

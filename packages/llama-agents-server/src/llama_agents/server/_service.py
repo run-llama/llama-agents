@@ -33,6 +33,7 @@ from ._store.abstract_workflow_store import (
     HandlerQuery,
     HandlerResultDecoder,
     PersistentHandler,
+    _handler_result_decoding_failed,
     is_terminal_status,
     query_handlers,
 )
@@ -198,15 +199,16 @@ class _WorkflowService:
     async def cancel_handler(
         self, handler_id: str, purge: bool = False
     ) -> Literal["cancelled", "deleted"] | None:
-        if purge:
+        found = await self.query_handlers(HandlerQuery(handler_id_in=[handler_id]))
+        if not found:
+            return None
+        if purge and _handler_result_decoding_failed(found[0]):
+            # Unreadable results cannot be used by the normal cancellation path.
             n_deleted = await self._store.delete(
                 HandlerQuery(handler_id_in=[handler_id])
             )
             return "deleted" if n_deleted else None
 
-        found = await self.query_handlers(HandlerQuery(handler_id_in=[handler_id]))
-        if not found:
-            return None
         persisted = handler_data_from_persistent(found[0])
         if not purge and (
             persisted.run_id is None or is_terminal_status(persisted.status)
@@ -220,6 +222,11 @@ class _WorkflowService:
             )
             await self._cancel_run(handler)
 
+        if purge:
+            n_deleted = await self._store.delete(
+                HandlerQuery(handler_id_in=[handler_id])
+            )
+            return "deleted" if n_deleted else None
         return "cancelled"
 
     async def start_workflow(
