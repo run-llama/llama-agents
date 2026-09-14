@@ -1156,7 +1156,7 @@ class _WorkflowAPI:
             event = EventEnvelope.parse(
                 event_data,
                 self.event_registry(handler_data.workflow_name),
-                decoder=workflow.runtime._get_json_decoder(workflow),
+                decoder=workflow.runtime.get_json_decoder(workflow),
             )
         except EventValidationError as e:
             raise HTTPException(detail=str(e), status_code=400)
@@ -1257,7 +1257,7 @@ class _WorkflowAPI:
                         start_event_data,
                         self.event_registry(workflow_name),
                         explicit_event=workflow.start_event_class,
-                        decoder=workflow.runtime._get_json_decoder(workflow),
+                        decoder=workflow.runtime.get_json_decoder(workflow),
                     )
 
                 except Exception as e:

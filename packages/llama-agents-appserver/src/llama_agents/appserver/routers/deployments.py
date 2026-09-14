@@ -105,7 +105,7 @@ def create_deployments_router(name: str, deployment: Deployment) -> APIRouter:
         workflow = deployment._workflow_services[
             event_def.service_id or DEFAULT_SERVICE_ID
         ]
-        event = workflow.runtime._get_json_decoder(workflow).deserialize(
+        event = workflow.runtime.get_json_decoder(workflow).deserialize(
             event_def.event_obj_str
         )
         if not isinstance(event, Event):

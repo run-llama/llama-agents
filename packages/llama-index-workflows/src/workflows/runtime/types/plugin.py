@@ -582,8 +582,8 @@ class Runtime(ABC):
         """Synchronous convenience wrapper for :meth:`destroy`."""
         asyncio.run(self.destroy())
 
-    def _get_json_decoder(self, workflow: Workflow) -> JsonSerializer:
-        """Return the public JSON decoder independently of internal encoding."""
+    def get_json_decoder(self, workflow: Workflow) -> JsonSerializer:
+        """Return the JSON serializer used to decode external workflow data."""
         return self._default_serializer
 
     def get_serializer(self, workflow: Workflow) -> BaseSerializer:

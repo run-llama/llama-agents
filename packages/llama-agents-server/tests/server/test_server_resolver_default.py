@@ -139,7 +139,7 @@ def input_payload(qualified_name: str | None = None) -> dict[str, Any]:
 
 def workflow_decoder(server: WorkflowServer, name: str) -> JsonSerializer:
     workflow = server.get_workflows()[name]
-    return workflow.runtime._get_json_decoder(workflow)
+    return workflow.runtime.get_json_decoder(workflow)
 
 
 async def test_declared_and_additional_events_and_typed_state_work(

@@ -230,10 +230,10 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
         self._registered_workflows.pop(workflow.workflow_name, None)
         super().untrack_workflow(workflow)
 
-    def _get_json_decoder(self, workflow: Workflow) -> JsonSerializer:
+    def get_json_decoder(self, workflow: Workflow) -> JsonSerializer:
         if self._result_decoder is not None:
             return self._result_decoder(workflow.workflow_name)
-        return super()._get_json_decoder(workflow)
+        return super().get_json_decoder(workflow)
 
     def get_serializer(self, workflow: Workflow) -> BaseSerializer:
         if workflow.serializer is not None:
@@ -241,7 +241,7 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
         elif self._default_serializer is not None:
             serializer = self._default_serializer
         else:
-            serializer = self._get_json_decoder(workflow)
+            serializer = self.get_json_decoder(workflow)
 
         return self._compose_serializer(
             workflow,
