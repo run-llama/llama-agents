@@ -6,11 +6,11 @@ import asyncio
 import logging
 import weakref
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Callable, MutableMapping
+from collections.abc import AsyncIterator, MutableMapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, ClassVar, Literal, Protocol, TypedDict, cast, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from llama_agents.client.protocol.serializable_events import (
     EventEnvelopeWithMetadata,
@@ -18,7 +18,6 @@ from llama_agents.client.protocol.serializable_events import (
 from pydantic import (
     BaseModel,
     PrivateAttr,
-    ValidationInfo,
     field_serializer,
     field_validator,
 )
@@ -31,8 +30,6 @@ from workflows.runtime.types.ticks import WorkflowTick, WorkflowTickAdapter
 logger = logging.getLogger(__name__)
 
 Status = Literal["running", "completed", "failed", "cancelled"]
-
-HandlerResultDecoder = Callable[[str], JsonSerializer]
 
 TERMINAL_STATUSES: frozenset[Status] = frozenset(("completed", "failed", "cancelled"))
 
@@ -78,12 +75,11 @@ class PersistentHandler(BaseModel):
 
     @field_validator("result", mode="before")
     @classmethod
-    def _parse_stop_event(cls, data: Any, info: ValidationInfo) -> StopEvent | None:
+    def _parse_stop_event(cls, data: Any) -> StopEvent | None:
         if isinstance(data, StopEvent):
             return data
         elif isinstance(data, dict):
-            decoder = (info.context or {}).get("json_serializer") or JsonSerializer()
-            deserialized = decoder.deserialize_value(data)
+            deserialized = JsonSerializer().deserialize_value(data)
             if isinstance(deserialized, StopEvent):
                 return deserialized
             else:
@@ -116,14 +112,7 @@ class StoredEvent(BaseModel):
 
 
 class AbstractWorkflowStore(ABC):
-    _supports_result_decoding: ClassVar[bool] = False
     poll_interval: float = 0.1
-
-    def __init_subclass__(cls, **kwargs: Any) -> None:
-        super().__init_subclass__(**kwargs)
-        # A query override must explicitly accept the decoder keyword.
-        if "query" in cls.__dict__ and "_supports_result_decoding" not in cls.__dict__:
-            cls._supports_result_decoding = False
 
     def __init__(self) -> None:
         # Per-run facade cache: the single memoization site for state stores.
@@ -235,16 +224,13 @@ class AbstractWorkflowStore(ABC):
         result: StopEvent | None = None,
         error: str | None = None,
         idle_since: datetime | None | _Unset = _UNSET,
-        result_decoder: HandlerResultDecoder | None = None,
     ) -> None:
         """Update status and related fields for an existing handler.
 
         Loads the handler by run_id, updates status/timestamps/provided fields,
         and writes back. If the handler is not found, logs a warning and returns.
         """
-        found = await query_handlers(
-            self, HandlerQuery(run_id_in=[run_id]), result_decoder=result_decoder
-        )
+        found = await self.query(HandlerQuery(run_id_in=[run_id]))
         if not found:
             logger.warning("update_handler_status: run %s not found, skipping", run_id)
             return
@@ -329,16 +315,9 @@ async def stream_workflow_ticks(
         yield tick
 
 
-def decode_persistent_handler(
-    data: dict[str, Any], result_decoder: HandlerResultDecoder | None = None
-) -> PersistentHandler:
+def decode_persistent_handler(data: dict[str, Any]) -> PersistentHandler:
     try:
-        context = (
-            {"json_serializer": result_decoder(data["workflow_name"])}
-            if result_decoder is not None and data.get("result") is not None
-            else None
-        )
-        return PersistentHandler.model_validate(data, context=context)
+        return PersistentHandler.model_validate(data)
     except Exception as exc:
         if data.get("result") is None:
             raise
@@ -355,30 +334,3 @@ def decode_persistent_handler(
 
 def _handler_result_decoding_failed(handler: PersistentHandler) -> bool:
     return handler._result_decoding_failed
-
-
-async def query_handlers(
-    store: AbstractWorkflowStore,
-    query: HandlerQuery,
-    *,
-    result_decoder: HandlerResultDecoder | None = None,
-) -> list[PersistentHandler]:
-    if result_decoder is None or not getattr(store, "_supports_result_decoding", False):
-        return await store.query(query)
-    decoding_store = cast(_ResultDecodingWorkflowStore, store)
-    return await decoding_store.query(query, result_decoder=result_decoder)
-
-
-class _ResultDecodingWorkflowStore(Protocol):
-    async def query(
-        self, query: HandlerQuery, *, result_decoder: HandlerResultDecoder
-    ) -> list[PersistentHandler]: ...
-
-
-class _ResultDecoderKwargs(TypedDict, total=False):
-    result_decoder: HandlerResultDecoder
-
-
-def result_decoder_kwargs(decoder: HandlerResultDecoder | None) -> _ResultDecoderKwargs:
-    """Omit the new keyword for legacy custom store status-update overrides."""
-    return {} if decoder is None else {"result_decoder": decoder}

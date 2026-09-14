@@ -1,20 +1,17 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 LlamaIndex Inc.
 from __future__ import annotations
 
 import base64
-import json
 import pickle
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
-from llama_agents.server import MemoryWorkflowStore, WorkflowServer
+from httpx import ASGITransport, AsyncClient
+from llama_agents.server import WorkflowServer
 from llama_agents.server._store.abstract_workflow_store import (
-    AbstractWorkflowStore,
-    HandlerQuery,
     PersistentHandler,
-    Status,
-    _handler_result_decoding_failed,
-    query_handlers,
     stream_workflow_ticks,
 )
 from llama_agents.server._store.sqlite.sqlite_workflow_store import SqliteWorkflowStore
@@ -75,8 +72,6 @@ async def test_bound_serializer_handles_internal_python_values(
     )
     server.add_workflow("python", workflow)
     assert workflow.runtime.get_serializer(workflow) is selected
-    server.add_workflow("python", workflow)
-    assert workflow.runtime.get_serializer(workflow) is selected
     async with server._runtime_core.contextmanager():
         result = await server._runtime_core.run("python")
         completed = await server._service.await_workflow(result)
@@ -100,104 +95,37 @@ async def test_bound_serializer_handles_internal_python_values(
         assert selected.decodes > 0
 
 
-class FirstStop(StopEvent):
-    pass
-
-
-class SecondStop(StopEvent):
-    pass
-
-
-async def test_store_selects_decoder_by_row_workflow_before_validation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    store = SqliteWorkflowStore(db_path=str(tmp_path / "results.db"))
-    await store.start()
-    for name, event_type in [("first", FirstStop), ("second", SecondStop)]:
-        await store.update(
-            PersistentHandler(
-                handler_id=name,
-                workflow_name=name,
-                status="completed",
-                result=event_type.model_validate({"result": name}),
-            )
-        )
-    decoders = {
-        "first": JsonSerializer(allowed_types=[FirstStop]),
-        "second": JsonSerializer(allowed_types=[SecondStop]),
-    }
-    handlers = await store.query(HandlerQuery(), result_decoder=decoders.__getitem__)
-    assert {type(handler.result) for handler in handlers} == {FirstStop, SecondStop}
-
-    def fail(name: str) -> Any:
-        pytest.fail(f"Unexpected metadata import: {name}")
-
-    monkeypatch.setattr("workflows.context.utils.import_module", fail)
-    with store._connect() as connection:
-        connection.execute(
-            "UPDATE handlers SET result = ? WHERE handler_id = ?",
-            (
-                json.dumps(
-                    {
-                        "__is_pydantic": True,
-                        "qualified_name": "unregistered_payload.Result",
-                        "value": {"secret": "do-not-log"},
-                    }
-                ),
-                "first",
-            ),
-        )
-        connection.commit()
-    handlers = await store.query(HandlerQuery(), result_decoder=decoders.__getitem__)
-    restored = {handler.handler_id: handler for handler in handlers}
-    assert restored["first"].result is None
-    assert _handler_result_decoding_failed(restored["first"])
-    assert isinstance(restored["second"].result, SecondStop)
-    assert "handler_id='first' workflow_name='first' error=" in caplog.text
-    assert "unregistered_payload" not in caplog.text
-    assert "do-not-log" not in caplog.text
-
-
-async def test_legacy_custom_query_signature_is_used_without_decoder(
+async def test_unreadable_persisted_result_is_reported_over_http(
     tmp_path: Path,
 ) -> None:
-    class LegacyStore:
-        async def query(self, query: HandlerQuery) -> list[PersistentHandler]:
-            return []
-
-    store = cast(AbstractWorkflowStore, LegacyStore())
-    assert await query_handlers(store, HandlerQuery()) == []
-    assert (
-        await query_handlers(
-            store, HandlerQuery(), result_decoder=lambda name: JsonSerializer()
+    store = SqliteWorkflowStore(db_path=str(tmp_path / "results.db"))
+    await store.update(
+        PersistentHandler(
+            handler_id="unreadable",
+            workflow_name="missing",
+            status="completed",
+            result=StopEvent(result="stored"),
         )
-        == []
     )
-
-
-async def test_legacy_status_override_receives_no_new_keyword(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    store = MemoryWorkflowStore()
-    calls: list[str] = []
-
-    async def update(
-        run_id: str,
-        *,
-        status: Status | None = None,
-        result: StopEvent | None = None,
-        error: str | None = None,
-    ) -> None:
-        calls.append(run_id)
-        await MemoryWorkflowStore.update_handler_status(
-            store, run_id, status=status, result=result, error=error
+    with store._connect() as connection:
+        connection.execute(
+            """UPDATE handlers
+               SET result = '{"__is_pydantic": true,
+                              "qualified_name": "missing.result.StoredResult",
+                              "value": {}}'
+               WHERE handler_id = 'unreadable'"""
         )
+        connection.commit()
 
-    monkeypatch.setattr(store, "update_handler_status", update)
-    server = WorkflowServer(workflow_store=store, serializer=PickleSerializer())
-    server.add_workflow("python", PythonWorkflow())
-    async with server._runtime_core.contextmanager():
-        result = await server._runtime_core.run("python")
-        completed = await server._service.await_workflow(result)
-        assert completed.status == "completed"
-    assert calls
+    server = WorkflowServer(workflow_store=store)
+    async with server.contextmanager():
+        transport = ASGITransport(app=server.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            handler = await client.get("/handlers/unreadable")
+            result = await client.get("/results/unreadable")
+            listing = await client.get("/handlers")
+
+    assert handler.status_code == 422
+    assert result.status_code == 422
+    assert listing.status_code == 200
+    assert listing.json()["handlers"][0]["result"] is None

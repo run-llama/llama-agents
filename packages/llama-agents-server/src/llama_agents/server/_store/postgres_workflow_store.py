@@ -22,7 +22,6 @@ from .._pool import PoolProvider
 from .abstract_workflow_store import (
     AbstractWorkflowStore,
     HandlerQuery,
-    HandlerResultDecoder,
     PersistentHandler,
     StoredEvent,
     StoredTick,
@@ -45,8 +44,6 @@ def _utc_now() -> datetime:
 
 
 class PostgresWorkflowStore(AbstractWorkflowStore):
-    _supports_result_decoding = True
-
     """Async Postgres workflow store using asyncpg with LISTEN/NOTIFY."""
 
     def __init__(
@@ -360,9 +357,7 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
 
     # ── Handlers ────────────────────────────────────────────────────────
 
-    async def query(
-        self, query: HandlerQuery, *, result_decoder: HandlerResultDecoder | None = None
-    ) -> list[PersistentHandler]:
+    async def query(self, query: HandlerQuery) -> list[PersistentHandler]:
         filter_spec = self._build_filters(query)
         if filter_spec is None:
             return []
@@ -380,7 +375,7 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
         async with pool.acquire() as conn:
             rows = await conn.fetch(sql, *params)
 
-        return [self._row_to_handler(row, result_decoder) for row in rows]
+        return [self._row_to_handler(row) for row in rows]
 
     async def update(self, handler: PersistentHandler) -> None:
         result_json = None
@@ -658,9 +653,7 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
         return clauses, params
 
     @staticmethod
-    def _row_to_handler(
-        row: asyncpg.Record, result_decoder: HandlerResultDecoder | None = None
-    ) -> PersistentHandler:
+    def _row_to_handler(row: asyncpg.Record) -> PersistentHandler:
         return decode_persistent_handler(
             dict(
                 handler_id=row["handler_id"],
@@ -673,6 +666,5 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
                 updated_at=row["updated_at"],
                 completed_at=row["completed_at"],
                 idle_since=row["idle_since"],
-            ),
-            result_decoder,
+            )
         )

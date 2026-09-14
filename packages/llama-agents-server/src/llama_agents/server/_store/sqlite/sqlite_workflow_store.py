@@ -20,7 +20,6 @@ from workflows.context.serializers import BaseSerializer
 from ..abstract_workflow_store import (
     AbstractWorkflowStore,
     HandlerQuery,
-    HandlerResultDecoder,
     PersistentHandler,
     StoredEvent,
     StoredTick,
@@ -35,8 +34,6 @@ _TICK_PAGE_SIZE = 100
 
 
 class SqliteWorkflowStore(AbstractWorkflowStore):
-    _supports_result_decoding = True
-
     def __init__(
         self,
         db_path: str,
@@ -137,9 +134,7 @@ class SqliteWorkflowStore(AbstractWorkflowStore):
         finally:
             conn.close()
 
-    async def query(
-        self, query: HandlerQuery, *, result_decoder: HandlerResultDecoder | None = None
-    ) -> list[PersistentHandler]:
+    async def query(self, query: HandlerQuery) -> list[PersistentHandler]:
         filter_spec = self._build_filters(query)
         if filter_spec is None:
             return []
@@ -154,7 +149,7 @@ class SqliteWorkflowStore(AbstractWorkflowStore):
             cursor.execute(sql, tuple(params))
             rows = cursor.fetchall()
 
-        return [_row_to_persistent_handler(row, result_decoder) for row in rows]
+        return [_row_to_persistent_handler(row) for row in rows]
 
     async def update(self, handler: PersistentHandler) -> None:
         with self._connect() as conn:
@@ -399,9 +394,7 @@ class SqliteWorkflowStore(AbstractWorkflowStore):
         return clauses, params
 
 
-def _row_to_persistent_handler(
-    row: tuple, result_decoder: HandlerResultDecoder | None = None
-) -> PersistentHandler:
+def _row_to_persistent_handler(row: tuple) -> PersistentHandler:
     return decode_persistent_handler(
         dict(
             handler_id=row[0],
@@ -414,6 +407,5 @@ def _row_to_persistent_handler(
             updated_at=datetime.fromisoformat(row[7]) if row[7] else None,
             completed_at=datetime.fromisoformat(row[8]) if row[8] else None,
             idle_since=datetime.fromisoformat(row[9]) if row[9] else None,
-        ),
-        result_decoder,
+        )
     )

@@ -44,10 +44,8 @@ from workflows.workflow import Workflow
 
 from .._store.abstract_workflow_store import (
     AbstractWorkflowStore,
-    HandlerResultDecoder,
     PersistentHandler,
     Status,
-    result_decoder_kwargs,
 )
 
 logger = logging.getLogger(__name__)
@@ -184,16 +182,13 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
         *,
         persistence_backoff: list[float] | None = None,
         serializer: BaseSerializer | None = None,
-        result_decoder: HandlerResultDecoder | None = None,
     ) -> None:
         super().__init__(decorated)
         self._store: AbstractWorkflowStore = store
         self._default_serializer = (
             serializer if serializer is not None else JsonSerializer()
         )
-        self._result_decoder = result_decoder
         self._registered_workflows: dict[str, Workflow] = {}
-        self._serializers: dict[str, BaseSerializer] = {}
         self._initial_state: dict[str, Any] = {}
         self._persistence_backoff = (
             list(persistence_backoff) if persistence_backoff is not None else [0.5, 3]
@@ -225,28 +220,16 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
     def track_workflow(self, workflow: Workflow) -> None:
         # Keep a strong reference — the base WorkflowSet uses weak refs,
         # so without this the workflow can be GC'd before launch().
-        if self._registered_workflows.get(workflow.workflow_name) is not workflow:
-            self._serializers[workflow.workflow_name] = (
-                workflow.serializer
-                if workflow.serializer is not None
-                else self._default_serializer
-            )
         self._registered_workflows[workflow.workflow_name] = workflow
         super().track_workflow(workflow)
 
     @override
     def untrack_workflow(self, workflow: Workflow) -> None:
         self._registered_workflows.pop(workflow.workflow_name, None)
-        self._serializers.pop(workflow.workflow_name, None)
         super().untrack_workflow(workflow)
 
-    def _get_json_decoder(self, workflow: Workflow) -> JsonSerializer:
-        if self._result_decoder is not None:
-            return self._result_decoder(workflow.workflow_name)
-        return super()._get_json_decoder(workflow)
-
     def get_serializer(self, workflow: Workflow) -> BaseSerializer:
-        return self._serializers[workflow.workflow_name]
+        return workflow.serializer or self._default_serializer
 
     def get_workflow(self, name: str) -> Workflow | None:
         return self._registered_workflows.get(name)
@@ -268,7 +251,6 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
         """Callback for adapter terminal-event status updates."""
         await self._retry_store_write(
             lambda: self._store.update_handler_status(
-                **result_decoder_kwargs(self._result_decoder),
                 run_id=run_id,
                 status=status,
                 result=result,

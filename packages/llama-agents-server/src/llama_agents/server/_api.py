@@ -1150,13 +1150,9 @@ class _WorkflowAPI:
             raise HTTPException(detail="Workflow already completed", status_code=409)
 
         try:
-            workflow = self._service.get_workflow(handler_data.workflow_name)
-            if workflow is None:
-                raise ValueError(f"Workflow {handler_data.workflow_name} not found")
             event = EventEnvelope.parse(
                 event_data,
                 self.event_registry(handler_data.workflow_name),
-                decoder=workflow.runtime._get_json_decoder(workflow),
             )
         except EventValidationError as e:
             raise HTTPException(detail=str(e), status_code=400)
@@ -1257,7 +1253,6 @@ class _WorkflowAPI:
                         start_event_data,
                         self.event_registry(workflow_name),
                         explicit_event=workflow.start_event_class,
-                        decoder=workflow.runtime._get_json_decoder(workflow),
                     )
 
                 except Exception as e:
@@ -1281,11 +1276,7 @@ class _WorkflowAPI:
                         detail="Context API is disabled. Set accept_context_api=True on WorkflowServer to enable it.",
                         status_code=400,
                     )
-                context = Context.from_dict(
-                    workflow=workflow,
-                    data=context_data,
-                    serializer=workflow.runtime.get_serializer(workflow),
-                )
+                context = Context.from_dict(workflow=workflow, data=context_data)
 
             handler_id = handler_id or nanoid()
             return (context, start_event, handler_id)

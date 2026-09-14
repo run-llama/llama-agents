@@ -18,7 +18,6 @@ from workflows.context.state_store import (
 from .abstract_workflow_store import (
     AbstractWorkflowStore,
     HandlerQuery,
-    HandlerResultDecoder,
     PersistentHandler,
     StoredEvent,
     StoredTick,
@@ -61,8 +60,6 @@ def _matches_query(handler: PersistentHandler, query: HandlerQuery) -> bool:
 
 
 class MemoryWorkflowStore(AbstractWorkflowStore):
-    _supports_result_decoding = True
-
     def __init__(self, max_completed: int | None = 1000) -> None:
         super().__init__()
         if max_completed is not None and max_completed < 0:
@@ -90,9 +87,7 @@ class MemoryWorkflowStore(AbstractWorkflowStore):
     ) -> InMemoryStateStore[Any]:
         return InMemoryStateStore(state_type() if state_type else DictState())
 
-    async def query(
-        self, query: HandlerQuery, *, result_decoder: HandlerResultDecoder | None = None
-    ) -> list[PersistentHandler]:
+    async def query(self, query: HandlerQuery) -> list[PersistentHandler]:
         return [
             handler
             for handler in self.handlers.values()

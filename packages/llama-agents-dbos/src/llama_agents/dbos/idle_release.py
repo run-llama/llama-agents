@@ -24,12 +24,9 @@ from llama_agents.dbos.journal.lifecycle import (
 from llama_agents.server._store.abstract_workflow_store import (
     AbstractWorkflowStore,
     HandlerQuery,
-    HandlerResultDecoder,
-    query_handlers,
     stream_workflow_ticks,
 )
 from typing_extensions import override
-from workflows.context.serializers import JsonSerializer
 from workflows.context.state_store import infer_state_type
 from workflows.context.state_store_integration import state_store_handoff
 from workflows.events import Event, WorkflowIdleEvent
@@ -170,12 +167,9 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
         lifecycle_lock: Callable[[], Awaitable[RunLifecycleLock]]
         | Callable[[], RunLifecycleLock]
         | None = None,
-        *,
-        result_decoder: HandlerResultDecoder | None = None,
     ) -> None:
         super().__init__(decorated)
         self._store = store
-        self._result_decoder = result_decoder
         self._deferred_release_tasks: dict[str, asyncio.Task[None]] = {}
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._idle_timeout = idle_timeout
@@ -213,14 +207,6 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
     def untrack_workflow(self, workflow: Workflow) -> None:
         self._workflows.pop(workflow.workflow_name, None)
         super().untrack_workflow(workflow)
-
-    def _get_result_decoder(self, workflow_name: str) -> JsonSerializer:
-        if self._result_decoder is not None:
-            return self._result_decoder(workflow_name)
-        workflow = self._workflows.get(workflow_name)
-        if workflow is None:
-            raise ValueError(f"Workflow {workflow_name} not found")
-        return workflow.runtime._get_json_decoder(workflow)
 
     def _spawn_task(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         task = asyncio.create_task(coro)
@@ -292,7 +278,6 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
                 run_id,
                 status="running",
                 idle_since=datetime.now(timezone.utc),
-                result_decoder=self._get_result_decoder,
             )
 
             logger.info(f"Marked handler as released [run_id={run_id}]")
@@ -377,11 +362,7 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
             return None
 
         # Look up handler to get workflow_name
-        handlers = await query_handlers(
-            self._store,
-            HandlerQuery(run_id_in=[run_id]),
-            result_decoder=self._get_result_decoder,
-        )
+        handlers = await self._store.query(HandlerQuery(run_id_in=[run_id]))
         if len(handlers) != 1:
             raise ValueError(
                 f"Expected 1 handler for run {run_id}, got {len(handlers)}"

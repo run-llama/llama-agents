@@ -471,8 +471,7 @@ class Runtime(ABC):
     """
 
     def __init__(self) -> None:
-        self._default_json_serializer = JsonSerializer()
-        self._default_serializer = self._default_json_serializer
+        self._default_serializer = JsonSerializer()
         self._pending: WorkflowSet = WorkflowSet()
         self._launched: bool = False
 
@@ -579,10 +578,6 @@ class Runtime(ABC):
     def destroy_sync(self) -> None:
         """Synchronous convenience wrapper for :meth:`destroy`."""
         asyncio.run(self.destroy())
-
-    def _get_json_decoder(self, workflow: Workflow) -> JsonSerializer:
-        """Return the public JSON decoder independently of internal encoding."""
-        return self._default_json_serializer
 
     def get_serializer(self, workflow: Workflow) -> BaseSerializer:
         """Return the workflow override or this runtime's stable legacy default."""

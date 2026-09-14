@@ -31,11 +31,8 @@ from workflows.workflow import Workflow
 from ._store.abstract_workflow_store import (
     AbstractWorkflowStore,
     HandlerQuery,
-    HandlerResultDecoder,
     PersistentHandler,
-    _handler_result_decoding_failed,
     is_terminal_status,
-    query_handlers,
 )
 
 logger = logging.getLogger(__name__)
@@ -104,12 +101,9 @@ class _WorkflowService:
         self,
         runtime: ServerRuntimeDecorator,
         store: AbstractWorkflowStore,
-        *,
-        result_decoder: HandlerResultDecoder | None = None,
     ) -> None:
         self._runtime: ServerRuntimeDecorator = runtime
         self._store = store
-        self._result_decoder = result_decoder
 
     # ------------------------------------------------------------------
     # Workflow registration
@@ -141,9 +135,7 @@ class _WorkflowService:
         return self._store
 
     async def query_handlers(self, query: HandlerQuery) -> list[PersistentHandler]:
-        return await query_handlers(
-            self._store, result_decoder=self._result_decoder, query=query
-        )
+        return await self._store.query(query)
 
     # ------------------------------------------------------------------
     # Handler lifecycle
@@ -202,13 +194,6 @@ class _WorkflowService:
         found = await self.query_handlers(HandlerQuery(handler_id_in=[handler_id]))
         if not found:
             return None
-        if purge and _handler_result_decoding_failed(found[0]):
-            # Unreadable results cannot be used by the normal cancellation path.
-            n_deleted = await self._store.delete(
-                HandlerQuery(handler_id_in=[handler_id])
-            )
-            return "deleted" if n_deleted else None
-
         persisted = handler_data_from_persistent(found[0])
         if not purge and (
             persisted.run_id is None or is_terminal_status(persisted.status)
