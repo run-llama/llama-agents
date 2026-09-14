@@ -337,7 +337,7 @@ class PersistenceDecorator(TickPersistenceDecorator):
                 status_in=["running"],
                 workflow_name_in=list(registered_workflows.keys()),
                 is_idle=False,
-            ),
+            )
         )
         for persistent in handlers:
             if (
@@ -373,7 +373,7 @@ class PersistenceDecorator(TickPersistenceDecorator):
                         persistent.workflow_name,
                     )
                     await self._store.update_handler_status(
-                        run_id=run_id,
+                        run_id,
                         status="failed",
                         error="handler crashed before persisting any state; cannot resume",
                     )
@@ -394,7 +394,7 @@ class PersistenceDecorator(TickPersistenceDecorator):
                         status,
                     )
                     await self._store.update_handler_status(
-                        run_id=run_id,
+                        run_id,
                         status=status,
                         result=result,
                         error=error,
@@ -408,9 +408,7 @@ class PersistenceDecorator(TickPersistenceDecorator):
                 )
                 try:
                     await self._store.update_handler_status(
-                        run_id=run_id,
-                        status="failed",
-                        error=str(e),
+                        run_id, status="failed", error=str(e)
                     )
                 except Exception:
                     logger.exception(

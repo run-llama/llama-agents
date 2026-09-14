@@ -144,8 +144,7 @@ class EventEnvelope(BaseModel):
                         f"Invalid event type: {event.type}. Expected one of {', '.join(registry.keys())}"
                     )
                 else:
-                    event_class = registry[event.type]
-                    return event_class.model_validate(event.value)
+                    return registry[event.type].model_validate(event.value)
             if event.qualified_name:
                 module_class = import_module_from_qualified_name(event.qualified_name)
                 if not issubclass(module_class, Event):

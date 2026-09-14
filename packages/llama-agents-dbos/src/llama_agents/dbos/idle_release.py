@@ -275,9 +275,7 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
 
             # Set idle_since NOW — after the workflow is fully released
             await self._store.update_handler_status(
-                run_id,
-                status="running",
-                idle_since=datetime.now(timezone.utc),
+                run_id, status="running", idle_since=datetime.now(timezone.utc)
             )
 
             logger.info(f"Marked handler as released [run_id={run_id}]")

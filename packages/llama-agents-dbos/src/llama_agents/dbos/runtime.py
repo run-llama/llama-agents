@@ -932,11 +932,7 @@ class DBOSRuntime(Runtime):
         if self.config.get("run_migrations_on_launch", True):
             await self.run_migrations()
 
-    def build_server_runtime(
-        self,
-        *,
-        idle_timeout: float = 600.0,
-    ) -> Runtime:
+    def build_server_runtime(self, *, idle_timeout: float = 600.0) -> Runtime:
         """Build the decorator chain for use with WorkflowServer.
 
         Wraps the DBOS runtime with:
