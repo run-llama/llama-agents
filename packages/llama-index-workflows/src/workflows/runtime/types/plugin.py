@@ -580,7 +580,7 @@ class Runtime(ABC):
         asyncio.run(self.destroy())
 
     def get_serializer(self, workflow: Workflow) -> BaseSerializer:
-        """Return the workflow override or this runtime's stable legacy default."""
+        """Return the workflow's serializer, or this runtime's default if it has none."""
         return (
             workflow.serializer
             if workflow.serializer is not None

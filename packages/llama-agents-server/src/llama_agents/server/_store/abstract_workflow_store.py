@@ -324,7 +324,7 @@ def decode_persistent_handler(data: dict[str, Any]) -> PersistentHandler:
         handler = PersistentHandler.model_validate({**data, "result": None})
         handler._result_decoding_failed = True
         logger.warning(
-            "Rejected persisted handler result: handler_id=%r workflow_name=%r error=%s",
+            "Could not decode persisted handler result: handler_id=%r workflow_name=%r error=%s",
             data.get("handler_id"),
             data.get("workflow_name"),
             type(exc).__name__,

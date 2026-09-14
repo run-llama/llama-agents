@@ -461,7 +461,7 @@ _event_type_adapter = TypeAdapter(SerializableEventType)
 
 
 def _import_event_type(qualified_name: str, serializer: BaseSerializer) -> type[Event]:
-    """Validate an event-class reference under the selected metadata scope."""
+    """Resolve an event class name through the selected serializer."""
     with serializer.validation_context():
         return _event_type_adapter.validate_python(qualified_name)
 

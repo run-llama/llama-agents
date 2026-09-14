@@ -61,7 +61,7 @@ def test_snapshot_retry_exception_uses_selected_serializer(
                     {
                         "event": serializer.serialize(StartEvent()),
                         "last_exception": {
-                            "exception_type": "untrusted_module.HiddenError",
+                            "exception_type": "other_module.MissingError",
                             "exception_message": "failed",
                         },
                     }
@@ -75,7 +75,7 @@ def test_snapshot_retry_exception_uses_selected_serializer(
     assert isinstance(exception, UnreconstructedException)
 
 
-def test_snapshot_validation_uses_custom_scope_without_decoding_metadata() -> None:
+def test_snapshot_validation_does_not_decode_metadata_with_the_serializer() -> None:
     calls: list[str] = []
 
     class ScopedSerializer(BaseSerializer):

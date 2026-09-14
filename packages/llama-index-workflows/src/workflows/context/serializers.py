@@ -55,7 +55,11 @@ class BaseSerializer(ABC):
 
     @contextmanager
     def validation_context(self) -> Iterator[None]:
-        """Scope metadata validation without decoding application payloads."""
+        """Run a block with this serializer selected for nested validation.
+
+        The base implementation does nothing, since most serializers have no
+        per-class lookup to carry.
+        """
         yield
 
     @abstractmethod
@@ -149,7 +153,7 @@ class JsonSerializer(BaseSerializer):
 
     @contextmanager
     def validation_context(self) -> Iterator[None]:
-        """Carry JSON class lookup through synchronous Pydantic validation."""
+        """Make this serializer's class lookup available to nested validators."""
         serializer_token = _active_serializer.set(self)
         try:
             yield

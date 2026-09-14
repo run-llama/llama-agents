@@ -5,4 +5,4 @@
 "llama-agents-appserver": patch
 ---
 
-Preserve configured internal serializers through execution, persistence, and replay.
+Share the configured serializer across persistence and replay boundaries.
