@@ -100,7 +100,6 @@ class EventEnvelope(BaseModel):
         client_data: dict[str, Any] | str,
         registry: dict[str, builtins.type[Event]] | None = None,
         explicit_event: builtins.type[Event] | None = None,
-        decoder: JsonSerializer | None = None,
     ) -> Event:
         """
         Parse client data into an Event. Raises an EventValidationError if the client data is invalid.
@@ -109,7 +108,6 @@ class EventEnvelope(BaseModel):
             client_data: The client data to parse. Can be a dictionary, a string, or an explicit Event class.
             registry: The registry of event type names to Event classes.
             explicit_event: An explicit Event class to treat the dict as
-            decoder: Optional JSON class resolver for qualified and nested types.
 
         Returns:
             The parsed Event.
@@ -137,6 +135,7 @@ class EventEnvelope(BaseModel):
                 "value": as_dict,
             }
         try:
+            decoder = _decoder_from_registry(registry)
             event = EventEnvelope.model_validate(as_dict)
 
             if event.type:
@@ -148,16 +147,9 @@ class EventEnvelope(BaseModel):
                     event_class = registry[event.type]
                     return _validate_event(event_class, event.value, decoder)
             if event.qualified_name:
-                event_class = None
-                if decoder is not None:
-                    event_class = decoder.resolve_class(event.qualified_name)
-                else:
-                    event_class = _find_registered_event(event.qualified_name, registry)
-                if event_class is None:
-                    errors.append(
-                        f"Invalid qualified event name: {event.qualified_name}"
-                    )
-                elif not issubclass(event_class, Event):
+                # This deprecated path is kept for older clients.
+                event_class = decoder.resolve_class(event.qualified_name)
+                if not issubclass(event_class, Event):
                     errors.append(
                         f"Invalid client data. Qualified name {event.qualified_name} does not correspond to an Event subclass"
                     )
@@ -176,25 +168,14 @@ class EventEnvelope(BaseModel):
 
 
 def _validate_event(
-    event_class: type[Event], value: Any, decoder: JsonSerializer | None
+    event_class: type[Event], value: Any, decoder: JsonSerializer
 ) -> Event:
-    if decoder is None:
-        return event_class.model_validate(value)
     with decoder.validation_context():
         return event_class.model_validate(value)
 
 
-def _find_registered_event(
-    qualified_name: str, registry: dict[str, type[Event]]
-) -> type[Event] | None:
-    for event_class in registry.values():
-        event_names = (
-            f"{event_class.__module__}.{event_class.__qualname__}",
-            f"{event_class.__module__}.{event_class.__name__}",
-        )
-        if qualified_name in event_names:
-            return event_class
-    return None
+def _decoder_from_registry(registry: dict[str, type[Event]]) -> JsonSerializer:
+    return JsonSerializer(allowed_types=list(registry.values()))
 
 
 def _get_event_subtypes(cls: type[Event]) -> list[str] | None:

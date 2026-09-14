@@ -105,22 +105,41 @@ def test_parse_with_registry_type_success() -> None:
     assert ev.x == 1
 
 
-def test_parse_uses_explicit_decoder_for_nested_event(
+def test_parse_resolves_nested_event_from_registry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fail(name: str) -> None:
         pytest.fail(f"Unexpected dynamic import: {name}")
 
     monkeypatch.setattr("workflows.context.utils.import_module", fail)
-    decoder = JsonSerializer(allowed_types=[NestedPayloadEvent])
     nested = JsonSerializer().serialize_value(NestedPayloadEvent(value=4))
     event = EventEnvelope.parse(
         client_data={"type": "NestedEnvelopeEvent", "value": {"nested": nested}},
-        registry={"NestedEnvelopeEvent": NestedEnvelopeEvent},
-        decoder=decoder,
+        registry={
+            "NestedEnvelopeEvent": NestedEnvelopeEvent,
+            "NestedPayloadEvent": NestedPayloadEvent,
+        },
     )
     assert isinstance(event, NestedEnvelopeEvent)
     assert isinstance(event.nested, NestedPayloadEvent)
+
+
+def test_parse_rejects_nested_event_outside_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(name: str) -> None:
+        pytest.fail(f"Unexpected dynamic import: {name}")
+
+    monkeypatch.setattr("workflows.context.utils.import_module", fail)
+    nested = JsonSerializer().serialize_value(NestedPayloadEvent(value=4))
+    with pytest.raises(EventValidationError, match="Failed to deserialize event"):
+        EventEnvelope.parse(
+            client_data={
+                "type": "NestedEnvelopeEvent",
+                "value": {"nested": nested},
+            },
+            registry={"NestedEnvelopeEvent": NestedEnvelopeEvent},
+        )
 
 
 def test_parse_with_registered_qualified_name_success() -> None:
@@ -134,7 +153,7 @@ def test_parse_with_registered_qualified_name_success() -> None:
 def test_parse_with_unregistered_qualified_name_raises() -> None:
     qn = f"{ModuleScopeEvent.__module__}.{ModuleScopeEvent.__name__}"
     payload = {"qualified_name": qn, "value": {"x": 7}}
-    with pytest.raises(EventValidationError, match="Invalid qualified event name"):
+    with pytest.raises(EventValidationError, match="Failed to deserialize event"):
         EventEnvelope.parse(client_data=payload)
 
 
