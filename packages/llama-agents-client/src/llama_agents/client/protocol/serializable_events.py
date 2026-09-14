@@ -146,27 +146,13 @@ class EventEnvelope(BaseModel):
                     )
                 else:
                     event_class = registry[event.type]
-                    if decoder is None:
-                        return event_class.model_validate(event.value)
-                    with decoder.validation_context():
-                        return event_class.model_validate(event.value)
+                    return _validate_event(event_class, event.value, decoder)
             if event.qualified_name:
                 event_class = None
                 if decoder is not None:
                     event_class = decoder.resolve_class(event.qualified_name)
                 else:
-                    event_class = next(
-                        (
-                            registered
-                            for registered in registry.values()
-                            if event.qualified_name
-                            in (
-                                f"{registered.__module__}.{registered.__qualname__}",
-                                f"{registered.__module__}.{registered.__name__}",
-                            )
-                        ),
-                        None,
-                    )
+                    event_class = _find_registered_event(event.qualified_name, registry)
                 if event_class is None:
                     errors.append(
                         f"Invalid qualified event name: {event.qualified_name}"
@@ -176,10 +162,7 @@ class EventEnvelope(BaseModel):
                         f"Invalid client data. Qualified name {event.qualified_name} does not correspond to an Event subclass"
                     )
                 else:
-                    if decoder is None:
-                        return event_class.model_validate(event.value)
-                    with decoder.validation_context():
-                        return event_class.model_validate(event.value)
+                    return _validate_event(event_class, event.value, decoder)
         except (TypeError, ValueError, ValidationError) as e:
             errors.append(f"Failed to deserialize event: {str(e)}")
         errors = (
@@ -190,6 +173,28 @@ class EventEnvelope(BaseModel):
             ]
         )
         raise EventValidationError(" ".join(errors))
+
+
+def _validate_event(
+    event_class: type[Event], value: Any, decoder: JsonSerializer | None
+) -> Event:
+    if decoder is None:
+        return event_class.model_validate(value)
+    with decoder.validation_context():
+        return event_class.model_validate(value)
+
+
+def _find_registered_event(
+    qualified_name: str, registry: dict[str, type[Event]]
+) -> type[Event] | None:
+    for event_class in registry.values():
+        event_names = (
+            f"{event_class.__module__}.{event_class.__qualname__}",
+            f"{event_class.__module__}.{event_class.__name__}",
+        )
+        if qualified_name in event_names:
+            return event_class
+    return None
 
 
 def _get_event_subtypes(cls: type[Event]) -> list[str] | None:
