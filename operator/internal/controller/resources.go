@@ -623,8 +623,9 @@ func (r *LlamaDeploymentReconciler) createBuildJob(llamaDeploy *llamadeployv1.Ll
 					},
 				},
 				Spec: corev1.PodSpec{
-					SecurityContext: defaultPodSecurityContext(),
-					RestartPolicy:   corev1.RestartPolicyNever,
+					SecurityContext:    defaultPodSecurityContext(),
+					EnableServiceLinks: ptr(false),
+					RestartPolicy:      corev1.RestartPolicyNever,
 					Volumes: []corev1.Volume{
 						{
 							Name: "app-data",
@@ -742,6 +743,9 @@ func (r *LlamaDeploymentReconciler) applyBuildJobTemplateOverlay(ctx context.Con
 			}
 		}
 	}
+
+	// Do not expose the namespace's service directory to user workloads.
+	job.Spec.Template.Spec.EnableServiceLinks = ptr(false)
 
 	return nil
 }
@@ -1121,6 +1125,7 @@ func (r *LlamaDeploymentReconciler) createDeploymentForLlama(llamaDeploy *llamad
 					SecurityContext:              defaultPodSecurityContext(),
 					ServiceAccountName:           llamaDeploy.Name + "-sa",
 					AutomountServiceAccountToken: ptr(false),
+					EnableServiceLinks:           ptr(false),
 					Volumes: []corev1.Volume{
 						{
 							Name: "app-data",
@@ -1376,6 +1381,8 @@ func (r *LlamaDeploymentReconciler) applyTemplateOverlay(ctx context.Context, ld
 	if err := json.Unmarshal(mergedJSON, &merged); err != nil {
 		return fmt.Errorf("unmarshal merged template: %w", err)
 	}
+	// Do not expose the namespace's service directory to user workloads.
+	merged.Spec.EnableServiceLinks = ptr(false)
 
 	dep.Spec.Template = merged
 	return nil
