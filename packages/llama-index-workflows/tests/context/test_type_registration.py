@@ -90,7 +90,7 @@ def test_qualname_and_legacy_names_both_resolve() -> None:
     assert serializer.resolve_class(qualified(Nested)) is Nested
 
 
-def test_colliding_wire_names_are_rejected() -> None:
+def test_colliding_wire_names_raise() -> None:
     def make_state() -> type[BaseModel]:
         class Duplicate(BaseModel):
             pass
@@ -105,7 +105,7 @@ def test_colliding_wire_names_are_rejected() -> None:
 
 
 @pytest.mark.parametrize("kind", ["__is_pydantic", "__is_component"])
-def test_unregistered_names_never_import(kind: str, forbid_imports: None) -> None:
+def test_unregistered_names_do_not_resolve(kind: str, forbid_imports: None) -> None:
     serializer = registered()
     with pytest.raises(ValueError, match="Refusing to import"):
         serializer.deserialize(
@@ -120,7 +120,7 @@ def test_serialization_does_not_register_types(forbid_imports: None) -> None:
         serializer.deserialize(payload)
 
 
-def test_string_entries_stay_name_restrictions() -> None:
+def test_string_entries_only_restrict_names() -> None:
     permissive = JsonSerializer(allowed_types=[qualified(Payload)])
     payload = Payload(value=2)
     assert permissive.deserialize(permissive.serialize(payload)) == payload
@@ -147,7 +147,7 @@ def test_component_roundtrip_without_imports(forbid_imports: None) -> None:
 
 
 @pytest.mark.parametrize("field", ["event", "optional_event", "event_type"])
-def test_nested_event_contracts_reject_registered_non_events(
+def test_nested_event_fields_require_event_types(
     field: str, forbid_imports: None
 ) -> None:
     class Allowed(Event):
@@ -231,7 +231,7 @@ def test_active_serializer_is_restored_after_error() -> None:
     assert restored.event_type is WorkflowFailedEvent
 
 
-def test_explicit_pickle_remains_available() -> None:
+def test_pickle_serializer_roundtrips() -> None:
     serializer = PickleSerializer()
     value = {1, 2}
     assert serializer.deserialize(serializer.serialize(value)) == value
@@ -240,6 +240,6 @@ def test_explicit_pickle_remains_available() -> None:
 @pytest.mark.parametrize(
     "annotation", [Any, list[Payload], Annotated[Payload, "metadata"]]
 )
-def test_registration_rejects_annotations(annotation: Any) -> None:
+def test_registration_raises_on_annotations(annotation: Any) -> None:
     with pytest.raises(TypeError, match="concrete classes"):
         JsonSerializer(allowed_types=[annotation])

@@ -256,10 +256,9 @@ def _deserialize_exception(data: Any) -> Exception:
             exc_cls = import_module_from_qualified_name(exc_type)
         else:
             exc_cls = serializer.resolve_class(exc_type)
-        # Only construct genuine exception types. The qualified name comes from a
-        # serialized blob and could resolve to any callable (e.g. ``builtins.eval``,
-        # which the ``builtins`` allowlist exemption would otherwise permit) —
-        # calling it with the message would be arbitrary code execution.
+        # Only exception subclasses are constructed. The name comes from the
+        # record, and names like ``builtins.eval`` resolve to other callables,
+        # so anything that is not an Exception subclass is skipped.
         if not (isinstance(exc_cls, type) and issubclass(exc_cls, Exception)):
             return UnreconstructedException(exc_message, original_type=exc_type)
         return exc_cls(exc_message)

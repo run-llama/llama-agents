@@ -53,13 +53,14 @@ class JsonSerializer(BaseSerializer):
       serialized to their dict form alongside the qualified class name.
     - Dicts and lists are handled recursively.
 
-    ``allowed_types`` restricts which class names may be reconstructed, as
-    before. Entries that are classes also register those classes, so their
-    payloads are rebuilt without importing anything. Unlisted names are rejected.
-    None retains unrestricted imports, and legacy string entries allow imports
-    of those names. An empty collection rejects every name. Two different
-    classes that serialize under the same name are rejected because a record
-    cannot say which one it meant.
+    ``allowed_types`` controls which class names can be reconstructed. Class
+    entries are registered under their serialized names, so their payloads are
+    rebuilt from the registry without importing anything. String entries keep
+    the older behavior and are looked up by import. A name that is not listed
+    does not resolve, and deserializing it raises. ``None`` keeps the default
+    lookup by import for every name, and an empty collection resolves nothing.
+    If two classes serialize under the same name, registration raises, because
+    a record does not say which one it meant.
 
     Fallback for unsupported objects is to attempt JSON encoding directly; if it
     fails, a `ValueError` is raised.
@@ -95,9 +96,9 @@ class JsonSerializer(BaseSerializer):
                     raise TypeError(
                         "allowed_types entries must be concrete classes or legacy names"
                     )
-                # Records carry the legacy ``module.__name__`` written by
-                # get_qualified_name; __qualname__ is what allowed_types has
-                # always matched on. Both come from the class itself.
+                # get_qualified_name writes ``module.__name__`` into records.
+                # allowed_types has always matched on ``module.__qualname__``.
+                # Register both, since both come from the class itself.
                 for name in (
                     f"{entry.__module__}.{entry.__qualname__}",
                     f"{entry.__module__}.{entry.__name__}",
@@ -125,8 +126,8 @@ class JsonSerializer(BaseSerializer):
     def resolve_class(self, qualified_name: str) -> type[Any]:
         """Resolve a class name to a registered class, or import it.
 
-        Classes passed to ``allowed_types`` resolve directly. Imports are allowed
-        only when ``allowed_types`` is None or contains the name as a legacy string.
+        Classes passed to ``allowed_types`` resolve from the registry. A name is
+        imported when ``allowed_types`` is None or lists that name as a string.
         """
         self._validate_qualified_name(qualified_name)
         registered = self._registered_types.get(qualified_name)
