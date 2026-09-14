@@ -105,8 +105,8 @@ class WorkflowServer:
                 of a declared model need to be listed here.
             accept_context_api: Allow the ``"context"`` field in run request
                 bodies. Defaults to ``False``. Submitted state is decoded with
-                the workflow's selected serializer, so only enable this when
-                callers should be allowed to restore workflow state.
+                the workflow's selected serializer. Enable it when callers are
+                expected to supply a saved context.
         """
         self._serializer = serializer
         self._extra_types = tuple(extra_types)
@@ -156,7 +156,7 @@ class WorkflowServer:
 
     @property
     def serializer(self) -> BaseSerializer | None:
-        """The explicit internal default, or None to use the declared types."""
+        """The explicitly configured internal default, or None to use the declared types."""
         return self._serializer
 
     @property

@@ -6,4 +6,4 @@
 "llama-agents-appserver": patch
 ---
 
-Decode server JSON from the types workflows declare instead of importing names from stored payloads.
+Build the server's default JSON decoder from each workflow's declared event and state types.

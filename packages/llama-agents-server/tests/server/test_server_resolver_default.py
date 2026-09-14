@@ -163,7 +163,7 @@ async def test_declared_and_additional_events_and_typed_state_work(
     "client", [None, JsonSerializer(), PickleSerializer()], indirect=True
 )
 @pytest.mark.parametrize("nested", [False, True])
-async def test_unknown_api_metadata_never_imports(
+async def test_unknown_api_metadata_does_not_resolve(
     client: tuple[WorkflowServer, AsyncClient, Path],
     forbid_imports: None,
     nested: bool,
@@ -179,7 +179,7 @@ async def test_unknown_api_metadata_never_imports(
     assert "Refusing to import" in response.text
 
 
-async def test_unknown_context_event_never_imports(
+async def test_unknown_context_event_does_not_resolve(
     client: tuple[WorkflowServer, AsyncClient, Path],
     forbid_imports: None,
 ) -> None:
@@ -201,7 +201,7 @@ async def test_unknown_context_event_never_imports(
 @pytest.mark.parametrize(
     "client", [None, JsonSerializer(), PickleSerializer()], indirect=True
 )
-async def test_unknown_persisted_result_never_imports(
+async def test_unknown_persisted_result_does_not_resolve(
     client: tuple[WorkflowServer, AsyncClient, Path],
     forbid_imports: None,
 ) -> None:
@@ -411,7 +411,7 @@ def test_server_context_retry_exception_uses_selected_serializer(
     assert isinstance(error, expected_type)
 
 
-def test_registering_another_workflow_keeps_existing_decoder_restricted(
+def test_registering_another_workflow_leaves_the_existing_decoder_alone(
     forbid_imports: None,
 ) -> None:
     server = WorkflowServer()
@@ -454,7 +454,7 @@ async def test_workflow_registered_later_uses_own_declarations() -> None:
         assert completed.result.value["result"] == 8
 
 
-async def test_run_api_rejects_another_workflows_event() -> None:
+async def test_run_api_does_not_resolve_another_workflows_event() -> None:
     server = WorkflowServer()
     server.add_workflow("first", DeclaredWorkflow())
     server.add_workflow("later", LaterWorkflow())
@@ -509,14 +509,14 @@ def test_stored_result_decoder_uses_handler_workflow_name() -> None:
     def result_decoder(name: str) -> JsonSerializer:
         return workflow_decoder(server, name)
 
-    rejected = decode_persistent_handler(data, result_decoder)
-    assert rejected.result is None
+    other_workflow = decode_persistent_handler(data, result_decoder)
+    assert other_workflow.result is None
     data["workflow_name"] = "later"
     restored = decode_persistent_handler(data, result_decoder)
     assert isinstance(restored.result, LaterOutput)
 
 
-async def test_server_rejects_persisted_result_excluded_from_workflow_types(
+async def test_persisted_result_outside_workflow_types_does_not_decode(
     tmp_path: Path,
 ) -> None:
     store = SqliteWorkflowStore(db_path=str(tmp_path / "excluded-result.db"))

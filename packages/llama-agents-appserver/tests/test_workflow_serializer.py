@@ -68,7 +68,7 @@ class CustomSerializer(BaseSerializer):
 
 @pytest.mark.parametrize("serializer_type", [PickleSerializer, CustomSerializer])
 @pytest.mark.parametrize("workflow_override", [False, True])
-def test_hosted_explicit_codec_preserves_serializer_binding(
+def test_hosted_explicit_serializer_is_preserved(
     serializer_type: type[BaseSerializer], workflow_override: bool
 ) -> None:
     serializer = serializer_type()
@@ -173,11 +173,11 @@ async def test_source_additional_event_snapshot_survives_hosted_transfer(
             },
             JsonSerializer().serialize_value(model),
         ]:
-            rejected = legacy.post(
+            undeclared = legacy.post(
                 "/deployments/test/tasks/task/events",
                 params={"session_id": "session"},
                 json={"service_id": "extra", "event_obj_str": json.dumps(payload)},
             )
-            assert rejected.status_code == 500
+            assert undeclared.status_code == 500
     assert len(delivered) == 1
     assert isinstance(delivered[0], HostedExtraEvent)
