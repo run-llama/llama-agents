@@ -19,11 +19,7 @@ from pydantic import (
     model_serializer,
 )
 
-from workflows.context.serializers import (
-    JsonSerializer,
-    _active_serializer,
-    allowed_type_names_var,
-)
+from workflows.context.serializers import JsonSerializer, _active_serializer
 from workflows.context.utils import import_module_from_qualified_name
 
 
@@ -245,34 +241,11 @@ _UNRECONSTRUCTED_EXCEPTION_NAME = (
 )
 
 
-def _exception_type_permitted(exc_type: str) -> bool:
-    """Whether an exception type may be imported for reconstruction.
-
-    ``builtins.*`` exceptions are always permitted (already loaded, no import side
-    effects). The framework's own breadcrumb type is always permitted so a
-    degraded exception round-trips stably under any allowlist rather than
-    degrading into a self-referential breadcrumb. With no allowlist active the
-    check is permissive, matching the opt-in nature of ``allowed_types``.
-    Otherwise the type must be in the allowlist; a miss returns ``False`` so the
-    caller degrades without ever importing the type.
-    """
-    if exc_type.startswith("builtins."):
-        return True
-    if exc_type == _UNRECONSTRUCTED_EXCEPTION_NAME:
-        return True
-    allowed = allowed_type_names_var.get()
-    if allowed is None:
-        return True
-    return exc_type in allowed
-
-
 def _deserialize_exception(data: Any) -> Exception:
     if isinstance(data, Exception):
         return data
     exc_type = data["exception_type"]
     exc_message = data["exception_message"]
-    if not _exception_type_permitted(exc_type):
-        return UnreconstructedException(exc_message, original_type=exc_type)
     try:
         serializer = _active_serializer.get()
         if exc_type.startswith("builtins."):

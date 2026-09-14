@@ -15,21 +15,9 @@ from pydantic import BaseModel
 
 from .utils import get_qualified_name, import_module_from_qualified_name
 
-# Threads the active serializer's allowlist into nested field validators during
-# deserialization. Pydantic's `model_validate(context=...)` is not a reliable
-# channel here: the event models (`DictLikeModel`) define a custom `__init__`,
-# which makes pydantic drop the validation context before nested field
-# validators run. A ContextVar is set around `model_validate` and read by the
-# exception reconstruction in `events.py`.
-allowed_type_names_var: contextvars.ContextVar[frozenset[str] | None] = (
-    contextvars.ContextVar("allowed_type_names", default=None)
-)
-
-
-# Event constructors drop Pydantic validation context, and component from_dict
-# has no context parameter. Scope the active serializer around both reconstruction
-# paths so nested event validators inherit it, then reset it even when validation
-# fails.
+# DictLikeModel's custom __init__ drops Pydantic validation context, and component
+# from_dict has no context parameter. A ContextVar carries the serializer through
+# both reconstruction paths so nested validators use the same type resolver.
 _active_serializer: contextvars.ContextVar[JsonSerializer | None] = (
     contextvars.ContextVar("workflow_json_serializer", default=None)
 )
@@ -217,20 +205,16 @@ class JsonSerializer(BaseSerializer):
             if data.get("__is_pydantic") and data.get("qualified_name"):
                 module_class = self.resolve_class(data["qualified_name"])
                 serializer_token = _active_serializer.set(self)
-                token = allowed_type_names_var.set(self._allowed_type_names)
                 try:
                     return module_class.model_validate(data["value"])
                 finally:
-                    allowed_type_names_var.reset(token)
                     _active_serializer.reset(serializer_token)
             elif data.get("__is_component") and data.get("qualified_name"):
                 module_class = self.resolve_class(data["qualified_name"])
                 serializer_token = _active_serializer.set(self)
-                token = allowed_type_names_var.set(self._allowed_type_names)
                 try:
                     return module_class.from_dict(data["value"])
                 finally:
-                    allowed_type_names_var.reset(token)
                     _active_serializer.reset(serializer_token)
             return {k: self.deserialize_value(v) for k, v in data.items()}
         elif isinstance(data, list):
