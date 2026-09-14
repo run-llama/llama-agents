@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator, Callable, MutableMapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Literal, Protocol, TypedDict, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from llama_agents.client.protocol.serializable_events import (
     EventEnvelopeWithMetadata,
@@ -365,12 +365,3 @@ async def query_handlers(
     ):
         return await store.query(query)
     return await store.query(query, result_decoder=result_decoder)
-
-
-class _ResultDecoderKwargs(TypedDict, total=False):
-    result_decoder: HandlerResultDecoder
-
-
-def result_decoder_kwargs(decoder: HandlerResultDecoder | None) -> _ResultDecoderKwargs:
-    """Omit the new keyword for legacy custom store status-update overrides."""
-    return {} if decoder is None else {"result_decoder": decoder}

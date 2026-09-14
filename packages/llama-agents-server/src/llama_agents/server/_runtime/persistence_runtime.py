@@ -54,7 +54,6 @@ from .._store.abstract_workflow_store import (
     Status,
     as_legacy_context_store,
     query_handlers,
-    result_decoder_kwargs,
     stream_workflow_ticks,
 )
 from .._store.sqlite.sqlite_state_store import SqliteStateStore
@@ -382,10 +381,10 @@ class PersistenceDecorator(TickPersistenceDecorator):
                         persistent.workflow_name,
                     )
                     await self._store.update_handler_status(
-                        **result_decoder_kwargs(self._result_decoder),
                         run_id=run_id,
                         status="failed",
                         error="handler crashed before persisting any state; cannot resume",
+                        result_decoder=self._result_decoder,
                     )
                     continue
 
@@ -404,11 +403,11 @@ class PersistenceDecorator(TickPersistenceDecorator):
                         status,
                     )
                     await self._store.update_handler_status(
-                        **result_decoder_kwargs(self._result_decoder),
                         run_id=run_id,
                         status=status,
                         result=result,
                         error=error,
+                        result_decoder=self._result_decoder,
                     )
                     continue
 
@@ -419,10 +418,10 @@ class PersistenceDecorator(TickPersistenceDecorator):
                 )
                 try:
                     await self._store.update_handler_status(
-                        **result_decoder_kwargs(self._result_decoder),
                         run_id=run_id,
                         status="failed",
                         error=str(e),
+                        result_decoder=self._result_decoder,
                     )
                 except Exception:
                     logger.exception(
