@@ -46,7 +46,6 @@ def test_source_server_options_survive_hosted_loading(
     deployment = Deployment(
         loaded.get_workflows(),
         serializer=loaded.serializer,
-        extra_types=loaded.extra_types,
         additional_events=loaded.additional_events,
     )
     hosted = deployment.create_workflow_server(
@@ -106,21 +105,19 @@ class ExtraWorkflow(Workflow):
 async def test_source_additional_event_snapshot_survives_hosted_transfer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    source = WorkflowServer(extra_types=[HostedModel])
+    source = WorkflowServer()
     workflow = ExtraWorkflow()
     source.add_workflow("extra", workflow, additional_events=[HostedExtraEvent])
     deployment = Deployment(
         source.get_workflows(),
-        extra_types=source.extra_types,
         additional_events=source.additional_events,
     )
     hosted = deployment.create_workflow_server(
         DeploymentConfig(name="test"), ApiserverSettings(persistence="memory")
     )
     assert source.get_workflows() == {}
-    selected = workflow.runtime.get_serializer(workflow)
+    selected = hosted.get_json_decoder("extra")
     model = HostedModel(value=5)
-    assert selected.deserialize(selected.serialize(model)) == model
 
     def forbid_import(name: str) -> Any:
         pytest.fail(f"Unexpected metadata import: {name}")

@@ -344,4 +344,4 @@ With Postgres, multiple server replicas can share the same database for distribu
 
 For programmatic interaction with a `WorkflowServer`, see the [Python Client](/python/llamaagents/workflows/client) documentation.
 
-Server JSON decoding uses workflow event and state declarations. Add API events with `server.add_workflow(name, workflow, additional_events=[MyEvent])`. Add independently enveloped model classes with `WorkflowServer(extra_types=[MyModel])`; ordinary typed model fields are validated by Pydantic. The `serializer=` setting controls internal contexts and checkpoints only.
+Server JSON decoding uses the workflow's declared events and `additional_events`. Add API events with `server.add_workflow(name, workflow, additional_events=[MyEvent])`. The `serializer=` setting controls internal contexts and checkpoints only.

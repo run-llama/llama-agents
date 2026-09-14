@@ -40,7 +40,6 @@ class Deployment:
         workflows: dict[str, Workflow],
         *,
         serializer: BaseSerializer | None = None,
-        extra_types: Iterable[type[Any]] = (),
         additional_events: Mapping[str, Iterable[type[Event]]] | None = None,
     ) -> None:
         """Creates a Deployment instance.
@@ -52,7 +51,6 @@ class Deployment:
         """
 
         self._serializer = serializer
-        self._extra_types = tuple(extra_types)
         self._additional_events = {
             name: tuple(events) for name, events in (additional_events or {}).items()
         }
@@ -63,6 +61,7 @@ class Deployment:
         self._contexts: dict[str, Context] = {}
         self._handlers: dict[str, WorkflowHandler] = {}
         self._handler_inputs: dict[str, str] = {}
+        self._workflow_server: WorkflowServer | None = None
 
     @property
     def default_service(self) -> Workflow | None:
@@ -143,7 +142,6 @@ class Deployment:
         server = WorkflowServer(
             workflow_store=persistence,
             serializer=self._serializer,
-            extra_types=self._extra_types,
         )
         for service_id, workflow in self._workflow_services.items():
             additional_events = self._additional_events.get(service_id)
@@ -154,7 +152,15 @@ class Deployment:
                 if additional_events is not None
                 else None,
             )
+        self._workflow_server = server
         return server
+
+    @property
+    def workflow_server(self) -> WorkflowServer:
+        """Return the workflow server created for this deployment."""
+        if self._workflow_server is None:
+            raise RuntimeError("The workflow server has not been created")
+        return self._workflow_server
 
     def mount_workflow_server(self, app: FastAPI) -> WorkflowServer:
         config = get_deployment_config()

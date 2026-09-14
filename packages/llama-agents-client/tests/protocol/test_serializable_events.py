@@ -123,18 +123,27 @@ def test_parse_uses_explicit_decoder_for_nested_event(
     assert isinstance(event.nested, NestedPayloadEvent)
 
 
-def test_parse_with_qualified_name_fallback_success() -> None:
+def test_parse_with_registered_qualified_name_success() -> None:
     qn = f"{ModuleScopeEvent.__module__}.{ModuleScopeEvent.__name__}"
     payload = {"qualified_name": qn, "value": {"x": 7}}
-    ev = EventEnvelope.parse(client_data=payload)
+    ev = EventEnvelope.parse(client_data=payload, registry={"event": ModuleScopeEvent})
     assert isinstance(ev, ModuleScopeEvent)
     assert ev.x == 7
 
 
-def test_parse_with_type_unknown_but_qualified_name_valid() -> None:
+def test_parse_with_unregistered_qualified_name_raises() -> None:
+    qn = f"{ModuleScopeEvent.__module__}.{ModuleScopeEvent.__name__}"
+    payload = {"qualified_name": qn, "value": {"x": 7}}
+    with pytest.raises(EventValidationError, match="Invalid qualified event name"):
+        EventEnvelope.parse(client_data=payload)
+
+
+def test_parse_with_type_unknown_but_registered_qualified_name() -> None:
     qn = f"{ModuleScopeOtherEvent.__module__}.{ModuleScopeOtherEvent.__name__}"
     payload = {"type": "NotInRegistry", "qualified_name": qn, "value": {"y": 3}}
-    ev = EventEnvelope.parse(client_data=payload, registry={})
+    ev = EventEnvelope.parse(
+        client_data=payload, registry={"other": ModuleScopeOtherEvent}
+    )
     assert isinstance(ev, ModuleScopeOtherEvent)
     assert ev.y == 3
 
@@ -216,7 +225,9 @@ def test_json_serializer_back_compat_with_pydantic_flag() -> None:
         "qualified_name": qn,
         "value": {"x": 123},
     }
-    ev = EventEnvelope.parse(client_data=payload)
+    ev = EventEnvelope.parse(
+        client_data=payload, registry={"ModuleScopeEvent": ModuleScopeEvent}
+    )
     assert isinstance(ev, ModuleScopeEvent)
     assert ev.x == 123
 

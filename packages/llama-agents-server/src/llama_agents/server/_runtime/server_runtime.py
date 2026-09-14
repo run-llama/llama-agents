@@ -187,7 +187,9 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
     ) -> None:
         super().__init__(decorated)
         self._store: AbstractWorkflowStore = store
-        self._default_serializer = serializer
+        self._default_serializer = (
+            serializer if serializer is not None else JsonSerializer()
+        )
         self._result_decoder = result_decoder
         self._registered_workflows: dict[str, Workflow] = {}
         self._additional_events: dict[str, tuple[type[Event], ...]] = {}
@@ -230,18 +232,8 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
         self._registered_workflows.pop(workflow.workflow_name, None)
         super().untrack_workflow(workflow)
 
-    def get_json_decoder(self, workflow: Workflow) -> JsonSerializer:
-        if self._result_decoder is not None:
-            return self._result_decoder(workflow.workflow_name)
-        return super().get_json_decoder(workflow)
-
     def get_serializer(self, workflow: Workflow) -> BaseSerializer:
-        if workflow.serializer is not None:
-            serializer = workflow.serializer
-        elif self._default_serializer is not None:
-            serializer = self._default_serializer
-        else:
-            serializer = self.get_json_decoder(workflow)
+        serializer = workflow.serializer or self._default_serializer
 
         return self._compose_serializer(
             workflow,

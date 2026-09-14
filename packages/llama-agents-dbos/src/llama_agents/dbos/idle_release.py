@@ -215,12 +215,9 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
         super().untrack_workflow(workflow)
 
     def _get_result_decoder(self, workflow_name: str) -> JsonSerializer:
-        if self._result_decoder is not None:
-            return self._result_decoder(workflow_name)
-        workflow = self._workflows.get(workflow_name)
-        if workflow is None:
-            raise ValueError(f"Workflow {workflow_name} not found")
-        return workflow.runtime.get_json_decoder(workflow)
+        if self._result_decoder is None:
+            raise RuntimeError("A workflow result decoder is required")
+        return self._result_decoder(workflow_name)
 
     def _spawn_task(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         task = asyncio.create_task(coro)

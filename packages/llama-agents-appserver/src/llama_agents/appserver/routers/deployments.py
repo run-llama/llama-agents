@@ -102,10 +102,8 @@ def create_deployments_router(name: str, deployment: Deployment) -> APIRouter:
     ) -> EventDefinition:
         """Send a human response event to a service for a specific task and session."""
         ctx = deployment._contexts[session_id]
-        workflow = deployment._workflow_services[
-            event_def.service_id or DEFAULT_SERVICE_ID
-        ]
-        event = workflow.runtime.get_json_decoder(workflow).deserialize(
+        service_id = event_def.service_id or DEFAULT_SERVICE_ID
+        event = deployment.workflow_server.get_json_decoder(service_id).deserialize(
             event_def.event_obj_str
         )
         if not isinstance(event, Event):

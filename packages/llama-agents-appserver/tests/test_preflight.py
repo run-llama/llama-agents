@@ -31,7 +31,6 @@ def test_preflight_validate_success(
         lambda cfg: SimpleNamespace(
             get_workflows=lambda: {},
             serializer=None,
-            extra_types=(),
             additional_events={},
         ),
     )
@@ -65,7 +64,6 @@ def test_preflight_validate_collects_errors(
         lambda cfg: SimpleNamespace(
             get_workflows=lambda: {"svc": BadWorkflow()},
             serializer=None,
-            extra_types=(),
             additional_events={},
         ),
     )

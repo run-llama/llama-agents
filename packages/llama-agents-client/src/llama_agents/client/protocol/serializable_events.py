@@ -10,7 +10,6 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError, model_validator
 from workflows.context.serializers import JsonSerializer
-from workflows.context.utils import import_module_from_qualified_name
 from workflows.events import Event
 
 
@@ -31,8 +30,7 @@ class EventEnvelopeWithMetadata(BaseModel):
 
     def load_event(self, registry: Sequence[type[Event]] = ()) -> Event:
         """
-        Attempts to load the event data as a python class based on the envelope metadata.
-        Looks up the event from the registry, if provided. Falls back to the qualified_name, attempting to load from the module path.
+        Load the event data using a class from the registry.
         """
         registry_lookup = {e.__name__: e for e in registry}
         as_event_envelope = EventEnvelope(
@@ -153,21 +151,36 @@ class EventEnvelope(BaseModel):
                     with decoder.validation_context():
                         return event_class.model_validate(event.value)
             if event.qualified_name:
-                module_class = (
-                    decoder.resolve_class(event.qualified_name)
-                    if decoder is not None
-                    else import_module_from_qualified_name(event.qualified_name)
-                )
-                if not issubclass(module_class, Event):
+                event_class = None
+                if decoder is not None:
+                    event_class = decoder.resolve_class(event.qualified_name)
+                else:
+                    event_class = next(
+                        (
+                            registered
+                            for registered in registry.values()
+                            if event.qualified_name
+                            in (
+                                f"{registered.__module__}.{registered.__qualname__}",
+                                f"{registered.__module__}.{registered.__name__}",
+                            )
+                        ),
+                        None,
+                    )
+                if event_class is None:
+                    errors.append(
+                        f"Invalid qualified event name: {event.qualified_name}"
+                    )
+                elif not issubclass(event_class, Event):
                     errors.append(
                         f"Invalid client data. Qualified name {event.qualified_name} does not correspond to an Event subclass"
                     )
                 else:
                     if decoder is None:
-                        return module_class.model_validate(event.value)
+                        return event_class.model_validate(event.value)
                     with decoder.validation_context():
-                        return module_class.model_validate(event.value)
-        except ValidationError as e:
+                        return event_class.model_validate(event.value)
+        except (TypeError, ValueError, ValidationError) as e:
             errors.append(f"Failed to deserialize event: {str(e)}")
         errors = (
             errors

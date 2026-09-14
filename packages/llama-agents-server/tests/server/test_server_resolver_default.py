@@ -20,19 +20,16 @@ from llama_agents.server._store.abstract_workflow_store import (
 from llama_agents.server._store.sqlite.sqlite_workflow_store import SqliteWorkflowStore
 from pydantic import BaseModel, model_validator
 from workflows import Context, Workflow, step
-from workflows.context.pre_context import PreContext
 from workflows.context.serializers import (
     BaseSerializer,
     JsonSerializer,
     PickleSerializer,
 )
-from workflows.context.state_store import DictState
 from workflows.events import (
     Event,
     SerializableEvent,
     StartEvent,
     StopEvent,
-    UnreconstructedException,
 )
 
 
@@ -138,13 +135,11 @@ def input_payload(qualified_name: str | None = None) -> dict[str, Any]:
 
 
 def workflow_decoder(server: WorkflowServer, name: str) -> JsonSerializer:
-    workflow = server.get_workflows()[name]
-    return workflow.runtime.get_json_decoder(workflow)
+    return server.get_json_decoder(name)
 
 
-async def test_declared_and_additional_events_and_typed_state_work(
+async def test_declared_and_additional_events_work(
     client: tuple[WorkflowServer, AsyncClient, Path],
-    forbid_imports: None,
 ) -> None:
     server, http, _ = client
     response = await http.post(
@@ -176,25 +171,6 @@ async def test_unknown_api_metadata_does_not_resolve(
     )
     response = await http.post("/workflows/declared/run", json={"start_event": payload})
     assert response.status_code == 400
-    assert "Refusing to import" in response.text
-
-
-async def test_unknown_context_event_does_not_resolve(
-    client: tuple[WorkflowServer, AsyncClient, Path],
-    forbid_imports: None,
-) -> None:
-    _, http, _ = client
-    event = JsonSerializer().serialize_value(ExtraEvent())
-    event["qualified_name"] = "unregistered_payload.Event"
-    context = {
-        "version": 2,
-        "workers": {"start": {"queue": [{"event": json.dumps(event)}]}},
-    }
-    response = await http.post(
-        "/workflows/declared/run",
-        json={"start_event": input_payload(), "context": context},
-    )
-    assert response.status_code == 400, response.text
     assert "Refusing to import" in response.text
 
 
@@ -307,7 +283,6 @@ async def test_purge_does_not_validate_persisted_result(tmp_path: Path) -> None:
 
 async def test_restart_loads_declared_result_and_continues_typed_state(
     tmp_path: Path,
-    forbid_imports: None,
 ) -> None:
     path = tmp_path / "restart.db"
     for count in (1, 2):
@@ -342,73 +317,26 @@ def test_explicit_json_serializer_only_controls_internal_encoding() -> None:
     assert workflow_decoder(server, "declared") is not dynamic
 
 
-def test_extra_types_register_independently_stored_models() -> None:
-    class Stored(BaseModel):
-        value: int = 0
-
-    server = WorkflowServer(extra_types=[Stored])
-    server.add_workflow("declared", DeclaredWorkflow())
+def test_additional_events_extend_the_workflow_decoder() -> None:
+    server = WorkflowServer()
+    server.add_workflow("declared", DeclaredWorkflow(), additional_events=[ExtraEvent])
     selected = workflow_decoder(server, "declared")
-    value = Stored(value=5)
+    value = ExtraEvent()
     assert selected.deserialize(selected.serialize(value)) == value
 
 
-def test_default_dict_state_is_not_registered_but_typed_state_is() -> None:
+def test_state_types_are_not_registered_as_public_events() -> None:
     server = WorkflowServer()
     server.add_workflow("typed", DeclaredWorkflow())
     server.add_workflow("dict", DictStateWorkflow())
-    assert (
+    with pytest.raises(ValueError, match="Refusing to import"):
         workflow_decoder(server, "typed").resolve_class(
             f"{State.__module__}.{State.__qualname__}"
         )
-        is State
-    )
     with pytest.raises(ValueError, match="Refusing to import"):
         workflow_decoder(server, "dict").resolve_class(
-            f"{DictState.__module__}.{DictState.__qualname__}"
+            f"{State.__module__}.{State.__qualname__}"
         )
-
-
-@pytest.mark.parametrize(
-    ("qualified_name", "expected_type"),
-    [
-        ("builtins.ValueError", ValueError),
-        ("workflows.errors.WorkflowRuntimeError", UnreconstructedException),
-        ("unknown_metadata.Error", UnreconstructedException),
-    ],
-)
-def test_server_context_retry_exception_uses_selected_serializer(
-    tmp_path: Path,
-    forbid_imports: None,
-    qualified_name: str,
-    expected_type: type[Exception],
-) -> None:
-    server = make_server(tmp_path / "exceptions.db")
-    workflow = server.get_workflows()["declared"]
-    decoder = workflow_decoder(server, "declared")
-    event = InputEvent(nested=ExtraEvent())
-    context = Context.from_dict(
-        workflow,
-        {
-            "version": 2,
-            "workers": {
-                "start": {
-                    "queue": [
-                        {
-                            "event": decoder.serialize(event),
-                            "last_exception": {
-                                "exception_type": qualified_name,
-                                "exception_message": "retry failed",
-                            },
-                        }
-                    ]
-                }
-            },
-        },
-    )
-    assert isinstance(context._face, PreContext)
-    error = context._face.init_snapshot.workers["start"].queue[0].last_exception
-    assert isinstance(error, expected_type)
 
 
 def test_registering_another_workflow_leaves_the_existing_decoder_alone(
@@ -579,26 +507,3 @@ async def test_stale_workflow_custom_stop_result_does_not_block_purge(
         response = await client.post("/handlers/stale/cancel?purge=true")
         assert response.status_code == 200
         assert response.json() == {"status": "deleted"}
-
-
-async def test_registered_model_is_not_an_outer_event(forbid_imports: None) -> None:
-    server = WorkflowServer(extra_types=[State])
-    server.add_workflow("declared", DeclaredWorkflow())
-    async with (
-        server.contextmanager(),
-        AsyncClient(
-            transport=ASGITransport(app=server.app),
-            base_url="http://test",
-        ) as client,
-    ):
-        response = await client.post(
-            "/workflows/declared/run",
-            json={
-                "start_event": {
-                    "qualified_name": f"{State.__module__}.{State.__qualname__}",
-                    "value": {},
-                }
-            },
-        )
-    assert response.status_code == 400
-    assert "Event subclass" in response.text

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator
 
@@ -12,10 +12,8 @@ import uvicorn
 from starlette.middleware import Middleware
 from workflows import Workflow
 from workflows.context.serializers import BaseSerializer, JsonSerializer
-from workflows.context.state_store import DictState, infer_state_type
-from workflows.events import _PERSISTED_FRAMEWORK_EVENT_TYPES, Event
+from workflows.events import Event
 from workflows.runtime.types.plugin import Runtime
-from workflows.runtime.types.ticks import _WORKFLOW_TICK_TYPES
 
 from ._api import _WorkflowAPI
 from ._runtime.persistence_runtime import RESUME_FRESH_HANDLER_GRACE
@@ -68,7 +66,6 @@ class WorkflowServer:
         sse_heartbeat_interval: float | None = 25.0,
         accept_context_api: bool = False,
         serializer: BaseSerializer | None = None,
-        extra_types: Iterable[type[Any]] = (),
     ):
         """Create a new workflow server.
 
@@ -99,19 +96,17 @@ class WorkflowServer:
                 Set to ``None`` to disable heartbeats. Only applies to SSE
                 mode; NDJSON streams are unaffected.
             serializer: Internal state and event serializer for workflows without
-                their own override. None uses the declared concrete classes.
-            extra_types: Classes to add to the default decoder. Models that are
-                stored inside an envelope of their own rather than as a field
-                of a declared model need to be listed here.
+                their own override.
             accept_context_api: Allow the ``"context"`` field in run request
                 bodies. Defaults to ``False``. Submitted state is decoded with
                 the workflow's selected serializer. Enable it when callers are
                 expected to supply a saved context.
         """
         self._serializer = serializer
-        self._extra_types = tuple(extra_types)
         self._additional_events: dict[str, tuple[type[Event], ...]] = {}
-        self._json_decoders: dict[str, JsonSerializer] = {}
+
+        def result_decoder(workflow_name: str) -> JsonSerializer:
+            return self._api.json_decoder(workflow_name)
 
         if runtime is None:
             self._runtime_core = _DurableWorkflowRuntime(
@@ -123,7 +118,7 @@ class WorkflowServer:
                 abort_active_on_stop=False,
                 persistence_backoff=list(persistence_backoff),
                 serializer=serializer,
-                result_decoder=self._json_decoders.__getitem__,
+                result_decoder=result_decoder,
             )
         else:
             self._runtime_core = _DurableWorkflowRuntime(
@@ -134,7 +129,7 @@ class WorkflowServer:
                 start_store_before_runtime=False,
                 persistence_backoff=list(persistence_backoff),
                 serializer=serializer,
-                result_decoder=self._json_decoders.__getitem__,
+                result_decoder=result_decoder,
                 wrap_runtime=False,
             )
         self._workflow_store = self._runtime_core._store
@@ -156,13 +151,8 @@ class WorkflowServer:
 
     @property
     def serializer(self) -> BaseSerializer | None:
-        """The explicitly configured internal default, or None to use the declared types."""
+        """Return the explicitly configured internal serializer, if any."""
         return self._serializer
-
-    @property
-    def extra_types(self) -> tuple[type[Any], ...]:
-        """Return the explicit extra JSON types configured on this server."""
-        return self._extra_types
 
     @property
     def additional_events(self) -> Mapping[str, tuple[type[Event], ...]]:
@@ -188,23 +178,15 @@ class WorkflowServer:
                 aren't discoverable from step signatures alone (e.g. events
                 consumed via ``ctx.wait_for_event()``).
         """
-        self._runtime_core.add_workflow(name, workflow, additional_events)
-
+        registered_additional_events = additional_events or []
+        self._runtime_core.add_workflow(name, workflow, registered_additional_events)
+        self._api.register_additional_events(name, registered_additional_events)
         if additional_events is not None:
-            self._api.register_additional_events(name, additional_events)
             self._additional_events[name] = tuple(additional_events)
 
-        state_type = infer_state_type(workflow)
-        declared = (
-            *_WORKFLOW_TICK_TYPES,
-            *_PERSISTED_FRAMEWORK_EVENT_TYPES,
-            *self._extra_types,
-            *self._api.get_workflow_events(name),
-            *((state_type,) if state_type is not DictState else ()),
-        )
-        self._json_decoders[name] = JsonSerializer(
-            allowed_types=tuple(dict.fromkeys(declared))
-        )
+    def get_json_decoder(self, workflow_name: str) -> JsonSerializer:
+        """Return the decoder for a workflow's public event types."""
+        return self._api.json_decoder(workflow_name)
 
     def get_workflows(self) -> dict[str, Workflow]:
         """Return registered workflows as a dict by name. Only available after start()."""

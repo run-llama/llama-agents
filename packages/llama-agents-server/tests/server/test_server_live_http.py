@@ -17,7 +17,7 @@ from server_test_fixtures import (  # type: ignore[import]
 )
 from server_test_fixtures import live_server as live_server_ctx  # type: ignore[import]
 from workflows import Workflow
-from workflows.events import StopEvent
+from workflows.events import StartEvent, StopEvent
 
 
 @pytest.fixture
@@ -54,7 +54,7 @@ async def test_streaming_over_real_http(
     # Stream until we see the RequestedExternalEvent, then respond and stop streaming
     saw_prompt = False
     async for ev in client.get_workflow_events(handler_id):
-        event = ev.load_event()
+        event = ev.load_event([StartEvent, RequestedExternalEvent, StopEvent])
         if isinstance(event, RequestedExternalEvent):
             saw_prompt = True
             sent = await client.send_event(handler_id, ExternalEvent(response="pong"))
@@ -83,7 +83,7 @@ async def test_reconnect_stream_and_send_event_succeeds(
     # 1) Connect and read until the first RequestedExternalEvent, then disconnect
     saw_prompt = False
     async for ev in client.get_workflow_events(handler_id):
-        event = ev.load_event()
+        event = ev.load_event([StartEvent, RequestedExternalEvent, StopEvent])
         if isinstance(event, RequestedExternalEvent):
             saw_prompt = True
             break  # simulate client disconnect
@@ -94,7 +94,7 @@ async def test_reconnect_stream_and_send_event_succeeds(
 
     async def _consume_again() -> None:
         async for ev in client.get_workflow_events(handler_id):
-            event = ev.load_event()
+            event = ev.load_event([StartEvent, RequestedExternalEvent, StopEvent])
             if isinstance(event, StopEvent):
                 stop_seen.set()
                 break
