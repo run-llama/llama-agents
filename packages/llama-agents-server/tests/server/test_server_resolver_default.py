@@ -6,7 +6,7 @@ import json
 import sqlite3
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -255,7 +255,7 @@ async def test_legacy_custom_store_query_signature_works_through_handler_apis(
         assert purged.json() == {"status": "deleted"}
 
 
-async def test_purge_does_not_validate_persisted_result(tmp_path: Path) -> None:
+async def test_purge_validates_readable_persisted_result(tmp_path: Path) -> None:
     store = SqliteWorkflowStore(db_path=str(tmp_path / "purge.db"))
     server = WorkflowServer(workflow_store=store)
     server.add_workflow("validated", ValidatedOutputWorkflow())
@@ -277,7 +277,7 @@ async def test_purge_does_not_validate_persisted_result(tmp_path: Path) -> None:
         response = await client.post("/handlers/purge/cancel?purge=true")
     assert response.status_code == 200
     assert response.json() == {"status": "deleted"}
-    assert ValidatedOutputEvent.validation_calls == 0
+    assert ValidatedOutputEvent.validation_calls > 0
 
 
 async def test_restart_loads_declared_result_and_continues_typed_state(
@@ -480,11 +480,9 @@ def test_unexpected_result_decoder_error_propagates() -> None:
         decode_persistent_handler(data, fail)
 
 
-@pytest.mark.parametrize("status", ["completed", "running"])
-async def test_stale_workflow_custom_stop_result_does_not_block_purge(
+async def test_unreadable_result_does_not_block_purge(
     tmp_path: Path,
     forbid_imports: None,
-    status: Literal["completed", "running"],
 ) -> None:
     server = WorkflowServer(
         workflow_store=SqliteWorkflowStore(db_path=str(tmp_path / "stale.db"))
@@ -500,7 +498,7 @@ async def test_stale_workflow_custom_stop_result_does_not_block_purge(
             PersistentHandler(
                 handler_id="stale",
                 workflow_name="removed",
-                status=status,
+                status="running",
                 run_id="removed-run",
                 result=OutputEvent.model_validate({"result": "done"}),
             )
@@ -515,9 +513,6 @@ async def test_stale_workflow_custom_stop_result_does_not_block_purge(
         assert response.status_code == 422
         response = await client.get("/results/stale")
         assert response.status_code == 422
-        if status == "completed":
-            response = await client.post("/handlers/stale/cancel")
-            assert response.status_code == 404
         response = await client.post("/handlers/stale/cancel?purge=true")
         assert response.status_code == 200
         assert response.json() == {"status": "deleted"}

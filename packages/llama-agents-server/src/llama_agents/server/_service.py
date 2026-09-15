@@ -191,27 +191,27 @@ class _WorkflowService:
     async def cancel_handler(
         self, handler_id: str, purge: bool = False
     ) -> Literal["cancelled", "deleted"] | None:
-        if purge:
-            n_deleted = await self._store.delete(
-                HandlerQuery(handler_id_in=[handler_id])
-            )
-            return "deleted" if n_deleted else None
-
         found = await self.query_handlers(HandlerQuery(handler_id_in=[handler_id]))
         if not found:
             return None
-        persisted = handler_data_from_persistent(found[0])
-        if not purge and (
-            persisted.run_id is None or is_terminal_status(persisted.status)
-        ):
+        persisted = found[0]
+        is_terminal = persisted.result_unreadable or is_terminal_status(
+            persisted.status
+        )
+        if not purge and (persisted.run_id is None or is_terminal):
             return None
 
-        is_terminal = is_terminal_status(persisted.status)
         if not is_terminal and persisted.run_id is not None:
             handler = self._workflow_run_handler(
                 persisted.workflow_name, persisted.run_id
             )
             await self._cancel_run(handler)
+
+        if purge:
+            n_deleted = await self._store.delete(
+                HandlerQuery(handler_id_in=[handler_id])
+            )
+            return "deleted" if n_deleted else None
 
         return "cancelled"
 
