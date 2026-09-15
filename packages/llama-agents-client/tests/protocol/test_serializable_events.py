@@ -269,7 +269,7 @@ def test_metadata_envelope_load_event_uses_serializer_for_nested_event() -> None
 
 
 def test_parse_unknown_type_with_empty_registry_has_clear_error() -> None:
-    with pytest.raises(EventValidationError, match="no event types are registered"):
+    with pytest.raises(EventValidationError, match="No event types are registered"):
         EventEnvelope.parse(client_data={"type": "MissingEvent", "value": {}})
 
 

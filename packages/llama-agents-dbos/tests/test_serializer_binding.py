@@ -28,7 +28,7 @@ async def test_dbos_state_facades_share_selected_serializer(
         assert adapter.get_state_store(namespace) is store
 
 
-def test_dbos_store_propagates_result_decoder_before_and_after_resolution() -> None:
+def test_dbos_store_propagates_result_decoder_before_resolution() -> None:
     def decoder(workflow_name: str) -> JsonSerializer:
         return JsonSerializer()
 
@@ -37,9 +37,3 @@ def test_dbos_store_propagates_result_decoder_before_and_after_resolution() -> N
     before.result_decoder = decoder
     assert before._resolve() is before_inner
     assert before_inner.result_decoder is decoder
-
-    after_inner = MemoryWorkflowStore()
-    after = DBOSWorkflowStore(lambda: after_inner)
-    assert after._resolve() is after_inner
-    after.result_decoder = decoder
-    assert after_inner.result_decoder is decoder

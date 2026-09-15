@@ -166,7 +166,7 @@ class EventEnvelope(BaseModel):
                         )
                     else:
                         errors.append(
-                            f"Invalid event type: {event.type} because no event types are registered"
+                            f"Invalid event type: {event.type}. No event types are registered."
                         )
                 else:
                     event_class = registry[event.type]

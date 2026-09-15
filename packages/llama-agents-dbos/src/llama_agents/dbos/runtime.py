@@ -35,7 +35,6 @@ from llama_agents.server._store import (
 from llama_agents.server._store.abstract_workflow_store import (
     AbstractWorkflowStore,
     HandlerQuery,
-    HandlerResultDecoder,
     PersistentHandler,
     StoredEvent,
     StoredTick,
@@ -159,19 +158,10 @@ class DBOSWorkflowStore(AbstractWorkflowStore):
         super().__init__()
         self._factory = factory
 
-    @property
-    def result_decoder(self) -> HandlerResultDecoder | None:
-        return self._result_decoder
-
-    @result_decoder.setter
-    def result_decoder(self, value: HandlerResultDecoder | None) -> None:
-        self._result_decoder = value
-        if self._inner is not None:
-            self._inner.result_decoder = value
-
     def _resolve(self) -> AbstractWorkflowStore:
         if self._inner is None:
             inner = self._factory()
+            # Copy the binding here because the server binds before first use.
             inner.result_decoder = self.result_decoder
             self._inner = inner
         return self._inner
