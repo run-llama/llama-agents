@@ -147,8 +147,10 @@ class JsonSerializer(BaseSerializer):
             return
         if qualified_name not in self._allowed_type_names:
             raise ValueError(
-                f"Refusing to import disallowed workflow state type: {qualified_name}. "
-                "Pass it via allowed_types to the JsonSerializer constructor."
+                f"Class {qualified_name} is not in the serializer's allowed types. "
+                f"Pass JsonSerializer(allowed_types=[{qualified_name}]) on the workflow "
+                "or server to allow it, or pass JsonSerializer() to resolve classes by "
+                "import path."
             )
 
     def with_types(self, *classes: type[Any]) -> JsonSerializer:

@@ -107,7 +107,7 @@ def test_colliding_wire_names_raise() -> None:
 @pytest.mark.parametrize("kind", ["__is_pydantic", "__is_component"])
 def test_unregistered_names_do_not_resolve(kind: str, forbid_imports: None) -> None:
     serializer = registered()
-    with pytest.raises(ValueError, match="Refusing to import"):
+    with pytest.raises(ValueError, match="not in the serializer's allowed types"):
         serializer.deserialize(
             json.dumps({kind: True, "qualified_name": "unknown.Type", "value": {}})
         )
@@ -116,7 +116,7 @@ def test_unregistered_names_do_not_resolve(kind: str, forbid_imports: None) -> N
 def test_serialization_does_not_register_types(forbid_imports: None) -> None:
     serializer = registered()
     payload = serializer.serialize(Payload(value=1))
-    with pytest.raises(ValueError, match="Refusing to import"):
+    with pytest.raises(ValueError, match="not in the serializer's allowed types"):
         serializer.deserialize(payload)
 
 
@@ -125,7 +125,7 @@ def test_string_entries_only_restrict_names() -> None:
     payload = Payload(value=2)
     assert permissive.deserialize(permissive.serialize(payload)) == payload
 
-    with pytest.raises(ValueError, match="Refusing to import disallowed"):
+    with pytest.raises(ValueError, match="not in the serializer's allowed types"):
         permissive.deserialize(JsonSerializer().serialize(Event()))
 
 
@@ -189,7 +189,7 @@ def test_component_from_dict_uses_the_registry(forbid_imports: None) -> None:
     assert isinstance(serializer.deserialize(payload), ComponentWithEvent)
 
     restricted = registered(ComponentWithEvent)
-    with pytest.raises(ValueError, match="Refusing to import"):
+    with pytest.raises(ValueError, match="not in the serializer's allowed types"):
         restricted.deserialize(payload)
 
 
@@ -223,7 +223,7 @@ def test_builtin_and_placeholder_exceptions_need_no_imports(
 def test_active_serializer_is_restored_after_error() -> None:
     serializer = registered(NestedEvent)
     event = NestedEvent(event=Event(), event_type=WorkflowFailedEvent)
-    with pytest.raises(ValueError, match="Refusing to import"):
+    with pytest.raises(ValueError, match="not in the serializer's allowed types"):
         serializer.deserialize(serializer.serialize(event))
     restored = NestedEvent.model_validate(
         JsonSerializer().serialize_value(event)["value"]

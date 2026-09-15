@@ -1163,7 +1163,7 @@ def test_decode_state_respects_json_serializer_allowed_types() -> None:
     state_data, _, _ = encode_state(state, serializer)
     restricted_serializer = JsonSerializer(allowed_types=[DictState])
 
-    with pytest.raises(ValueError, match="Refusing to import disallowed"):
+    with pytest.raises(ValueError, match="not in the serializer's allowed types"):
         decode_state(state_data, restricted_serializer)
 
 

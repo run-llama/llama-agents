@@ -1,6 +1,8 @@
 ---
 "llama-index-workflows": minor
-"llama-agents-server": patch
+"llama-agents-server": minor
+"llama-agents-dbos": minor
+"llama-agents-appserver": minor
 ---
 
 The default serializer for persisted workflow state now resolves only the workflow's declared event and state types.

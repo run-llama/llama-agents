@@ -111,7 +111,7 @@ curl -s -X POST http://localhost:8080/api/events/<handler_id> \
   -d '{"event": {"type": "UserInput", "value": {"response": "Alice"}}}'
 ```
 
-`GET /api/events/{handler_id}?after_sequence=-1` shows events emitted before the client connected.
+`GET /api/events/{handler_id}?after_sequence=-1` shows events emitted before the client connected and streams until the run finishes.
 
 ```bash
 # Get result

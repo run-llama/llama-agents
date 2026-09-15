@@ -348,7 +348,7 @@ def test_allowlisted_serializer_rejects_user_type_inside_tick() -> None:
     serializer = JsonSerializer(allowed_types=[])
     tick = TickAddEvent(event=MyEvent(value="blocked"))
 
-    with pytest.raises(ValueError, match="Refusing to import disallowed"):
+    with pytest.raises(ValueError, match="not in the serializer's allowed types"):
         serializer.deserialize(serializer.serialize(tick))
 
 

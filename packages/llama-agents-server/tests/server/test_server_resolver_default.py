@@ -171,10 +171,11 @@ async def test_unknown_api_metadata_does_not_resolve(
     response = await http.post("/workflows/declared/run", json={"start_event": payload})
     assert response.status_code == 400
     if nested:
-        assert "Refusing to import" in response.text
+        assert "is not in the serializer's allowed types" in response.text
     else:
         assert (
-            "Event type unregistered_payload.Event is not declared by this workflow."
+            "Event type unregistered_payload.Event is not declared by this workflow. "
+            "Register it with add_workflow(..., additional_events=[...])."
             in response.text
         )
 
@@ -334,11 +335,11 @@ def test_state_types_are_not_registered_as_public_events() -> None:
     server = WorkflowServer()
     server.add_workflow("typed", DeclaredWorkflow())
     server.add_workflow("dict", DictStateWorkflow())
-    with pytest.raises(ValueError, match="Refusing to import"):
+    with pytest.raises(ValueError, match="not in the serializer's allowed types"):
         workflow_decoder(server, "typed").resolve_class(
             f"{State.__module__}.{State.__qualname__}"
         )
-    with pytest.raises(ValueError, match="Refusing to import"):
+    with pytest.raises(ValueError, match="not in the serializer's allowed types"):
         workflow_decoder(server, "dict").resolve_class(
             f"{State.__module__}.{State.__qualname__}"
         )
@@ -354,7 +355,7 @@ def test_registering_another_workflow_leaves_the_existing_decoder_alone(
     server.add_workflow("second", DeclaredWorkflow(), additional_events=[ExtraEvent])
     assert workflow_decoder(server, "first") is before
     value = ExtraEvent()
-    with pytest.raises(ValueError, match="Refusing to import"):
+    with pytest.raises(ValueError, match="not in the serializer's allowed types"):
         before.deserialize(before.serialize(value))
 
 
@@ -409,7 +410,8 @@ async def test_run_api_does_not_resolve_another_workflows_event() -> None:
     assert response.status_code == 400
     assert (
         f"Event type {LaterInput.__module__}.{LaterInput.__qualname__} "
-        "is not declared by this workflow."
+        "is not declared by this workflow. Register it with "
+        "add_workflow(..., additional_events=[...])."
     ) in response.text
 
 

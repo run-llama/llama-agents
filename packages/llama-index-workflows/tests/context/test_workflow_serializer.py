@@ -66,7 +66,7 @@ def test_standalone_default_resolves_declared_types_only() -> None:
         ValueError,
         match=(
             r"test_workflow_serializer\.UndeclaredValue.*"
-            r"Pass it via allowed_types to the JsonSerializer constructor"
+            r"Pass JsonSerializer\(allowed_types="
         ),
     ):
         first.deserialize(first.serialize(value))
@@ -83,7 +83,7 @@ async def test_default_context_restore_rejects_undeclared_store_value() -> None:
         ValueError,
         match=(
             r"test_workflow_serializer\.UndeclaredValue.*"
-            r"Pass it via allowed_types to the JsonSerializer constructor"
+            r"Pass JsonSerializer\(allowed_types="
         ),
     ):
         await workflow.run(ctx=Context.from_dict(workflow, context.to_dict()))
@@ -130,7 +130,7 @@ def test_runtime_json_serializer_adds_workflow_declared_types() -> None:
     ):
         assert selected.deserialize(selected.serialize(value)) == value
     value = UndeclaredValue(value="missing")
-    with pytest.raises(ValueError, match="Refusing to import disallowed"):
+    with pytest.raises(ValueError, match="not in the serializer's allowed types"):
         selected.deserialize(selected.serialize(value))
 
 
@@ -143,7 +143,7 @@ def test_empty_allowlist_resolves_only_workflow_declared_types() -> None:
     assert selected.deserialize(selected.serialize(WorkflowState())) == WorkflowState()
 
     value = UndeclaredValue(value="missing")
-    with pytest.raises(ValueError, match="Refusing to import disallowed"):
+    with pytest.raises(ValueError, match="not in the serializer's allowed types"):
         selected.deserialize(selected.serialize(value))
 
 

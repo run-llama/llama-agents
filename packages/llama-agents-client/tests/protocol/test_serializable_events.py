@@ -162,7 +162,8 @@ def test_parse_rejects_framework_qualified_name_outside_registry() -> None:
             registry={"ModuleScopeEvent": ModuleScopeEvent},
         )
     assert str(exc_info.value) == (
-        f"Event type {qualified_name} is not declared by this workflow."
+        f"Event type {qualified_name} is not declared by this workflow. "
+        "Register it with add_workflow(..., additional_events=[...])."
     )
 
 
@@ -171,7 +172,10 @@ def test_parse_with_unregistered_qualified_name_raises() -> None:
     payload = {"qualified_name": qn, "value": {"x": 7}}
     with pytest.raises(EventValidationError) as exc_info:
         EventEnvelope.parse(client_data=payload)
-    assert str(exc_info.value) == f"Event type {qn} is not declared by this workflow."
+    assert str(exc_info.value) == (
+        f"Event type {qn} is not declared by this workflow. "
+        "Register it with add_workflow(..., additional_events=[...])."
+    )
 
 
 def test_parse_with_type_unknown_but_registered_qualified_name() -> None:
@@ -268,7 +272,9 @@ def test_metadata_envelope_load_event_with_serializer() -> None:
         f"{ModuleScopeOtherEvent.__module__}.{ModuleScopeOtherEvent.__name__}"
     )
     assert str(exc_info.value) == (
-        f"Event type {qualified_name} is not declared by this workflow."
+        f"Class {qualified_name} is not in the serializer's allowed types. "
+        f"Pass JsonSerializer(allowed_types=[{qualified_name}]) on the workflow or "
+        "server to allow it, or pass JsonSerializer() to resolve classes by import path."
     )
 
 
