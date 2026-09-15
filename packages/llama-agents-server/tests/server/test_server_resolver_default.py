@@ -518,6 +518,7 @@ async def test_unreadable_result_does_not_block_purge(
         assert stale["handler_id"] == "stale"
         assert stale["workflow_name"] == "removed"
         assert stale["result"] is None
+        assert stale["result_unreadable"] is True
         response = await client.get("/handlers/stale")
         assert response.status_code == 422
         response = await client.get("/results/stale")

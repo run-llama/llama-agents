@@ -82,6 +82,7 @@ def handler_data_from_persistent(persistent: PersistentHandler) -> HandlerData:
         result=EventEnvelopeWithMetadata.from_event(persistent.result)
         if persistent.result is not None
         else None,
+        result_unreadable=persistent.result_unreadable,
     )
 
 
