@@ -9,7 +9,7 @@ import json
 import pickle
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, get_origin
 
 from pydantic import BaseModel
 
@@ -110,7 +110,11 @@ class JsonSerializer(BaseSerializer):
                 if isinstance(entry, str):
                     names.add(entry)
                     continue
-                if not isinstance(entry, type) or entry is Any:
+                if (
+                    get_origin(entry) is not None
+                    or not isinstance(entry, type)
+                    or entry is Any
+                ):
                     raise TypeError(
                         "allowed_types entries must be concrete classes or legacy names"
                     )
