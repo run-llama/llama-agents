@@ -174,6 +174,12 @@ class EventEnvelope(BaseModel):
             if event.qualified_name:
                 # This deprecated path is kept for older clients.
                 event_class = decoder.resolve_class(event.qualified_name)
+                if registry and event_class not in registry.values():
+                    raise ValueError(
+                        "Refusing to import disallowed workflow state type: "
+                        f"{event.qualified_name}. Pass it via allowed_types to the "
+                        "JsonSerializer constructor."
+                    )
                 if not issubclass(event_class, Event):
                     errors.append(
                         f"Invalid client data. Qualified name {event.qualified_name} does not correspond to an Event subclass"

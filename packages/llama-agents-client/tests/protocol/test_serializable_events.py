@@ -14,6 +14,7 @@ from llama_agents.client.protocol.serializable_events import (
 )
 from workflows.context.serializers import JsonSerializer
 from workflows.events import (
+    CollectionReleaseEvent,
     Event,
     SerializableEvent,
     StepState,
@@ -149,6 +150,17 @@ def test_parse_with_registered_qualified_name_success() -> None:
     ev = EventEnvelope.parse(client_data=payload, registry={"event": ModuleScopeEvent})
     assert isinstance(ev, ModuleScopeEvent)
     assert ev.x == 7
+
+
+def test_parse_rejects_framework_qualified_name_outside_registry() -> None:
+    qualified_name = (
+        f"{CollectionReleaseEvent.__module__}.{CollectionReleaseEvent.__name__}"
+    )
+    with pytest.raises(EventValidationError, match="Failed to deserialize event"):
+        EventEnvelope.parse(
+            client_data={"qualified_name": qualified_name, "value": {}},
+            registry={"ModuleScopeEvent": ModuleScopeEvent},
+        )
 
 
 def test_parse_with_unregistered_qualified_name_raises() -> None:
