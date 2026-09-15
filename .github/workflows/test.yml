@@ -148,8 +148,13 @@ jobs:
           python-version: "3.14"
           enable-cache: true
 
-      - name: Build appserver wheel
-        run: uv build --wheel --package llama-agents-appserver --out-dir dist
+      - name: Build internal package wheels
+        run: |
+          uv build --wheel --package llama-index-workflows --out-dir dist
+          uv build --wheel --package llama-agents-client --out-dir dist
+          uv build --wheel --package llama-agents-core --out-dir dist
+          uv build --wheel --package llama-agents-server --out-dir dist
+          uv build --wheel --package llama-agents-appserver --out-dir dist
 
       - name: Resolve package dependencies
         run: >-
@@ -157,15 +162,19 @@ jobs:
           packages/llama-agents-appserver/pyproject.toml
           --no-sources
           --resolution ${{ matrix.resolution }}
+          --no-emit-package llama-index-workflows
+          --no-emit-package llama-agents-client
+          --no-emit-package llama-agents-core
+          --no-emit-package llama-agents-server
           --output-file "${RUNNER_TEMP}/appserver-requirements.txt"
 
-      - name: Install appserver wheel
+      - name: Install internal package wheels
         run: |
           uv venv "${RUNNER_TEMP}/appserver-venv"
           uv pip install \
             --python "${RUNNER_TEMP}/appserver-venv/bin/python" \
             --requirements "${RUNNER_TEMP}/appserver-requirements.txt" \
-            dist/llama_agents_appserver-*.whl
+            dist/*.whl
 
       - name: Smoke test installed appserver
         run: |
