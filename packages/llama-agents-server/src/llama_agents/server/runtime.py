@@ -108,9 +108,16 @@ class _DurableWorkflowRuntime:
         self._active_handlers: dict[str, WorkflowHandler] = {}
         self._started = False
 
-    def add_workflow(self, name: str, workflow: Workflow) -> None:
+    def add_workflow(
+        self,
+        name: str,
+        workflow: Workflow,
+        additional_events: list[type[Event]] | None = None,
+    ) -> None:
         """Register a workflow under a stable name for new runs and resume."""
         self._service.add_workflow(name, workflow)
+        if additional_events is not None:
+            self._runtime.register_additional_events(name, additional_events)
 
     async def start(self) -> _DurableWorkflowRuntime:
         """Start the store and runtime, resuming existing runs if enabled."""

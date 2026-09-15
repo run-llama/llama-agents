@@ -189,6 +189,7 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
             serializer if serializer is not None else JsonSerializer()
         )
         self._registered_workflows: dict[str, Workflow] = {}
+        self._additional_events: dict[str, tuple[type[Event], ...]] = {}
         self._initial_state: dict[str, Any] = {}
         self._persistence_backoff = (
             list(persistence_backoff) if persistence_backoff is not None else [0.5, 3]
@@ -229,7 +230,20 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
         super().untrack_workflow(workflow)
 
     def get_serializer(self, workflow: Workflow) -> BaseSerializer:
-        return workflow.serializer or self._default_serializer
+        serializer = workflow.serializer or self._default_serializer
+        return self._compose_serializer(
+            workflow,
+            serializer,
+            *self._additional_events.get(workflow.workflow_name, ()),
+        )
+
+    def register_additional_events(
+        self, workflow_name: str, events: list[type[Event]]
+    ) -> None:
+        self._additional_events[workflow_name] = tuple(events)
+        workflow = self.get_workflow(workflow_name)
+        if workflow is not None:
+            self._clear_serializer_cache(workflow)
 
     def get_workflow(self, name: str) -> Workflow | None:
         return self._registered_workflows.get(name)

@@ -151,6 +151,15 @@ class JsonSerializer(BaseSerializer):
                 "Pass it via allowed_types to the JsonSerializer constructor."
             )
 
+    def with_types(self, *classes: type[Any]) -> JsonSerializer:
+        """Return a serializer that also resolves the given classes."""
+        if self._allowed_type_names is None:
+            return self
+
+        registered = tuple(dict.fromkeys(self._registered_types.values()))
+        legacy_names = self._allowed_type_names - self._registered_types.keys()
+        return JsonSerializer(allowed_types=(*registered, *legacy_names, *classes))
+
     @contextmanager
     def validation_context(self) -> Iterator[None]:
         """Make this serializer's class lookup available to nested validators."""

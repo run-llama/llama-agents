@@ -166,7 +166,7 @@ class WorkflowServer:
                 aren't discoverable from step signatures alone (e.g. events
                 consumed via ``ctx.wait_for_event()``).
         """
-        self._service.add_workflow(name, workflow)
+        self._runtime_core.add_workflow(name, workflow, additional_events)
 
         if additional_events is not None:
             self._api.register_additional_events(name, additional_events)

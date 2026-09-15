@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 from workflows import Context, Workflow, step
 from workflows.context.context_types import SerializedContext
 from workflows.context.pre_context import PreContext
@@ -14,11 +15,30 @@ from workflows.context.serializers import (
     PickleSerializer,
 )
 from workflows.events import StartEvent, StopEvent, UnreconstructedException
+from workflows.runtime.types.ticks import TickAddEvent
+
+
+class WorkflowState(BaseModel):
+    count: int = 0
+
+
+class UserValue(BaseModel):
+    value: str
+
+
+class UndeclaredValue(BaseModel):
+    value: str
 
 
 class ExampleWorkflow(Workflow):
     @step
     async def start(self, ev: StartEvent) -> StopEvent:
+        return StopEvent(result="ok")
+
+
+class TypedWorkflow(Workflow):
+    @step
+    async def start(self, ctx: Context[WorkflowState], ev: StartEvent) -> StopEvent:
         return StopEvent(result="ok")
 
 
@@ -40,6 +60,38 @@ def test_standalone_default_remains_json() -> None:
     first = workflow.runtime.get_serializer(workflow)
     assert type(first) is JsonSerializer
     assert workflow.runtime.get_serializer(workflow) is first
+
+
+def test_runtime_json_serializer_adds_workflow_declared_types() -> None:
+    configured = JsonSerializer(allowed_types=[UserValue])
+    workflow = TypedWorkflow(serializer=configured)
+
+    selected = workflow.runtime.get_serializer(workflow)
+
+    assert selected is workflow.runtime.get_serializer(workflow)
+    assert selected is not configured
+    for value in (
+        TickAddEvent(event=StartEvent()),
+        WorkflowState(count=1),
+        UserValue(value="configured"),
+    ):
+        assert selected.deserialize(selected.serialize(value)) == value
+    value = UndeclaredValue(value="missing")
+    with pytest.raises(ValueError, match="Refusing to import disallowed"):
+        selected.deserialize(selected.serialize(value))
+
+
+def test_empty_allowlist_resolves_only_workflow_declared_types() -> None:
+    workflow = TypedWorkflow(serializer=JsonSerializer(allowed_types=[]))
+    selected = workflow.runtime.get_serializer(workflow)
+
+    tick = TickAddEvent(event=StartEvent())
+    assert selected.deserialize(selected.serialize(tick)) == tick
+    assert selected.deserialize(selected.serialize(WorkflowState())) == WorkflowState()
+
+    value = UndeclaredValue(value="missing")
+    with pytest.raises(ValueError, match="Refusing to import disallowed"):
+        selected.deserialize(selected.serialize(value))
 
 
 def test_snapshot_retry_exception_uses_selected_serializer(

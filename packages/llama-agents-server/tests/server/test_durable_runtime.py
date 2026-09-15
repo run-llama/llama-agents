@@ -217,9 +217,7 @@ async def test_allowlisted_serializer_resumes_released_hitl_workflow(
 ) -> None:
     handler_id = "allowlisted-reload-1"
     workflow = WaitingWorkflow()
-    serializer = JsonSerializer(
-        allowed_types=[StartEvent, StopEvent, WaitableExternalEvent]
-    )
+    serializer = JsonSerializer(allowed_types=[])
     server = WorkflowServer(
         workflow_store=sqlite_store,
         idle_timeout=0.01,

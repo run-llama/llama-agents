@@ -28,6 +28,10 @@ class PythonEvent(Event):
     pass
 
 
+class AdditionalEvent(Event):
+    pass
+
+
 class PythonWorkflow(Workflow):
     @step
     async def start(self, ctx: Context, ev: StartEvent) -> PythonEvent:
@@ -54,6 +58,20 @@ class CustomSerializer(BaseSerializer):
         self.decodes += 1
         assert value.startswith("custom:")
         return pickle.loads(base64.b64decode(value.removeprefix("custom:")))
+
+
+def test_server_serializer_adds_additional_events() -> None:
+    configured = JsonSerializer(allowed_types=[])
+    workflow = PythonWorkflow()
+    server = WorkflowServer(serializer=configured)
+    server.add_workflow("python", workflow, additional_events=[AdditionalEvent])
+
+    selected = workflow.runtime.get_serializer(workflow)
+
+    assert selected is workflow.runtime.get_serializer(workflow)
+    assert selected is not configured
+    event = AdditionalEvent()
+    assert selected.deserialize(selected.serialize(event)) == event
 
 
 @pytest.mark.parametrize("use_workflow_override", [True, False])

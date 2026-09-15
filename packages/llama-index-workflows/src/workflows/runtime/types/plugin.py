@@ -23,7 +23,7 @@ from typing import (
 )
 
 from workflows.context.serializers import BaseSerializer, JsonSerializer
-from workflows.context.state_store import StateStore
+from workflows.context.state_store import DictState, StateStore, infer_state_type
 from workflows.events import Event, StartEvent, StopEvent
 from workflows.runtime.types.named_task import (
     NamedTask,
@@ -472,6 +472,9 @@ class Runtime(ABC):
 
     def __init__(self) -> None:
         self._default_serializer = JsonSerializer()
+        self._serializer_cache: weakref.WeakKeyDictionary[Workflow, BaseSerializer] = (
+            weakref.WeakKeyDictionary()
+        )
         self._pending: WorkflowSet = WorkflowSet()
         self._launched: bool = False
 
@@ -581,11 +584,35 @@ class Runtime(ABC):
 
     def get_serializer(self, workflow: Workflow) -> BaseSerializer:
         """Return the workflow's serializer, or this runtime's default if it has none."""
-        return (
+        serializer = (
             workflow.serializer
             if workflow.serializer is not None
             else self._default_serializer
         )
+        return self._compose_serializer(workflow, serializer)
+
+    def _compose_serializer(
+        self,
+        workflow: Workflow,
+        serializer: BaseSerializer,
+        *additional_types: type[Any],
+    ) -> BaseSerializer:
+        cached = self._serializer_cache.get(workflow)
+        if cached is not None:
+            return cached
+
+        if isinstance(serializer, JsonSerializer):
+            state_type = infer_state_type(workflow)
+            declared_types: list[type[Any]] = [*workflow.events, *additional_types]
+            if state_type is not DictState:
+                declared_types.append(state_type)
+            serializer = serializer.with_types(*declared_types)
+
+        self._serializer_cache[workflow] = serializer
+        return serializer
+
+    def _clear_serializer_cache(self, workflow: Workflow) -> None:
+        self._serializer_cache.pop(workflow, None)
 
     def track_workflow(self, workflow: Workflow) -> None:
         """
