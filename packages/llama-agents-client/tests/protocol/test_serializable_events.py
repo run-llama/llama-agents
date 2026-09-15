@@ -258,7 +258,7 @@ def test_metadata_envelope_load_event_allows_framework_event_with_registry() -> 
 def test_metadata_envelope_load_event_rejects_custom_event_outside_registry() -> None:
     envelope = EventEnvelopeWithMetadata.from_event(ModuleScopeOtherEvent(y=7))
 
-    with pytest.raises(EventValidationError, match="Invalid event type"):
+    with pytest.raises(EventValidationError, match="ModuleScopeOtherEvent"):
         envelope.load_event([ModuleScopeEvent])
 
 
