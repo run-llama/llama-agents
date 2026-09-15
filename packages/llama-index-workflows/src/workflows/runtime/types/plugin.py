@@ -471,7 +471,7 @@ class Runtime(ABC):
     """
 
     def __init__(self) -> None:
-        self._default_serializer = JsonSerializer()
+        self._default_serializer = JsonSerializer(allowed_types=[])
         self._serializer_cache: weakref.WeakKeyDictionary[Workflow, BaseSerializer] = (
             weakref.WeakKeyDictionary()
         )

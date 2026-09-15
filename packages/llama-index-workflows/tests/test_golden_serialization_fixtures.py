@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 from workflows import Context, Workflow
+from workflows.context.serializers import JsonSerializer
 from workflows.decorators import step
 from workflows.events import Event, HumanResponseEvent, StartEvent, StopEvent
 from workflows.runtime.control_loop.reduce import _reduce_tick, rewind_in_progress
@@ -108,7 +109,9 @@ async def test_golden_snapshot_loads_and_resumes() -> None:
     snapshot = _load("snapshot.json")
     meta = _load("snapshot_meta.json")
 
-    workflow = GoldenSnapshotWorkflow()
+    workflow = GoldenSnapshotWorkflow(
+        serializer=JsonSerializer(allowed_types=[HumanResponse])
+    )
     ctx = Context.from_dict(workflow, snapshot)
     handler = workflow.run(ctx=ctx)
     handler.ctx.send_event(HumanResponse(response="42"))

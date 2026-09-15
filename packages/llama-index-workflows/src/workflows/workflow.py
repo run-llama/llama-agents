@@ -131,8 +131,8 @@ class Workflow(metaclass=WorkflowMeta):
                 If not provided, a module-qualified name is computed from
                 the class's `__module__` and `__qualname__` attributes.
             serializer (BaseSerializer | None): Explicit internal state and event
-                serializer. None uses the runtime default, which is legacy JSON
-                for standalone workflows.
+                serializer. None uses the runtime default, which resolves the
+                workflow's declared event and state types.
             skip_graph_checks (set[str] | None): Optional set of graph validation
                 checks to skip (e.g. "reachability", "terminal_event"). Use to
                 allow intentional patterns that would otherwise fail validation.

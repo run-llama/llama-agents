@@ -186,7 +186,7 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
         super().__init__(decorated)
         self._store: AbstractWorkflowStore = store
         self._default_serializer = (
-            serializer if serializer is not None else JsonSerializer()
+            serializer if serializer is not None else JsonSerializer(allowed_types=[])
         )
         self._registered_workflows: dict[str, Workflow] = {}
         self._additional_events: dict[str, tuple[type[Event], ...]] = {}

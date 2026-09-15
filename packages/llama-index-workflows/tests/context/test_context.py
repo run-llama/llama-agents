@@ -320,7 +320,7 @@ async def test_wait_for_event_in_workflow_serialization() -> None:
             )
             return StopEvent(result=result.msg)
 
-    workflow = TestWorkflow()
+    workflow = TestWorkflow(serializer=JsonSerializer(allowed_types=[Event]))
     handler = workflow.run()
     ctx_dict = None
 
@@ -426,7 +426,10 @@ async def test_to_dict_after_stream_events_break_resumes() -> None:
             )
             return StopEvent(result=response.response)
 
-    workflow = WaiterWorkflow(timeout=1.0)
+    workflow = WaiterWorkflow(
+        timeout=1.0,
+        serializer=JsonSerializer(allowed_types=[NamedResponseEvent]),
+    )
     handler = workflow.run()
 
     async for ev in handler.stream_events():
@@ -469,7 +472,10 @@ async def test_legacy_implicit_waiter_id_survives_serialization_resume() -> None
             )
             return StopEvent(result=response.response)
 
-    workflow = WaiterWorkflow(timeout=1.0)
+    workflow = WaiterWorkflow(
+        timeout=1.0,
+        serializer=JsonSerializer(allowed_types=[NamedResponseEvent]),
+    )
     handler = workflow.run()
 
     async for ev in handler.stream_events():
@@ -704,7 +710,10 @@ async def test_parallel_identical_implicit_waiters_are_not_collapsed() -> None:
 async def test_parallel_implicit_waiters_survive_snapshot_resume() -> None:
     """The per-invocation waiter ids must round-trip: snapshot three suspended
     fan-out branches, restore, and every branch still resolves."""
-    workflow = ParallelImplicitWaiterWorkflow(timeout=5.0)
+    workflow = ParallelImplicitWaiterWorkflow(
+        timeout=5.0,
+        serializer=JsonSerializer(allowed_types=[HumanResponseEvent]),
+    )
     handler = workflow.run()
     prefixes: set[str] = set()
 
@@ -785,7 +794,10 @@ async def test_requirements_waiter_survives_snapshot_resume() -> None:
             )
             return StopEvent(result=response.response)
 
-    workflow = ReqWaiterWorkflow(timeout=5.0)
+    workflow = ReqWaiterWorkflow(
+        timeout=5.0,
+        serializer=JsonSerializer(allowed_types=[HumanResponseEvent]),
+    )
     handler = workflow.run()
     async for ev in handler.stream_events():
         if isinstance(ev, InputRequiredEvent):

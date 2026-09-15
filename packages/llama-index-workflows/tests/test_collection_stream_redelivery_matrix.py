@@ -22,6 +22,7 @@ from typing import Annotated
 import pytest
 from workflows import Context, Workflow, catch_error, step
 from workflows.collect import Collect, Take
+from workflows.context.serializers import JsonSerializer
 from workflows.events import (
     CollectionReleaseEvent,
     Event,
@@ -382,7 +383,10 @@ def _waiter_branch_workflow() -> type[Workflow]:
 
 async def test_resume_with_unresolved_waiter_in_branch() -> None:
     """Snapshot while one branch is parked on wait_for_event, resume, approve."""
-    wf = _waiter_branch_workflow()(timeout=20)
+    wf = _waiter_branch_workflow()(
+        timeout=20,
+        serializer=JsonSerializer(allowed_types=[Approval]),
+    )
     handler = wf.run()
     async for ev in handler.stream_events():
         if isinstance(ev, ApprovalRequired):
@@ -390,7 +394,10 @@ async def test_resume_with_unresolved_waiter_in_branch() -> None:
     await asyncio.sleep(0.2)  # let the other members settle into the join buffer
     snapshot = await _snapshot_cancel(handler)
 
-    wf2 = _waiter_branch_workflow()(timeout=20)
+    wf2 = _waiter_branch_workflow()(
+        timeout=20,
+        serializer=JsonSerializer(allowed_types=[Approval]),
+    )
     restored = Context.from_dict(wf2, snapshot)
     handler2 = wf2.run(ctx=restored)
     drain = asyncio.create_task(_drain(handler2))

@@ -54,12 +54,65 @@ async def test_workflow_serializer_is_read_only_and_used_for_context() -> None:
     assert await workflow.run(ctx=context) == "ok"
 
 
-def test_standalone_default_remains_json() -> None:
+def test_standalone_default_resolves_declared_types_only() -> None:
     workflow = ExampleWorkflow()
     assert workflow.serializer is None
     first = workflow.runtime.get_serializer(workflow)
     assert type(first) is JsonSerializer
     assert workflow.runtime.get_serializer(workflow) is first
+
+    value = UndeclaredValue(value="missing")
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"test_workflow_serializer\.UndeclaredValue.*"
+            r"Pass it via allowed_types to the JsonSerializer constructor"
+        ),
+    ):
+        first.deserialize(first.serialize(value))
+
+
+@pytest.mark.asyncio
+async def test_default_context_restore_rejects_undeclared_store_value() -> None:
+    workflow = ExampleWorkflow()
+    context = Context(workflow)
+    await workflow.run(ctx=context)
+    await context.store.set("value", UndeclaredValue(value="missing"))
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"test_workflow_serializer\.UndeclaredValue.*"
+            r"Pass it via allowed_types to the JsonSerializer constructor"
+        ),
+    ):
+        await workflow.run(ctx=Context.from_dict(workflow, context.to_dict()))
+
+
+@pytest.mark.asyncio
+async def test_default_context_restore_resolves_typed_state_model() -> None:
+    workflow = TypedWorkflow()
+    context = Context(workflow)
+    await workflow.run(ctx=context)
+    async with context.store.edit_state() as state:
+        state.count = 3
+
+    restored = Context.from_dict(workflow, context.to_dict())
+
+    assert await restored.store.get_state() == WorkflowState(count=3)
+
+
+@pytest.mark.asyncio
+async def test_explicit_open_serializer_restores_undeclared_store_value() -> None:
+    workflow = ExampleWorkflow(serializer=JsonSerializer())
+    context = Context(workflow)
+    value = UndeclaredValue(value="allowed")
+    await workflow.run(ctx=context)
+    await context.store.set("value", value)
+
+    restored = Context.from_dict(workflow, context.to_dict())
+
+    assert await restored.store.get("value") == value
 
 
 def test_runtime_json_serializer_adds_workflow_declared_types() -> None:
