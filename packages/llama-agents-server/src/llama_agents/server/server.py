@@ -99,8 +99,9 @@ class WorkflowServer:
                 their own override.
             accept_context_api: Allow the ``"context"`` field in run request
                 bodies. Defaults to ``False``. Submitted state is decoded with
-                the workflow's selected serializer. Enable it when callers are
-                expected to supply a saved context.
+                the workflow's selected serializer. An open ``JsonSerializer()``
+                on the workflow or server resolves any importable class. Enable
+                it when callers are expected to supply a saved context.
         """
         self._serializer = serializer
         self._additional_events: dict[str, tuple[type[Event], ...]] = {}
