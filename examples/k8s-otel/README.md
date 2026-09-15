@@ -86,14 +86,14 @@ kubectl port-forward -n llama-k8s-otel svc/phoenix 6006:6006 &
 
 ```bash
 # Start the counter without waiting (returns handler_id)
-curl -s -X POST http://localhost:8080/workflows/counter/run-nowait \
+curl -s -X POST http://localhost:8080/api/workflows/counter/run-nowait \
   -H 'Content-Type: application/json' -d '{}'
 
 # Check result (after ~20s)
-curl -s http://localhost:8080/results/<handler_id>
+curl -s http://localhost:8080/api/results/<handler_id>
 
 # Or run synchronously (blocks until done)
-curl -s -X POST http://localhost:8080/workflows/counter/run \
+curl -s -X POST http://localhost:8080/api/workflows/counter/run \
   -H 'Content-Type: application/json' -d '{}'
 ```
 
@@ -101,17 +101,21 @@ curl -s -X POST http://localhost:8080/workflows/counter/run \
 
 ```bash
 # Start — returns a handler_id
-curl -s -X POST http://localhost:8080/workflows/greeter/run-nowait \
+curl -s -X POST http://localhost:8080/api/workflows/greeter/run-nowait \
   -H 'Content-Type: application/json' -d '{}'
 # {"handler_id": "abc123", ...}
 
 # Send user input
-curl -s -X POST http://localhost:8080/events/<handler_id> \
+curl -s -X POST http://localhost:8080/api/events/<handler_id> \
   -H 'Content-Type: application/json' \
   -d '{"event": {"type": "UserInput", "value": {"response": "Alice"}}}'
+```
 
+`GET /api/events/{handler_id}?after_sequence=-1` shows events emitted before the client connected.
+
+```bash
 # Get result
-curl -s http://localhost:8080/results/<handler_id>
+curl -s http://localhost:8080/api/results/<handler_id>
 ```
 
 ### View Traces
