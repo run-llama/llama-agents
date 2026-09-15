@@ -156,18 +156,22 @@ def test_parse_rejects_framework_qualified_name_outside_registry() -> None:
     qualified_name = (
         f"{CollectionReleaseEvent.__module__}.{CollectionReleaseEvent.__name__}"
     )
-    with pytest.raises(EventValidationError, match="Failed to deserialize event"):
+    with pytest.raises(EventValidationError) as exc_info:
         EventEnvelope.parse(
             client_data={"qualified_name": qualified_name, "value": {}},
             registry={"ModuleScopeEvent": ModuleScopeEvent},
         )
+    assert str(exc_info.value) == (
+        f"Event type {qualified_name} is not declared by this workflow."
+    )
 
 
 def test_parse_with_unregistered_qualified_name_raises() -> None:
     qn = f"{ModuleScopeEvent.__module__}.{ModuleScopeEvent.__name__}"
     payload = {"qualified_name": qn, "value": {"x": 7}}
-    with pytest.raises(EventValidationError, match="Failed to deserialize event"):
+    with pytest.raises(EventValidationError) as exc_info:
         EventEnvelope.parse(client_data=payload)
+    assert str(exc_info.value) == f"Event type {qn} is not declared by this workflow."
 
 
 def test_parse_with_type_unknown_but_registered_qualified_name() -> None:
@@ -258,8 +262,14 @@ def test_metadata_envelope_load_event_with_serializer() -> None:
     assert loaded.x == 42
 
     other_envelope = EventEnvelopeWithMetadata.from_event(ModuleScopeOtherEvent(y=7))
-    with pytest.raises(EventValidationError, match="Failed to deserialize event"):
+    with pytest.raises(EventValidationError) as exc_info:
         other_envelope.load_event(serializer=serializer)
+    qualified_name = (
+        f"{ModuleScopeOtherEvent.__module__}.{ModuleScopeOtherEvent.__name__}"
+    )
+    assert str(exc_info.value) == (
+        f"Event type {qualified_name} is not declared by this workflow."
+    )
 
 
 def test_metadata_envelope_load_event_uses_serializer_for_nested_event() -> None:

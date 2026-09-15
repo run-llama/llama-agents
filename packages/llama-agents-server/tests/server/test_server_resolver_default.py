@@ -170,7 +170,13 @@ async def test_unknown_api_metadata_does_not_resolve(
     )
     response = await http.post("/workflows/declared/run", json={"start_event": payload})
     assert response.status_code == 400
-    assert "Refusing to import" in response.text
+    if nested:
+        assert "Refusing to import" in response.text
+    else:
+        assert (
+            "Event type unregistered_payload.Event is not declared by this workflow."
+            in response.text
+        )
 
 
 @pytest.mark.parametrize(
@@ -401,7 +407,10 @@ async def test_run_api_does_not_resolve_another_workflows_event() -> None:
             },
         )
     assert response.status_code == 400
-    assert "Refusing to import" in response.text
+    assert (
+        f"Event type {LaterInput.__module__}.{LaterInput.__qualname__} "
+        "is not declared by this workflow."
+    ) in response.text
 
 
 def test_qualified_name_collisions_are_scoped_to_each_workflow() -> None:
