@@ -10,7 +10,20 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError, model_validator
 from workflows.context.serializers import JsonSerializer
-from workflows.events import Event
+from workflows.events import (
+    Event,
+    HumanResponseEvent,
+    InputRequiredEvent,
+    StartEvent,
+    StopEvent,
+)
+
+FRAMEWORK_EVENT_TYPES = (
+    StartEvent,
+    StopEvent,
+    InputRequiredEvent,
+    HumanResponseEvent,
+)
 
 
 class EventEnvelopeWithMetadata(BaseModel):
@@ -35,16 +48,21 @@ class EventEnvelopeWithMetadata(BaseModel):
     ) -> Event:
         """
         Load the event data using the given serializer when provided.
-        A non-empty registry limits resolution to its event classes.
+        A non-empty registry also permits framework event classes.
         With neither, a default serializer resolves classes by qualified name.
         """
-        if serializer is None:
-            serializer = (
-                JsonSerializer(allowed_types=list(registry))
-                if registry
-                else JsonSerializer()
-            )
         registry_lookup = {e.__name__: e for e in registry}
+        if serializer is None:
+            if registry:
+                registry_lookup = {
+                    **{event.__name__: event for event in FRAMEWORK_EVENT_TYPES},
+                    **registry_lookup,
+                }
+                serializer = JsonSerializer(
+                    allowed_types=list(registry_lookup.values())
+                )
+            else:
+                serializer = JsonSerializer()
         as_event_envelope = EventEnvelope(
             value=self.value, type=self.type, qualified_name=self.qualified_name
         ).model_dump()

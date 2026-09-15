@@ -238,6 +238,22 @@ def test_metadata_envelope_load_event_with_registry() -> None:
     assert loaded.z == 42
 
 
+def test_metadata_envelope_load_event_allows_framework_event_with_registry() -> None:
+    envelope = EventEnvelopeWithMetadata.from_event(StopEvent(result="done"))
+
+    loaded = envelope.load_event([ModuleScopeEvent])
+
+    assert isinstance(loaded, StopEvent)
+    assert loaded.result == "done"
+
+
+def test_metadata_envelope_load_event_rejects_custom_event_outside_registry() -> None:
+    envelope = EventEnvelopeWithMetadata.from_event(ModuleScopeOtherEvent(y=7))
+
+    with pytest.raises(EventValidationError, match="Invalid event type"):
+        envelope.load_event([ModuleScopeEvent])
+
+
 def test_metadata_envelope_load_event_resolves_qualified_name() -> None:
     event = ModuleScopeEvent(x=42)
     envelope = EventEnvelopeWithMetadata.from_event(event)
