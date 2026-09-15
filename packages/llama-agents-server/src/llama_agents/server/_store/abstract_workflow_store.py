@@ -123,13 +123,12 @@ class AbstractWorkflowStore(ABC):
     """
 
     poll_interval: float = 0.1
-    # The server sets this once at construction. Stores call it with a handler's
-    # workflow name when decoding a stored result. A store instance is used by
-    # one running server at a time.
-    result_decoder: HandlerResultDecoder | None  # pyright: ignore[reportRedeclaration]
 
     def __init__(self) -> None:
-        self.result_decoder = None
+        # The server sets this once at construction. Stores call it with a handler's
+        # workflow name when decoding a stored result. A store instance is used by
+        # one running server at a time.
+        self.result_decoder: HandlerResultDecoder | None = None
         # Per-run facade cache: the single memoization site for state stores.
         # Weak-valued by default so facades die with their last consumer.
         # Backends needing a different lifecycle (strong refs + explicit
@@ -137,14 +136,6 @@ class AbstractWorkflowStore(ABC):
         self._state_store_cache: MutableMapping[
             tuple[str, tuple[str, ...]], StateStoreFacade[Any]
         ] = weakref.WeakValueDictionary()
-
-    @property
-    def result_decoder(self) -> HandlerResultDecoder | None:
-        return self._result_decoder
-
-    @result_decoder.setter
-    def result_decoder(self, value: HandlerResultDecoder | None) -> None:
-        self._result_decoder = value
 
     async def start(self) -> None:
         """Initialize backend resources. Default is a no-op."""
