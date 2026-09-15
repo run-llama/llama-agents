@@ -203,10 +203,14 @@ class _WorkflowService:
             return None
 
         if not is_terminal and persisted.run_id is not None:
-            handler = self._workflow_run_handler(
-                persisted.workflow_name, persisted.run_id
+            workflow_registered = (
+                self._runtime.get_workflow(persisted.workflow_name) is not None
             )
-            await self._cancel_run(handler)
+            if workflow_registered or not purge:
+                handler = self._workflow_run_handler(
+                    persisted.workflow_name, persisted.run_id
+                )
+                await self._cancel_run(handler)
 
         if purge:
             n_deleted = await self._store.delete(

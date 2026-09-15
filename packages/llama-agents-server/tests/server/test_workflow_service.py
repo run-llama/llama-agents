@@ -16,7 +16,11 @@ from llama_agents.server import (
     PersistentHandler,
     WorkflowServer,
 )
-from llama_agents.server._service import EventSendError, HandlerCompletedError
+from llama_agents.server._service import (
+    EventSendError,
+    HandlerCompletedError,
+    HandlerNotFoundError,
+)
 from pydantic import BaseModel
 from server_test_fixtures import (  # type: ignore[import]
     ErrorWorkflow,
@@ -162,6 +166,32 @@ async def test_purge_running_handler_cancels_runtime(
         assert not await memory_store.query(
             HandlerQuery(handler_id_in=["purge-running-1"])
         )
+
+
+@pytest.mark.asyncio
+async def test_purge_running_handler_with_unregistered_workflow(
+    memory_store: MemoryWorkflowStore,
+) -> None:
+    server = WorkflowServer(workflow_store=memory_store)
+    await memory_store.update(
+        PersistentHandler(
+            handler_id="removed-workflow",
+            workflow_name="removed",
+            status="running",
+            run_id="removed-run",
+        )
+    )
+
+    with pytest.raises(HandlerNotFoundError, match="removed"):
+        await server._service.cancel_handler("removed-workflow")
+    assert await memory_store.query(HandlerQuery(handler_id_in=["removed-workflow"]))
+
+    result = await server._service.cancel_handler("removed-workflow", purge=True)
+
+    assert result == "deleted"
+    assert not await memory_store.query(
+        HandlerQuery(handler_id_in=["removed-workflow"])
+    )
 
 
 @pytest.mark.asyncio
