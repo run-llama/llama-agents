@@ -50,10 +50,8 @@ from workflows.workflow import Workflow
 from .._store.abstract_workflow_store import (
     AbstractWorkflowStore,
     HandlerQuery,
-    HandlerResultDecoder,
     Status,
     as_legacy_context_store,
-    query_handlers,
     stream_workflow_ticks,
 )
 from .._store.sqlite.sqlite_state_store import SqliteStateStore
@@ -149,12 +147,9 @@ class TickPersistenceDecorator(BaseRuntimeDecorator):
         self,
         decorated: Runtime,
         store: AbstractWorkflowStore,
-        *,
-        result_decoder: HandlerResultDecoder | None = None,
     ) -> None:
         super().__init__(decorated)
         self._store = store
-        self._result_decoder = result_decoder
         self._workflows_by_name: dict[str, Workflow] = {}
         self._active_run_ids: set[str] = set()
 
@@ -311,9 +306,8 @@ class PersistenceDecorator(TickPersistenceDecorator):
         store: AbstractWorkflowStore,
         *,
         resume_fresh_handler_grace: timedelta | None = RESUME_FRESH_HANDLER_GRACE,
-        result_decoder: HandlerResultDecoder | None = None,
     ) -> None:
-        super().__init__(decorated, store, result_decoder=result_decoder)
+        super().__init__(decorated, store)
         self._resume_fresh_handler_grace = resume_fresh_handler_grace
         self._background_tasks: set[asyncio.Task[None]] = set()
         self.resume_task: asyncio.Task[None] | None = None
@@ -338,14 +332,12 @@ class PersistenceDecorator(TickPersistenceDecorator):
         resume_started_at: datetime,
     ) -> None:
         """Resume previously running (non-idle) workflows from persistence."""
-        handlers = await query_handlers(
-            self._store,
+        handlers = await self._store.query(
             HandlerQuery(
                 status_in=["running"],
                 workflow_name_in=list(registered_workflows.keys()),
                 is_idle=False,
             ),
-            result_decoder=self._result_decoder,
         )
         for persistent in handlers:
             if (
@@ -384,7 +376,6 @@ class PersistenceDecorator(TickPersistenceDecorator):
                         run_id,
                         status="failed",
                         error="handler crashed before persisting any state; cannot resume",
-                        result_decoder=self._result_decoder,
                     )
                     continue
 
@@ -407,7 +398,6 @@ class PersistenceDecorator(TickPersistenceDecorator):
                         status=status,
                         result=result,
                         error=error,
-                        result_decoder=self._result_decoder,
                     )
                     continue
 
@@ -421,7 +411,6 @@ class PersistenceDecorator(TickPersistenceDecorator):
                         run_id,
                         status="failed",
                         error=str(e),
-                        result_decoder=self._result_decoder,
                     )
                 except Exception:
                     logger.exception(

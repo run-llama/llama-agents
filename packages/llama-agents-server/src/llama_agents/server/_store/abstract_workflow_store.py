@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import weakref
 from abc import ABC, abstractmethod
@@ -18,7 +17,8 @@ from llama_agents.client.protocol.serializable_events import (
 )
 from pydantic import (
     BaseModel,
-    PrivateAttr,
+    Field,
+    ValidationError,
     ValidationInfo,
     field_serializer,
     field_validator,
@@ -64,8 +64,6 @@ class HandlerQuery:
 
 
 class PersistentHandler(BaseModel):
-    _result_decoding_failed: bool = PrivateAttr(default=False)
-
     handler_id: str
     workflow_name: str
     status: Status
@@ -76,6 +74,7 @@ class PersistentHandler(BaseModel):
     updated_at: datetime | None = None
     completed_at: datetime | None = None
     idle_since: datetime | None = None
+    result_unreadable: bool = Field(default=False, exclude=True, repr=False)
 
     @field_validator("result", mode="before")
     @classmethod
@@ -117,9 +116,16 @@ class StoredEvent(BaseModel):
 
 
 class AbstractWorkflowStore(ABC):
+    """Persistence backend for workflow state.
+
+    One server binds one store instance to its result decoder. Sharing a store
+    instance between concurrently running servers is not supported.
+    """
+
     poll_interval: float = 0.1
 
     def __init__(self) -> None:
+        self.result_decoder = None
         # Per-run facade cache: the single memoization site for state stores.
         # Weak-valued by default so facades die with their last consumer.
         # Backends needing a different lifecycle (strong refs + explicit
@@ -127,6 +133,14 @@ class AbstractWorkflowStore(ABC):
         self._state_store_cache: MutableMapping[
             tuple[str, tuple[str, ...]], StateStoreFacade[Any]
         ] = weakref.WeakValueDictionary()
+
+    @property
+    def result_decoder(self) -> HandlerResultDecoder | None:
+        return self._result_decoder
+
+    @result_decoder.setter
+    def result_decoder(self, value: HandlerResultDecoder | None) -> None:
+        self._result_decoder = value
 
     async def start(self) -> None:
         """Initialize backend resources. Default is a no-op."""
@@ -180,9 +194,7 @@ class AbstractWorkflowStore(ABC):
         """Construct the backend facade for a (run, namespace). No caching."""
 
     @abstractmethod
-    async def query(
-        self, query: HandlerQuery, *, result_decoder: HandlerResultDecoder | None = None
-    ) -> list[PersistentHandler]: ...
+    async def query(self, query: HandlerQuery) -> list[PersistentHandler]: ...
 
     @abstractmethod
     async def update(self, handler: PersistentHandler) -> None: ...
@@ -231,16 +243,13 @@ class AbstractWorkflowStore(ABC):
         result: StopEvent | None = None,
         error: str | None = None,
         idle_since: datetime | None | _Unset = _UNSET,
-        result_decoder: HandlerResultDecoder | None = None,
     ) -> None:
         """Update status and related fields for an existing handler.
 
         Loads the handler by run_id, updates status/timestamps/provided fields,
         and writes back. If the handler is not found, logs a warning and returns.
         """
-        found = await query_handlers(
-            self, HandlerQuery(run_id_in=[run_id]), result_decoder=result_decoder
-        )
+        found = await self.query(HandlerQuery(run_id_in=[run_id]))
         if not found:
             logger.warning("update_handler_status: run %s not found, skipping", run_id)
             return
@@ -335,11 +344,18 @@ def decode_persistent_handler(
             else None
         )
         return PersistentHandler.model_validate(data, context=context)
-    except Exception as exc:
+    except (
+        ValidationError,
+        ValueError,
+        KeyError,
+        ImportError,
+        AttributeError,
+        TypeError,
+    ) as exc:
         if data.get("result") is None:
             raise
         handler = PersistentHandler.model_validate({**data, "result": None})
-        handler._result_decoding_failed = True
+        handler.result_unreadable = True
         logger.warning(
             "Could not decode persisted handler result: handler_id=%r workflow_name=%r error=%s",
             data.get("handler_id"),
@@ -347,21 +363,3 @@ def decode_persistent_handler(
             type(exc).__name__,
         )
         return handler
-
-
-def _handler_result_decoding_failed(handler: PersistentHandler) -> bool:
-    return handler._result_decoding_failed
-
-
-async def query_handlers(
-    store: AbstractWorkflowStore,
-    query: HandlerQuery,
-    *,
-    result_decoder: HandlerResultDecoder | None = None,
-) -> list[PersistentHandler]:
-    if (
-        result_decoder is None
-        or "result_decoder" not in inspect.signature(store.query).parameters
-    ):
-        return await store.query(query)
-    return await store.query(query, result_decoder=result_decoder)

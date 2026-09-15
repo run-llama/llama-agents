@@ -6,17 +6,14 @@ import base64
 import json
 import pickle
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from llama_agents.server import WorkflowServer
 from llama_agents.server._store.abstract_workflow_store import (
-    AbstractWorkflowStore,
     HandlerQuery,
     PersistentHandler,
-    _handler_result_decoding_failed,
-    query_handlers,
     stream_workflow_ticks,
 )
 from llama_agents.server._store.sqlite.sqlite_workflow_store import SqliteWorkflowStore
@@ -144,7 +141,8 @@ async def test_store_selects_decoder_by_row_workflow_before_validation(
         "first": JsonSerializer(allowed_types=[FirstStop]),
         "second": JsonSerializer(allowed_types=[SecondStop]),
     }
-    handlers = await store.query(HandlerQuery(), result_decoder=decoders.__getitem__)
+    store.result_decoder = decoders.__getitem__
+    handlers = await store.query(HandlerQuery())
     assert {type(handler.result) for handler in handlers} == {FirstStop, SecondStop}
 
     def fail(name: str) -> Any:
@@ -166,10 +164,10 @@ async def test_store_selects_decoder_by_row_workflow_before_validation(
             ),
         )
         connection.commit()
-    handlers = await store.query(HandlerQuery(), result_decoder=decoders.__getitem__)
+    handlers = await store.query(HandlerQuery())
     restored = {handler.handler_id: handler for handler in handlers}
     assert restored["first"].result is None
-    assert _handler_result_decoding_failed(restored["first"])
+    assert restored["first"].result_unreadable
     assert isinstance(restored["second"].result, SecondStop)
     assert "handler_id='first' workflow_name='first' error=" in caplog.text
     assert "unregistered_payload" not in caplog.text
@@ -210,20 +208,3 @@ async def test_unreadable_persisted_result_is_reported_over_http(
     assert result.status_code == 422
     assert listing.status_code == 200
     assert listing.json()["handlers"][0]["result"] is None
-
-
-async def test_legacy_custom_query_signature_is_used_without_decoder(
-    tmp_path: Path,
-) -> None:
-    class LegacyStore:
-        async def query(self, query: HandlerQuery) -> list[PersistentHandler]:
-            return []
-
-    store = cast(AbstractWorkflowStore, LegacyStore())
-    assert await query_handlers(store, HandlerQuery()) == []
-    assert (
-        await query_handlers(
-            store, HandlerQuery(), result_decoder=lambda name: JsonSerializer()
-        )
-        == []
-    )

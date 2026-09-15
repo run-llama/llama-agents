@@ -51,7 +51,6 @@ from ._store.abstract_workflow_store import (
     AbstractWorkflowStore,
     HandlerQuery,
     Status,
-    _handler_result_decoding_failed,
     is_terminal_status,
 )
 
@@ -622,7 +621,7 @@ class _WorkflowAPI:
         persistent = await self._service.load_persistent_handler(handler_id)
         if persistent is None:
             raise HTTPException(detail="Handler not found", status_code=404)
-        if _handler_result_decoding_failed(persistent):
+        if persistent.result_unreadable:
             raise HTTPException(
                 detail="Stored handler result cannot be decoded", status_code=422
             )

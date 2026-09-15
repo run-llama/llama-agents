@@ -19,6 +19,7 @@ def test_stop_event_round_trip() -> None:
     handler = PersistentHandler(**_base_handler_kwargs(), result=StopEvent(result=1))
 
     dumped = handler.model_dump(mode="python")
+    assert "result_unreadable" not in dumped
     restored = PersistentHandler(**dumped)
     assert isinstance(restored.result, StopEvent)
     assert restored.result.result == 1

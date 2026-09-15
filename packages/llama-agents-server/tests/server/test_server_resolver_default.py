@@ -14,7 +14,6 @@ from llama_agents.server import MemoryWorkflowStore, WorkflowServer
 from llama_agents.server._store.abstract_workflow_store import (
     HandlerQuery,
     PersistentHandler,
-    _handler_result_decoding_failed,
     decode_persistent_handler,
 )
 from llama_agents.server._store.sqlite.sqlite_workflow_store import SqliteWorkflowStore
@@ -463,7 +462,22 @@ async def test_persisted_result_outside_workflow_types_does_not_decode(
 
     assert restored is not None
     assert restored.result is None
-    assert _handler_result_decoding_failed(restored)
+    assert restored.result_unreadable
+
+
+def test_unexpected_result_decoder_error_propagates() -> None:
+    data = {
+        "handler_id": "handler",
+        "workflow_name": "workflow",
+        "status": "completed",
+        "result": {"result": 1},
+    }
+
+    def fail(workflow_name: str) -> JsonSerializer:
+        raise RuntimeError(workflow_name)
+
+    with pytest.raises(RuntimeError, match="workflow"):
+        decode_persistent_handler(data, fail)
 
 
 @pytest.mark.parametrize("status", ["completed", "running"])

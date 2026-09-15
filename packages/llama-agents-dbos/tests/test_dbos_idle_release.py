@@ -340,11 +340,6 @@ def decorator(
     return _make_decorator(stub_runtime, store, mock_journal_crud, lifecycle)
 
 
-def test_result_decoder_is_required(decorator: DBOSIdleReleaseDecorator) -> None:
-    with pytest.raises(RuntimeError, match="A workflow result decoder is required"):
-        decorator._get_result_decoder("test")
-
-
 # -- Helpers ---------------------------------------------------------------
 
 

@@ -39,8 +39,6 @@ from .._keyed_lock import KeyedLock
 from .._store.abstract_workflow_store import (
     AbstractWorkflowStore,
     HandlerQuery,
-    HandlerResultDecoder,
-    query_handlers,
 )
 from .persistence_runtime import TickPersistenceDecorator
 
@@ -58,7 +56,6 @@ class _IdleReleaseInternalRunAdapter(BaseInternalRunAdapterDecorator):
     ) -> None:
         super().__init__(decorated)
         self._runtime = runtime
-        self._result_decoder = runtime._result_decoder
         self._store = store
 
     @override
@@ -69,7 +66,6 @@ class _IdleReleaseInternalRunAdapter(BaseInternalRunAdapterDecorator):
                 run_id=self.run_id,
                 status="running",
                 idle_since=idle_since,
-                result_decoder=self._result_decoder,
             )
         await super().write_to_event_stream(event)
         if isinstance(event, WorkflowIdleEvent):
@@ -110,7 +106,6 @@ class IdleReleaseExternalRunAdapter(BaseExternalRunAdapterDecorator):
                 await self._runtime._store.update_handler_status(
                     run_id=self.run_id,
                     idle_since=None,
-                    result_decoder=self._runtime._result_decoder,
                 )
             await self._decorated.send_event(tick)
 
@@ -127,12 +122,9 @@ class IdleReleaseDecorator(BaseRuntimeDecorator):
         decorated: TickPersistenceDecorator,
         store: AbstractWorkflowStore,
         idle_timeout: float = 60.0,
-        *,
-        result_decoder: HandlerResultDecoder | None = None,
     ) -> None:
         super().__init__(decorated)
         self._store = store
-        self._result_decoder = result_decoder
         self._persistence: TickPersistenceDecorator = decorated
         self._reload_lock = KeyedLock()
         self._active_run_ids: set[str] = set()
@@ -183,11 +175,7 @@ class IdleReleaseDecorator(BaseRuntimeDecorator):
     async def _release_idle_handler(self, run_id: str) -> None:
         """Release an idle handler from memory."""
         async with self._reload_lock(run_id):
-            handlers = await query_handlers(
-                self._store,
-                HandlerQuery(run_id_in=[run_id]),
-                result_decoder=self._result_decoder,
-            )
+            handlers = await self._store.query(HandlerQuery(run_id_in=[run_id]))
             if len(handlers) != 1 or handlers[0].idle_since is None:
                 return
             elapsed = (
@@ -221,11 +209,7 @@ class IdleReleaseDecorator(BaseRuntimeDecorator):
     async def _ensure_active_run_locked(self, run_id: str) -> None:
         if run_id in self._active_run_ids:
             return
-        handlers = await query_handlers(
-            self._store,
-            HandlerQuery(run_id_in=[run_id]),
-            result_decoder=self._result_decoder,
-        )
+        handlers = await self._store.query(HandlerQuery(run_id_in=[run_id]))
         if len(handlers) != 1:
             raise ValueError(
                 f"Expected 1 handler for run {run_id}, got {len(handlers)}"
@@ -241,7 +225,6 @@ class IdleReleaseDecorator(BaseRuntimeDecorator):
         await self._store.update_handler_status(
             run_id=run_id,
             idle_since=None,
-            result_decoder=self._result_decoder,
         )
         logger.info(
             f"Reloaded workflow [handler_id={handler.handler_id}, run_id={run_id}] from persistence"

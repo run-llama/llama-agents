@@ -31,10 +31,8 @@ from workflows.workflow import Workflow
 from ._store.abstract_workflow_store import (
     AbstractWorkflowStore,
     HandlerQuery,
-    HandlerResultDecoder,
     PersistentHandler,
     is_terminal_status,
-    query_handlers,
 )
 
 logger = logging.getLogger(__name__)
@@ -103,12 +101,9 @@ class _WorkflowService:
         self,
         runtime: ServerRuntimeDecorator,
         store: AbstractWorkflowStore,
-        *,
-        result_decoder: HandlerResultDecoder | None = None,
     ) -> None:
         self._runtime: ServerRuntimeDecorator = runtime
         self._store = store
-        self._result_decoder = result_decoder
 
     # ------------------------------------------------------------------
     # Workflow registration
@@ -140,9 +135,7 @@ class _WorkflowService:
         return self._store
 
     async def query_handlers(self, query: HandlerQuery) -> list[PersistentHandler]:
-        return await query_handlers(
-            self._store, query, result_decoder=self._result_decoder
-        )
+        return await self._store.query(query)
 
     # ------------------------------------------------------------------
     # Handler lifecycle

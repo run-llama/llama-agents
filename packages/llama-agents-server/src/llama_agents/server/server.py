@@ -118,7 +118,6 @@ class WorkflowServer:
                 abort_active_on_stop=False,
                 persistence_backoff=list(persistence_backoff),
                 serializer=serializer,
-                result_decoder=result_decoder,
             )
         else:
             self._runtime_core = _DurableWorkflowRuntime(
@@ -129,10 +128,10 @@ class WorkflowServer:
                 start_store_before_runtime=False,
                 persistence_backoff=list(persistence_backoff),
                 serializer=serializer,
-                result_decoder=result_decoder,
                 wrap_runtime=False,
             )
         self._workflow_store = self._runtime_core._store
+        self._workflow_store.result_decoder = result_decoder
         self._runtime = self._runtime_core._runtime
         self._service = self._runtime_core._service
 
