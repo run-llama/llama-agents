@@ -123,6 +123,10 @@ class AbstractWorkflowStore(ABC):
     """
 
     poll_interval: float = 0.1
+    # The server sets this once at construction. Stores call it with a handler's
+    # workflow name when decoding a stored result. A store instance is used by
+    # one running server at a time.
+    result_decoder: HandlerResultDecoder | None  # pyright: ignore[reportRedeclaration]
 
     def __init__(self) -> None:
         self.result_decoder = None
