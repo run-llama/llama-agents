@@ -661,6 +661,10 @@ class _WorkflowAPI:
             raise HTTPException(detail="Handler not found", status_code=404)
 
         persistent = found[0]
+        if persistent.result_unreadable:
+            raise HTTPException(
+                detail="Stored handler result cannot be decoded", status_code=422
+            )
         run_id = persistent.run_id
         if run_id is None:
             raise HTTPException(detail="Handler has no associated run", status_code=404)

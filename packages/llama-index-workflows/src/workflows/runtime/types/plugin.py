@@ -61,6 +61,7 @@ class WaitResultTimeout:
 
 
 WaitResult = WaitResultTick | WaitResultTimeout
+SerializerCacheEntry = tuple[tuple[type[Any], ...], BaseSerializer]
 
 
 @dataclass
@@ -472,9 +473,9 @@ class Runtime(ABC):
 
     def __init__(self) -> None:
         self._default_serializer = JsonSerializer(allowed_types=[])
-        self._serializer_cache: weakref.WeakKeyDictionary[Workflow, BaseSerializer] = (
-            weakref.WeakKeyDictionary()
-        )
+        self._serializer_cache: weakref.WeakKeyDictionary[
+            Workflow, SerializerCacheEntry
+        ] = weakref.WeakKeyDictionary()
         self._pending: WorkflowSet = WorkflowSet()
         self._launched: bool = False
 
@@ -598,8 +599,8 @@ class Runtime(ABC):
         *additional_types: type[Any],
     ) -> BaseSerializer:
         cached = self._serializer_cache.get(workflow)
-        if cached is not None:
-            return cached
+        if cached is not None and cached[0] == additional_types:
+            return cached[1]
 
         if isinstance(serializer, JsonSerializer):
             state_type = infer_state_type(workflow)
@@ -608,7 +609,7 @@ class Runtime(ABC):
                 declared_types.append(state_type)
             serializer = serializer.with_types(*declared_types)
 
-        self._serializer_cache[workflow] = serializer
+        self._serializer_cache[workflow] = (additional_types, serializer)
         return serializer
 
     def _clear_serializer_cache(self, workflow: Workflow) -> None:

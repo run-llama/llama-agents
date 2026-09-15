@@ -476,6 +476,36 @@ async def test_persisted_result_outside_workflow_types_does_not_decode(
     assert restored.result_unreadable
 
 
+async def test_event_stream_rejects_unreadable_result(
+    tmp_path: Path,
+    forbid_imports: None,
+) -> None:
+    server = WorkflowServer(
+        workflow_store=SqliteWorkflowStore(db_path=str(tmp_path / "unreadable.db"))
+    )
+    server.add_workflow("renamed", DeclaredWorkflow())
+    async with (
+        server.contextmanager(),
+        AsyncClient(
+            transport=ASGITransport(app=server.app), base_url="http://test"
+        ) as client,
+    ):
+        await server._workflow_store.update(
+            PersistentHandler(
+                handler_id="unreadable",
+                workflow_name="removed",
+                status="completed",
+                run_id="removed-run",
+                result=OutputEvent.model_validate({"result": "done"}),
+            )
+        )
+
+        response = await client.get("/events/unreadable?after_sequence=-1")
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Stored handler result cannot be decoded"}
+
+
 def test_unexpected_result_decoder_error_propagates() -> None:
     data = {
         "handler_id": "handler",

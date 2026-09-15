@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 LlamaIndex Inc.
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -132,6 +134,19 @@ def test_runtime_json_serializer_adds_workflow_declared_types() -> None:
     value = UndeclaredValue(value="missing")
     with pytest.raises(ValueError, match="not in the serializer's allowed types"):
         selected.deserialize(selected.serialize(value))
+
+
+def test_runtime_recomposes_serializer_when_additional_types_change() -> None:
+    workflow = ExampleWorkflow()
+    serializer = JsonSerializer(allowed_types=[])
+
+    first = workflow.runtime._compose_serializer(workflow, serializer, UserValue)
+    second = workflow.runtime._compose_serializer(workflow, serializer, UndeclaredValue)
+
+    assert second is not first
+    assert isinstance(second, JsonSerializer)
+    qualified_name = f"{UndeclaredValue.__module__}.{UndeclaredValue.__qualname__}"
+    assert second.resolve_class(qualified_name) is UndeclaredValue
 
 
 def test_empty_allowlist_resolves_only_workflow_declared_types() -> None:
