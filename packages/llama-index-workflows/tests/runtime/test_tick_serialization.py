@@ -9,6 +9,7 @@ from typing import get_args
 
 import pytest
 from pydantic import TypeAdapter
+from workflows.context.serializers import JsonSerializer
 from workflows.events import (
     Event,
     StartEvent,
@@ -324,6 +325,31 @@ def test_tick_step_result_with_add_waiter() -> None:
 def test_persisted_tick_roots_match_workflow_tick_union() -> None:
     tick_union = get_args(WorkflowTick)[0]
     assert set(_WORKFLOW_TICK_TYPES) == set(get_args(tick_union))
+
+
+def test_allowlisted_serializer_roundtrips_framework_tick() -> None:
+    serializer = JsonSerializer(allowed_types=[])
+    tick = TickCancelRun()
+
+    assert serializer.deserialize(serializer.serialize(tick)) == tick
+
+
+def test_allowlisted_serializer_roundtrips_tick_with_user_event() -> None:
+    serializer = JsonSerializer(allowed_types=[MyEvent])
+    tick = TickAddEvent(event=MyEvent(value="allowed"))
+
+    restored = serializer.deserialize(serializer.serialize(tick))
+
+    assert restored == tick
+    assert type(restored.event) is MyEvent
+
+
+def test_allowlisted_serializer_rejects_user_type_inside_tick() -> None:
+    serializer = JsonSerializer(allowed_types=[])
+    tick = TickAddEvent(event=MyEvent(value="blocked"))
+
+    with pytest.raises(ValueError, match="Refusing to import disallowed"):
+        serializer.deserialize(serializer.serialize(tick))
 
 
 def test_workflow_tick_discriminated_union_roundtrip() -> None:

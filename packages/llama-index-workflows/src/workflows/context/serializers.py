@@ -21,6 +21,23 @@ from .utils import get_qualified_name, import_module_from_qualified_name
 _active_serializer: contextvars.ContextVar[JsonSerializer | None] = (
     contextvars.ContextVar("workflow_json_serializer", default=None)
 )
+_framework_types: dict[str, type[Any]] = {}
+
+
+def _register_framework_types(*classes: type[Any]) -> None:
+    """Register framework-owned types that persisted values require."""
+    for cls in classes:
+        for name in (
+            f"{cls.__module__}.{cls.__qualname__}",
+            f"{cls.__module__}.{cls.__name__}",
+        ):
+            claimed = _framework_types.get(name)
+            if claimed is not None and claimed is not cls:
+                raise ValueError(
+                    f"Two framework classes claim the serialized name {name}: "
+                    f"{claimed!r} and {cls!r}."
+                )
+            _framework_types[name] = cls
 
 
 class BaseSerializer(ABC):
@@ -57,8 +74,9 @@ class JsonSerializer(BaseSerializer):
     entries are registered under their serialized names, so their payloads are
     rebuilt from the registry without importing anything. String entries keep
     the older behavior and are looked up by import. A name that is not listed
-    does not resolve, and deserializing it raises. ``None`` keeps the default
-    lookup by import for every name, and an empty collection resolves nothing.
+    does not resolve, and deserializing it raises. Framework-owned types needed
+    for persistence always resolve. ``None`` keeps the default lookup by import
+    for every name, and an empty collection resolves only framework-owned types.
     If two classes serialize under the same name, registration raises, because
     a record does not say which one it meant.
 
@@ -126,13 +144,17 @@ class JsonSerializer(BaseSerializer):
     def resolve_class(self, qualified_name: str) -> type[Any]:
         """Resolve a class name to a registered class, or import it.
 
-        Classes passed to ``allowed_types`` resolve from the registry. A name is
-        imported when ``allowed_types`` is None or lists that name as a string.
+        Classes passed to ``allowed_types`` and framework-owned persistence
+        types resolve from registries. A remaining name is imported when
+        ``allowed_types`` is None or lists that name as a string.
         """
-        self._validate_qualified_name(qualified_name)
         registered = self._registered_types.get(qualified_name)
         if registered is not None:
             return registered
+        framework_type = _framework_types.get(qualified_name)
+        if framework_type is not None:
+            return framework_type
+        self._validate_qualified_name(qualified_name)
         cls = import_module_from_qualified_name(qualified_name)
         if not isinstance(cls, type):
             raise ValueError(

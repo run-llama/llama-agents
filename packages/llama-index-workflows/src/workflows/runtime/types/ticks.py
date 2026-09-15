@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, TypeAdapter
+from workflows.context.serializers import _register_framework_types
 from workflows.events import SerializableEvent, SerializableOptionalException
 from workflows.runtime.types.results import (
     SerializableCollectionReleasePayload,
@@ -158,5 +159,6 @@ _WORKFLOW_TICK_TYPES = (
     TickIdleRelease,
     TickWakeup,
 )
+_register_framework_types(*_WORKFLOW_TICK_TYPES)
 
 WorkflowTickAdapter: TypeAdapter[WorkflowTick] = TypeAdapter(WorkflowTick)

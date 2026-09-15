@@ -19,7 +19,11 @@ from pydantic import (
     model_serializer,
 )
 
-from workflows.context.serializers import JsonSerializer, _active_serializer
+from workflows.context.serializers import (
+    JsonSerializer,
+    _active_serializer,
+    _register_framework_types,
+)
 from workflows.context.utils import import_module_from_qualified_name
 
 
@@ -506,6 +510,7 @@ _PERSISTED_FRAMEWORK_EVENT_TYPES = (
     CollectionReleaseEvent,
     StepFailedEvent,
 )
+_register_framework_types(*_PERSISTED_FRAMEWORK_EVENT_TYPES)
 
 
 class InputRequiredEvent(Event):
