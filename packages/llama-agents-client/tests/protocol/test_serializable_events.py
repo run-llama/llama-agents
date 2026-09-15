@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LlamaIndex Inc.
 
+from __future__ import annotations
 
 import json
 
@@ -223,6 +224,53 @@ def test_metadata_envelope_load_event_with_registry() -> None:
     loaded = env.load_event([MyMeta])
     assert isinstance(loaded, MyMeta)
     assert loaded.z == 42
+
+
+def test_metadata_envelope_load_event_resolves_qualified_name() -> None:
+    event = ModuleScopeEvent(x=42)
+    envelope = EventEnvelopeWithMetadata.from_event(event)
+
+    loaded = envelope.load_event()
+
+    assert isinstance(loaded, ModuleScopeEvent)
+    assert loaded.x == 42
+
+
+def test_metadata_envelope_load_event_with_serializer() -> None:
+    serializer = JsonSerializer(allowed_types=[ModuleScopeEvent])
+    envelope = EventEnvelopeWithMetadata.from_event(ModuleScopeEvent(x=42))
+
+    loaded = envelope.load_event(serializer=serializer)
+
+    assert isinstance(loaded, ModuleScopeEvent)
+    assert loaded.x == 42
+
+    other_envelope = EventEnvelopeWithMetadata.from_event(ModuleScopeOtherEvent(y=7))
+    with pytest.raises(EventValidationError, match="Failed to deserialize event"):
+        other_envelope.load_event(serializer=serializer)
+
+
+def test_metadata_envelope_load_event_uses_serializer_for_nested_event() -> None:
+    nested = JsonSerializer().serialize_value(NestedPayloadEvent(value=4))
+    envelope = EventEnvelopeWithMetadata(
+        value={"nested": nested},
+        qualified_name=(
+            f"{NestedEnvelopeEvent.__module__}.{NestedEnvelopeEvent.__name__}"
+        ),
+        type="NestedEnvelopeEvent",
+        types=None,
+    )
+    serializer = JsonSerializer(allowed_types=[NestedEnvelopeEvent, NestedPayloadEvent])
+
+    loaded = envelope.load_event(serializer=serializer)
+
+    assert isinstance(loaded, NestedEnvelopeEvent)
+    assert isinstance(loaded.nested, NestedPayloadEvent)
+
+
+def test_parse_unknown_type_with_empty_registry_has_clear_error() -> None:
+    with pytest.raises(EventValidationError, match="no event types are registered"):
+        EventEnvelope.parse(client_data={"type": "MissingEvent", "value": {}})
 
 
 def test_metadata_envelope_qualified_name_toggle() -> None:

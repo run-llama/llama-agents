@@ -28,16 +28,30 @@ class EventEnvelopeWithMetadata(BaseModel):
     type: str
     types: list[str] | None
 
-    def load_event(self, registry: Sequence[type[Event]] = ()) -> Event:
+    def load_event(
+        self,
+        registry: Sequence[type[Event]] = (),
+        serializer: JsonSerializer | None = None,
+    ) -> Event:
         """
-        Load the event data using a class from the registry.
+        Load the event data using the given serializer when provided.
+        A non-empty registry limits resolution to its event classes.
+        With neither, a default serializer resolves classes by qualified name.
         """
+        if serializer is None:
+            serializer = (
+                JsonSerializer(allowed_types=list(registry))
+                if registry
+                else JsonSerializer()
+            )
         registry_lookup = {e.__name__: e for e in registry}
         as_event_envelope = EventEnvelope(
             value=self.value, type=self.type, qualified_name=self.qualified_name
         ).model_dump()
         return EventEnvelope.parse(
-            client_data=as_event_envelope, registry=registry_lookup
+            client_data=as_event_envelope,
+            registry=registry_lookup,
+            serializer=serializer,
         )
 
     @classmethod
@@ -100,6 +114,7 @@ class EventEnvelope(BaseModel):
         client_data: dict[str, Any] | str,
         registry: dict[str, builtins.type[Event]] | None = None,
         explicit_event: builtins.type[Event] | None = None,
+        serializer: JsonSerializer | None = None,
     ) -> Event:
         """
         Parse client data into an Event. Raises an EventValidationError if the client data is invalid.
@@ -108,6 +123,7 @@ class EventEnvelope(BaseModel):
             client_data: The client data to parse. Can be a dictionary, a string, or an explicit Event class.
             registry: The registry of event type names to Event classes.
             explicit_event: An explicit Event class to treat the dict as
+            serializer: The serializer used to resolve qualified names and nested values.
 
         Returns:
             The parsed Event.
@@ -135,14 +151,23 @@ class EventEnvelope(BaseModel):
                 "value": as_dict,
             }
         try:
-            decoder = _decoder_from_registry(registry)
+            decoder = (
+                serializer
+                if serializer is not None
+                else _decoder_from_registry(registry)
+            )
             event = EventEnvelope.model_validate(as_dict)
 
             if event.type:
                 if event.type not in registry:
-                    errors.append(
-                        f"Invalid event type: {event.type}. Expected one of {', '.join(registry.keys())}"
-                    )
+                    if registry:
+                        errors.append(
+                            f"Invalid event type: {event.type}. Expected one of {', '.join(registry.keys())}"
+                        )
+                    else:
+                        errors.append(
+                            f"Invalid event type: {event.type} because no event types are registered"
+                        )
                 else:
                     event_class = registry[event.type]
                     return _validate_event(event_class, event.value, decoder)

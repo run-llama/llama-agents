@@ -175,4 +175,4 @@ res = OutEvent.model_validate(result.result)
 print("Received final message:", res.output)
 ```
 
-`load_event()` works automatically when the event class is importable by its qualified name. You can also pass a `registry` list to resolve against: `event.load_event(registry=[RequestEvent, ResponseEvent])`. If you don't need typed events, the raw `event.type` and `event.value` dict are always available.
+`load_event()` works automatically when the event class is importable by its qualified name. Pass `serializer=JsonSerializer(allowed_types=[RequestEvent, ResponseEvent])` to restrict which classes the client resolves, or pass the same classes as the `registry` list. If you don't need typed events, the raw `event.type` and `event.value` dict are always available.
