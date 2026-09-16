@@ -1,6 +1,6 @@
 {
   "name": "llama-agents-operator",
-  "version": "0.11.1",
+  "version": "0.11.2",
   "private": false,
   "docker": {
     "dockerfile": "docker/operator.Dockerfile",

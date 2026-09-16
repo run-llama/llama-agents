@@ -2194,7 +2194,7 @@ wheels = [
 
 [[package]]
 name = "llama-agents-agentcore"
-version = "0.9.4"
+version = "0.9.5"
 source = { editable = "packages/llama-agents-agentcore" }
 dependencies = [
     { name = "bedrock-agentcore" },
@@ -2239,7 +2239,7 @@ dev = [
 
 [[package]]
 name = "llama-agents-appserver"
-version = "0.11.6"
+version = "0.12.0"
 source = { editable = "packages/llama-agents-appserver" }
 dependencies = [
     { name = "fastapi" },
@@ -2304,7 +2304,7 @@ dev = [
 
 [[package]]
 name = "llama-agents-client"
-version = "0.3.13"
+version = "0.4.0"
 source = { editable = "packages/llama-agents-client" }
 dependencies = [
     { name = "httpx" },
@@ -2484,7 +2484,7 @@ dev = [
 
 [[package]]
 name = "llama-agents-dbos"
-version = "0.6.0"
+version = "0.7.0"
 source = { editable = "packages/llama-agents-dbos" }
 dependencies = [
     { name = "dbos" },
@@ -2629,7 +2629,7 @@ dev = [
 
 [[package]]
 name = "llama-agents-server"
-version = "0.7.1"
+version = "0.8.0"
 source = { editable = "packages/llama-agents-server" }
 dependencies = [
     { name = "httpx" },
@@ -2794,7 +2794,7 @@ dev = [
 
 [[package]]
 name = "llama-index-workflows"
-version = "2.23.3"
+version = "2.24.0"
 source = { editable = "packages/llama-index-workflows" }
 dependencies = [
     { name = "llama-index-instrumentation" },
@@ -2858,7 +2858,7 @@ dev = [
 
 [[package]]
 name = "llamactl"
-version = "0.10.3"
+version = "0.10.4"
 source = { editable = "packages/llamactl" }
 dependencies = [
     { name = "aiohttp" },

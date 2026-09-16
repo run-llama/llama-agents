@@ -1,5 +1,11 @@
 # llama-index-workflows
 
+## 2.24.0
+
+### Minor Changes
+
+- 8916b75: Add `Workflow(serializer=...)` and `Runtime(default_serializer=...)` to configure serialization across context state, durable ticks, and replay. `JsonSerializer(allowed_types=[...])` now accepts classes and resolves them from its registry instead of importing them by name.
+
 ## 2.23.3
 
 ### Patch Changes

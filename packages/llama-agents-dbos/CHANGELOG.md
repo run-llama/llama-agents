@@ -1,5 +1,11 @@
 # llama-agents-dbos
 
+## 0.7.0
+
+### Minor Changes
+
+- 8916b75: Use the selected workflow serializer for initial state, DBOS state stores, idle release, persistence, and replay. Server-hosted workflows now restore declared types by default, so list other stored classes in `JsonSerializer(allowed_types=[...])` or configure `JsonSerializer()` to retain import lookup.
+
 ## 0.6.0
 
 ### Minor Changes

@@ -1,5 +1,11 @@
 # llama-agents-appserver
 
+## 0.12.0
+
+### Minor Changes
+
+- 8916b75: Preserve a deployed `WorkflowServer` serializer and each workflow's additional events. Deployments without an explicit serializer now restore declared types by default, so list other stored classes in `JsonSerializer(allowed_types=[...])` or configure `JsonSerializer()` to retain import lookup.
+
 ## 0.11.6
 
 ### Patch Changes

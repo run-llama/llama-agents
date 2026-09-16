@@ -1,5 +1,16 @@
 # llama-agents-client
 
+## 0.4.0
+
+### Minor Changes
+
+- 8916b75: Let event parsing use a `JsonSerializer` or event registry to resolve qualified event names while preserving import lookup when neither is provided.
+
+### Patch Changes
+
+- Updated dependencies [8916b75]
+  - llama-index-workflows@2.24.0
+
 ## 0.3.13
 
 ### Patch Changes
