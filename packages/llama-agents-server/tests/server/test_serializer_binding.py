@@ -76,6 +76,17 @@ def test_server_serializer_adds_additional_events() -> None:
     assert selected.deserialize(selected.serialize(event)) == event
 
 
+def test_server_default_rejects_undeclared_types() -> None:
+    workflow = PythonWorkflow()
+    server = WorkflowServer()
+    server.add_workflow("python", workflow)
+
+    selected = workflow.runtime.get_serializer(workflow)
+
+    with pytest.raises(ValueError, match="not in the serializer's allowed types"):
+        selected.deserialize(selected.serialize(AdditionalEvent()))
+
+
 @pytest.mark.parametrize("use_workflow_override", [True, False])
 @pytest.mark.parametrize("serializer_type", [PickleSerializer, CustomSerializer])
 async def test_bound_serializer_handles_internal_python_values(

@@ -170,7 +170,14 @@ async def test_unknown_api_metadata_does_not_resolve(
     )
     response = await http.post("/workflows/declared/run", json={"start_event": payload})
     assert response.status_code == 400
-    assert "Refusing to import" in response.text
+    if nested:
+        assert "is not in the serializer's allowed types" in response.text
+    else:
+        assert (
+            "Event type unregistered_payload.Event is not declared by this workflow. "
+            "Register it with add_workflow(..., additional_events=[...])."
+            in response.text
+        )
 
 
 @pytest.mark.parametrize(
@@ -328,11 +335,11 @@ def test_state_types_are_not_registered_as_public_events() -> None:
     server = WorkflowServer()
     server.add_workflow("typed", DeclaredWorkflow())
     server.add_workflow("dict", DictStateWorkflow())
-    with pytest.raises(ValueError, match="Refusing to import"):
+    with pytest.raises(ValueError, match="not in the serializer's allowed types"):
         workflow_decoder(server, "typed").resolve_class(
             f"{State.__module__}.{State.__qualname__}"
         )
-    with pytest.raises(ValueError, match="Refusing to import"):
+    with pytest.raises(ValueError, match="not in the serializer's allowed types"):
         workflow_decoder(server, "dict").resolve_class(
             f"{State.__module__}.{State.__qualname__}"
         )
@@ -348,7 +355,7 @@ def test_registering_another_workflow_leaves_the_existing_decoder_alone(
     server.add_workflow("second", DeclaredWorkflow(), additional_events=[ExtraEvent])
     assert workflow_decoder(server, "first") is before
     value = ExtraEvent()
-    with pytest.raises(ValueError, match="Refusing to import"):
+    with pytest.raises(ValueError, match="not in the serializer's allowed types"):
         before.deserialize(before.serialize(value))
 
 
@@ -401,7 +408,11 @@ async def test_run_api_does_not_resolve_another_workflows_event() -> None:
             },
         )
     assert response.status_code == 400
-    assert "Refusing to import" in response.text
+    assert (
+        f"Event type {LaterInput.__module__}.{LaterInput.__qualname__} "
+        "is not declared by this workflow. Register it with "
+        "add_workflow(..., additional_events=[...])."
+    ) in response.text
 
 
 def test_qualified_name_collisions_are_scoped_to_each_workflow() -> None:
@@ -465,6 +476,36 @@ async def test_persisted_result_outside_workflow_types_does_not_decode(
     assert restored.result_unreadable
 
 
+async def test_event_stream_rejects_unreadable_result(
+    tmp_path: Path,
+    forbid_imports: None,
+) -> None:
+    server = WorkflowServer(
+        workflow_store=SqliteWorkflowStore(db_path=str(tmp_path / "unreadable.db"))
+    )
+    server.add_workflow("renamed", DeclaredWorkflow())
+    async with (
+        server.contextmanager(),
+        AsyncClient(
+            transport=ASGITransport(app=server.app), base_url="http://test"
+        ) as client,
+    ):
+        await server._workflow_store.update(
+            PersistentHandler(
+                handler_id="unreadable",
+                workflow_name="removed",
+                status="completed",
+                run_id="removed-run",
+                result=OutputEvent.model_validate({"result": "done"}),
+            )
+        )
+
+        response = await client.get("/events/unreadable?after_sequence=-1")
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Stored handler result cannot be decoded"}
+
+
 def test_unexpected_result_decoder_error_propagates() -> None:
     data = {
         "handler_id": "handler",
@@ -509,6 +550,7 @@ async def test_unreadable_result_does_not_block_purge(
         assert stale["handler_id"] == "stale"
         assert stale["workflow_name"] == "removed"
         assert stale["result"] is None
+        assert stale["result_unreadable"] is True
         response = await client.get("/handlers/stale")
         assert response.status_code == 422
         response = await client.get("/results/stale")

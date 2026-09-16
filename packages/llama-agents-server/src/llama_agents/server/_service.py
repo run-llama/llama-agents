@@ -82,6 +82,7 @@ def handler_data_from_persistent(persistent: PersistentHandler) -> HandlerData:
         result=EventEnvelopeWithMetadata.from_event(persistent.result)
         if persistent.result is not None
         else None,
+        result_unreadable=persistent.result_unreadable,
     )
 
 
@@ -201,16 +202,48 @@ class _WorkflowService:
         if not purge and (persisted.run_id is None or is_terminal):
             return None
 
+        workflow_unregistered = (
+            purge and self._runtime.get_workflow(persisted.workflow_name) is None
+        )
+        unregistered_run_cancelled = False
+        cancel_error_type: str | None = None
         if not is_terminal and persisted.run_id is not None:
-            handler = self._workflow_run_handler(
-                persisted.workflow_name, persisted.run_id
-            )
-            await self._cancel_run(handler)
+            if not workflow_unregistered:
+                handler = self._workflow_run_handler(
+                    persisted.workflow_name, persisted.run_id
+                )
+                await self._cancel_run(handler)
+            else:
+                try:
+                    adapter = self._runtime.get_external_adapter(persisted.run_id)
+                    await adapter.cancel()
+                    unregistered_run_cancelled = True
+                except Exception as error:
+                    cancel_error_type = type(error).__name__
 
         if purge:
             n_deleted = await self._store.delete(
                 HandlerQuery(handler_id_in=[handler_id])
             )
+            if n_deleted and workflow_unregistered:
+                if unregistered_run_cancelled:
+                    logger.warning(
+                        "Handler %s uses workflow %s, which is not registered on this "
+                        "server. Run %s was cancelled, and the handler row is deleted.",
+                        handler_id,
+                        persisted.workflow_name,
+                        persisted.run_id,
+                    )
+                else:
+                    logger.warning(
+                        "Handler %s uses workflow %s, which is not registered on this "
+                        "server. Run %s was not cancelled (%s), and the handler row "
+                        "is deleted.",
+                        handler_id,
+                        persisted.workflow_name,
+                        persisted.run_id,
+                        cancel_error_type or "no run ID",
+                    )
             return "deleted" if n_deleted else None
 
         return "cancelled"

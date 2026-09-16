@@ -661,6 +661,10 @@ class _WorkflowAPI:
             raise HTTPException(detail="Handler not found", status_code=404)
 
         persistent = found[0]
+        if persistent.result_unreadable:
+            raise HTTPException(
+                detail="Stored handler result cannot be decoded", status_code=422
+            )
         run_id = persistent.run_id
         if run_id is None:
             raise HTTPException(detail="Handler has no associated run", status_code=404)
@@ -1058,22 +1062,7 @@ class _WorkflowAPI:
         persistent_handlers = await self._service.query_handlers(
             HandlerQuery(status_in=status_in, workflow_name_in=workflow_name_in)
         )
-        items = [
-            HandlerData(
-                handler_id=h.handler_id,
-                workflow_name=h.workflow_name,
-                run_id=h.run_id,
-                status=h.status,
-                started_at=h.started_at.isoformat() if h.started_at else "",
-                updated_at=h.updated_at.isoformat() if h.updated_at else None,
-                completed_at=h.completed_at.isoformat() if h.completed_at else None,
-                error=h.error,
-                result=EventEnvelopeWithMetadata.from_event(h.result)
-                if h.result
-                else None,
-            )
-            for h in persistent_handlers
-        ]
+        items = [handler_data_from_persistent(h) for h in persistent_handlers]
         return JSONResponse(HandlersListResponse(handlers=items).model_dump())
 
     async def _post_event(self, request: Request) -> JSONResponse:

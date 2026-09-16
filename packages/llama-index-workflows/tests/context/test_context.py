@@ -320,7 +320,7 @@ async def test_wait_for_event_in_workflow_serialization() -> None:
             )
             return StopEvent(result=result.msg)
 
-    workflow = TestWorkflow()
+    workflow = TestWorkflow(serializer=JsonSerializer(allowed_types=[Event]))
     handler = workflow.run()
     ctx_dict = None
 
@@ -363,6 +363,35 @@ async def test_wait_for_event_in_workflow_serialization() -> None:
         len(worker.collected_waiters) for worker in state.workers.values()
     )
     assert total_waiters == 0
+
+
+@pytest.mark.asyncio
+async def test_wait_for_framework_event_serialization() -> None:
+    class TestWorkflow(Workflow):
+        @step
+        async def step1(self, ctx: Context, ev: StartEvent) -> StopEvent:
+            result = await ctx.wait_for_event(
+                HumanResponseEvent,
+                waiter_event=InputRequiredEvent.model_validate({"prefix": "Continue?"}),
+            )
+            return StopEvent(result=result.response)
+
+    workflow = TestWorkflow()
+    handler = workflow.run()
+    ctx_dict = None
+
+    async for event in handler.stream_events():
+        if isinstance(event, InputRequiredEvent):
+            ctx_dict = handler.ctx.to_dict()
+            await handler.cancel_run()
+            break
+
+    assert ctx_dict is not None
+    restored = Context.from_dict(workflow, ctx_dict)
+    resumed = workflow.run(ctx=restored)
+    resumed.ctx.send_event(HumanResponseEvent.model_validate({"response": "yes"}))
+
+    assert await resumed == "yes"
 
 
 def test_context_from_dict_rejects_future_version_as_context_serde_error(
@@ -426,7 +455,10 @@ async def test_to_dict_after_stream_events_break_resumes() -> None:
             )
             return StopEvent(result=response.response)
 
-    workflow = WaiterWorkflow(timeout=1.0)
+    workflow = WaiterWorkflow(
+        timeout=1.0,
+        serializer=JsonSerializer(allowed_types=[NamedResponseEvent]),
+    )
     handler = workflow.run()
 
     async for ev in handler.stream_events():
@@ -469,7 +501,10 @@ async def test_legacy_implicit_waiter_id_survives_serialization_resume() -> None
             )
             return StopEvent(result=response.response)
 
-    workflow = WaiterWorkflow(timeout=1.0)
+    workflow = WaiterWorkflow(
+        timeout=1.0,
+        serializer=JsonSerializer(allowed_types=[NamedResponseEvent]),
+    )
     handler = workflow.run()
 
     async for ev in handler.stream_events():
@@ -704,7 +739,10 @@ async def test_parallel_identical_implicit_waiters_are_not_collapsed() -> None:
 async def test_parallel_implicit_waiters_survive_snapshot_resume() -> None:
     """The per-invocation waiter ids must round-trip: snapshot three suspended
     fan-out branches, restore, and every branch still resolves."""
-    workflow = ParallelImplicitWaiterWorkflow(timeout=5.0)
+    workflow = ParallelImplicitWaiterWorkflow(
+        timeout=5.0,
+        serializer=JsonSerializer(allowed_types=[HumanResponseEvent]),
+    )
     handler = workflow.run()
     prefixes: set[str] = set()
 
@@ -785,7 +823,10 @@ async def test_requirements_waiter_survives_snapshot_resume() -> None:
             )
             return StopEvent(result=response.response)
 
-    workflow = ReqWaiterWorkflow(timeout=5.0)
+    workflow = ReqWaiterWorkflow(
+        timeout=5.0,
+        serializer=JsonSerializer(allowed_types=[HumanResponseEvent]),
+    )
     handler = workflow.run()
     async for ev in handler.stream_events():
         if isinstance(ev, InputRequiredEvent):
@@ -1151,7 +1192,7 @@ def test_decode_state_respects_json_serializer_allowed_types() -> None:
     state_data, _, _ = encode_state(state, serializer)
     restricted_serializer = JsonSerializer(allowed_types=[DictState])
 
-    with pytest.raises(ValueError, match="Refusing to import disallowed"):
+    with pytest.raises(ValueError, match="not in the serializer's allowed types"):
         decode_state(state_data, restricted_serializer)
 
 

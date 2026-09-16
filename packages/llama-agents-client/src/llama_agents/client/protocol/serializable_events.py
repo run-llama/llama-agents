@@ -191,12 +191,19 @@ class EventEnvelope(BaseModel):
                     return _validate_event(event_class, event.value, decoder)
             if event.qualified_name:
                 # This deprecated path is kept for older clients.
-                event_class = decoder.resolve_class(event.qualified_name)
+                try:
+                    event_class = decoder.resolve_class(event.qualified_name)
+                except ValueError as e:
+                    if serializer is not None:
+                        raise EventValidationError(str(e)) from e
+                    raise EventValidationError(
+                        f"Event type {event.qualified_name} is not declared by this workflow. "
+                        "Register it with add_workflow(..., additional_events=[...])."
+                    ) from e
                 if registry and event_class not in registry.values():
-                    raise ValueError(
-                        "Refusing to import disallowed workflow state type: "
-                        f"{event.qualified_name}. Pass it via allowed_types to the "
-                        "JsonSerializer constructor."
+                    raise EventValidationError(
+                        f"Event type {event.qualified_name} is not declared by this workflow. "
+                        "Register it with add_workflow(..., additional_events=[...])."
                     )
                 if not issubclass(event_class, Event):
                     errors.append(

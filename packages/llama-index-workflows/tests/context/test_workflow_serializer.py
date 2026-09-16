@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 LlamaIndex Inc.
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -54,12 +56,54 @@ async def test_workflow_serializer_is_read_only_and_used_for_context() -> None:
     assert await workflow.run(ctx=context) == "ok"
 
 
-def test_standalone_default_remains_json() -> None:
+def test_standalone_default_resolves_import_paths() -> None:
     workflow = ExampleWorkflow()
     assert workflow.serializer is None
     first = workflow.runtime.get_serializer(workflow)
     assert type(first) is JsonSerializer
     assert workflow.runtime.get_serializer(workflow) is first
+
+    value = UndeclaredValue(value="restored")
+    assert first.deserialize(first.serialize(value)) == value
+
+
+@pytest.mark.asyncio
+async def test_default_context_restore_resolves_undeclared_store_value() -> None:
+    workflow = ExampleWorkflow()
+    context = Context(workflow)
+    await workflow.run(ctx=context)
+    value = UndeclaredValue(value="restored")
+    await context.store.set("value", value)
+
+    restored = Context.from_dict(workflow, context.to_dict())
+
+    assert await restored.store.get("value") == value
+
+
+@pytest.mark.asyncio
+async def test_default_context_restore_resolves_typed_state_model() -> None:
+    workflow = TypedWorkflow()
+    context = Context(workflow)
+    await workflow.run(ctx=context)
+    async with context.store.edit_state() as state:
+        state.count = 3
+
+    restored = Context.from_dict(workflow, context.to_dict())
+
+    assert await restored.store.get_state() == WorkflowState(count=3)
+
+
+@pytest.mark.asyncio
+async def test_explicit_open_serializer_restores_undeclared_store_value() -> None:
+    workflow = ExampleWorkflow(serializer=JsonSerializer())
+    context = Context(workflow)
+    value = UndeclaredValue(value="allowed")
+    await workflow.run(ctx=context)
+    await context.store.set("value", value)
+
+    restored = Context.from_dict(workflow, context.to_dict())
+
+    assert await restored.store.get("value") == value
 
 
 def test_runtime_json_serializer_adds_workflow_declared_types() -> None:
@@ -77,8 +121,21 @@ def test_runtime_json_serializer_adds_workflow_declared_types() -> None:
     ):
         assert selected.deserialize(selected.serialize(value)) == value
     value = UndeclaredValue(value="missing")
-    with pytest.raises(ValueError, match="Refusing to import disallowed"):
+    with pytest.raises(ValueError, match="not in the serializer's allowed types"):
         selected.deserialize(selected.serialize(value))
+
+
+def test_runtime_recomposes_serializer_when_additional_types_change() -> None:
+    workflow = ExampleWorkflow()
+    serializer = JsonSerializer(allowed_types=[])
+
+    first = workflow.runtime._compose_serializer(workflow, serializer, UserValue)
+    second = workflow.runtime._compose_serializer(workflow, serializer, UndeclaredValue)
+
+    assert second is not first
+    assert isinstance(second, JsonSerializer)
+    qualified_name = f"{UndeclaredValue.__module__}.{UndeclaredValue.__qualname__}"
+    assert second.resolve_class(qualified_name) is UndeclaredValue
 
 
 def test_empty_allowlist_resolves_only_workflow_declared_types() -> None:
@@ -90,7 +147,7 @@ def test_empty_allowlist_resolves_only_workflow_declared_types() -> None:
     assert selected.deserialize(selected.serialize(WorkflowState())) == WorkflowState()
 
     value = UndeclaredValue(value="missing")
-    with pytest.raises(ValueError, match="Refusing to import disallowed"):
+    with pytest.raises(ValueError, match="not in the serializer's allowed types"):
         selected.deserialize(selected.serialize(value))
 
 

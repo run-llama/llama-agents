@@ -23,6 +23,7 @@ class HandlerData(BaseModel):
     run_id: str | None
     error: str | None
     result: EventEnvelopeWithMetadata | None
+    result_unreadable: bool = False
     status: Status
     started_at: str
     updated_at: str | None

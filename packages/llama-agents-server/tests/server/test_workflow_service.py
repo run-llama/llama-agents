@@ -4,10 +4,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from llama_agents.server import (
@@ -16,7 +17,11 @@ from llama_agents.server import (
     PersistentHandler,
     WorkflowServer,
 )
-from llama_agents.server._service import EventSendError, HandlerCompletedError
+from llama_agents.server._service import (
+    EventSendError,
+    HandlerCompletedError,
+    HandlerNotFoundError,
+)
 from pydantic import BaseModel
 from server_test_fixtures import (  # type: ignore[import]
     ErrorWorkflow,
@@ -162,6 +167,84 @@ async def test_purge_running_handler_cancels_runtime(
         assert not await memory_store.query(
             HandlerQuery(handler_id_in=["purge-running-1"])
         )
+
+
+@pytest.mark.asyncio
+async def test_purge_running_handler_with_unregistered_workflow(
+    memory_store: MemoryWorkflowStore,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    server = WorkflowServer(workflow_store=memory_store)
+    await memory_store.update(
+        PersistentHandler(
+            handler_id="removed-workflow",
+            workflow_name="removed",
+            status="running",
+            run_id="removed-run",
+        )
+    )
+
+    with pytest.raises(HandlerNotFoundError, match="removed"):
+        await server._service.cancel_handler("removed-workflow")
+    assert await memory_store.query(HandlerQuery(handler_id_in=["removed-workflow"]))
+
+    cancel = AsyncMock()
+    get_external_adapter = Mock(return_value=Mock(cancel=cancel))
+    monkeypatch.setattr(
+        server._service._runtime, "get_external_adapter", get_external_adapter
+    )
+    with caplog.at_level(logging.WARNING, logger="llama_agents.server._service"):
+        result = await server._service.cancel_handler("removed-workflow", purge=True)
+
+    assert result == "deleted"
+    get_external_adapter.assert_called_once_with("removed-run")
+    cancel.assert_awaited_once_with()
+    assert (
+        "Handler removed-workflow uses workflow removed, which is not registered "
+        "on this server. Run removed-run was cancelled, and the handler row is deleted."
+        in caplog.messages
+    )
+    assert not await memory_store.query(
+        HandlerQuery(handler_id_in=["removed-workflow"])
+    )
+
+
+@pytest.mark.asyncio
+async def test_purge_unregistered_workflow_deletes_row_when_cancel_fails(
+    memory_store: MemoryWorkflowStore,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    server = WorkflowServer(workflow_store=memory_store)
+    await memory_store.update(
+        PersistentHandler(
+            handler_id="removed-workflow",
+            workflow_name="removed",
+            status="running",
+            run_id="removed-run",
+        )
+    )
+    cancel = AsyncMock(side_effect=RuntimeError("cancel failed"))
+    monkeypatch.setattr(
+        server._service._runtime,
+        "get_external_adapter",
+        Mock(return_value=Mock(cancel=cancel)),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="llama_agents.server._service"):
+        result = await server._service.cancel_handler("removed-workflow", purge=True)
+
+    assert result == "deleted"
+    cancel.assert_awaited_once_with()
+    assert (
+        "Handler removed-workflow uses workflow removed, which is not registered "
+        "on this server. Run removed-run was not cancelled (RuntimeError), and the "
+        "handler row is deleted." in caplog.messages
+    )
+    assert not await memory_store.query(
+        HandlerQuery(handler_id_in=["removed-workflow"])
+    )
 
 
 @pytest.mark.asyncio

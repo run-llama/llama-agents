@@ -44,8 +44,13 @@ class BaseRuntimeDecorator(Runtime):
     etc.) without re-implementing the full interface.
     """
 
-    def __init__(self, decorated: Runtime) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        decorated: Runtime,
+        *,
+        default_serializer: BaseSerializer | None = None,
+    ) -> None:
+        super().__init__(default_serializer=default_serializer)
         self._decorated = decorated
 
     def register(self, workflow: Workflow) -> RegisteredWorkflow:
