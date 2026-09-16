@@ -18,6 +18,7 @@ from llama_agents.appserver.types import (
 from llama_agents.appserver.workflow_loader import DEFAULT_SERVICE_ID
 from workflows import Context
 from workflows.context import JsonSerializer
+from workflows.events import Event
 from workflows.handler import WorkflowHandler
 
 
@@ -101,8 +102,12 @@ def create_deployments_router(name: str, deployment: Deployment) -> APIRouter:
     ) -> EventDefinition:
         """Send a human response event to a service for a specific task and session."""
         ctx = deployment._contexts[session_id]
-        serializer = JsonSerializer()
-        event = serializer.deserialize(event_def.event_obj_str)
+        service_id = event_def.service_id or DEFAULT_SERVICE_ID
+        event = deployment.workflow_server.get_json_decoder(service_id).deserialize(
+            event_def.event_obj_str
+        )
+        if not isinstance(event, Event):
+            raise ValueError("Expected an Event")
         ctx.send_event(event)
 
         return event_def

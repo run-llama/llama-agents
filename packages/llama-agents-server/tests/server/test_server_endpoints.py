@@ -31,7 +31,7 @@ from workflows import Context, step
 from workflows.context.context_types import SerializedContext
 from workflows.context.serializers import JsonSerializer
 from workflows.context.state_store import DictState, InMemoryStateStore
-from workflows.events import Event, StartEvent, StopEvent
+from workflows.events import CollectionReleaseEvent, Event, StartEvent, StopEvent
 from workflows.workflow import Workflow
 
 
@@ -1006,6 +1006,43 @@ async def test_post_event_with_discriminators_to_running_workflow(
     )
 
     assert result["result"]["value"]["result"] == "received: Hello with discriminators"
+
+
+@pytest.mark.asyncio
+async def test_post_event_rejects_undeclared_framework_qualified_name(
+    client: AsyncClient, server: WorkflowServer
+) -> None:
+    response = await client.post("/workflows/interactive/run-nowait", json={})
+    assert response.status_code == 200
+    handler_id = response.json()["handler_id"]
+    await wait_for_requested_external_event(server._service.store, handler_id)
+
+    response = await client.post(
+        f"/events/{handler_id}",
+        json={
+            "event": {
+                "qualified_name": (
+                    f"{CollectionReleaseEvent.__module__}."
+                    f"{CollectionReleaseEvent.__name__}"
+                ),
+                "value": {},
+            }
+        },
+    )
+    assert response.status_code == 400
+
+    response = await client.post(
+        f"/events/{handler_id}",
+        json={
+            "event": {
+                "qualified_name": (
+                    f"{ExternalEvent.__module__}.{ExternalEvent.__name__}"
+                ),
+                "value": {"response": "declared"},
+            }
+        },
+    )
+    assert response.status_code == 200
 
 
 @pytest.mark.asyncio

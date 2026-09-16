@@ -154,13 +154,16 @@ class DBOSWorkflowStore(AbstractWorkflowStore):
     """
 
     def __init__(self, factory: Callable[[], AbstractWorkflowStore]) -> None:
+        self._inner: AbstractWorkflowStore | None = None
         super().__init__()
         self._factory = factory
-        self._inner: AbstractWorkflowStore | None = None
 
     def _resolve(self) -> AbstractWorkflowStore:
         if self._inner is None:
-            self._inner = self._factory()
+            inner = self._factory()
+            # Copy the binding here because the server binds before first use.
+            inner.result_decoder = self.result_decoder
+            self._inner = inner
         return self._inner
 
     async def start(self) -> None:
@@ -932,7 +935,11 @@ class DBOSRuntime(Runtime):
         if self.config.get("run_migrations_on_launch", True):
             await self.run_migrations()
 
-    def build_server_runtime(self, *, idle_timeout: float = 600.0) -> Runtime:
+    def build_server_runtime(
+        self,
+        *,
+        idle_timeout: float = 600.0,
+    ) -> Runtime:
         """Build the decorator chain for use with WorkflowServer.
 
         Wraps the DBOS runtime with:

@@ -235,11 +235,10 @@ class AgentDataStore(AbstractWorkflowStore):
 
         return filters
 
-    @staticmethod
-    def _item_to_handler(item: dict[str, Any]) -> PersistentHandler:
+    def _item_to_handler(self, item: dict[str, Any]) -> PersistentHandler:
         """Convert an Agent Data API item to a PersistentHandler."""
         data = item["data"]
-        return decode_persistent_handler(data)
+        return decode_persistent_handler(data, self.result_decoder)
 
     async def query(self, query: HandlerQuery) -> list[PersistentHandler]:
         filters = self._build_handler_filters(query)

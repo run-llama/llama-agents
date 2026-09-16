@@ -231,6 +231,7 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
 
     def get_serializer(self, workflow: Workflow) -> BaseSerializer:
         serializer = workflow.serializer or self._default_serializer
+
         return self._compose_serializer(
             workflow,
             serializer,
@@ -265,7 +266,10 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
         """Callback for adapter terminal-event status updates."""
         await self._retry_store_write(
             lambda: self._store.update_handler_status(
-                run_id, status=status, result=result, error=error
+                run_id,
+                status=status,
+                result=result,
+                error=error,
             )
         )
 

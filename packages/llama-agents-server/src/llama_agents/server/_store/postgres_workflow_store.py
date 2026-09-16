@@ -652,8 +652,7 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
 
         return clauses, params
 
-    @staticmethod
-    def _row_to_handler(row: asyncpg.Record) -> PersistentHandler:
+    def _row_to_handler(self, row: asyncpg.Record) -> PersistentHandler:
         return decode_persistent_handler(
             dict(
                 handler_id=row["handler_id"],
@@ -666,5 +665,6 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
                 updated_at=row["updated_at"],
                 completed_at=row["completed_at"],
                 idle_since=row["idle_since"],
-            )
+            ),
+            self.result_decoder,
         )

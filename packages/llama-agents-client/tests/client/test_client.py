@@ -112,7 +112,7 @@ async def test_run_nowait_and_stream_events(client: WorkflowClient) -> None:
     events = []
     async for event in client.get_workflow_events(handler_id=handler_id):
         assert isinstance(event, EventEnvelopeWithMetadata)
-        events.append(event.load_event())
+        events.append(event.load_event([InputEvent, GreetEvent, OutputEvent]))
     assert len(events) == 3
     assert events[0] == InputEvent(greeting="hello", name="John")
 
@@ -439,7 +439,7 @@ async def test_stream_events_including_internal(client: WorkflowClient) -> None:
         handler_id=handler_id, include_internal_events=True
     ):
         assert isinstance(event, EventEnvelopeWithMetadata)
-        events.append(event.load_event())
+        events.append(event)
     assert len(events) > 3
 
 

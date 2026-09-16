@@ -277,7 +277,9 @@ async def test_reconnect_stream(
         async for ev in client.get_workflow_events(
             handler_id, after_sequence=prompt_cursor
         ):
-            event = ev.load_event()
+            if ev.type != "StopEvent":
+                continue
+            event = ev.load_event([StopEvent])
             if isinstance(event, StopEvent):
                 stop_seen.set()
                 break

@@ -63,7 +63,9 @@ class _IdleReleaseInternalRunAdapter(BaseInternalRunAdapterDecorator):
         if isinstance(event, WorkflowIdleEvent):
             idle_since = datetime.now(timezone.utc)
             await self._store.update_handler_status(
-                self.run_id, status="running", idle_since=idle_since
+                run_id=self.run_id,
+                status="running",
+                idle_since=idle_since,
             )
         await super().write_to_event_stream(event)
         if isinstance(event, WorkflowIdleEvent):
@@ -102,7 +104,8 @@ class IdleReleaseExternalRunAdapter(BaseExternalRunAdapterDecorator):
                 await self._runtime._ensure_active_run_locked(self.run_id)
             else:
                 await self._runtime._store.update_handler_status(
-                    self.run_id, idle_since=None
+                    run_id=self.run_id,
+                    idle_since=None,
                 )
             await self._decorated.send_event(tick)
 
@@ -219,7 +222,10 @@ class IdleReleaseDecorator(BaseRuntimeDecorator):
         context = replayed.context if replayed is not None else None
         workflow.run(ctx=context, run_id=run_id)
         self._active_run_ids.add(run_id)
-        await self._store.update_handler_status(run_id, idle_since=None)
+        await self._store.update_handler_status(
+            run_id=run_id,
+            idle_since=None,
+        )
         logger.info(
             f"Reloaded workflow [handler_id={handler.handler_id}, run_id={run_id}] from persistence"
         )

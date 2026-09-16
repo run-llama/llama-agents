@@ -6,7 +6,7 @@ import asyncio
 import logging
 import weakref
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, MutableMapping
+from collections.abc import AsyncIterator, Callable, MutableMapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -17,7 +17,9 @@ from llama_agents.client.protocol.serializable_events import (
 )
 from pydantic import (
     BaseModel,
-    PrivateAttr,
+    Field,
+    ValidationError,
+    ValidationInfo,
     field_serializer,
     field_validator,
 )
@@ -30,6 +32,8 @@ from workflows.runtime.types.ticks import WorkflowTick, WorkflowTickAdapter
 logger = logging.getLogger(__name__)
 
 Status = Literal["running", "completed", "failed", "cancelled"]
+
+HandlerResultDecoder = Callable[[str], JsonSerializer]
 
 TERMINAL_STATUSES: frozenset[Status] = frozenset(("completed", "failed", "cancelled"))
 
@@ -60,8 +64,6 @@ class HandlerQuery:
 
 
 class PersistentHandler(BaseModel):
-    _result_decoding_failed: bool = PrivateAttr(default=False)
-
     handler_id: str
     workflow_name: str
     status: Status
@@ -72,14 +74,16 @@ class PersistentHandler(BaseModel):
     updated_at: datetime | None = None
     completed_at: datetime | None = None
     idle_since: datetime | None = None
+    result_unreadable: bool = Field(default=False, exclude=True, repr=False)
 
     @field_validator("result", mode="before")
     @classmethod
-    def _parse_stop_event(cls, data: Any) -> StopEvent | None:
+    def _parse_stop_event(cls, data: Any, info: ValidationInfo) -> StopEvent | None:
         if isinstance(data, StopEvent):
             return data
         elif isinstance(data, dict):
-            deserialized = JsonSerializer().deserialize_value(data)
+            decoder = (info.context or {}).get("json_serializer") or JsonSerializer()
+            deserialized = decoder.deserialize_value(data)
             if isinstance(deserialized, StopEvent):
                 return deserialized
             else:
@@ -112,9 +116,19 @@ class StoredEvent(BaseModel):
 
 
 class AbstractWorkflowStore(ABC):
+    """Persistence backend for workflow state.
+
+    One server binds one store instance to its result decoder. Sharing a store
+    instance between concurrently running servers is not supported.
+    """
+
     poll_interval: float = 0.1
 
     def __init__(self) -> None:
+        # The server sets this once at construction. Stores call it with a handler's
+        # workflow name when decoding a stored result. A store instance is used by
+        # one running server at a time.
+        self.result_decoder: HandlerResultDecoder | None = None
         # Per-run facade cache: the single memoization site for state stores.
         # Weak-valued by default so facades die with their last consumer.
         # Backends needing a different lifecycle (strong refs + explicit
@@ -315,14 +329,28 @@ async def stream_workflow_ticks(
         yield tick
 
 
-def decode_persistent_handler(data: dict[str, Any]) -> PersistentHandler:
+def decode_persistent_handler(
+    data: dict[str, Any], result_decoder: HandlerResultDecoder | None = None
+) -> PersistentHandler:
     try:
-        return PersistentHandler.model_validate(data)
-    except Exception as exc:
+        context = (
+            {"json_serializer": result_decoder(data["workflow_name"])}
+            if result_decoder is not None and data.get("result") is not None
+            else None
+        )
+        return PersistentHandler.model_validate(data, context=context)
+    except (
+        ValidationError,
+        ValueError,
+        KeyError,
+        ImportError,
+        AttributeError,
+        TypeError,
+    ) as exc:
         if data.get("result") is None:
             raise
         handler = PersistentHandler.model_validate({**data, "result": None})
-        handler._result_decoding_failed = True
+        handler.result_unreadable = True
         logger.warning(
             "Could not decode persisted handler result: handler_id=%r workflow_name=%r error=%s",
             data.get("handler_id"),
@@ -330,7 +358,3 @@ def decode_persistent_handler(data: dict[str, Any]) -> PersistentHandler:
             type(exc).__name__,
         )
         return handler
-
-
-def _handler_result_decoding_failed(handler: PersistentHandler) -> bool:
-    return handler._result_decoding_failed

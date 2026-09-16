@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+from collections.abc import Iterable, Mapping
 from typing import Any, Tuple
 from urllib.parse import quote_plus
 
@@ -24,6 +25,7 @@ from starlette.responses import HTMLResponse
 from starlette.routing import Route
 from workflows import Context, Workflow
 from workflows.context.serializers import BaseSerializer
+from workflows.events import Event
 from workflows.handler import WorkflowHandler
 
 logger = logging.getLogger()
@@ -38,6 +40,7 @@ class Deployment:
         workflows: dict[str, Workflow],
         *,
         serializer: BaseSerializer | None = None,
+        additional_events: Mapping[str, Iterable[type[Event]]] | None = None,
     ) -> None:
         """Creates a Deployment instance.
 
@@ -48,6 +51,9 @@ class Deployment:
         """
 
         self._serializer = serializer
+        self._additional_events = {
+            name: tuple(events) for name, events in (additional_events or {}).items()
+        }
         self._default_service: Workflow | None = workflows.get(DEFAULT_SERVICE_ID)
         self._service_tasks: list[asyncio.Task] = []
         # Ready to load services
@@ -55,6 +61,7 @@ class Deployment:
         self._contexts: dict[str, Context] = {}
         self._handlers: dict[str, WorkflowHandler] = {}
         self._handler_inputs: dict[str, str] = {}
+        self._workflow_server: WorkflowServer | None = None
 
     @property
     def default_service(self) -> Workflow | None:
@@ -137,8 +144,23 @@ class Deployment:
             serializer=self._serializer,
         )
         for service_id, workflow in self._workflow_services.items():
-            server.add_workflow(service_id, workflow)
+            additional_events = self._additional_events.get(service_id)
+            server.add_workflow(
+                service_id,
+                workflow,
+                additional_events=list(additional_events)
+                if additional_events is not None
+                else None,
+            )
+        self._workflow_server = server
         return server
+
+    @property
+    def workflow_server(self) -> WorkflowServer:
+        """Return the workflow server created for this deployment."""
+        if self._workflow_server is None:
+            raise RuntimeError("The workflow server has not been created")
+        return self._workflow_server
 
     def mount_workflow_server(self, app: FastAPI) -> WorkflowServer:
         config = get_deployment_config()

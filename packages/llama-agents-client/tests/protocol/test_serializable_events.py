@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LlamaIndex Inc.
 
+from __future__ import annotations
 
 import json
 
@@ -11,8 +12,11 @@ from llama_agents.client.protocol.serializable_events import (
     EventEnvelopeWithMetadata,
     EventValidationError,
 )
+from workflows.context.serializers import JsonSerializer
 from workflows.events import (
+    CollectionReleaseEvent,
     Event,
+    SerializableEvent,
     StepState,
     StepStateChanged,
     StopEvent,
@@ -85,6 +89,14 @@ class ModuleScopeOtherEvent(Event):
     y: int
 
 
+class NestedEnvelopeEvent(Event):
+    nested: SerializableEvent
+
+
+class NestedPayloadEvent(Event):
+    value: int
+
+
 def test_parse_with_registry_type_success() -> None:
     class MyEvent(Event):
         x: int
@@ -95,18 +107,75 @@ def test_parse_with_registry_type_success() -> None:
     assert ev.x == 1
 
 
-def test_parse_with_qualified_name_fallback_success() -> None:
+def test_parse_resolves_nested_event_from_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(name: str) -> None:
+        pytest.fail(f"Unexpected dynamic import: {name}")
+
+    monkeypatch.setattr("workflows.context.utils.import_module", fail)
+    nested = JsonSerializer().serialize_value(NestedPayloadEvent(value=4))
+    event = EventEnvelope.parse(
+        client_data={"type": "NestedEnvelopeEvent", "value": {"nested": nested}},
+        registry={
+            "NestedEnvelopeEvent": NestedEnvelopeEvent,
+            "NestedPayloadEvent": NestedPayloadEvent,
+        },
+    )
+    assert isinstance(event, NestedEnvelopeEvent)
+    assert isinstance(event.nested, NestedPayloadEvent)
+
+
+def test_parse_rejects_nested_event_outside_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(name: str) -> None:
+        pytest.fail(f"Unexpected dynamic import: {name}")
+
+    monkeypatch.setattr("workflows.context.utils.import_module", fail)
+    nested = JsonSerializer().serialize_value(NestedPayloadEvent(value=4))
+    with pytest.raises(EventValidationError, match="Failed to deserialize event"):
+        EventEnvelope.parse(
+            client_data={
+                "type": "NestedEnvelopeEvent",
+                "value": {"nested": nested},
+            },
+            registry={"NestedEnvelopeEvent": NestedEnvelopeEvent},
+        )
+
+
+def test_parse_with_registered_qualified_name_success() -> None:
     qn = f"{ModuleScopeEvent.__module__}.{ModuleScopeEvent.__name__}"
     payload = {"qualified_name": qn, "value": {"x": 7}}
-    ev = EventEnvelope.parse(client_data=payload)
+    ev = EventEnvelope.parse(client_data=payload, registry={"event": ModuleScopeEvent})
     assert isinstance(ev, ModuleScopeEvent)
     assert ev.x == 7
 
 
-def test_parse_with_type_unknown_but_qualified_name_valid() -> None:
+def test_parse_rejects_framework_qualified_name_outside_registry() -> None:
+    qualified_name = (
+        f"{CollectionReleaseEvent.__module__}.{CollectionReleaseEvent.__name__}"
+    )
+    with pytest.raises(EventValidationError, match="Failed to deserialize event"):
+        EventEnvelope.parse(
+            client_data={"qualified_name": qualified_name, "value": {}},
+            registry={"ModuleScopeEvent": ModuleScopeEvent},
+        )
+
+
+def test_parse_with_unregistered_qualified_name_raises() -> None:
+    qn = f"{ModuleScopeEvent.__module__}.{ModuleScopeEvent.__name__}"
+    payload = {"qualified_name": qn, "value": {"x": 7}}
+    with pytest.raises(EventValidationError, match="Failed to deserialize event"):
+        EventEnvelope.parse(client_data=payload)
+
+
+def test_parse_with_type_unknown_but_registered_qualified_name() -> None:
     qn = f"{ModuleScopeOtherEvent.__module__}.{ModuleScopeOtherEvent.__name__}"
     payload = {"type": "NotInRegistry", "qualified_name": qn, "value": {"y": 3}}
-    ev = EventEnvelope.parse(client_data=payload, registry={})
+    ev = EventEnvelope.parse(
+        client_data=payload, registry={"other": ModuleScopeOtherEvent}
+    )
     assert isinstance(ev, ModuleScopeOtherEvent)
     assert ev.y == 3
 
@@ -169,6 +238,69 @@ def test_metadata_envelope_load_event_with_registry() -> None:
     assert loaded.z == 42
 
 
+def test_metadata_envelope_load_event_allows_framework_event_with_registry() -> None:
+    envelope = EventEnvelopeWithMetadata.from_event(StopEvent(result="done"))
+
+    loaded = envelope.load_event([ModuleScopeEvent])
+
+    assert isinstance(loaded, StopEvent)
+    assert loaded.result == "done"
+
+
+def test_metadata_envelope_load_event_rejects_custom_event_outside_registry() -> None:
+    envelope = EventEnvelopeWithMetadata.from_event(ModuleScopeOtherEvent(y=7))
+
+    with pytest.raises(EventValidationError, match="ModuleScopeOtherEvent"):
+        envelope.load_event([ModuleScopeEvent])
+
+
+def test_metadata_envelope_load_event_resolves_qualified_name() -> None:
+    event = ModuleScopeEvent(x=42)
+    envelope = EventEnvelopeWithMetadata.from_event(event)
+
+    loaded = envelope.load_event()
+
+    assert isinstance(loaded, ModuleScopeEvent)
+    assert loaded.x == 42
+
+
+def test_metadata_envelope_load_event_with_serializer() -> None:
+    serializer = JsonSerializer(allowed_types=[ModuleScopeEvent])
+    envelope = EventEnvelopeWithMetadata.from_event(ModuleScopeEvent(x=42))
+
+    loaded = envelope.load_event(serializer=serializer)
+
+    assert isinstance(loaded, ModuleScopeEvent)
+    assert loaded.x == 42
+
+    other_envelope = EventEnvelopeWithMetadata.from_event(ModuleScopeOtherEvent(y=7))
+    with pytest.raises(EventValidationError, match="Failed to deserialize event"):
+        other_envelope.load_event(serializer=serializer)
+
+
+def test_metadata_envelope_load_event_uses_serializer_for_nested_event() -> None:
+    nested = JsonSerializer().serialize_value(NestedPayloadEvent(value=4))
+    envelope = EventEnvelopeWithMetadata(
+        value={"nested": nested},
+        qualified_name=(
+            f"{NestedEnvelopeEvent.__module__}.{NestedEnvelopeEvent.__name__}"
+        ),
+        type="NestedEnvelopeEvent",
+        types=None,
+    )
+    serializer = JsonSerializer(allowed_types=[NestedEnvelopeEvent, NestedPayloadEvent])
+
+    loaded = envelope.load_event(serializer=serializer)
+
+    assert isinstance(loaded, NestedEnvelopeEvent)
+    assert isinstance(loaded.nested, NestedPayloadEvent)
+
+
+def test_parse_unknown_type_with_empty_registry_has_clear_error() -> None:
+    with pytest.raises(EventValidationError, match="No event types are registered"):
+        EventEnvelope.parse(client_data={"type": "MissingEvent", "value": {}})
+
+
 def test_metadata_envelope_qualified_name_toggle() -> None:
     class MyMetaQ(Event):
         q: int
@@ -188,7 +320,9 @@ def test_json_serializer_back_compat_with_pydantic_flag() -> None:
         "qualified_name": qn,
         "value": {"x": 123},
     }
-    ev = EventEnvelope.parse(client_data=payload)
+    ev = EventEnvelope.parse(
+        client_data=payload, registry={"ModuleScopeEvent": ModuleScopeEvent}
+    )
     assert isinstance(ev, ModuleScopeEvent)
     assert ev.x == 123
 

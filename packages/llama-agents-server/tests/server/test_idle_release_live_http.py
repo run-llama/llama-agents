@@ -47,6 +47,8 @@ async def test_fast_idle_timeout_does_not_drop_valid_event() -> None:
         async for env in client.get_workflow_events(
             handler_id, include_internal_events=True
         ):
+            if env.type != "WorkflowIdleEvent":
+                continue
             event = env.load_event([WorkflowIdleEvent])
             if isinstance(event, WorkflowIdleEvent):
                 send = await client.send_event(

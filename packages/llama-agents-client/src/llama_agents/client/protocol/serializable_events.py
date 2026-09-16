@@ -9,8 +9,21 @@ from collections.abc import Sequence
 from typing import Any
 
 from pydantic import BaseModel, ValidationError, model_validator
-from workflows.context.utils import import_module_from_qualified_name
-from workflows.events import Event
+from workflows.context.serializers import JsonSerializer
+from workflows.events import (
+    Event,
+    HumanResponseEvent,
+    InputRequiredEvent,
+    StartEvent,
+    StopEvent,
+)
+
+FRAMEWORK_EVENT_TYPES = (
+    StartEvent,
+    StopEvent,
+    InputRequiredEvent,
+    HumanResponseEvent,
+)
 
 
 class EventEnvelopeWithMetadata(BaseModel):
@@ -28,17 +41,35 @@ class EventEnvelopeWithMetadata(BaseModel):
     type: str
     types: list[str] | None
 
-    def load_event(self, registry: Sequence[type[Event]] = ()) -> Event:
+    def load_event(
+        self,
+        registry: Sequence[type[Event]] = (),
+        serializer: JsonSerializer | None = None,
+    ) -> Event:
         """
-        Attempts to load the event data as a python class based on the envelope metadata.
-        Looks up the event from the registry, if provided. Falls back to the qualified_name, attempting to load from the module path.
+        Load the event data using the given serializer when provided.
+        A non-empty registry also permits framework event classes.
+        With neither, a default serializer resolves classes by qualified name.
         """
         registry_lookup = {e.__name__: e for e in registry}
+        if serializer is None:
+            if registry:
+                registry_lookup = {
+                    **{event.__name__: event for event in FRAMEWORK_EVENT_TYPES},
+                    **registry_lookup,
+                }
+                serializer = JsonSerializer(
+                    allowed_types=list(registry_lookup.values())
+                )
+            else:
+                serializer = JsonSerializer()
         as_event_envelope = EventEnvelope(
             value=self.value, type=self.type, qualified_name=self.qualified_name
         ).model_dump()
         return EventEnvelope.parse(
-            client_data=as_event_envelope, registry=registry_lookup
+            client_data=as_event_envelope,
+            registry=registry_lookup,
+            serializer=serializer,
         )
 
     @classmethod
@@ -101,6 +132,7 @@ class EventEnvelope(BaseModel):
         client_data: dict[str, Any] | str,
         registry: dict[str, builtins.type[Event]] | None = None,
         explicit_event: builtins.type[Event] | None = None,
+        serializer: JsonSerializer | None = None,
     ) -> Event:
         """
         Parse client data into an Event. Raises an EventValidationError if the client data is invalid.
@@ -109,6 +141,7 @@ class EventEnvelope(BaseModel):
             client_data: The client data to parse. Can be a dictionary, a string, or an explicit Event class.
             registry: The registry of event type names to Event classes.
             explicit_event: An explicit Event class to treat the dict as
+            serializer: The serializer used to resolve qualified names and nested values.
 
         Returns:
             The parsed Event.
@@ -136,24 +169,42 @@ class EventEnvelope(BaseModel):
                 "value": as_dict,
             }
         try:
+            decoder = (
+                serializer
+                if serializer is not None
+                else _decoder_from_registry(registry)
+            )
             event = EventEnvelope.model_validate(as_dict)
 
             if event.type:
                 if event.type not in registry:
-                    errors.append(
-                        f"Invalid event type: {event.type}. Expected one of {', '.join(registry.keys())}"
-                    )
+                    if registry:
+                        errors.append(
+                            f"Invalid event type: {event.type}. Expected one of {', '.join(registry.keys())}"
+                        )
+                    else:
+                        errors.append(
+                            f"Invalid event type: {event.type}. No event types are registered."
+                        )
                 else:
-                    return registry[event.type].model_validate(event.value)
+                    event_class = registry[event.type]
+                    return _validate_event(event_class, event.value, decoder)
             if event.qualified_name:
-                module_class = import_module_from_qualified_name(event.qualified_name)
-                if not issubclass(module_class, Event):
+                # This deprecated path is kept for older clients.
+                event_class = decoder.resolve_class(event.qualified_name)
+                if registry and event_class not in registry.values():
+                    raise ValueError(
+                        "Refusing to import disallowed workflow state type: "
+                        f"{event.qualified_name}. Pass it via allowed_types to the "
+                        "JsonSerializer constructor."
+                    )
+                if not issubclass(event_class, Event):
                     errors.append(
                         f"Invalid client data. Qualified name {event.qualified_name} does not correspond to an Event subclass"
                     )
                 else:
-                    return module_class.model_validate(event.value)
-        except ValidationError as e:
+                    return _validate_event(event_class, event.value, decoder)
+        except (TypeError, ValueError, ValidationError) as e:
             errors.append(f"Failed to deserialize event: {str(e)}")
         errors = (
             errors
@@ -163,6 +214,17 @@ class EventEnvelope(BaseModel):
             ]
         )
         raise EventValidationError(" ".join(errors))
+
+
+def _validate_event(
+    event_class: type[Event], value: Any, decoder: JsonSerializer
+) -> Event:
+    with decoder.validation_context():
+        return event_class.model_validate(value)
+
+
+def _decoder_from_registry(registry: dict[str, type[Event]]) -> JsonSerializer:
+    return JsonSerializer(allowed_types=list(registry.values()))
 
 
 def _get_event_subtypes(cls: type[Event]) -> list[str] | None:

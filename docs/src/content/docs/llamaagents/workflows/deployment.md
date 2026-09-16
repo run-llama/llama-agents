@@ -343,3 +343,5 @@ With Postgres, multiple server replicas can share the same database for distribu
 ## Python Client
 
 For programmatic interaction with a `WorkflowServer`, see the [Python Client](/python/llamaagents/workflows/client) documentation.
+
+Server JSON decoding uses the workflow's declared events and `additional_events`. Add API events with `server.add_workflow(name, workflow, additional_events=[MyEvent])`. The `serializer=` setting controls internal contexts and checkpoints only.

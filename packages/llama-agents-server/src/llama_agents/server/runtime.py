@@ -57,7 +57,11 @@ def _durable_runtime(
     if idle_timeout is None:
         return persisted, persistence
     return (
-        IdleReleaseDecorator(persisted, store=store, idle_timeout=idle_timeout),
+        IdleReleaseDecorator(
+            persisted,
+            store=store,
+            idle_timeout=idle_timeout,
+        ),
         persistence,
     )
 

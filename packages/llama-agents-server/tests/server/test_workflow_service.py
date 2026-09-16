@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from llama_agents.server import (
@@ -23,7 +25,7 @@ from server_test_fixtures import (  # type: ignore[import]
     wait_for_requested_external_event,
 )
 from workflows import Context, Workflow
-from workflows.context.serializers import BaseSerializer
+from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import DictState, InMemoryStateStore
 from workflows.decorators import step
 from workflows.events import StartEvent, StopEvent
@@ -59,6 +61,22 @@ class ToDictOnlyStateStore:
         return self._inner.to_dict(serializer)
 
 
+class RunningWorkflow(Workflow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.stopped = asyncio.Event()
+
+    @step
+    async def run_until_cancelled(self, ev: StartEvent) -> StopEvent:
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            self.stopped.set()
+        return StopEvent()
+
+
 @pytest.mark.asyncio
 async def test_cancel_running_handler(
     memory_store: MemoryWorkflowStore, interactive_workflow: Workflow
@@ -90,7 +108,9 @@ async def test_cancel_running_handler(
 
 @pytest.mark.asyncio
 async def test_cancel_handler_with_purge(
-    memory_store: MemoryWorkflowStore, simple_test_workflow: Workflow
+    memory_store: MemoryWorkflowStore,
+    simple_test_workflow: Workflow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Start and complete a workflow, then purge it from the store."""
     server = WorkflowServer(workflow_store=memory_store, idle_timeout=0.01)
@@ -109,6 +129,10 @@ async def test_cancel_handler_with_purge(
 
         await wait_for_passing(handler_completed, max_duration=2.0, interval=0.01)
 
+        async def fail_if_cancelled(run: Any) -> None:
+            pytest.fail(f"Completed run was cancelled: {run.run_id}")
+
+        monkeypatch.setattr(server._service, "_cancel_run", fail_if_cancelled)
         result = await server._service.cancel_handler("purge-test-1", purge=True)
         assert result == "deleted"
 
@@ -117,6 +141,59 @@ async def test_cancel_handler_with_purge(
             HandlerQuery(handler_id_in=["purge-test-1"])
         )
         assert len(persisted) == 0
+
+
+@pytest.mark.asyncio
+async def test_purge_running_handler_cancels_runtime(
+    memory_store: MemoryWorkflowStore,
+) -> None:
+    workflow = RunningWorkflow()
+    server = WorkflowServer(workflow_store=memory_store)
+    server.add_workflow("running", workflow)
+
+    async with server.contextmanager():
+        await server._service.start_workflow(workflow, "purge-running-1")
+        await asyncio.wait_for(workflow.started.wait(), timeout=2)
+
+        result = await server._service.cancel_handler("purge-running-1", purge=True)
+
+        assert result == "deleted"
+        assert workflow.stopped.is_set()
+        assert not await memory_store.query(
+            HandlerQuery(handler_id_in=["purge-running-1"])
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["query", "cancel", "delete"])
+async def test_purge_propagates_failures_before_deletion(
+    memory_store: MemoryWorkflowStore,
+    interactive_workflow: Workflow,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    server = WorkflowServer(workflow_store=memory_store)
+    server.add_workflow("interactive", interactive_workflow)
+    await memory_store.update(
+        PersistentHandler(
+            handler_id="purge-failure",
+            workflow_name="interactive",
+            status="running",
+            run_id="run",
+        )
+    )
+    error = RuntimeError("purge failure")
+    cancel = AsyncMock(side_effect=error if failure == "cancel" else None)
+    monkeypatch.setattr(server._service, "_workflow_run_handler", lambda *args: None)
+    monkeypatch.setattr(server._service, "_cancel_run", cancel)
+    if failure in ("query", "delete"):
+        monkeypatch.setattr(memory_store, failure, AsyncMock(side_effect=error))
+
+    with pytest.raises(RuntimeError, match="purge failure") as raised:
+        await server._service.cancel_handler("purge-failure", purge=True)
+
+    assert raised.value is error
+    assert "purge-failure" in memory_store.handlers
 
 
 @pytest.mark.asyncio
@@ -401,9 +478,9 @@ async def test_typed_state_continuation_via_memory_store(
 async def test_dict_state_pydantic_value_continuation_via_memory_store(
     memory_store: MemoryWorkflowStore,
 ) -> None:
-    """Pydantic values in DictState must survive handler continuation undegraded."""
+    """An explicit legacy serializer preserves undeclared DictState model values."""
     server = WorkflowServer(workflow_store=memory_store, idle_timeout=0.01)
-    wf = _DictHandoffWorkflow()
+    wf = _DictHandoffWorkflow(serializer=JsonSerializer())
     server.add_workflow("dictwf", wf)
     await memory_store.update(
         PersistentHandler(

@@ -184,6 +184,8 @@ async def _run_idle_release_test(port: int, db_url: str) -> None:
         # 2. Stream events until WorkflowIdleEvent
         stream = client.get_workflow_events(handler_id, include_internal_events=True)
         async for env in stream:
+            if env.type != "WorkflowIdleEvent":
+                continue
             event = env.load_event([WorkflowIdleEvent])
             if isinstance(event, WorkflowIdleEvent):
                 break

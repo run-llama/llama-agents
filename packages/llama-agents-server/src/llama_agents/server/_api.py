@@ -34,6 +34,7 @@ from starlette.routing import Route
 from starlette.schemas import SchemaGenerator
 from starlette.staticfiles import StaticFiles
 from workflows import Context, Workflow
+from workflows.context.serializers import JsonSerializer
 from workflows.events import Event, InternalDispatchEvent, StartEvent
 from workflows.representation import get_workflow_representation
 from workflows.utils import _nanoid as nanoid
@@ -50,7 +51,6 @@ from ._store.abstract_workflow_store import (
     AbstractWorkflowStore,
     HandlerQuery,
     Status,
-    _handler_result_decoding_failed,
     is_terminal_status,
 )
 
@@ -86,6 +86,7 @@ class _WorkflowAPI:
     ) -> None:
         self._service = service
         self._additional_events: dict[str, list[type[Event]]] = {}
+        self._json_decoders: dict[str, JsonSerializer] = {}
         self._sse_heartbeat_interval = sse_heartbeat_interval
         self._accept_context_api = accept_context_api
 
@@ -125,6 +126,9 @@ class _WorkflowAPI:
 
     def register_additional_events(self, name: str, events: list[type[Event]]) -> None:
         self._additional_events[name] = events
+        self._json_decoders[name] = JsonSerializer(
+            allowed_types=self.get_workflow_events(name)
+        )
 
     def get_workflow_events(self, workflow_name: str) -> list[type[Event]]:
         workflow = self._service.get_workflow(workflow_name)
@@ -135,6 +139,10 @@ class _WorkflowAPI:
     def event_registry(self, workflow_name: str) -> dict[str, type[Event]]:
         """Return a name→type mapping of events for the given workflow."""
         return {e.__name__: e for e in self.get_workflow_events(workflow_name)}
+
+    def json_decoder(self, workflow_name: str) -> JsonSerializer:
+        """Return the decoder for a workflow's public event types."""
+        return self._json_decoders[workflow_name]
 
     def _routes(self) -> list[Route]:
         return [
@@ -613,7 +621,7 @@ class _WorkflowAPI:
         persistent = await self._service.load_persistent_handler(handler_id)
         if persistent is None:
             raise HTTPException(detail="Handler not found", status_code=404)
-        if _handler_result_decoding_failed(persistent):
+        if persistent.result_unreadable:
             raise HTTPException(
                 detail="Stored handler result cannot be decoded", status_code=422
             )
@@ -1151,7 +1159,8 @@ class _WorkflowAPI:
 
         try:
             event = EventEnvelope.parse(
-                event_data, self.event_registry(handler_data.workflow_name)
+                event_data,
+                self.event_registry(handler_data.workflow_name),
             )
         except EventValidationError as e:
             raise HTTPException(detail=str(e), status_code=400)

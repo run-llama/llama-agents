@@ -69,7 +69,7 @@ async def test_run_workflow_simple_success(
         workflow_name="default", start_event=StartEvent()
     )
     assert result.result is not None
-    event = cast(StopEvent, result.result.load_event())
+    event = cast(StopEvent, result.result.load_event([StopEvent]))
     assert event.result == "hello"
     assert app.added == 1  # 1 step -> add_async_task called once
     assert app.completed == 1  # 1 step -> complete_async_task called once
@@ -88,7 +88,7 @@ async def test_run_workflow_file_success(
         workflow_name="process-file", start_event=FileEvent(file_id="1")
     )
     assert result.result is not None
-    event = cast(StopEvent, result.result.load_event())
+    event = cast(StopEvent, result.result.load_event([StopEvent]))
     assert event.result == "1"
     assert app.added == 1  # 1 step -> add_async_task called once
     assert app.completed == 1  # 1 step -> complete_async_task called once

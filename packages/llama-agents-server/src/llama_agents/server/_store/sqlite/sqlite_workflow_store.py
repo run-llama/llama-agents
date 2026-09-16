@@ -149,7 +149,7 @@ class SqliteWorkflowStore(AbstractWorkflowStore):
             cursor.execute(sql, tuple(params))
             rows = cursor.fetchall()
 
-        return [_row_to_persistent_handler(row) for row in rows]
+        return [self._row_to_persistent_handler(row) for row in rows]
 
     async def update(self, handler: PersistentHandler) -> None:
         with self._connect() as conn:
@@ -393,19 +393,19 @@ class SqliteWorkflowStore(AbstractWorkflowStore):
 
         return clauses, params
 
-
-def _row_to_persistent_handler(row: tuple) -> PersistentHandler:
-    return decode_persistent_handler(
-        dict(
-            handler_id=row[0],
-            workflow_name=row[1],
-            status=row[2],
-            run_id=row[3],
-            error=row[4],
-            result=json.loads(row[5]) if row[5] else None,
-            started_at=datetime.fromisoformat(row[6]) if row[6] else None,
-            updated_at=datetime.fromisoformat(row[7]) if row[7] else None,
-            completed_at=datetime.fromisoformat(row[8]) if row[8] else None,
-            idle_since=datetime.fromisoformat(row[9]) if row[9] else None,
+    def _row_to_persistent_handler(self, row: tuple) -> PersistentHandler:
+        return decode_persistent_handler(
+            dict(
+                handler_id=row[0],
+                workflow_name=row[1],
+                status=row[2],
+                run_id=row[3],
+                error=row[4],
+                result=json.loads(row[5]) if row[5] else None,
+                started_at=datetime.fromisoformat(row[6]) if row[6] else None,
+                updated_at=datetime.fromisoformat(row[7]) if row[7] else None,
+                completed_at=datetime.fromisoformat(row[8]) if row[8] else None,
+                idle_since=datetime.fromisoformat(row[9]) if row[9] else None,
+            ),
+            self.result_decoder,
         )
-    )
