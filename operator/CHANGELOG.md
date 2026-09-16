@@ -1,5 +1,11 @@
 # llama-agents-operator
 
+## 0.11.2
+
+### Patch Changes
+
+- 48e871d: Disable Kubernetes service links on build Job and appserver Deployment pods, including after template overlays.
+
 ## 0.11.1
 
 ### Patch Changes

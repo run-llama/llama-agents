@@ -155,10 +155,10 @@ Partial inline (one of `accessKey`/`secretKey` set) is a template error.
 | images.controlPlane.tag | string | `"0.12.4"` | Control plane image tag |
 | images.controlPlane.pullPolicy | string | `"IfNotPresent"` | Control plane image pull policy |
 | images.operator.repository | string | `"llamaindex/llama-agents-operator"` | Operator image repository |
-| images.operator.tag | string | `"0.11.1"` | Operator image tag |
+| images.operator.tag | string | `"0.11.2"` | Operator image tag |
 | images.operator.pullPolicy | string | `"IfNotPresent"` | Operator image pull policy |
 | images.appserver.repository | string | `"llamaindex/llama-agents-appserver"` | Appserver image repository (used by operator for managed pods) |
-| images.appserver.tag | string | `"0.11.6"` | Appserver image tag |
+| images.appserver.tag | string | `"0.12.0"` | Appserver image tag |
 | images.appserver.pullPolicy | string | `"IfNotPresent"` | Appserver image pull policy |
 | images.nginx.repository | string | `"nginxinc/nginx-unprivileged"` | Nginx sidecar image repository |
 | images.nginx.tag | string | `"1.27-alpine"` | Nginx sidecar image tag |
