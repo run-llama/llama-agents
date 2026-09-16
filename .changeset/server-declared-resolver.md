@@ -1,5 +1,5 @@
 ---
-"llama-agents-client": patch
+"llama-agents-client": minor
 "llama-agents-server": minor
 "llama-agents-dbos": patch
 "llama-agents-appserver": patch
