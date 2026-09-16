@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Generic, cast
 from pydantic import ValidationError
 
 from workflows.context.context_types import MODEL_T, SerializedContext
-from workflows.context.serializers import BaseSerializer, JsonSerializer
+from workflows.context.serializers import BaseSerializer
 from workflows.context.state_store import (
     InMemoryStateStore,
     StateStore,
@@ -41,7 +41,11 @@ class PreContext(Generic[MODEL_T]):
         previous_context: dict[str, Any] | None = None,
         serializer: BaseSerializer | None = None,
     ) -> None:
-        self._serializer = serializer or JsonSerializer()
+        self._serializer = (
+            serializer
+            if serializer is not None
+            else workflow.runtime.get_serializer(workflow)
+        )
         self._workflow = workflow
         self._store = None
 
@@ -50,7 +54,7 @@ class PreContext(Generic[MODEL_T]):
             try:
                 # Auto-detect and convert V0 to V1 if needed
                 previous_context_parsed = SerializedContext.from_dict_auto(
-                    previous_context
+                    previous_context, self._serializer
                 )
                 # Validate it fully parses synchronously to avoid delayed validation errors
                 BrokerState.from_serialized(

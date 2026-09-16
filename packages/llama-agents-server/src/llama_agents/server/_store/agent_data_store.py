@@ -21,6 +21,7 @@ from .abstract_workflow_store import (
     PersistentHandler,
     StoredEvent,
     StoredTick,
+    decode_persistent_handler,
 )
 from .agent_data_client import AgentDataClient
 from .agent_data_state_store import AgentDataStateStore
@@ -238,7 +239,7 @@ class AgentDataStore(AbstractWorkflowStore):
     def _item_to_handler(item: dict[str, Any]) -> PersistentHandler:
         """Convert an Agent Data API item to a PersistentHandler."""
         data = item["data"]
-        return PersistentHandler.model_validate(data)
+        return decode_persistent_handler(data)
 
     async def query(self, query: HandlerQuery) -> list[PersistentHandler]:
         filters = self._build_handler_filters(query)

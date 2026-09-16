@@ -17,7 +17,7 @@ from llama_agents.client.protocol.serializable_events import (
     EventEnvelopeWithMetadata,
 )
 from typing_extensions import override
-from workflows.context.serializers import BaseSerializer
+from workflows.context.serializers import BaseSerializer, JsonSerializer
 from workflows.context.state_store import (
     StateStore,
     infer_state_type,
@@ -68,11 +68,13 @@ class _ServerInternalRunAdapter(BaseInternalRunAdapterDecorator):
         runtime: ServerRuntimeDecorator,
         *,
         state_type: type[Any] | None = None,
+        serializer: BaseSerializer | None = None,
     ) -> None:
         super().__init__(decorated)
         self._runtime = runtime
         self._store = runtime._store
         self._state_type = state_type
+        self._serializer = serializer
         self._state_stores: dict[tuple[str, ...], StateStore[Any]] = {}
         self._write_lock: asyncio.Lock | None = None
 
@@ -95,7 +97,10 @@ class _ServerInternalRunAdapter(BaseInternalRunAdapterDecorator):
             )
         else:
             store = self._store.create_state_store(
-                self.run_id, self._state_type, namespace=namespace
+                self.run_id,
+                self._state_type,
+                serializer=self._serializer,
+                namespace=namespace,
             )
         self._state_stores[namespace] = store
         return store
@@ -176,10 +181,15 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
         store: AbstractWorkflowStore,
         *,
         persistence_backoff: list[float] | None = None,
+        serializer: BaseSerializer | None = None,
     ) -> None:
         super().__init__(decorated)
         self._store: AbstractWorkflowStore = store
+        self._default_serializer = (
+            serializer if serializer is not None else JsonSerializer()
+        )
         self._registered_workflows: dict[str, Workflow] = {}
+        self._additional_events: dict[str, tuple[type[Event], ...]] = {}
         self._initial_state: dict[str, Any] = {}
         self._persistence_backoff = (
             list(persistence_backoff) if persistence_backoff is not None else [0.5, 3]
@@ -218,6 +228,22 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
     def untrack_workflow(self, workflow: Workflow) -> None:
         self._registered_workflows.pop(workflow.workflow_name, None)
         super().untrack_workflow(workflow)
+
+    def get_serializer(self, workflow: Workflow) -> BaseSerializer:
+        serializer = workflow.serializer or self._default_serializer
+        return self._compose_serializer(
+            workflow,
+            serializer,
+            *self._additional_events.get(workflow.workflow_name, ()),
+        )
+
+    def register_additional_events(
+        self, workflow_name: str, events: list[type[Event]]
+    ) -> None:
+        self._additional_events[workflow_name] = tuple(events)
+        workflow = self.get_workflow(workflow_name)
+        if workflow is not None:
+            self._clear_serializer_cache(workflow)
 
     def get_workflow(self, name: str) -> Workflow | None:
         return self._registered_workflows.get(name)
@@ -274,7 +300,12 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
         """Wraps the inner runtime's adapter in _ServerInternalRunAdapter."""
         inner_adapter = self._decorated.get_internal_adapter(workflow)
         state_type = infer_state_type(workflow)
-        return _ServerInternalRunAdapter(inner_adapter, self, state_type=state_type)
+        return _ServerInternalRunAdapter(
+            inner_adapter,
+            self,
+            state_type=state_type,
+            serializer=self.get_serializer(workflow),
+        )
 
     # ------------------------------------------------------------------
     # Handler persistence

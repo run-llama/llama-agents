@@ -27,7 +27,6 @@ from llama_agents.server._store.abstract_workflow_store import (
     stream_workflow_ticks,
 )
 from typing_extensions import override
-from workflows.context.serializers import JsonSerializer
 from workflows.context.state_store import infer_state_type
 from workflows.context.state_store_integration import state_store_handoff
 from workflows.events import Event, WorkflowIdleEvent
@@ -291,7 +290,13 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
         """Rebuild BrokerState from persisted ticks."""
         init_state = BrokerState.from_workflow(workflow)
         return await rebuild_state_from_ticks_stream(
-            init_state, stream_workflow_ticks(self._store, run_id), run_id=run_id
+            init_state,
+            stream_workflow_ticks(
+                self._store,
+                run_id,
+                serializer=workflow.runtime.get_serializer(workflow),
+            ),
+            run_id=run_id,
         )
 
     async def _await_old_workflow_for_resume(
@@ -377,13 +382,13 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
             )
 
         # Carry over state from old run's state store
-        serializer = JsonSerializer()
+        serializer = workflow.runtime.get_serializer(workflow)
         serialized_state: dict[str, Any] | None = None
         state_type = infer_state_type(workflow)
         if state_type is not None:
             try:
                 old_state_store = self._store.create_state_store(
-                    run_id, state_type=state_type
+                    run_id, state_type=state_type, serializer=serializer
                 )
                 serialized_state = await state_store_handoff(
                     old_state_store, serializer

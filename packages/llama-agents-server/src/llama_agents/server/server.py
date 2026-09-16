@@ -11,6 +11,7 @@ from typing import Any, AsyncGenerator
 import uvicorn
 from starlette.middleware import Middleware
 from workflows import Workflow
+from workflows.context.serializers import BaseSerializer
 from workflows.events import Event
 from workflows.runtime.types.plugin import Runtime
 
@@ -64,6 +65,7 @@ class WorkflowServer:
         idle_timeout: float = 60.0,
         sse_heartbeat_interval: float | None = 25.0,
         accept_context_api: bool = False,
+        serializer: BaseSerializer | None = None,
     ):
         """Create a new workflow server.
 
@@ -93,11 +95,14 @@ class WorkflowServer:
                 (``: heartbeat``) on idle connections. Defaults to ``25.0``.
                 Set to ``None`` to disable heartbeats. Only applies to SSE
                 mode; NDJSON streams are unaffected.
+            serializer: Internal state and event serializer for workflows without
+                their own override. None preserves the legacy JSON default.
             accept_context_api: Allow the ``"context"`` field in run request
                 bodies. Defaults to ``False``. Context deserialization can
                 instantiate arbitrary Pydantic objects via ``importlib``, so
                 only enable this on trusted networks.
         """
+        self._serializer = serializer
         if runtime is None:
             self._runtime_core = _DurableWorkflowRuntime(
                 workflow_store=workflow_store,
@@ -107,6 +112,7 @@ class WorkflowServer:
                 idle_timeout=idle_timeout,
                 abort_active_on_stop=False,
                 persistence_backoff=list(persistence_backoff),
+                serializer=serializer,
             )
         else:
             self._runtime_core = _DurableWorkflowRuntime(
@@ -116,6 +122,7 @@ class WorkflowServer:
                 abort_active_on_stop=False,
                 start_store_before_runtime=False,
                 persistence_backoff=list(persistence_backoff),
+                serializer=serializer,
                 wrap_runtime=False,
             )
         self._workflow_store = self._runtime_core._store
@@ -134,6 +141,11 @@ class WorkflowServer:
     # ------------------------------------------------------------------
     # Workflow registration
     # ------------------------------------------------------------------
+
+    @property
+    def serializer(self) -> BaseSerializer | None:
+        """The explicitly configured internal default, or None for legacy JSON."""
+        return self._serializer
 
     def add_workflow(
         self,
@@ -154,7 +166,7 @@ class WorkflowServer:
                 aren't discoverable from step signatures alone (e.g. events
                 consumed via ``ctx.wait_for_event()``).
         """
-        self._service.add_workflow(name, workflow)
+        self._runtime_core.add_workflow(name, workflow, additional_events)
 
         if additional_events is not None:
             self._api.register_additional_events(name, additional_events)

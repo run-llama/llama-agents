@@ -23,6 +23,7 @@ from ..abstract_workflow_store import (
     PersistentHandler,
     StoredEvent,
     StoredTick,
+    decode_persistent_handler,
 )
 from .migrate import run_migrations as _run_migrations
 from .sqlite_state_store import SqliteStateStore
@@ -394,15 +395,17 @@ class SqliteWorkflowStore(AbstractWorkflowStore):
 
 
 def _row_to_persistent_handler(row: tuple) -> PersistentHandler:
-    return PersistentHandler(
-        handler_id=row[0],
-        workflow_name=row[1],
-        status=row[2],
-        run_id=row[3],
-        error=row[4],
-        result=json.loads(row[5]) if row[5] else None,
-        started_at=datetime.fromisoformat(row[6]) if row[6] else None,
-        updated_at=datetime.fromisoformat(row[7]) if row[7] else None,
-        completed_at=datetime.fromisoformat(row[8]) if row[8] else None,
-        idle_since=datetime.fromisoformat(row[9]) if row[9] else None,
+    return decode_persistent_handler(
+        dict(
+            handler_id=row[0],
+            workflow_name=row[1],
+            status=row[2],
+            run_id=row[3],
+            error=row[4],
+            result=json.loads(row[5]) if row[5] else None,
+            started_at=datetime.fromisoformat(row[6]) if row[6] else None,
+            updated_at=datetime.fromisoformat(row[7]) if row[7] else None,
+            completed_at=datetime.fromisoformat(row[8]) if row[8] else None,
+            idle_since=datetime.fromisoformat(row[9]) if row[9] else None,
+        )
     )

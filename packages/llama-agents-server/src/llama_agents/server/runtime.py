@@ -11,6 +11,7 @@ from warnings import catch_warnings, simplefilter
 
 from llama_agents.client.protocol import HandlerData
 from workflows import Context, Workflow
+from workflows.context.serializers import BaseSerializer
 from workflows.events import Event, StartEvent
 from workflows.handler import WorkflowHandler
 from workflows.plugins.basic import BasicRuntime
@@ -77,6 +78,7 @@ class _DurableWorkflowRuntime:
         start_store_before_runtime: bool = True,
         persistence_backoff: list[float] | None = None,
         wrap_runtime: bool = True,
+        serializer: BaseSerializer | None = None,
     ) -> None:
         store = workflow_store if workflow_store is not None else MemoryWorkflowStore()
         if wrap_runtime:
@@ -100,14 +102,22 @@ class _DurableWorkflowRuntime:
             durable,
             store=self._store,
             persistence_backoff=persistence_backoff,
+            serializer=serializer,
         )
         self._service = _WorkflowService(runtime=self._runtime, store=self._store)
         self._active_handlers: dict[str, WorkflowHandler] = {}
         self._started = False
 
-    def add_workflow(self, name: str, workflow: Workflow) -> None:
+    def add_workflow(
+        self,
+        name: str,
+        workflow: Workflow,
+        additional_events: list[type[Event]] | None = None,
+    ) -> None:
         """Register a workflow under a stable name for new runs and resume."""
         self._service.add_workflow(name, workflow)
+        if additional_events is not None:
+            self._runtime.register_additional_events(name, additional_events)
 
     async def start(self) -> _DurableWorkflowRuntime:
         """Start the store and runtime, resuming existing runs if enabled."""

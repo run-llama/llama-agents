@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 import dataclasses
-import importlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from pydantic import TypeAdapter
 from workflows._event_matching import step_accepts_type
 from workflows._stream_levels import event_types, stream_level_types_by_producer
 from workflows.collect import Collect, Take
@@ -23,7 +23,7 @@ from workflows.context.context_types import (
 )
 from workflows.context.serializers import JsonSerializer
 from workflows.decorators import CatchErrorHandler, StepConfig
-from workflows.events import Event
+from workflows.events import Event, SerializableEventType
 from workflows.retry_policy import RetryPolicy
 from workflows.runtime.types.results import (
     CollectionReleasePayload,
@@ -329,7 +329,7 @@ class BrokerState:
     ) -> BrokerState:
         """Deserialize a SerializedContext into a BrokerState."""
 
-        serializer = serializer or JsonSerializer()
+        serializer = serializer if serializer is not None else JsonSerializer()
 
         # Start with a base state from the workflow
         base_state = BrokerState.from_workflow(workflow)
@@ -405,7 +405,7 @@ class BrokerState:
                         if waiter_payload is not None
                         else serializer.deserialize(waiter_data.event),
                         waiting_for_event=_import_event_type(
-                            waiter_data.waiting_for_event
+                            waiter_data.waiting_for_event, serializer
                         ),
                         requirements={},
                         has_requirements=waiter_data.has_requirements,
@@ -457,16 +457,13 @@ def _deserialize_event_attempt(
     )
 
 
-def _import_event_type(qualified_name: str) -> type[Event]:
-    """Import an event type from a fully qualified name like 'mymodule.MyEvent'."""
-    parts = qualified_name.rsplit(".", 1)
-    if len(parts) != 2:
-        raise ValueError(f"Invalid qualified name: {qualified_name}")
+_event_type_adapter = TypeAdapter(SerializableEventType)
 
-    module_name, class_name = parts
 
-    module = importlib.import_module(module_name)
-    return getattr(module, class_name)
+def _import_event_type(qualified_name: str, serializer: BaseSerializer) -> type[Event]:
+    """Resolve an event class name through the selected serializer."""
+    with serializer.validation_context():
+        return _event_type_adapter.validate_python(qualified_name)
 
 
 def _binding_id(

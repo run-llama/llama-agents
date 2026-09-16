@@ -23,6 +23,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse
 from starlette.routing import Route
 from workflows import Context, Workflow
+from workflows.context.serializers import BaseSerializer
 from workflows.handler import WorkflowHandler
 
 logger = logging.getLogger()
@@ -35,6 +36,8 @@ class Deployment:
     def __init__(
         self,
         workflows: dict[str, Workflow],
+        *,
+        serializer: BaseSerializer | None = None,
     ) -> None:
         """Creates a Deployment instance.
 
@@ -44,6 +47,7 @@ class Deployment:
             local: Whether the deployment is local. If true, sources won't be synced
         """
 
+        self._serializer = serializer
         self._default_service: Workflow | None = workflows.get(DEFAULT_SERVICE_ID)
         self._service_tasks: list[asyncio.Task] = []
         # Ready to load services
@@ -128,7 +132,10 @@ class Deployment:
             )
         else:
             logger.info("Not persisting workflows")
-        server = WorkflowServer(workflow_store=persistence)
+        server = WorkflowServer(
+            workflow_store=persistence,
+            serializer=self._serializer,
+        )
         for service_id, workflow in self._workflow_services.items():
             server.add_workflow(service_id, workflow)
         return server

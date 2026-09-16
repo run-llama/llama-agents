@@ -22,7 +22,8 @@ from typing import (
     Protocol,
 )
 
-from workflows.context.state_store import StateStore
+from workflows.context.serializers import BaseSerializer, JsonSerializer
+from workflows.context.state_store import DictState, StateStore, infer_state_type
 from workflows.events import Event, StartEvent, StopEvent
 from workflows.runtime.types.named_task import (
     NamedTask,
@@ -33,7 +34,6 @@ from workflows.runtime.types.named_task import (
 
 if TYPE_CHECKING:
     from workflows.context.context import Context
-    from workflows.context.serializers import BaseSerializer
     from workflows.runtime.types.internal_state import BrokerState
     from workflows.runtime.types.step_function import StepWorkerFunction
     from workflows.workflow import Workflow
@@ -471,6 +471,10 @@ class Runtime(ABC):
     """
 
     def __init__(self) -> None:
+        self._default_serializer = JsonSerializer()
+        self._serializer_cache: weakref.WeakKeyDictionary[Workflow, BaseSerializer] = (
+            weakref.WeakKeyDictionary()
+        )
         self._pending: WorkflowSet = WorkflowSet()
         self._launched: bool = False
 
@@ -577,6 +581,38 @@ class Runtime(ABC):
     def destroy_sync(self) -> None:
         """Synchronous convenience wrapper for :meth:`destroy`."""
         asyncio.run(self.destroy())
+
+    def get_serializer(self, workflow: Workflow) -> BaseSerializer:
+        """Return the workflow's serializer, or this runtime's default if it has none."""
+        serializer = (
+            workflow.serializer
+            if workflow.serializer is not None
+            else self._default_serializer
+        )
+        return self._compose_serializer(workflow, serializer)
+
+    def _compose_serializer(
+        self,
+        workflow: Workflow,
+        serializer: BaseSerializer,
+        *additional_types: type[Any],
+    ) -> BaseSerializer:
+        cached = self._serializer_cache.get(workflow)
+        if cached is not None:
+            return cached
+
+        if isinstance(serializer, JsonSerializer):
+            state_type = infer_state_type(workflow)
+            declared_types: list[type[Any]] = [*workflow.events, *additional_types]
+            if state_type is not DictState:
+                declared_types.append(state_type)
+            serializer = serializer.with_types(*declared_types)
+
+        self._serializer_cache[workflow] = serializer
+        return serializer
+
+    def _clear_serializer_cache(self, workflow: Workflow) -> None:
+        self._serializer_cache.pop(workflow, None)
 
     def track_workflow(self, workflow: Workflow) -> None:
         """

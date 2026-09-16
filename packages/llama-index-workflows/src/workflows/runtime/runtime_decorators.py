@@ -86,6 +86,9 @@ class BaseRuntimeDecorator(Runtime):
     async def destroy(self) -> None:
         await self._decorated.destroy()
 
+    def get_serializer(self, workflow: Workflow) -> BaseSerializer:
+        return self._decorated.get_serializer(workflow)
+
     def track_workflow(self, workflow: Workflow) -> None:
         self._pending.add(workflow)
         self._decorated.track_workflow(workflow)

@@ -36,6 +36,7 @@ from llama_agents.appserver.workflow_loader import (
     inject_appserver_into_target,
     install_ui,
     load_environment_variables,
+    load_workflow_server,
     load_workflows,
     start_dev_ui_process,
     validate_required_env_vars,
@@ -63,8 +64,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, Any]:
     apiserver_state.state("starting")
     config = get_deployment_config()
 
-    workflows = load_workflows(config)
-    deployment = Deployment(workflows)
+    source_server = load_workflow_server(config)
+    deployment = Deployment(
+        source_server.get_workflows(), serializer=source_server.serializer
+    )
     base_router = create_base_router(config.name)
     deploy_router = create_deployments_router(config.name, deployment)
     server = deployment.mount_workflow_server(app)
@@ -431,9 +434,10 @@ def preflight_validate(
     load_environment_variables(cfg, settings.resolved_config_parent)
     validate_required_env_vars(cfg, fill_missing=skip_env_validation)
 
-    workflows = load_workflows(cfg)
+    source_server = load_workflow_server(cfg)
+    workflows = source_server.get_workflows()
     # Instantiate Deployment to ensure server wiring doesn't raise
-    _ = Deployment(workflows)
+    _ = Deployment(workflows, serializer=source_server.serializer)
     # Run workflow-level validations if present
     errors: list[tuple[str, str]] = []
     for service_name, workflow in workflows.items():

@@ -17,6 +17,7 @@ from llama_agents.client.protocol.serializable_events import (
 )
 from pydantic import (
     BaseModel,
+    PrivateAttr,
     field_serializer,
     field_validator,
 )
@@ -59,6 +60,8 @@ class HandlerQuery:
 
 
 class PersistentHandler(BaseModel):
+    _result_decoding_failed: bool = PrivateAttr(default=False)
+
     handler_id: str
     workflow_name: str
     status: Status
@@ -150,7 +153,10 @@ class AbstractWorkflowStore(ABC):
             # not shadow the workflow's concrete state type.
             store.state_type = state_type
         if serialized_state is not None:
-            store.add_seed(serialized_state, serializer or JsonSerializer())
+            store.add_seed(
+                serialized_state,
+                serializer if serializer is not None else JsonSerializer(),
+            )
         return store
 
     def _evict_run_state_stores(self, run_id: str) -> None:
@@ -293,7 +299,38 @@ def as_legacy_context_store(store: AbstractWorkflowStore) -> LegacyContextStore 
 async def stream_workflow_ticks(
     store: AbstractWorkflowStore,
     run_id: str,
+    *,
+    serializer: BaseSerializer | None = None,
 ) -> AsyncIterator[WorkflowTick]:
     """Stream validated WorkflowTick objects for *run_id* from *store*."""
+    selected = serializer if serializer is not None else JsonSerializer()
     async for stored in store.stream_ticks(run_id):
-        yield WorkflowTickAdapter.validate_python(stored.tick_data)
+        with selected.validation_context():
+            value = (
+                selected.deserialize(stored.tick_data["serialized_tick"])
+                if "serialized_tick" in stored.tick_data
+                else stored.tick_data
+            )
+            tick = WorkflowTickAdapter.validate_python(value)
+        yield tick
+
+
+def decode_persistent_handler(data: dict[str, Any]) -> PersistentHandler:
+    try:
+        return PersistentHandler.model_validate(data)
+    except Exception as exc:
+        if data.get("result") is None:
+            raise
+        handler = PersistentHandler.model_validate({**data, "result": None})
+        handler._result_decoding_failed = True
+        logger.warning(
+            "Could not decode persisted handler result: handler_id=%r workflow_name=%r error=%s",
+            data.get("handler_id"),
+            data.get("workflow_name"),
+            type(exc).__name__,
+        )
+        return handler
+
+
+def _handler_result_decoding_failed(handler: PersistentHandler) -> bool:
+    return handler._result_decoding_failed

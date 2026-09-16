@@ -648,7 +648,11 @@ class DBOSRuntime(Runtime):
             )
 
         # Capture values needed in the async task closure
-        active_serializer = serializer or JsonSerializer()
+        active_serializer = (
+            serializer
+            if serializer is not None
+            else workflow.runtime.get_serializer(workflow)
+        )
 
         async def _run_workflow() -> WorkflowHandleAsync[Any]:
             with SetWorkflowID(run_id):
@@ -732,6 +736,7 @@ class DBOSRuntime(Runtime):
             else None,
             resolved_pool=self._pool,
             db_path=self._db_path,
+            serializer=workflow.runtime.get_serializer(workflow),
         )
 
     def get_external_adapter(self, run_id: str) -> ExternalRunAdapter:
@@ -1110,7 +1115,9 @@ class InternalDBOSAdapter(InternalRunAdapter):
         pool: PoolProvider | None = None,
         resolved_pool: asyncpg.Pool | None = None,
         db_path: str | None = None,
+        serializer: BaseSerializer | None = None,
     ) -> None:
+        self._serializer = serializer if serializer is not None else JsonSerializer()
         self._run_id = run_id
         self._engine = engine
         self._state_type = state_type
@@ -1208,6 +1215,7 @@ class InternalDBOSAdapter(InternalRunAdapter):
                     run_id=self._run_id,
                     namespace=namespace,
                     state_type=cast(type[Any], self._state_type),
+                    serializer=self._serializer,
                     schema=self._schema,
                 )
             elif self._db_path is not None:
@@ -1216,6 +1224,7 @@ class InternalDBOSAdapter(InternalRunAdapter):
                     run_id=self._run_id,
                     namespace=namespace,
                     state_type=cast(type[Any], self._state_type),
+                    serializer=self._serializer,
                 )
             else:
                 raise RuntimeError(

@@ -212,6 +212,38 @@ async def test_released_handler_reloaded_on_event(
 
 
 @pytest.mark.asyncio
+async def test_allowlisted_serializer_resumes_released_hitl_workflow(
+    sqlite_store: SqliteWorkflowStore,
+) -> None:
+    handler_id = "allowlisted-reload-1"
+    workflow = WaitingWorkflow()
+    serializer = JsonSerializer(allowed_types=[])
+    server = WorkflowServer(
+        workflow_store=sqlite_store,
+        idle_timeout=0.01,
+        serializer=serializer,
+    )
+    server.add_workflow("test", workflow, additional_events=[WaitableExternalEvent])
+
+    async with server.contextmanager():
+        handler_data = await server._service.start_workflow(workflow, handler_id)
+        assert handler_data.run_id is not None
+
+        idle_release = _get_idle_release(server)
+        await wait_handler_idle_and_released(
+            sqlite_store, handler_id, idle_release, handler_data.run_id
+        )
+
+        await server._service.send_event(
+            handler_id, WaitableExternalEvent(response="Ada")
+        )
+
+        handler = await wait_handler_status(sqlite_store, handler_id, "completed")
+        assert handler.result is not None
+        assert handler.result.result == "received: Ada"
+
+
+@pytest.mark.asyncio
 async def test_idle_since_cleared_on_reload(
     memory_store: MemoryWorkflowStore, waiting_workflow: WaitingWorkflow
 ) -> None:

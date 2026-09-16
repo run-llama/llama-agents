@@ -25,6 +25,7 @@ from .abstract_workflow_store import (
     PersistentHandler,
     StoredEvent,
     StoredTick,
+    decode_persistent_handler,
 )
 from .postgres.migrate import run_migrations as _run_migrations
 from .postgres_state_store import PostgresStateStore
@@ -653,15 +654,17 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
 
     @staticmethod
     def _row_to_handler(row: asyncpg.Record) -> PersistentHandler:
-        return PersistentHandler(
-            handler_id=row["handler_id"],
-            workflow_name=row["workflow_name"],
-            status=row["status"],
-            run_id=row["run_id"],
-            error=row["error"],
-            result=json.loads(row["result"]) if row["result"] else None,
-            started_at=row["started_at"],
-            updated_at=row["updated_at"],
-            completed_at=row["completed_at"],
-            idle_since=row["idle_since"],
+        return decode_persistent_handler(
+            dict(
+                handler_id=row["handler_id"],
+                workflow_name=row["workflow_name"],
+                status=row["status"],
+                run_id=row["run_id"],
+                error=row["error"],
+                result=json.loads(row["result"]) if row["result"] else None,
+                started_at=row["started_at"],
+                updated_at=row["updated_at"],
+                completed_at=row["completed_at"],
+                idle_since=row["idle_since"],
+            )
         )

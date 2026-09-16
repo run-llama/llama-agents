@@ -48,6 +48,29 @@ def _dist_name_for_version(version: Version) -> str:
     return _NEW_DIST_NAME
 
 
+def _load_app_server(app_path: str) -> WorkflowServer:
+    module_name, app_name = app_path.split(":", 1)
+    module = importlib.import_module(module_name)
+    if not hasattr(module, app_name):
+        raise AttributeError(f"Module '{module_name}' has no attribute '{app_name}'")
+    workflow = getattr(module, app_name)
+    if not isinstance(workflow, WorkflowServer):
+        raise ValueError(
+            f"Workflow {app_name} in {module_name} is not a WorkflowServer object"
+        )
+    return workflow
+
+
+def load_workflow_server(config: DeploymentConfig) -> WorkflowServer:
+    """Load a source server or construct one from configured workflow instances."""
+    if config.app:
+        return _load_app_server(config.app)
+    server = WorkflowServer()
+    for name, workflow in load_workflows(config).items():
+        server.add_workflow(name, workflow)
+    return server
+
+
 def load_workflows(config: DeploymentConfig) -> dict[str, Workflow]:
     """
     Creates WorkflowService instances according to the configuration object.
@@ -56,18 +79,7 @@ def load_workflows(config: DeploymentConfig) -> dict[str, Workflow]:
     workflow_services: dict[str, Workflow] = {}
 
     if config.app:
-        module_name, app_name = config.app.split(":", 1)
-        module = importlib.import_module(module_name)
-        if not hasattr(module, app_name):
-            raise AttributeError(
-                f"Module '{module_name}' has no attribute '{app_name}'"
-            )
-        workflow = getattr(module, app_name)
-        if not isinstance(workflow, WorkflowServer):
-            raise ValueError(
-                f"Workflow {app_name} in {module_name} is not a WorkflowServer object"
-            )
-        workflow_services = workflow.get_workflows()
+        workflow_services = _load_app_server(config.app).get_workflows()
     else:
         for service_id, workflow_name in config.workflows.items():
             module_name, workflow_name = workflow_name.split(":", 1)

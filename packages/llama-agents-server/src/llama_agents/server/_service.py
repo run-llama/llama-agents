@@ -22,7 +22,6 @@ from llama_agents.client.protocol.serializable_events import (
 from llama_agents.server._runtime.server_runtime import ServerRuntimeDecorator
 from llama_index_instrumentation.dispatcher import instrument_tags
 from workflows import Context
-from workflows.context.serializers import JsonSerializer
 from workflows.context.state_store_integration import state_store_handoff
 from workflows.events import Event, StartEvent
 from workflows.handler import WorkflowHandler
@@ -143,10 +142,18 @@ class _WorkflowService:
     # ------------------------------------------------------------------
 
     async def load_handler(self, handler_id: str) -> HandlerData | None:
-        found = await self._store.query(HandlerQuery(handler_id_in=[handler_id]))
+        persistent = await self.load_persistent_handler(handler_id)
+        return (
+            handler_data_from_persistent(persistent) if persistent is not None else None
+        )
+
+    async def load_persistent_handler(
+        self, handler_id: str
+    ) -> PersistentHandler | None:
+        found = await self.query_handlers(HandlerQuery(handler_id_in=[handler_id]))
         if not found:
             return None
-        return handler_data_from_persistent(found[0])
+        return found[0]
 
     async def resolve_handler(self, handler_id: str) -> HandlerData:
         handler_data = await self.load_handler(handler_id)
@@ -184,7 +191,13 @@ class _WorkflowService:
     async def cancel_handler(
         self, handler_id: str, purge: bool = False
     ) -> Literal["cancelled", "deleted"] | None:
-        found = await self._store.query(HandlerQuery(handler_id_in=[handler_id]))
+        if purge:
+            n_deleted = await self._store.delete(
+                HandlerQuery(handler_id_in=[handler_id])
+            )
+            return "deleted" if n_deleted else None
+
+        found = await self.query_handlers(HandlerQuery(handler_id_in=[handler_id]))
         if not found:
             return None
         persisted = handler_data_from_persistent(found[0])
@@ -200,14 +213,7 @@ class _WorkflowService:
             )
             await self._cancel_run(handler)
 
-        if purge:
-            n_deleted = await self._store.delete(
-                HandlerQuery(handler_id_in=[handler_id])
-            )
-            if n_deleted == 0:
-                return None
-
-        return "deleted" if purge else "cancelled"
+        return "cancelled"
 
     async def start_workflow(
         self,
@@ -288,7 +294,7 @@ class _WorkflowService:
 
         Returns None if the handler doesn't exist, isn't completed, or has no state.
         """
-        found = await self._store.query(HandlerQuery(handler_id_in=[handler_id]))
+        found = await self.query_handlers(HandlerQuery(handler_id_in=[handler_id]))
         if not found:
             return None
         handler = found[0]
@@ -296,14 +302,17 @@ class _WorkflowService:
             return None
 
         try:
-            old_state_store = self._store.create_state_store(handler.run_id)
-            state_dict = await state_store_handoff(old_state_store, JsonSerializer())
+            serializer = self._runtime.get_serializer(workflow)
+            old_state_store = self._store.create_state_store(
+                handler.run_id, serializer=serializer
+            )
+            state_dict = await state_store_handoff(old_state_store, serializer)
             if not state_dict:
                 return None
             return Context.from_dict(
                 workflow=workflow,
                 data={"version": 1, "state": state_dict},
-                serializer=JsonSerializer(),
+                serializer=serializer,
             )
         except Exception:
             logger.warning(

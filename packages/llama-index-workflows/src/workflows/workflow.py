@@ -17,6 +17,8 @@ from pydantic import ValidationError
 if TYPE_CHECKING:  # pragma: no cover
     from .context import Context
     from .runtime.types.plugin import Runtime
+from workflows.context.serializers import BaseSerializer
+
 from ._event_matching import step_accepts_event
 from .decorators import CatchErrorHandler, StepConfig, StepFunction, WorkflowGraphCheck
 from .errors import (
@@ -104,6 +106,7 @@ class Workflow(metaclass=WorkflowMeta):
         runtime: Runtime | None = None,
         workflow_name: str | None = None,
         skip_graph_checks: set[WorkflowGraphCheck] | None = None,
+        serializer: BaseSerializer | None = None,
     ) -> None:
         """
         Initialize a workflow instance.
@@ -127,6 +130,9 @@ class Workflow(metaclass=WorkflowMeta):
             workflow_name (str | None): Optional explicit name for this workflow.
                 If not provided, a module-qualified name is computed from
                 the class's `__module__` and `__qualname__` attributes.
+            serializer (BaseSerializer | None): Explicit internal state and event
+                serializer. None uses the runtime default, which is legacy JSON
+                for standalone workflows.
             skip_graph_checks (set[str] | None): Optional set of graph validation
                 checks to skip (e.g. "reachability", "terminal_event"). Use to
                 allow intentional patterns that would otherwise fail validation.
@@ -151,6 +157,7 @@ class Workflow(metaclass=WorkflowMeta):
             raise WorkflowValidationError(
                 "num_concurrent_runs must be an integer greater than 0 or None"
             )
+        self._serializer = serializer
         self._timeout = timeout
         self._verbose = verbose
         self._disable_validation = disable_validation
@@ -209,6 +216,11 @@ class Workflow(metaclass=WorkflowMeta):
             raise WorkflowRuntimeError(
                 f"Step {step} does not accept event of type {type(message)}"
             )
+
+    @property
+    def serializer(self) -> BaseSerializer | None:
+        """The explicitly configured internal serializer, or None for runtime defaults."""
+        return self._serializer
 
     @property
     def runtime(self) -> Runtime:

@@ -25,8 +25,14 @@ def test_preflight_validate_success(
     monkeypatch.setattr(app_mod, "validate_required_env_vars", lambda *a, **k: None)
 
     # Provide empty workflows and stub Deployment
-    monkeypatch.setattr(app_mod, "load_workflows", lambda cfg: {})
-    monkeypatch.setattr(app_mod, "Deployment", lambda workflows: SimpleNamespace())
+    monkeypatch.setattr(
+        app_mod,
+        "load_workflow_server",
+        lambda cfg: SimpleNamespace(get_workflows=lambda: {}, serializer=None),
+    )
+    monkeypatch.setattr(
+        app_mod, "Deployment", lambda workflows, **options: SimpleNamespace()
+    )
 
     # Should not raise
     app_mod.preflight_validate(cwd=tmp_path, deployment_file=tmp_path / "deploy.yaml")
@@ -40,13 +46,22 @@ def test_preflight_validate_collects_errors(
     monkeypatch.setattr(app_mod, "get_deployment_config", lambda: SimpleNamespace())
     monkeypatch.setattr(app_mod, "load_environment_variables", lambda *a, **k: None)
     monkeypatch.setattr(app_mod, "validate_required_env_vars", lambda *a, **k: None)
-    monkeypatch.setattr(app_mod, "Deployment", lambda workflows: SimpleNamespace())
+    monkeypatch.setattr(
+        app_mod, "Deployment", lambda workflows, **options: SimpleNamespace()
+    )
 
     class BadWorkflow:
         def _validate(self) -> None:
             raise ValueError("boom")
 
-    monkeypatch.setattr(app_mod, "load_workflows", lambda cfg: {"svc": BadWorkflow()})
+    monkeypatch.setattr(
+        app_mod,
+        "load_workflow_server",
+        lambda cfg: SimpleNamespace(
+            get_workflows=lambda: {"svc": BadWorkflow()},
+            serializer=None,
+        ),
+    )
 
     with pytest.raises(app_mod.PreflightValidationError) as ei:
         app_mod.preflight_validate(
