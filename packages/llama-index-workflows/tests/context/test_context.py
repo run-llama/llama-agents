@@ -365,6 +365,35 @@ async def test_wait_for_event_in_workflow_serialization() -> None:
     assert total_waiters == 0
 
 
+@pytest.mark.asyncio
+async def test_wait_for_framework_event_serialization() -> None:
+    class TestWorkflow(Workflow):
+        @step
+        async def step1(self, ctx: Context, ev: StartEvent) -> StopEvent:
+            result = await ctx.wait_for_event(
+                HumanResponseEvent,
+                waiter_event=InputRequiredEvent.model_validate({"prefix": "Continue?"}),
+            )
+            return StopEvent(result=result.response)
+
+    workflow = TestWorkflow()
+    handler = workflow.run()
+    ctx_dict = None
+
+    async for event in handler.stream_events():
+        if isinstance(event, InputRequiredEvent):
+            ctx_dict = handler.ctx.to_dict()
+            await handler.cancel_run()
+            break
+
+    assert ctx_dict is not None
+    restored = Context.from_dict(workflow, ctx_dict)
+    resumed = workflow.run(ctx=restored)
+    resumed.ctx.send_event(HumanResponseEvent.model_validate({"response": "yes"}))
+
+    assert await resumed == "yes"
+
+
 def test_context_from_dict_rejects_future_version_as_context_serde_error(
     workflow: Workflow,
 ) -> None:
