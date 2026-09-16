@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import builtins
 from _collections_abc import dict_items, dict_keys, dict_values
 from datetime import datetime
 from enum import Enum
@@ -18,7 +19,11 @@ from pydantic import (
     model_serializer,
 )
 
-from workflows.context.serializers import JsonSerializer, allowed_type_names_var
+from workflows.context.serializers import (
+    JsonSerializer,
+    _active_serializer,
+    _register_framework_types,
+)
 from workflows.context.utils import import_module_from_qualified_name
 
 
@@ -162,7 +167,10 @@ def _serialize_event(event: Event) -> Any:
 
 
 def _deserialize_event(data: Any) -> Event:
-    return _json_serializer.deserialize_value(data)
+    event = (_active_serializer.get() or _json_serializer).deserialize_value(data)
+    if not isinstance(event, Event):
+        raise ValueError("SerializableEvent must resolve to an Event instance")
+    return event
 
 
 SerializableEvent = Annotated[
@@ -181,7 +189,12 @@ def _serialize_optional_event(event: Event | None) -> Any:
 def _deserialize_optional_event(data: Any) -> Event | None:
     if data is None:
         return None
-    return _json_serializer.deserialize_value(data)
+    event = (_active_serializer.get() or _json_serializer).deserialize_value(data)
+    if not isinstance(event, Event):
+        raise ValueError(
+            "SerializableOptionalEvent must resolve to an Event instance or None"
+        )
+    return event
 
 
 SerializableOptionalEvent = Annotated[
@@ -232,40 +245,24 @@ _UNRECONSTRUCTED_EXCEPTION_NAME = (
 )
 
 
-def _exception_type_permitted(exc_type: str) -> bool:
-    """Whether an exception type may be imported for reconstruction.
-
-    ``builtins.*`` exceptions are always permitted (already loaded, no import side
-    effects). The framework's own breadcrumb type is always permitted so a
-    degraded exception round-trips stably under any allowlist rather than
-    degrading into a self-referential breadcrumb. With no allowlist active the
-    check is permissive, matching the opt-in nature of ``allowed_types``.
-    Otherwise the type must be in the allowlist; a miss returns ``False`` so the
-    caller degrades without ever importing the type.
-    """
-    if exc_type.startswith("builtins."):
-        return True
-    if exc_type == _UNRECONSTRUCTED_EXCEPTION_NAME:
-        return True
-    allowed = allowed_type_names_var.get()
-    if allowed is None:
-        return True
-    return exc_type in allowed
-
-
 def _deserialize_exception(data: Any) -> Exception:
     if isinstance(data, Exception):
         return data
     exc_type = data["exception_type"]
     exc_message = data["exception_message"]
-    if not _exception_type_permitted(exc_type):
-        return UnreconstructedException(exc_message, original_type=exc_type)
     try:
-        exc_cls = import_module_from_qualified_name(exc_type)
-        # Only construct genuine exception types. The qualified name comes from a
-        # serialized blob and could resolve to any callable (e.g. ``builtins.eval``,
-        # which the ``builtins`` allowlist exemption would otherwise permit) —
-        # calling it with the message would be arbitrary code execution.
+        serializer = _active_serializer.get()
+        if exc_type.startswith("builtins."):
+            exc_cls = getattr(builtins, exc_type.removeprefix("builtins."))
+        elif exc_type == _UNRECONSTRUCTED_EXCEPTION_NAME:
+            exc_cls = UnreconstructedException
+        elif serializer is None:
+            exc_cls = import_module_from_qualified_name(exc_type)
+        else:
+            exc_cls = serializer.resolve_class(exc_type)
+        # Only exception subclasses are constructed. The name comes from the
+        # record, and names like ``builtins.eval`` resolve to other callables,
+        # so anything that is not an Exception subclass is skipped.
         if not (isinstance(exc_cls, type) and issubclass(exc_cls, Exception)):
             return UnreconstructedException(exc_message, original_type=exc_type)
         return exc_cls(exc_message)
@@ -304,9 +301,14 @@ def _serialize_event_type(event_type: type[Event]) -> str:
 
 
 def _deserialize_event_type(data: Any) -> type[Event]:
-    if isinstance(data, type):
-        return data
-    return import_module_from_qualified_name(data)
+    event_type = (
+        data
+        if isinstance(data, type)
+        else (_active_serializer.get() or _json_serializer).resolve_class(data)
+    )
+    if not isinstance(event_type, type) or not issubclass(event_type, Event):
+        raise ValueError("SerializableEventType must resolve to an Event class")
+    return event_type
 
 
 SerializableEventType = Annotated[
@@ -549,6 +551,19 @@ class HumanResponseEvent(Event):
                 return StopEvent(result=ev.response)
         ```
     """
+
+
+# Framework events that can appear in persisted context values. Other framework
+# events are stored as plain envelopes or are declared by each workflow.
+_PERSISTED_FRAMEWORK_EVENT_TYPES = (
+    StartEvent,
+    StopEvent,
+    InputRequiredEvent,
+    HumanResponseEvent,
+    CollectionReleaseEvent,
+    StepFailedEvent,
+)
+_register_framework_types(*_PERSISTED_FRAMEWORK_EVENT_TYPES)
 
 
 class InternalDispatchEvent(Event):

@@ -9,21 +9,35 @@ import json
 import pickle
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, get_origin
 
 from pydantic import BaseModel
 
 from .utils import get_qualified_name, import_module_from_qualified_name
 
-# Threads the active serializer's allowlist into nested field validators during
-# deserialization. Pydantic's `model_validate(context=...)` is not a reliable
-# channel here: the event models (`DictLikeModel`) define a custom `__init__`,
-# which makes pydantic drop the validation context before nested field
-# validators run. A ContextVar is set around `model_validate` and read by the
-# exception reconstruction in `events.py`.
-allowed_type_names_var: contextvars.ContextVar[frozenset[str] | None] = (
-    contextvars.ContextVar("allowed_type_names", default=None)
+# DictLikeModel's custom __init__ drops Pydantic validation context, and component
+# from_dict has no context parameter. A ContextVar carries the serializer through
+# both reconstruction paths so nested validators use the same type resolver.
+_active_serializer: contextvars.ContextVar[JsonSerializer | None] = (
+    contextvars.ContextVar("workflow_json_serializer", default=None)
 )
+_framework_types: dict[str, type[Any]] = {}
+
+
+def _register_framework_types(*classes: type[Any]) -> None:
+    """Register framework-owned types that persisted values require."""
+    for cls in classes:
+        for name in (
+            f"{cls.__module__}.{cls.__qualname__}",
+            f"{cls.__module__}.{cls.__name__}",
+        ):
+            claimed = _framework_types.get(name)
+            if claimed is not None and claimed is not cls:
+                raise ValueError(
+                    f"Two framework classes claim the serialized name {name}: "
+                    f"{claimed!r} and {cls!r}."
+                )
+            _framework_types[name] = cls
 
 
 class BaseSerializer(ABC):
@@ -56,6 +70,16 @@ class JsonSerializer(BaseSerializer):
       serialized to their dict form alongside the qualified class name.
     - Dicts and lists are handled recursively.
 
+    ``allowed_types`` controls which class names can be reconstructed. Class
+    entries are registered under their serialized names, so their payloads are
+    rebuilt from the registry without importing anything. String entries keep
+    the older behavior and are looked up by import. A name that is not listed
+    does not resolve, and deserializing it raises. Framework-owned types needed
+    for persistence always resolve. ``None`` keeps the default lookup by import
+    for every name, and an empty collection resolves only framework-owned types.
+    If two classes serialize under the same name, registration raises, because
+    a record does not say which one it meant.
+
     Fallback for unsupported objects is to attempt JSON encoding directly; if it
     fails, a `ValueError` is raised.
 
@@ -77,13 +101,40 @@ class JsonSerializer(BaseSerializer):
         *,
         allowed_types: Iterable[type[Any] | str] | None = None,
     ) -> None:
+        self._registered_types: dict[str, type[Any]] = {}
         if allowed_types is None:
             self._allowed_type_names: frozenset[str] | None = None
         else:
-            self._allowed_type_names = frozenset(
-                t if isinstance(t, str) else f"{t.__module__}.{t.__qualname__}"
-                for t in allowed_types
-            )
+            names: set[str] = set()
+            for entry in allowed_types:
+                if isinstance(entry, str):
+                    names.add(entry)
+                    continue
+                if (
+                    get_origin(entry) is not None
+                    or not isinstance(entry, type)
+                    or entry is Any
+                ):
+                    raise TypeError(
+                        "allowed_types entries must be concrete classes or legacy names"
+                    )
+                # get_qualified_name writes ``module.__name__`` into records.
+                # allowed_types has always matched on ``module.__qualname__``.
+                # Register both, since both come from the class itself.
+                for name in (
+                    f"{entry.__module__}.{entry.__qualname__}",
+                    f"{entry.__module__}.{entry.__name__}",
+                ):
+                    claimed = self._registered_types.get(name)
+                    if claimed is not None and claimed is not entry:
+                        raise ValueError(
+                            f"Two classes claim the serialized name {name}: "
+                            f"{claimed!r} and {entry!r}. Records cannot tell "
+                            "them apart, so only one of them can be registered."
+                        )
+                    names.add(name)
+                    self._registered_types[name] = entry
+            self._allowed_type_names = frozenset(names)
 
     def _validate_qualified_name(self, qualified_name: str) -> None:
         if self._allowed_type_names is None:
@@ -93,6 +144,27 @@ class JsonSerializer(BaseSerializer):
                 f"Refusing to import disallowed workflow state type: {qualified_name}. "
                 "Pass it via allowed_types to the JsonSerializer constructor."
             )
+
+    def resolve_class(self, qualified_name: str) -> type[Any]:
+        """Resolve a class name to a registered class, or import it.
+
+        Classes passed to ``allowed_types`` and framework-owned persistence
+        types resolve from registries. A remaining name is imported when
+        ``allowed_types`` is None or lists that name as a string.
+        """
+        registered = self._registered_types.get(qualified_name)
+        if registered is not None:
+            return registered
+        framework_type = _framework_types.get(qualified_name)
+        if framework_type is not None:
+            return framework_type
+        self._validate_qualified_name(qualified_name)
+        cls = import_module_from_qualified_name(qualified_name)
+        if not isinstance(cls, type):
+            raise ValueError(
+                f"Resolved workflow state type is not a class: {qualified_name}"
+            )
+        return cls
 
     def serialize_value(self, value: Any) -> Any:
         """
@@ -158,17 +230,19 @@ class JsonSerializer(BaseSerializer):
         """
         if isinstance(data, dict):
             if data.get("__is_pydantic") and data.get("qualified_name"):
-                self._validate_qualified_name(data["qualified_name"])
-                module_class = import_module_from_qualified_name(data["qualified_name"])
-                token = allowed_type_names_var.set(self._allowed_type_names)
+                module_class = self.resolve_class(data["qualified_name"])
+                serializer_token = _active_serializer.set(self)
                 try:
                     return module_class.model_validate(data["value"])
                 finally:
-                    allowed_type_names_var.reset(token)
+                    _active_serializer.reset(serializer_token)
             elif data.get("__is_component") and data.get("qualified_name"):
-                self._validate_qualified_name(data["qualified_name"])
-                module_class = import_module_from_qualified_name(data["qualified_name"])
-                return module_class.from_dict(data["value"])
+                module_class = self.resolve_class(data["qualified_name"])
+                serializer_token = _active_serializer.set(self)
+                try:
+                    return module_class.from_dict(data["value"])
+                finally:
+                    _active_serializer.reset(serializer_token)
             return {k: self.deserialize_value(v) for k, v in data.items()}
         elif isinstance(data, list):
             return [self.deserialize_value(item) for item in data]
