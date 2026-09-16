@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 LlamaIndex Inc.
+
 from __future__ import annotations
 
 import json
@@ -8,6 +11,7 @@ from pydantic import BaseModel, TypeAdapter
 from workflows.context.serializers import JsonSerializer, PickleSerializer
 from workflows.events import (
     Event,
+    HumanResponseEvent,
     SerializableEvent,
     SerializableEventType,
     SerializableOptionalEvent,
@@ -57,6 +61,14 @@ def forbid_imports(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def registered(*types: type[Any]) -> JsonSerializer:
     return JsonSerializer(allowed_types=list(types))
+
+
+def test_framework_event_resolves_without_registration() -> None:
+    serializer = JsonSerializer(allowed_types=[])
+    assert (
+        serializer.resolve_class("workflows.events.HumanResponseEvent")
+        is HumanResponseEvent
+    )
 
 
 def test_registered_classes_roundtrip_without_imports(forbid_imports: None) -> None:
