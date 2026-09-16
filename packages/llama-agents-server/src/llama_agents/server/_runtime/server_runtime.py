@@ -183,11 +183,15 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
         persistence_backoff: list[float] | None = None,
         serializer: BaseSerializer | None = None,
     ) -> None:
-        super().__init__(decorated)
-        self._store: AbstractWorkflowStore = store
-        self._default_serializer = (
-            serializer if serializer is not None else JsonSerializer(allowed_types=[])
+        super().__init__(
+            decorated,
+            default_serializer=(
+                serializer
+                if serializer is not None
+                else JsonSerializer(allowed_types=[])
+            ),
         )
+        self._store: AbstractWorkflowStore = store
         self._registered_workflows: dict[str, Workflow] = {}
         self._additional_events: dict[str, tuple[type[Event], ...]] = {}
         self._initial_state: dict[str, Any] = {}

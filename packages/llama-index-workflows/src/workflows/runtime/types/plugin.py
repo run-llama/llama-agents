@@ -471,8 +471,10 @@ class Runtime(ABC):
     Use registering() context manager for implicit workflow registration.
     """
 
-    def __init__(self) -> None:
-        self._default_serializer = JsonSerializer(allowed_types=[])
+    def __init__(self, *, default_serializer: BaseSerializer | None = None) -> None:
+        self._default_serializer = (
+            default_serializer if default_serializer is not None else JsonSerializer()
+        )
         self._serializer_cache: weakref.WeakKeyDictionary[
             Workflow, SerializerCacheEntry
         ] = weakref.WeakKeyDictionary()

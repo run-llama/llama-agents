@@ -56,39 +56,28 @@ async def test_workflow_serializer_is_read_only_and_used_for_context() -> None:
     assert await workflow.run(ctx=context) == "ok"
 
 
-def test_standalone_default_resolves_declared_types_only() -> None:
+def test_standalone_default_resolves_import_paths() -> None:
     workflow = ExampleWorkflow()
     assert workflow.serializer is None
     first = workflow.runtime.get_serializer(workflow)
     assert type(first) is JsonSerializer
     assert workflow.runtime.get_serializer(workflow) is first
 
-    value = UndeclaredValue(value="missing")
-    with pytest.raises(
-        ValueError,
-        match=(
-            r"test_workflow_serializer\.UndeclaredValue.*"
-            r"Pass JsonSerializer\(allowed_types="
-        ),
-    ):
-        first.deserialize(first.serialize(value))
+    value = UndeclaredValue(value="restored")
+    assert first.deserialize(first.serialize(value)) == value
 
 
 @pytest.mark.asyncio
-async def test_default_context_restore_rejects_undeclared_store_value() -> None:
+async def test_default_context_restore_resolves_undeclared_store_value() -> None:
     workflow = ExampleWorkflow()
     context = Context(workflow)
     await workflow.run(ctx=context)
-    await context.store.set("value", UndeclaredValue(value="missing"))
+    value = UndeclaredValue(value="restored")
+    await context.store.set("value", value)
 
-    with pytest.raises(
-        ValueError,
-        match=(
-            r"test_workflow_serializer\.UndeclaredValue.*"
-            r"Pass JsonSerializer\(allowed_types="
-        ),
-    ):
-        await workflow.run(ctx=Context.from_dict(workflow, context.to_dict()))
+    restored = Context.from_dict(workflow, context.to_dict())
+
+    assert await restored.store.get("value") == value
 
 
 @pytest.mark.asyncio

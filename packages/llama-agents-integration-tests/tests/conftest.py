@@ -22,7 +22,6 @@ from llama_index.core.llms.mock import MockFunctionCallingLLM
 from llama_index.core.tools import BaseTool
 from sqlalchemy.engine import Engine
 from testcontainers.postgres import PostgresContainer
-from workflows.context import JsonSerializer
 
 
 class WorkflowFactory(Protocol):
@@ -78,12 +77,10 @@ def create_workflow() -> WorkflowFactory:
             llm=llm,
         )
 
-        # AgentWorkflow stores llama_index memory and message objects in the context store without declaring them, so this suite keeps import-based resolution.
         return AgentWorkflow(
             agents=[agent],
             root_agent=name,
             initial_state=initial_state,
-            serializer=JsonSerializer(),
             **kwargs,
         )
 
