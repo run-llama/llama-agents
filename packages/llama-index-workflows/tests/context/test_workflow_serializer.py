@@ -44,6 +44,14 @@ class TypedWorkflow(Workflow):
         return StopEvent(result="ok")
 
 
+class UnhashableWorkflow(Workflow):
+    __hash__: Any = None
+
+    @step
+    async def start(self, ev: StartEvent) -> StopEvent:
+        return StopEvent(result="ok")
+
+
 async def test_workflow_serializer_is_read_only_and_used_for_context() -> None:
     serializer = PickleSerializer()
     workflow = ExampleWorkflow(serializer=serializer)
@@ -53,6 +61,17 @@ async def test_workflow_serializer_is_read_only_and_used_for_context() -> None:
     assert workflow.runtime.get_serializer(workflow) is serializer
     with pytest.raises(AttributeError):
         setattr(workflow, "serializer", JsonSerializer())
+    assert await workflow.run(ctx=context) == "ok"
+
+
+@pytest.mark.asyncio
+async def test_unhashable_workflow_uses_context_serializer_and_runs() -> None:
+    workflow = UnhashableWorkflow()
+
+    context = Context(workflow)
+
+    assert isinstance(context._face, PreContext)
+    assert context._face.serializer is workflow.runtime.get_serializer(workflow)
     assert await workflow.run(ctx=context) == "ok"
 
 

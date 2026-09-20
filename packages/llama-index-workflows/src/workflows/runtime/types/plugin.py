@@ -454,6 +454,36 @@ class WorkflowSet:
         return any(ref() is not None for ref in self._refs.values())
 
 
+class WorkflowSerializerCache:
+    """Identity-based weak cache for workflow serializers."""
+
+    def __init__(self) -> None:
+        self._entries: dict[
+            int, tuple[weakref.ref[Workflow], SerializerCacheEntry]
+        ] = {}
+
+    def get(self, workflow: Workflow) -> SerializerCacheEntry | None:
+        cached = self._entries.get(id(workflow))
+        if cached is None or cached[0]() is not workflow:
+            return None
+        return cached[1]
+
+    def set(self, workflow: Workflow, entry: SerializerCacheEntry) -> None:
+        obj_id = id(workflow)
+
+        def _cleanup(ref: weakref.ref[Workflow], _id: int = obj_id) -> None:
+            cached = self._entries.get(_id)
+            if cached is not None and cached[0] is ref:
+                self._entries.pop(_id, None)
+
+        self._entries[obj_id] = (weakref.ref(workflow, _cleanup), entry)
+
+    def discard(self, workflow: Workflow) -> None:
+        cached = self._entries.get(id(workflow))
+        if cached is not None and cached[0]() is workflow:
+            self._entries.pop(id(workflow), None)
+
+
 class Runtime(ABC):
     """
     Abstract base class for workflow execution runtimes.
@@ -475,9 +505,7 @@ class Runtime(ABC):
         self._default_serializer = (
             default_serializer if default_serializer is not None else JsonSerializer()
         )
-        self._serializer_cache: weakref.WeakKeyDictionary[
-            Workflow, SerializerCacheEntry
-        ] = weakref.WeakKeyDictionary()
+        self._serializer_cache = WorkflowSerializerCache()
         self._pending: WorkflowSet = WorkflowSet()
         self._launched: bool = False
 
@@ -611,11 +639,11 @@ class Runtime(ABC):
                 declared_types.append(state_type)
             serializer = serializer.with_types(*declared_types)
 
-        self._serializer_cache[workflow] = (additional_types, serializer)
+        self._serializer_cache.set(workflow, (additional_types, serializer))
         return serializer
 
     def _clear_serializer_cache(self, workflow: Workflow) -> None:
-        self._serializer_cache.pop(workflow, None)
+        self._serializer_cache.discard(workflow)
 
     def track_workflow(self, workflow: Workflow) -> None:
         """
