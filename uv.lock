@@ -2794,7 +2794,7 @@ dev = [
 
 [[package]]
 name = "llama-index-workflows"
-version = "2.24.0"
+version = "2.24.1"
 source = { editable = "packages/llama-index-workflows" }
 dependencies = [
     { name = "llama-index-instrumentation" },

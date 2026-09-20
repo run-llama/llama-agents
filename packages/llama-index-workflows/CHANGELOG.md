@@ -1,5 +1,11 @@
 # llama-index-workflows
 
+## 2.24.1
+
+### Patch Changes
+
+- ff4fc6b: Fix serializer selection failing for unhashable workflows.
+
 ## 2.24.0
 
 ### Minor Changes
