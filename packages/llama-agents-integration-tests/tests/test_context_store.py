@@ -18,6 +18,7 @@ from llama_index.core.agent.workflow import (
     AgentStream,
     AgentWorkflow,
     FunctionAgent,
+    ReActAgent,
     ToolCall,
 )
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
@@ -42,6 +43,22 @@ def _mock_agent(
         llm=llm,
         can_handoff_to=can_handoff_to or [],
     )
+
+
+async def test_react_agent_runs() -> None:
+    llm = MockFunctionCallingLLM(
+        response_generator=response_generator_from_list([make_text_response("Done")])
+    )
+    agent = ReActAgent(
+        name="test_agent",
+        description="Test agent",
+        llm=llm,
+    )
+
+    assert type(agent).__hash__ is None
+    result = await agent.run(user_msg="hello")
+
+    assert result.response.content == "Done"
 
 
 async def test_multi_agent_handoff_streams_with_memory() -> None:
