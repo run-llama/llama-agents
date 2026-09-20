@@ -1,17 +1,24 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LlamaIndex Inc.
-"""Tests for WorkflowSet, runtime tracking, and workflow mutation."""
+"""Tests for weak identity collections, runtime tracking, and workflow mutation."""
 
 from __future__ import annotations
 
 import gc
+import weakref
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
 from workflows import Workflow, step
 from workflows.events import StartEvent, StopEvent
 from workflows.plugins import BasicRuntime
-from workflows.runtime.types.plugin import WorkflowSet
+from workflows.runtime.types.plugin import WeakIdentityKeyDictionary, WorkflowSet
+
+
+@dataclass
+class EqualKey:
+    value: int
 
 
 class SimpleWorkflow(Workflow):
@@ -21,9 +28,7 @@ class SimpleWorkflow(Workflow):
 
 
 class UnhashableWorkflow(Workflow):
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self.data = [1, 2, 3]  # Makes it unhashable
+    __hash__: Any = None
 
     @step
     async def start(self, ev: StartEvent) -> StopEvent:
@@ -38,6 +43,46 @@ def basic_runtime() -> BasicRuntime:
 @pytest.fixture
 def workflow_set() -> WorkflowSet:
     return WorkflowSet()
+
+
+# ---------------------------------------------------------------------------
+# WeakIdentityKeyDictionary tests
+# ---------------------------------------------------------------------------
+
+
+def test_weak_identity_dictionary_distinguishes_equal_unhashable_keys() -> None:
+    first = EqualKey(1)
+    second = EqualKey(1)
+    values: WeakIdentityKeyDictionary[EqualKey, str] = WeakIdentityKeyDictionary()
+
+    assert first == second
+    values[first] = "first"
+    values[second] = "second"
+
+    assert values.get(first) == "first"
+    assert values.get(second) == "second"
+    assert len(values) == 2
+
+    values[first] = "updated"
+    assert values.get(first) == "updated"
+    assert len(values) == 2
+
+    values.pop(first)
+    assert first not in values
+    assert values.get(second) == "second"
+
+
+def test_weak_identity_dictionary_removes_collected_keys() -> None:
+    key = EqualKey(1)
+    key_ref = weakref.ref(key)
+    values: WeakIdentityKeyDictionary[EqualKey, str] = WeakIdentityKeyDictionary()
+    values[key] = "value"
+
+    del key
+    gc.collect()
+
+    assert key_ref() is None
+    assert not values
 
 
 # ---------------------------------------------------------------------------
