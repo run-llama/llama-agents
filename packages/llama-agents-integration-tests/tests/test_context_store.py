@@ -45,7 +45,7 @@ def _mock_agent(
     )
 
 
-async def test_unhashable_react_agent_runs_with_default_context() -> None:
+async def test_react_agent_runs() -> None:
     llm = MockFunctionCallingLLM(
         response_generator=response_generator_from_list([make_text_response("Done")])
     )
