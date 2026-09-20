@@ -2,4 +2,4 @@
 "llama-index-workflows": patch
 ---
 
-Support unhashable workflow subclasses when selecting a serializer.
+Fix serializer selection failing for unhashable workflows.
