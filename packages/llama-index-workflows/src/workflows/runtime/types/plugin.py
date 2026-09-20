@@ -18,8 +18,10 @@ from typing import (
     AsyncGenerator,
     Coroutine,
     Generator,
+    Generic,
     Literal,
     Protocol,
+    TypeVar,
 )
 
 from workflows.context.serializers import BaseSerializer, JsonSerializer
@@ -62,6 +64,8 @@ class WaitResultTimeout:
 
 WaitResult = WaitResultTick | WaitResultTimeout
 SerializerCacheEntry = tuple[tuple[type[Any], ...], BaseSerializer]
+_K = TypeVar("_K")
+_V = TypeVar("_V")
 
 
 @dataclass
@@ -412,6 +416,50 @@ def consume_current_run() -> RunContext:
     return container.consume()
 
 
+class WeakIdentityKeyDictionary(Generic[_K, _V]):
+    """Weak dictionary keyed by object identity instead of equality and hash."""
+
+    def __init__(self) -> None:
+        self._entries: dict[int, tuple[weakref.ref[_K], _V]] = {}
+
+    def __setitem__(self, key: _K, value: _V) -> None:
+        obj_id = id(key)
+
+        def _cleanup(ref: weakref.ref[_K], _id: int = obj_id) -> None:
+            cached = self._entries.get(_id)
+            if cached is not None and cached[0] is ref:
+                self._entries.pop(_id, None)
+
+        self._entries[obj_id] = (weakref.ref(key, _cleanup), value)
+
+    def get(self, key: _K) -> _V | None:
+        entry = self._entries.get(id(key))
+        if entry is None or entry[0]() is not key:
+            return None
+        return entry[1]
+
+    def pop(self, key: _K) -> None:
+        entry = self._entries.get(id(key))
+        if entry is not None and entry[0]() is key:
+            self._entries.pop(id(key), None)
+
+    def __contains__(self, key: object) -> bool:
+        entry = self._entries.get(id(key))
+        return entry is not None and entry[0]() is key
+
+    def __iter__(self) -> Generator[_K, None, None]:
+        for ref, _ in list(self._entries.values()):
+            key = ref()
+            if key is not None:
+                yield key
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def __bool__(self) -> bool:
+        return bool(self._entries)
+
+
 class WorkflowSet:
     """Identity-based weak set for tracking Workflow instances.
 
@@ -420,68 +468,27 @@ class WorkflowSet:
     """
 
     def __init__(self) -> None:
-        self._refs: dict[int, weakref.ref[Workflow]] = {}
+        self._workflows: WeakIdentityKeyDictionary[Workflow, None] = (
+            WeakIdentityKeyDictionary()
+        )
 
     def add(self, workflow: Workflow) -> None:
-        obj_id = id(workflow)
-        if obj_id in self._refs:
-            return
-
-        def _cleanup(ref: weakref.ref[Workflow], _id: int = obj_id) -> None:
-            self._refs.pop(_id, None)
-
-        self._refs[obj_id] = weakref.ref(workflow, _cleanup)
+        self._workflows[workflow] = None
 
     def discard(self, workflow: Workflow) -> None:
-        self._refs.pop(id(workflow), None)
+        self._workflows.pop(workflow)
 
     def __contains__(self, workflow: Workflow) -> bool:
-        ref = self._refs.get(id(workflow))
-        if ref is None:
-            return False
-        return ref() is not None
+        return workflow in self._workflows
 
     def __iter__(self) -> Generator[Workflow, None, None]:
-        for ref in list(self._refs.values()):
-            obj = ref()
-            if obj is not None:
-                yield obj
+        yield from self._workflows
 
     def __len__(self) -> int:
-        return sum(1 for _ in self)
+        return len(self._workflows)
 
     def __bool__(self) -> bool:
-        return any(ref() is not None for ref in self._refs.values())
-
-
-class WorkflowSerializerCache:
-    """Identity-based weak cache for workflow serializers."""
-
-    def __init__(self) -> None:
-        self._entries: dict[
-            int, tuple[weakref.ref[Workflow], SerializerCacheEntry]
-        ] = {}
-
-    def get(self, workflow: Workflow) -> SerializerCacheEntry | None:
-        cached = self._entries.get(id(workflow))
-        if cached is None or cached[0]() is not workflow:
-            return None
-        return cached[1]
-
-    def set(self, workflow: Workflow, entry: SerializerCacheEntry) -> None:
-        obj_id = id(workflow)
-
-        def _cleanup(ref: weakref.ref[Workflow], _id: int = obj_id) -> None:
-            cached = self._entries.get(_id)
-            if cached is not None and cached[0] is ref:
-                self._entries.pop(_id, None)
-
-        self._entries[obj_id] = (weakref.ref(workflow, _cleanup), entry)
-
-    def discard(self, workflow: Workflow) -> None:
-        cached = self._entries.get(id(workflow))
-        if cached is not None and cached[0]() is workflow:
-            self._entries.pop(id(workflow), None)
+        return bool(self._workflows)
 
 
 class Runtime(ABC):
@@ -505,7 +512,9 @@ class Runtime(ABC):
         self._default_serializer = (
             default_serializer if default_serializer is not None else JsonSerializer()
         )
-        self._serializer_cache = WorkflowSerializerCache()
+        self._serializer_cache: WeakIdentityKeyDictionary[
+            Workflow, SerializerCacheEntry
+        ] = WeakIdentityKeyDictionary()
         self._pending: WorkflowSet = WorkflowSet()
         self._launched: bool = False
 
@@ -639,11 +648,11 @@ class Runtime(ABC):
                 declared_types.append(state_type)
             serializer = serializer.with_types(*declared_types)
 
-        self._serializer_cache.set(workflow, (additional_types, serializer))
+        self._serializer_cache[workflow] = (additional_types, serializer)
         return serializer
 
     def _clear_serializer_cache(self, workflow: Workflow) -> None:
-        self._serializer_cache.discard(workflow)
+        self._serializer_cache.pop(workflow)
 
     def track_workflow(self, workflow: Workflow) -> None:
         """

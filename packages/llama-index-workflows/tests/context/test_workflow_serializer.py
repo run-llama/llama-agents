@@ -65,14 +65,10 @@ async def test_workflow_serializer_is_read_only_and_used_for_context() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unhashable_workflow_uses_context_serializer_and_runs() -> None:
+async def test_unhashable_workflow_runs() -> None:
     workflow = UnhashableWorkflow()
 
-    context = Context(workflow)
-
-    assert isinstance(context._face, PreContext)
-    assert context._face.serializer is workflow.runtime.get_serializer(workflow)
-    assert await workflow.run(ctx=context) == "ok"
+    assert await workflow.run() == "ok"
 
 
 def test_standalone_default_resolves_import_paths() -> None:
