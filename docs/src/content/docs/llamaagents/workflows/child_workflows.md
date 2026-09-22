@@ -60,6 +60,8 @@ In the example above, `start` returns a `SummarizeStart`, which runs the child. 
 
 A child that uses the bare `StartEvent` or `StopEvent` is rejected when you construct the parent, because there would be no distinct event type to route to it.
 
+Sibling children need distinct, unrelated `StartEvent` classes. If one child's start class inherits from another's, the parent rejects the pair because a single event could otherwise start both children. Parent steps can still consume the child's `StopEvent`.
+
 ## Nesting
 
 A child can have children of its own. The boundary rule is the same at every level: each workflow defines its own start and stop events, the parent emits the start, and the stop comes back as a routable event one level up.
@@ -105,4 +107,4 @@ await handler
 
 ## Configuration
 
-A `timeout` set on a child is honored as a deadline for that child's own execution. Other run-level settings like `verbose` only apply to the workflow you actually run, so setting them on a nested child does nothing. Attaching a child that carries one of those dead settings emits a warning that names it, so it does not silently get ignored.
+A `timeout` set on a child limits that child's known alive time. The runtime adds elapsed time when it processes journal ticks. Time while the workflow is stopped before a resume does not count, nor does the interval between the last processed tick and a crash. A child without an explicit timeout is bounded by its parent. Other run-level settings like `verbose` only apply to the workflow you actually run, so setting them on a nested child does nothing. Attaching a child that carries one of those dead settings emits a warning that names it, so it does not silently get ignored.
