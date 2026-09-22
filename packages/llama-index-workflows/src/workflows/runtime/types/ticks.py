@@ -204,6 +204,7 @@ _WORKFLOW_TICK_TYPES = (
     TickPublishEvent,
     TickTimeout,
     TickWaiterTimeout,
+    TickSessionStart,
     TickIdleCheck,
     TickIdleRelease,
     TickWakeup,
