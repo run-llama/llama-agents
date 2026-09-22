@@ -742,13 +742,13 @@ def test_step_worker_failed_uses_attempt_indexed_delay(
     wait_chain with three distinct values and checks the absolute
     not_before for each failure.
     """
-    base_state.workers["test_step"].config.retry_policy = retry_policy(
+    base_state.workers[TEST_STEP_ID].config.retry_policy = retry_policy(
         wait=wait_chain(wait_fixed(1.0), wait_fixed(2.0), wait_fixed(5.0)),
         stop=stop_after_attempt(4),
     )
     event = MyTestEvent(value=42)
     add_worker(base_state, event)
-    base_state.workers["test_step"].in_progress[0].attempts = prior_attempts
+    base_state.workers[TEST_STEP_ID].in_progress[0].attempts = prior_attempts
 
     tick: TickStepResult = TickStepResult(
         step_id=StepId.root("test_step"),
@@ -759,7 +759,7 @@ def test_step_worker_failed_uses_attempt_indexed_delay(
 
     new_state, _ = _process_step_result_tick(tick, base_state, now_seconds=110.0)
 
-    queue = new_state.workers["test_step"].queue
+    queue = new_state.workers[TEST_STEP_ID].queue
     assert len(queue) == 1
     assert queue[0].not_before == 110.0 + expected_delay
     assert queue[0].attempts == prior_attempts + 1
