@@ -477,7 +477,9 @@ def _load_broker_from_serialized(
                     event=waiter_payload.as_event()
                     if waiter_payload is not None
                     else serializer.deserialize(waiter_data.event),
-                    waiting_for_event=_import_event_type(waiter_data.waiting_for_event),
+                    waiting_for_event=_import_event_type(
+                        waiter_data.waiting_for_event, serializer
+                    ),
                     requirements={},
                     has_requirements=waiter_data.has_requirements,
                     resolved_event=serializer.deserialize(waiter_data.resolved_event)
