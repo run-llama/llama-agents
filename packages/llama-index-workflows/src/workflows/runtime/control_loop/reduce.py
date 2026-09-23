@@ -102,6 +102,10 @@ def _root_step_key(step_id: StepId) -> str:
     return str(step_id)
 
 
+def _static_step_name(path: tuple[str, ...], step_id: StepId) -> str:
+    return "/".join((*path, str(step_id))) if path else str(step_id)
+
+
 def rebuild_state_from_ticks(
     state: BrokerState,
     ticks: list[WorkflowTick],
@@ -221,7 +225,7 @@ def _reduce_tick(
     elif isinstance(tick, TickIdleCheck):
         # Return early — idle check ticks don't schedule further idle checks
         if _check_idle_state(init):
-            stuck = _detect_stuck_streams(init)
+            stuck = _detect_stuck_streams_tree(init)
             if stuck is not None:
                 stuck_step, stuck_error = stuck
                 state = init.deepcopy()
@@ -249,6 +253,22 @@ def _reduce_tick(
         commands.append(CommandScheduleIdleCheck())
 
     return state, commands
+
+
+@dataclass(frozen=True)
+class _Descent:
+    broker: BrokerState
+    path: tuple[str, ...]
+
+
+def _descend(root_state: BrokerState, path: tuple[str, ...]) -> _Descent | None:
+    broker = root_state
+    for seg in path:
+        child = broker.children.get(seg)
+        if child is None:
+            return None
+        broker = child
+    return _Descent(broker=broker, path=path)
 
 
 def _is_eligible(attempt: EventAttempt) -> bool:
@@ -303,6 +323,7 @@ def _decide_retry_delay(
 def _drain_eligible_queue(
     step_id: StepId,
     state: InternalStepWorkerState,
+    path: tuple[str, ...],
     now_seconds: float,
 ) -> list[WorkflowCommand]:
     """Dispatch eligible queued attempts while worker capacity remains.
@@ -320,7 +341,9 @@ def _drain_eligible_queue(
         if index is None:
             break
         attempt = state.queue.pop(index)
-        commands.extend(_add_or_enqueue_event(attempt, step_id, state, now_seconds))
+        commands.extend(
+            _add_or_enqueue_event(attempt, step_id, state, path, now_seconds)
+        )
     return commands
 
 
@@ -337,8 +360,17 @@ def rewind_in_progress(
     """
     state = state.deepcopy()
     commands: list[WorkflowCommand] = []
-    for step_name, step_state in sorted(state.workers.items(), key=lambda x: x[0]):
-        step_id = StepId.root(step_name)
+    _rewind_broker(state, (), commands, now_seconds)
+    return state, commands
+
+
+def _rewind_broker(
+    state: BrokerState,
+    path: tuple[str, ...],
+    commands: list[WorkflowCommand],
+    now_seconds: float,
+) -> None:
+    for step_id, step_state in sorted(state.workers.items(), key=lambda x: str(x[0])):
         for in_progress in step_state.in_progress:
             step_state.queue.insert(
                 0,
@@ -356,11 +388,12 @@ def rewind_in_progress(
                 ),
             )
         step_state.in_progress = []
-        commands.extend(_drain_eligible_queue(step_id, step_state, now_seconds))
+        commands.extend(_drain_eligible_queue(step_id, step_state, path, now_seconds))
         for attempt in step_state.queue:
             if attempt.not_before is not None:
                 commands.append(CommandScheduleWakeup(at_time=attempt.not_before))
-    return state, commands
+    for key, child in sorted(state.children.items()):
+        _rewind_broker(child, (*path, key), commands, now_seconds)
 
 
 def _check_idle_state(state: BrokerState) -> bool:
@@ -378,11 +411,30 @@ def _check_idle_state(state: BrokerState) -> bool:
     if not state.is_running:
         return False
 
+    return not _broker_busy(state)
+
+
+def _broker_busy(state: BrokerState) -> bool:
     for worker_state in state.workers.values():
         if worker_state.queue or worker_state.in_progress:
-            return False
+            return True
+    return any(_broker_busy(child) for child in state.children.values())
 
-    return True
+
+def _detect_stuck_streams_tree(
+    state: BrokerState,
+) -> tuple[str, WorkflowRuntimeError] | None:
+    def walk(broker: BrokerState, path: tuple[str, ...]):
+        stuck = _detect_stuck_streams(broker, path)
+        if stuck is not None:
+            return stuck
+        for key, child in broker.children.items():
+            found = walk(child, (*path, key))
+            if found is not None:
+                return found
+        return None
+
+    return walk(state, ())
 
 
 def _collect_buffer_diverged(live: list[Event], snapshot: list[Event]) -> bool:
@@ -395,12 +447,14 @@ def _queue_catch_error_event(
     *,
     event: Event,
     step_id: StepId,
+    path: tuple[str, ...],
     recovery_counts: dict[str, int],
 ) -> CommandQueueEvent:
     """Build a catch_error dispatch in the failed work item's stream scope."""
     return CommandQueueEvent(
         event=event,
         step_id=step_id,
+        origin_namespace=path,
         recovery_counts=recovery_counts,
         scope_path=this_execution.scope_path,
     )
@@ -522,6 +576,7 @@ def _apply_step_result(
     *,
     tick: TickStepResult,
     state: BrokerState,
+    path: tuple[str, ...],
     worker_state: InternalStepWorkerState,
     this_execution: InProgressState,
     scope: _FanOutScope,
@@ -558,6 +613,7 @@ def _apply_step_result(
             acc.commands.append(
                 CommandQueueEvent(
                     event=result.result,
+                    origin_namespace=path,
                     recovery_counts=dict(this_execution.recovery_counts),
                     scope_path=scope.emit_stack,
                 )
@@ -574,6 +630,7 @@ def _apply_step_result(
             result,
             tick=tick,
             state=state,
+            path=path,
             worker_state=worker_state,
             this_execution=this_execution,
             acc=acc,
@@ -581,7 +638,7 @@ def _apply_step_result(
         )
     elif isinstance(result, AddCollectedEvent):
         # The current state of collected events.
-        collected_events = state.workers[step_name].collected_events.setdefault(
+        collected_events = state.workers[step_id].collected_events.setdefault(
             result.event_id, []
         )
         # the events snapshot that was sent with the step function execution that yielded this result
@@ -596,7 +653,7 @@ def _apply_step_result(
                 this_execution.shared_state,
                 collected_events={
                     x: list(y)
-                    for x, y in state.workers[step_name].collected_events.items()
+                    for x, y in state.workers[step_id].collected_events.items()
                 },
             )
             this_execution.shared_state = updated_state
@@ -606,6 +663,7 @@ def _apply_step_result(
                     event=result.event,
                     bound_events=this_execution.bound_events,
                     id=this_execution.worker_id,
+                    invocation_namespace=path,
                 )
             )
         else:
@@ -613,7 +671,7 @@ def _apply_step_result(
     elif isinstance(result, DeleteCollectedEvent):
         if did_complete_step:  # allow retries to grab the events
             # indicates that a run has successfully collected its events, and they can be deleted from the collected events state
-            state.workers[step_name].collected_events.pop(result.event_id, None)
+            state.workers[step_id].collected_events.pop(result.event_id, None)
     elif isinstance(result, AddWaiter):
         # indicates that a run has added a waiter to the collected waiters state
         existing = next(
@@ -650,13 +708,14 @@ def _apply_step_result(
                         step_id=step_id,
                         waiter_id=result.waiter_id,
                         timeout=result.timeout,
+                        invocation_namespace=path,
                     )
                 )
     elif isinstance(result, DeleteWaiter):
         if did_complete_step:  # allow retries to grab the waiter events
             # indicates that a run has obtained the waiting event, and it can be deleted from the collected waiters state
             to_remove = result.waiter_id
-            waiters = state.workers[step_name].collected_waiters
+            waiters = state.workers[step_id].collected_waiters
             item = next(filter(lambda w: w.waiter_id == to_remove, waiters), None)
             if item is not None:
                 waiters.remove(item)
@@ -669,6 +728,7 @@ def _schedule_retry_or_route_failure(
     *,
     tick: TickStepResult,
     state: BrokerState,
+    path: tuple[str, ...],
     worker_state: InternalStepWorkerState,
     this_execution: InProgressState,
     acc: _StepResultAcc,
@@ -736,7 +796,7 @@ def _schedule_retry_or_route_failure(
     total_attempts = this_execution.attempts + 1
     elapsed = result.failed_at - first_attempt_at
 
-    handler_name = state.config.handler_for_step.get(step_name)
+    handler_name = state.config.handler_for_step.get(step_id)
     handler = (
         state.config.catch_error_handlers.get(handler_name)
         if handler_name is not None
@@ -769,7 +829,8 @@ def _schedule_retry_or_route_failure(
             _queue_catch_error_event(
                 this_execution,
                 event=step_failed_event,
-                step_id=StepId.root(handler.step_name),
+                step_id=StepId((), handler.step_name),
+                path=path,
                 recovery_counts={
                     **this_execution.recovery_counts,
                     handler.step_name: new_count,
@@ -796,6 +857,7 @@ def _schedule_retry_or_route_failure(
 def _resolve_work_item_in_stream(
     tick: TickStepResult,
     state: BrokerState,
+    path: tuple[str, ...],
     scope: _FanOutScope,
     acc: _StepResultAcc,
     now_seconds: float,
@@ -806,7 +868,7 @@ def _resolve_work_item_in_stream(
     is driven only by source exhaustion plus ``open_work_items == 0``.
     Classification happens once, before any counter mutation.
     """
-    step_name = _root_step_key(tick.step_id)
+    step_id = tick.step_id
     commands: list[WorkflowCommand] = []
     emitted_non_stop = [
         x.result
@@ -828,12 +890,12 @@ def _resolve_work_item_in_stream(
         disposition is WorkDisposition.FANNED_OUT
         and scope.fan_out_stream_id is not None
     ):
-        bindings = state.config.bindings_for_source(step_name)
+        bindings = state.config.bindings_for_source(step_id)
         accepting_binding_ids = tuple(binding.id for binding in bindings)
-        seed = sum(_count_accepting_steps(state, type(m)) for m in emitted_non_stop)
+        seed = sum(_count_accepting_steps(state, m) for m in emitted_non_stop)
         state.streams[scope.fan_out_stream_id] = CollectionStreamInstance(
             stream_id=scope.fan_out_stream_id,
-            source_step=step_name,
+            source_step=step_id,
             scope_path=scope.trigger_stack,
             accepting_binding_ids=accepting_binding_ids,
             open_work_items=seed,
@@ -841,28 +903,34 @@ def _resolve_work_item_in_stream(
         # The parent work item now waits for each child collection release.
         commands.extend(
             _adjust_open_work_items(
-                state, enclosing, len(accepting_binding_ids) - 1, now_seconds
+                state,
+                enclosing,
+                len(accepting_binding_ids) - 1,
+                path,
+                now_seconds,
             )
         )
         if seed == 0:
             commands.extend(
-                _close_collection_stream(state, scope.fan_out_stream_id, now_seconds)
+                _close_collection_stream(
+                    state, scope.fan_out_stream_id, path, now_seconds
+                )
             )
     elif disposition is WorkDisposition.COMPLETED:
         # Same-level resolution (1:1 step, or a collect step firing its
         # summary). Remove this work item and add its same-level successors: one
         # work item per accepting step per emitted event. A step that returns
         # None adds zero successors and simply leaves the set.
-        successors = sum(
-            _count_accepting_steps(state, type(ev)) for ev in emitted_non_stop
-        )
+        successors = sum(_count_accepting_steps(state, ev) for ev in emitted_non_stop)
         commands.extend(
-            _adjust_open_work_items(state, enclosing, successors - 1, now_seconds)
+            _adjust_open_work_items(state, enclosing, successors - 1, path, now_seconds)
         )
     elif disposition is WorkDisposition.ABSORBED:
         # Consumed once per work item, no matter how many slot buffers the
         # invocation touched.
-        commands.extend(_adjust_open_work_items(state, enclosing, -1, now_seconds))
+        commands.extend(
+            _adjust_open_work_items(state, enclosing, -1, path, now_seconds)
+        )
     # STILL_LIVE re-delivers and resolves later; RUN_ENDING needs no accounting.
     return commands
 
@@ -882,9 +950,14 @@ def _process_step_result_tick(
     dispatch any newly-eligible queued work).
     """
     state = init.deepcopy()
+    descent = _descend(state, tick.invocation_namespace)
+    if descent is None:
+        return state, []
+    broker = descent.broker
+    path = descent.path
     step_id = tick.step_id
     step_name = _root_step_key(step_id)
-    worker_state = state.workers[step_name]
+    worker_state = broker.workers[step_id]
     this_execution = _find_in_progress(worker_state, tick.worker_id)
 
     rerun = _rerun_for_stale_collect_buffer(tick, worker_state, this_execution)
@@ -894,7 +967,7 @@ def _process_step_result_tick(
     fanned_out = any(
         isinstance(x, StepWorkerResult) and x.fanned_out for x in tick.result
     )
-    scope = _fan_out_scope(state, step_name, this_execution, fanned_out=fanned_out)
+    scope = _fan_out_scope(broker, step_name, this_execution, fanned_out=fanned_out)
 
     did_complete_step = any(isinstance(x, StepWorkerResult) for x in tick.result)
     acc = _StepResultAcc(commands=[])
@@ -902,7 +975,8 @@ def _process_step_result_tick(
         _apply_step_result(
             result,
             tick=tick,
-            state=state,
+            state=broker,
+            path=path,
             worker_state=worker_state,
             this_execution=this_execution,
             scope=scope,
@@ -912,7 +986,7 @@ def _process_step_result_tick(
         )
 
     acc.commands.extend(
-        _resolve_work_item_in_stream(tick, state, scope, acc, now_seconds)
+        _resolve_work_item_in_stream(tick, broker, path, scope, acc, now_seconds)
     )
 
     is_completed = any(indicates_exit(c) for c in acc.commands)
@@ -922,7 +996,7 @@ def _process_step_result_tick(
             CommandPublishEvent(
                 StepStateChanged(
                     step_state=StepState.NOT_RUNNING,
-                    name=step_name,
+                    name=_static_step_name(path, step_id),
                     input_event_name=str(type(tick.event)),
                     output_event_name=acc.output_event_name,
                     worker_id=str(tick.worker_id),
@@ -933,7 +1007,9 @@ def _process_step_result_tick(
             worker_state.in_progress.remove(this_execution)
     # enqueue next events if there are any
     if not is_completed:
-        acc.commands.extend(_drain_eligible_queue(step_id, worker_state, now_seconds))
+        acc.commands.extend(
+            _drain_eligible_queue(step_id, worker_state, path, now_seconds)
+        )
 
     return state, acc.commands
 
@@ -1003,6 +1079,7 @@ def _add_or_enqueue_event(
     event: EventAttempt,
     step_id: StepId,
     state: InternalStepWorkerState,
+    path: tuple[str, ...],
     now_seconds: float,
 ) -> list[WorkflowCommand]:
     """
@@ -1010,7 +1087,7 @@ def _add_or_enqueue_event(
     Note! This mutates the state, assuming that its already been deepcopied in an outer scope.
     """
     commands: list[WorkflowCommand] = []
-    step_name = _root_step_key(step_id)
+    step_name = _static_step_name(path, step_id)
     # Determine if there is available capacity based on in_progress workers.
     # Delayed attempts (not_before set) are never dispatched here; they wait
     # in the queue without consuming a worker slot until a wakeup flips them.
@@ -1053,6 +1130,7 @@ def _add_or_enqueue_event(
                 step_id=step_id,
                 event=event.event,
                 id=id,
+                invocation_namespace=path,
                 bound_events=event.bound_events,
             )
         )
@@ -1094,7 +1172,10 @@ class _RouteResult:
 
 
 def _redeliver_collection_payload(
-    tick: TickAddEvent, state: BrokerState, now_seconds: float
+    tick: TickAddEvent,
+    state: BrokerState,
+    path: tuple[str, ...],
+    now_seconds: float,
 ) -> list[WorkflowCommand] | None:
     """Re-deliver a payload-carrying tick straight to its collect target.
 
@@ -1127,15 +1208,19 @@ def _redeliver_collection_payload(
             collection_release_payload=payload,
             work_item_id=tick.work_item_id,
         ),
-        StepId.root(binding.target_step),
+        binding.target_step,
         state.workers[binding.target_step],
+        path,
         now_seconds,
     )
 
 
 def _resolve_waiters(
-    tick: TickAddEvent, state: BrokerState, now_seconds: float
-) -> tuple[list[WorkflowCommand], set[str]]:
+    tick: TickAddEvent,
+    state: BrokerState,
+    path: tuple[str, ...],
+    now_seconds: float,
+) -> tuple[list[WorkflowCommand], set[StepId]]:
     """Resolve any waiters the event satisfies, resuming their work items.
 
     Returns the emitted commands plus the set of steps woken via waiter
@@ -1143,10 +1228,9 @@ def _resolve_waiters(
     the same delivery as a normally-accepted event.
     """
     commands: list[WorkflowCommand] = []
-    waiter_resolved_steps: set[str] = set()
-    for step_name, step_config in state.config.steps.items():
-        step_id = StepId.root(step_name)
-        wait_conditions = state.workers[step_name].collected_waiters
+    waiter_resolved_steps: set[StepId] = set()
+    for step_id, step_config in state.config.steps.items():
+        wait_conditions = state.workers[step_id].collected_waiters
         for wait_condition in wait_conditions:
             is_match = event_matches(
                 tick.event,
@@ -1158,7 +1242,7 @@ def _resolve_waiters(
                 for k, v in wait_condition.requirements.items()
             )
             if is_match:
-                waiter_resolved_steps.add(step_name)
+                waiter_resolved_steps.add(step_id)
                 wait_condition.resolved_event = tick.event
                 # Resume re-delivers the suspended work item whole from the
                 # waiter record: original trigger, stream scope, collect batch.
@@ -1172,7 +1256,8 @@ def _resolve_waiters(
                             work_item_id=wait_condition.work_item_id,
                         ),
                         step_id,
-                        state.workers[step_name],
+                        state.workers[step_id],
+                        path,
                         now_seconds,
                     )
                 )
@@ -1182,7 +1267,8 @@ def _resolve_waiters(
 def _route_member_to_collect_step(
     tick: TickAddEvent,
     state: BrokerState,
-    step_name: str,
+    step_id: StepId,
+    path: tuple[str, ...],
     worker_state: InternalStepWorkerState,
     now_seconds: float,
 ) -> tuple[list[WorkflowCommand], bool]:
@@ -1193,6 +1279,7 @@ def _route_member_to_collect_step(
     (a targeted send to a collect step, which the runtime cannot honor).
     """
     commands: list[WorkflowCommand] = []
+    step_name = _static_step_name(path, step_id)
     if not tick.scope_path:
         # Scope-less events (ctx.send_event, external sends) can
         # never join a collect batch — members reach a collect step
@@ -1214,9 +1301,7 @@ def _route_member_to_collect_step(
                     event=WorkflowFailedEvent(step_name=step_name, exception=error)
                 )
             )
-            commands.append(
-                CommandFailWorkflow(step_id=StepId.root(step_name), exception=error)
-            )
+            commands.append(CommandFailWorkflow(step_id=step_id, exception=error))
             return commands, True
         # An untargeted send may be legitimate traffic for other
         # steps that merely overlaps an open stream — warn.
@@ -1229,7 +1314,7 @@ def _route_member_to_collect_step(
         )
         return commands, False
     stream_id = tick.scope_path[-1]
-    binding = state.config.binding_for_target(stream_id, step_name, state.streams)
+    binding = state.config.binding_for_target(stream_id, step_id, state.streams)
     if binding is None:
         # Dropped member: its nearest stream has no binding to this
         # collect step. Balance the stream accounting for the dead
@@ -1242,7 +1327,9 @@ def _route_member_to_collect_step(
             step_name,
             stream_id,
         )
-        commands.extend(_adjust_open_work_items(state, stream_id, -1, now_seconds))
+        commands.extend(
+            _adjust_open_work_items(state, stream_id, -1, path, now_seconds)
+        )
         return commands, False
     release_state = _release_state_for(state, stream_id, binding)
     if not release_state.released:
@@ -1256,17 +1343,19 @@ def _route_member_to_collect_step(
                     worker_state,
                     release,
                     tuple(tick.scope_path[:-1]),
+                    path,
                     now_seconds,
                 )
             )
-    commands.extend(_adjust_open_work_items(state, stream_id, -1, now_seconds))
+    commands.extend(_adjust_open_work_items(state, stream_id, -1, path, now_seconds))
     return commands, False
 
 
 def _route_to_accepting_steps(
     tick: TickAddEvent,
     state: BrokerState,
-    waiter_resolved_steps: set[str],
+    path: tuple[str, ...],
+    waiter_resolved_steps: set[StepId],
     now_seconds: float,
 ) -> _RouteResult:
     """Route the event to every step that accepts (and is targeted by) it.
@@ -1275,15 +1364,14 @@ def _route_to_accepting_steps(
     accounting is balanced for the delivery the waiter swallowed.
     """
     result = _RouteResult(commands=[])
-    for step_name, step_config in state.config.steps.items():
-        step_id = StepId.root(step_name)
+    for step_id, step_config in state.config.steps.items():
         is_accepted = step_accepts_event(
             tick.event,
             step_config.accepted_events,
             allow_subclasses=step_config.accept_event_subclasses,
         )
-        is_targeted = tick.step_id is None or _root_step_key(tick.step_id) == step_name
-        if step_name in waiter_resolved_steps:
+        is_targeted = tick.step_id is None or tick.step_id == step_id
+        if step_id in waiter_resolved_steps:
             if is_accepted and is_targeted and tick.scope_path:
                 # The waiter swallowed a delivery this step would otherwise
                 # have received. The delivery was birth-counted as a work item
@@ -1293,16 +1381,18 @@ def _route_to_accepting_steps(
                 # swallowed member never joins the batch; the waiter consumed
                 # it).
                 result.commands.extend(
-                    _adjust_open_work_items(state, tick.scope_path[-1], -1, now_seconds)
+                    _adjust_open_work_items(
+                        state, tick.scope_path[-1], -1, path, now_seconds
+                    )
                 )
             continue
         if not (is_accepted and is_targeted):
             continue
         result.handled = True
-        worker_state = state.workers[step_name]
+        worker_state = state.workers[step_id]
         if worker_state.config.collection_param is not None:
             member_commands, failed = _route_member_to_collect_step(
-                tick, state, step_name, worker_state, now_seconds
+                tick, state, step_id, path, worker_state, now_seconds
             )
             result.commands.extend(member_commands)
             if failed:
@@ -1320,7 +1410,7 @@ def _route_to_accepting_steps(
                 if tick.scope_path:
                     result.commands.extend(
                         _adjust_open_work_items(
-                            state, tick.scope_path[-1], -1, now_seconds
+                            state, tick.scope_path[-1], -1, path, now_seconds
                         )
                     )
                 continue
@@ -1338,7 +1428,8 @@ def _route_to_accepting_steps(
                     work_item_id=tick.work_item_id,
                 ),
                 step_id,
-                state.workers[step_name],
+                state.workers[step_id],
+                path,
                 now_seconds,
             )
         )
@@ -1377,6 +1468,11 @@ def _process_add_event_tick(
     an UnhandledEvent.
     """
     state = init.deepcopy()
+    descent = _descend(state, tick.origin_namespace)
+    if descent is None:
+        return state, _unhandled_event_commands(tick, state)
+    broker = descent.broker
+    path = descent.path
     if tick.work_item_id is None:
         # A collect re-delivery derives its id from the payload's stable
         # stream+binding key so it matches the invocation fired at release time
@@ -1385,26 +1481,28 @@ def _process_add_event_tick(
         work_item_id = (
             tick.collection_release_payload.work_item_id()
             if tick.collection_release_payload is not None
-            else _next_work_item_id(state)
+            else _next_work_item_id(broker)
         )
         tick = tick.model_copy(update={"work_item_id": work_item_id})
     if isinstance(tick.event, StartEvent):
-        state.is_running = True
+        broker.is_running = True
 
-    payload_commands = _redeliver_collection_payload(tick, state, now_seconds)
+    payload_commands = _redeliver_collection_payload(tick, broker, path, now_seconds)
     if payload_commands is not None:
         return state, payload_commands
 
-    commands, waiter_resolved_steps = _resolve_waiters(tick, state, now_seconds)
+    commands, waiter_resolved_steps = _resolve_waiters(tick, broker, path, now_seconds)
 
-    routed = _route_to_accepting_steps(tick, state, waiter_resolved_steps, now_seconds)
+    routed = _route_to_accepting_steps(
+        tick, broker, path, waiter_resolved_steps, now_seconds
+    )
     commands.extend(routed.commands)
     if routed.failed:
         return state, commands
 
     handled = bool(waiter_resolved_steps) or routed.handled
     if not handled:
-        commands.extend(_unhandled_event_commands(tick, state))
+        commands.extend(_unhandled_event_commands(tick, broker))
     return state, commands
 
 
@@ -1463,8 +1561,8 @@ def _process_timeout_tick(
     state.is_running = False
     _clear_collection_state(state)
     active_steps = [
-        step_name
-        for step_name, worker_state in init.workers.items()
+        str(step_id)
+        for step_id, worker_state in init.workers.items()
         if len(worker_state.in_progress) > 0
     ]
     steps_info = (
@@ -1499,12 +1597,18 @@ def _process_wakeup_tick(
     """
     state = init.deepcopy()
     commands: list[WorkflowCommand] = []
-    for step_name, worker_state in sorted(state.workers.items(), key=lambda x: x[0]):
-        step_id = StepId.root(step_name)
+    descent = _descend(state, ())
+    if descent is None:
+        return state, commands
+    for step_id, worker_state in sorted(
+        descent.broker.workers.items(), key=lambda x: str(x[0])
+    ):
         for attempt in worker_state.queue:
             if attempt.not_before is not None and attempt.not_before <= tick.due:
                 attempt.not_before = None
-        commands.extend(_drain_eligible_queue(step_id, worker_state, now_seconds))
+        commands.extend(
+            _drain_eligible_queue(step_id, worker_state, descent.path, now_seconds)
+        )
     return state, commands
 
 
@@ -1513,11 +1617,14 @@ def _process_waiter_timeout_tick(
 ) -> tuple[BrokerState, list[WorkflowCommand]]:
     state = init.deepcopy()
     commands: list[WorkflowCommand] = []
-    step_id = tick.step_id
-    step_name = _root_step_key(step_id)
-    if step_name not in state.workers:
+    descent = _descend(state, tick.invocation_namespace)
+    if descent is None:
         return state, commands
-    worker_state = state.workers[step_name]
+    broker = descent.broker
+    step_id = tick.step_id
+    if step_id not in broker.workers:
+        return state, commands
+    worker_state = broker.workers[step_id]
     waiter = next(
         (w for w in worker_state.collected_waiters if w.waiter_id == tick.waiter_id),
         None,
@@ -1537,6 +1644,7 @@ def _process_waiter_timeout_tick(
         ),
         step_id,
         worker_state,
+        descent.path,
         now_seconds,
     )
     commands.extend(subcommands)

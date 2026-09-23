@@ -16,6 +16,7 @@ from workflows.runtime.types.internal_state import (
     InProgressState,
 )
 from workflows.runtime.types.results import StepWorkerState
+from workflows.runtime.types.step_id import StepId
 from workflows.workflow import Workflow
 
 
@@ -154,7 +155,8 @@ def test_in_progress_retry_state_survives_serialization() -> None:
     """In-flight work is requeued with its retry state on resume."""
     workflow = _RetryStateWorkflow()
     state = BrokerState.from_workflow(workflow)
-    state.workers["start"].in_progress.append(
+    step_id = StepId.root("start")
+    state.workers[step_id].in_progress.append(
         InProgressState(
             event=StartEvent(),
             worker_id=0,
@@ -174,7 +176,7 @@ def test_in_progress_retry_state_survives_serialization() -> None:
     serializer = JsonSerializer()
     serialized = state.to_serialized(serializer)
     restored = BrokerState.from_serialized(serialized, workflow, serializer)
-    attempt = restored.workers["start"].queue[0]
+    attempt = restored.workers[step_id].queue[0]
 
     assert serialized.version == CURRENT_SERIALIZED_VERSION
     assert attempt.attempts == 2
@@ -188,7 +190,8 @@ def test_queued_not_before_survives_serialization() -> None:
     """The v2 change preserves the delayed-retry field added to queued attempts."""
     workflow = _RetryStateWorkflow()
     state = BrokerState.from_workflow(workflow)
-    state.workers["start"].queue.append(
+    step_id = StepId.root("start")
+    state.workers[step_id].queue.append(
         EventAttempt(
             event=StartEvent(),
             attempts=1,
@@ -202,7 +205,7 @@ def test_queued_not_before_survives_serialization() -> None:
     restored = BrokerState.from_serialized(serialized, workflow, serializer)
 
     assert serialized.workers["start"].queue[0].not_before == 150.0
-    assert restored.workers["start"].queue[0].not_before == 150.0
+    assert restored.workers[step_id].queue[0].not_before == 150.0
 
 
 def test_deserialize_broken_state_raises_validation_error(workflow: Workflow) -> None:
