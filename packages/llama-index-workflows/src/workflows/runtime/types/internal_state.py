@@ -621,6 +621,21 @@ class BrokerConfig:
     def __setstate__(self, state: dict[str, Any]) -> None:
         self.__dict__.update(state)
         self._normalize_step_id_maps()
+        object.__setattr__(
+            self,
+            "collection_bindings",
+            {
+                binding_id: dataclasses.replace(
+                    binding,
+                    source_step=_normalize_step_id(binding.source_step),
+                    target_step=_normalize_step_id(binding.target_step),
+                )
+                if not isinstance(binding.source_step, StepId)
+                or not isinstance(binding.target_step, StepId)
+                else binding
+                for binding_id, binding in self.collection_bindings.items()
+            },
+        )
 
     def _normalize_step_id_maps(self) -> None:
         object.__setattr__(self, "steps", _normalize_step_id_keys(self.steps))
