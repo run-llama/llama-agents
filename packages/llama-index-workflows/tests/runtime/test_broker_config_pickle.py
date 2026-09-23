@@ -6,9 +6,11 @@ from __future__ import annotations
 import base64
 import pickle
 
-from workflows.runtime.types.internal_state import BrokerConfig, CollectionStreamInstance
+from workflows.runtime.types.internal_state import (
+    BrokerConfig,
+    CollectionStreamInstance,
+)
 from workflows.runtime.types.step_id import StepId
-
 
 # Pickled with origin/main's BrokerConfig and CollectionBinding, using string step names.
 _LEGACY_CONFIG = (
