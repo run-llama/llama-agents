@@ -22,7 +22,6 @@ from llama_agents.server._runtime.server_runtime import (
 )
 from workflows import Workflow, step
 from workflows.context.state_store import StateStore
-from workflows.errors import WorkflowRuntimeError
 from workflows.events import (
     Event,
     StartEvent,
@@ -160,40 +159,7 @@ class SimpleWorkflow(Workflow):
         return StopEvent(result="done")
 
 
-class ChildStart(StartEvent):
-    pass
-
-
-class ChildStop(StopEvent):
-    pass
-
-
-class ChildWorkflow(Workflow):
-    @step
-    async def finish(self, ev: ChildStart) -> ChildStop:
-        return ChildStop()
-
-
-class ParentWorkflow(Workflow):
-    child: ChildWorkflow
-
-    @step
-    async def start(self, ev: StartEvent) -> ChildStart:
-        return ChildStart()
-
-    @step
-    async def finish(self, ev: ChildStop) -> StopEvent:
-        return StopEvent()
-
-
 # -- Tests -----------------------------------------------------------------
-
-
-def test_server_runtime_rejects_child_workflows() -> None:
-    decorator = ServerRuntimeDecorator(StubRuntime(), store=MemoryWorkflowStore())
-
-    with pytest.raises(WorkflowRuntimeError, match="durable child state support"):
-        ParentWorkflow(child=ChildWorkflow(), runtime=decorator)
 
 
 def test_add_workflow_sets_workflow_name() -> None:

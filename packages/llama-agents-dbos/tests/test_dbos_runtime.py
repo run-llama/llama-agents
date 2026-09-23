@@ -30,7 +30,6 @@ from workflows.context import Context
 from workflows.context.serializers import JsonSerializer
 from workflows.context.state_store import DictState, InMemoryStateStore, StateStore
 from workflows.decorators import step
-from workflows.errors import WorkflowRuntimeError
 from workflows.events import Event, StartEvent, StopEvent
 from workflows.runtime.types.internal_state import BrokerState
 from workflows.runtime.types.named_task import WorkerTask
@@ -38,39 +37,6 @@ from workflows.runtime.types.plugin import RegisteredWorkflow
 from workflows.runtime.types.step_id import StepId
 from workflows.testing import WorkflowTestRunner
 from workflows.workflow import Workflow
-
-
-class ChildStart(StartEvent):
-    pass
-
-
-class ChildStop(StopEvent):
-    pass
-
-
-class ChildWorkflow(Workflow):
-    @step
-    async def finish(self, ev: ChildStart) -> ChildStop:
-        return ChildStop()
-
-
-class ParentWorkflow(Workflow):
-    child: ChildWorkflow
-
-    @step
-    async def start(self, ev: StartEvent) -> ChildStart:
-        return ChildStart()
-
-    @step
-    async def finish(self, ev: ChildStop) -> StopEvent:
-        return StopEvent()
-
-
-def test_dbos_runtime_rejects_child_workflows() -> None:
-    runtime = DBOSRuntime()
-
-    with pytest.raises(WorkflowRuntimeError, match="durable child state support"):
-        ParentWorkflow(child=ChildWorkflow(), runtime=runtime)
 
 
 def _fake_sqlite_engine() -> Engine:
@@ -357,9 +323,10 @@ async def test_run_workflow_seeds_state_store_from_durable_handle() -> None:
             state_type: type[Any] | None = None,
             serialized_state: dict[str, Any] | None = None,
             serializer: Any = None,
+            namespace: tuple[str, ...] = (),
         ) -> StateStore[Any]:
             self.create_state_store_calls.append(
-                (run_id, state_type, serialized_state, serializer)
+                (run_id, state_type, serialized_state, serializer, namespace)
             )
             return self.state_store
 
@@ -421,7 +388,7 @@ async def test_run_workflow_seeds_state_store_from_durable_handle() -> None:
     assert workflow_store.start_called
     assert workflow_store.state_store.ensure_seeded_called
     assert workflow_store.create_state_store_calls == [
-        ("run-1", DictState, serialized_state, serializer)
+        ("run-1", DictState, serialized_state, serializer, ())
     ]
     start_mock.assert_awaited_once()
     start_args = start_mock.await_args
