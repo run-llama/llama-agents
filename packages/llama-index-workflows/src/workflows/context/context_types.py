@@ -169,7 +169,7 @@ class SerializedStepWorkerState(BaseModel):
 
 
 class SerializedCollectionStreamInstance(BaseModel):
-    """Serialized representation of an open collection stream."""
+    """Serialized representation of an open collection stream (broker-local)."""
 
     stream_id: str
     source_step: str
@@ -216,6 +216,12 @@ class SerializedContext(BaseModel):
     collection_release_states: dict[str, SerializedCollectionReleaseState] = Field(
         default_factory=dict
     )
+    # Live child invocations nested self-similarly, keyed by "slot#N" segment.
+    # Additive to v2: childless snapshots omit it.
+    child_brokers: dict[str, "SerializedChildBroker"] = Field(default_factory=dict)
+    # Per-slot invocation mint counter, persisted so snapshot-resume and full
+    # tick-replay mint identical child ids.
+    child_seq: dict[str, int] = Field(default_factory=dict)
     # Elapsed known-alive time (seconds) this broker has consumed against its
     # timeout budget. Persisted so a resumed run keeps its spent budget instead
     # of resetting; downtime between sessions never accrues (see the reducer's
@@ -347,3 +353,35 @@ class SerializedContext(BaseModel):
             # Older int version markers (e.g. an explicit 0): legacy V0 format.
             v0 = SerializedContextV0.model_validate(data)
             return SerializedContext.from_v0(v0)
+        if not isinstance(version, int) or version > CURRENT_SERIALIZED_VERSION:
+            raise ValueError(
+                f"Cannot load serialized workflow context with "
+                f"version={version!r}; this library supports up to version "
+                f"{CURRENT_SERIALIZED_VERSION}. The payload was likely written "
+                "by a newer version of llama-index-workflows."
+            )
+        if version == CURRENT_SERIALIZED_VERSION:
+            return SerializedContext.model_validate(data)
+        if version == 1:
+            return SerializedContext.from_v1(data)
+        # Older int version markers (e.g. an explicit 0): legacy V0 format.
+        v0 = SerializedContextV0.model_validate(data)
+        return SerializedContext.from_v0(v0)
+
+
+class SerializedChildBroker(BaseModel):
+    """A nested child invocation inside a serialized broker.
+
+    ``broker`` is the same self-similar :class:`SerializedContext`, which carries
+    the child's own ``elapsed_alive``/``last_alive_stamp`` timeout budget. The
+    boundary fields record the child's identity in the parent's stream
+    accounting.
+    """
+
+    slot: str
+    boundary_scope_path: list[str] = Field(default_factory=list)
+    boundary_recovery_counts: dict[str, int] = Field(default_factory=dict)
+    broker: SerializedContext
+
+
+SerializedContext.model_rebuild()
