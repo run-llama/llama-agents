@@ -45,9 +45,11 @@ class TickStepResult(BaseModel):
         frozen=True, arbitrary_types_allowed=True, populate_by_name=True
     )
     type: Literal["step_result"] = "step_result"
+    # Local (bare) step id within the addressed broker. ``invocation_namespace``
+    # is the invocation path that addresses which broker owns this result.
     step_id: StepId = Field(validation_alias=_STEP_ID_ALIAS)
     worker_id: int
-    invocation_namespace: tuple[str, ...] = Field(default=(), exclude=True)
+    invocation_namespace: tuple[str, ...] = ()
     event: SerializableEvent
     result: list[Annotated[StepFunctionResult, Discriminator("type")]]
     # Wall-clock stamp recorded before ``on_tick`` journaling, so replay reads
@@ -64,9 +66,16 @@ class TickAddEvent(BaseModel):
     )
     type: Literal["add_event"] = "add_event"
     event: SerializableEvent
+    # Local (bare) target step within the addressed broker, for a targeted
+    # send. ``origin_namespace`` is the invocation path that addresses which
+    # broker's local routing processes this event.
     step_id: StepId | None = Field(default=None, validation_alias=_STEP_ID_ALIAS)
     bound_events: dict[str, SerializableEvent] | None = None
-    origin_namespace: tuple[str, ...] = Field(default=(), exclude=True)
+    # Invocation path of the broker whose local routing owns this event. Type-
+    # routing and boundary descent into that broker's child slots both happen
+    # there; ``()`` (the default) is the root broker, preserving the pre-child
+    # wire format for old journals.
+    origin_namespace: tuple[str, ...] = ()
     attempts: int | None = None
     first_attempt_at: float | None = None
     last_exception: SerializableOptionalException = None
@@ -119,9 +128,10 @@ class TickWaiterTimeout(BaseModel):
 
     model_config = ConfigDict(frozen=True, populate_by_name=True)
     type: Literal["waiter_timeout"] = "waiter_timeout"
+    # Local (bare) step id; ``invocation_namespace`` addresses the broker.
     step_id: StepId = Field(validation_alias=_STEP_ID_ALIAS)
     waiter_id: str
-    invocation_namespace: tuple[str, ...] = Field(default=(), exclude=True)
+    invocation_namespace: tuple[str, ...] = ()
     stamped_at: float | None = None
 
 
@@ -132,11 +142,33 @@ class TickSessionStart(BaseModel):
     sessions, resetting every broker's ``last_alive_stamp`` without accruing, so
     the inter-session gap (downtime) never enters any broker's budget — on the
     snapshot-resume path and the full-journal-replay path identically. Additive
-    to the journal; old journals simply lack it.
+    to the journal; old (pre-child) journals simply lack it.
     """
 
     model_config = ConfigDict(frozen=True)
     type: Literal["session_start"] = "session_start"
+    stamped_at: float | None = None
+
+
+class TickNamespaceTimeout(BaseModel):
+    """When processed, checks a single child invocation's alive-time budget.
+
+    Armed at boundary descent (and re-armed on resume) at the wall-clock time the
+    child's remaining ``timeout - elapsed_alive`` budget would be spent. On fire
+    the reducer accrues the child's alive time from ``stamped_at``; if the budget
+    is truly spent it expires the child (its local ``@catch_error`` first, else a
+    boundary failure ascends to the parent), otherwise it re-arms for the
+    remaining budget. Only the root timeout (:class:`TickTimeout`) halts the whole
+    run. ``namespace`` is the child's invocation path.
+    """
+
+    model_config = ConfigDict(frozen=True)
+    type: Literal["namespace_timeout"] = "namespace_timeout"
+    namespace: tuple[str, ...]
+    timeout: float
+    # See TickStepResult.stamped_at. Stamped before on_tick with the fire time,
+    # so replay accrues the child's alive budget to the same value the live run
+    # asserted budget-spent at.
     stamped_at: float | None = None
 
 
@@ -171,13 +203,14 @@ class TickWakeup(BaseModel):
     stamped_at: float | None = None
 
 
-# Ticks that carry a journaled wall-clock stamp. See TickStepResult.stamped_at.
+# Ticks that carry a journaled wall-clock stamp.
 STAMPED_TICK_TYPES = (
     TickStepResult,
     TickAddEvent,
     TickTimeout,
     TickWaiterTimeout,
     TickSessionStart,
+    TickNamespaceTimeout,
     TickWakeup,
 )
 
@@ -189,6 +222,7 @@ WorkflowTick = Annotated[
     | TickTimeout
     | TickWaiterTimeout
     | TickSessionStart
+    | TickNamespaceTimeout
     | TickIdleCheck
     | TickIdleRelease
     | TickWakeup,
@@ -205,6 +239,7 @@ _WORKFLOW_TICK_TYPES = (
     TickTimeout,
     TickWaiterTimeout,
     TickSessionStart,
+    TickNamespaceTimeout,
     TickIdleCheck,
     TickIdleRelease,
     TickWakeup,

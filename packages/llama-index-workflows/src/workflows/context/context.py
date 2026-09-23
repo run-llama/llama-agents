@@ -227,6 +227,7 @@ class Context(Generic[MODEL_T]):
     def _create_internal(
         cls,
         workflow: Workflow,
+        state_store: StateStore[Any] | None = None,
     ) -> Context[MODEL_T]:
         """Create a Context directly in internal face state.
 
@@ -239,6 +240,7 @@ class Context(Generic[MODEL_T]):
             InternalContext(
                 internal_adapter=internal_adapter,
                 workflow=workflow,
+                state_store=state_store,
             ),
         )
         return new_ctx

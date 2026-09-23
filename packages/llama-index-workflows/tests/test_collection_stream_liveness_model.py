@@ -167,6 +167,7 @@ def test_failed_work_without_redelivery_is_not_classified_live() -> None:
             rerun_scheduled=False,
             redelivery_scheduled=False,
             fanned_out=False,
+            boundary_descent=False,
         )
 
 
