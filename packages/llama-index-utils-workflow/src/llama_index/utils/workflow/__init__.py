@@ -471,7 +471,9 @@ def _extract_agent_workflow_structure(
 
 
 def _extract_execution_graph(
-    handler: WorkflowHandler, max_label_length: int | None = None
+    handler: WorkflowHandler,
+    max_label_length: int | None = None,
+    include_child_workflows: bool = False,
 ) -> Tuple[Dict[str, Tuple[str, str, type | None]], List[Tuple[str, str]]]:
     """Helper to extract nodes and edges from the workflow handler's tick log."""
 
@@ -533,6 +535,152 @@ def _extract_execution_graph(
             for out_ev in iter_emitted_events(t):
                 out_event_node_id = ensure_event_node(out_ev)
                 edges.append((step_node_id, out_event_node_id))
+
+    if include_child_workflows:
+        try:
+            workflow = handler._workflow  # type: ignore[attr-defined]
+            workflow_cls = type(workflow)
+            steps_lookup = workflow_cls._get_steps_from_class()
+        except Exception:
+            steps_lookup = {}
+
+        for step_name, step_method in steps_lookup.items():
+            nested_classnames = _get_workflow_classes_from_step(step_method)
+            if not nested_classnames:
+                continue
+            # Find execution node ids for this step (e.g. step:parent_start#1)
+            execution_step_ids = [
+                nid
+                for nid in list(nodes.keys())
+                if nid.startswith(f"step:{step_name}#")
+            ]
+            # If step never executed (no tick yet), skip merging
+            if not execution_step_ids:
+                continue
+            parent_exec_id = execution_step_ids[0]
+
+            for nested_classname in nested_classnames:
+                try:
+                    func_globals = getattr(step_method, "__globals__", {})
+                    wf_class = func_globals.get(nested_classname)
+                    if wf_class is None:
+                        continue
+                    child_instance = wf_class()
+                    child_graph = _get_workflow_representation(child_instance)
+                except Exception:
+                    continue
+
+                prefix = f"{step_name}_{nested_classname}_"
+                # Map original child node id -> execution node id
+                id_map: Dict[str, str] = {}
+                for c_node in child_graph.nodes:
+                    c_id = getattr(c_node, "id", str(c_node))
+                    c_label = getattr(c_node, "label", c_id)
+                    c_type = getattr(c_node, "node_type", "step")
+                    c_event_type = getattr(c_node, "event_type", None)
+                    if c_type == "step":
+                        exec_id = f"step:{prefix}{c_id}#1"
+                        display = (
+                            _truncate_label(c_label, max_label_length)
+                            if max_label_length
+                            else c_label
+                        )
+                        if exec_id not in nodes:
+                            nodes[exec_id] = (display, "step", None)
+                    elif c_type == "event":
+                        # Resolve event type for coloring
+                        ev_type: type | None = None
+                        if c_event_type == "StartEvent" or c_id == "StartEvent":
+                            ev_type = StartEvent
+                        elif c_event_type == "StopEvent" or c_id == "StopEvent":
+                            ev_type = StopEvent
+                        else:
+                            # Try to keep original event string -> generic Event
+                            ev_type = Event
+                        exec_id = f"event:{prefix}{c_id}#0"
+                        display = (
+                            _truncate_label(c_label, max_label_length)
+                            if max_label_length
+                            else c_label
+                        )
+                        if exec_id not in nodes:
+                            nodes[exec_id] = (display, "event", ev_type)
+                    elif c_type == "child_connector":
+                        exec_id = f"child_connector:{prefix}{c_id}"
+                        if exec_id not in nodes:
+                            nodes[exec_id] = (c_label, "child_connector", None)
+                    elif c_type in ("resource", "resource_config"):
+                        exec_id = f"{c_type}:{prefix}{c_id}"
+                        if exec_id not in nodes:
+                            nodes[exec_id] = (c_label, c_type, None)
+                    else:
+                        exec_id = f"{c_type}:{prefix}{c_id}"
+                        if exec_id not in nodes:
+                            nodes[exec_id] = (c_label, c_type, None)
+                    id_map[c_id] = exec_id
+
+                for edge in child_graph.edges:
+                    src = getattr(edge, "source", "")
+                    dst = getattr(edge, "target", "")
+                    mapped_src = id_map.get(src, f"step:{prefix}{src}#1")
+                    mapped_dst = id_map.get(dst, f"step:{prefix}{dst}#1")
+                    edges.append((mapped_src, mapped_dst))
+
+                # Stitch connectors similar to static representation
+                child_start_id = next(
+                    (
+                        n.id
+                        for n in child_graph.nodes
+                        if getattr(n, "event_type", None) == "StartEvent"
+                    ),
+                    None,
+                )
+                child_stop_id = next(
+                    (
+                        n.id
+                        for n in child_graph.nodes
+                        if getattr(n, "event_type", None) == "StopEvent"
+                    ),
+                    None,
+                )
+                if child_start_id is not None:
+                    child_start_exec = id_map.get(child_start_id)
+                    if child_start_exec is not None:
+                        calls_id = f"child_connector:{prefix}calls"
+                        if calls_id not in nodes:
+                            calls_label = f"calls: {nested_classname}"
+                            if max_label_length:
+                                calls_label = _truncate_label(
+                                    calls_label, max_label_length
+                                )
+                            nodes[calls_id] = (
+                                calls_label,
+                                "child_connector",
+                                None,
+                            )
+                        if (parent_exec_id, calls_id) not in edges:
+                            edges.append((parent_exec_id, calls_id))
+                        if (calls_id, child_start_exec) not in edges:
+                            edges.append((calls_id, child_start_exec))
+                if child_stop_id is not None:
+                    child_stop_exec = id_map.get(child_stop_id)
+                    if child_stop_exec is not None:
+                        returns_id = f"child_connector:{prefix}returns"
+                        if returns_id not in nodes:
+                            returns_label = f"returns: {nested_classname}"
+                            if max_label_length:
+                                returns_label = _truncate_label(
+                                    returns_label, max_label_length
+                                )
+                            nodes[returns_id] = (
+                                returns_label,
+                                "child_connector",
+                                None,
+                            )
+                        if (child_stop_exec, returns_id) not in edges:
+                            edges.append((child_stop_exec, returns_id))
+                        if (returns_id, parent_exec_id) not in edges:
+                            edges.append((returns_id, parent_exec_id))
 
     return nodes, edges
 
@@ -855,15 +1003,21 @@ def draw_most_recent_execution(
     filename: str = "workflow_recent_execution.html",
     notebook: bool = False,
     max_label_length: int | None = None,
+    include_child_workflows: bool = True,
 ) -> None:
     """Draws the most recent execution of the workflow using Pyvis."""
-    nodes, edges = _extract_execution_graph(handler, max_label_length)
+    nodes, edges = _extract_execution_graph(
+        handler, max_label_length, include_child_workflows
+    )
     net = Network(directed=True, height="750px", width="100%")
 
     for node_id, (label, node_type, ev_type) in nodes.items():
         if node_type == "step" or node_type == "external":
             color = "#ADD8E6" if node_type == "step" else "#BEDAE4"
             shape = "box"
+        elif node_type == "child_connector":
+            color = "#E0E0E0"
+            shape = "ellipse"
         else:
             color = _determine_event_color(ev_type if ev_type else Event)
             shape = "ellipse"
@@ -895,9 +1049,12 @@ def draw_most_recent_execution_mermaid(
     handler: WorkflowHandler,
     filename: str = "workflow_recent_execution.mermaid",
     max_label_length: int | None = None,
+    include_child_workflows: bool = True,
 ) -> str:
     """Draws the most recent execution of the workflow as a Mermaid diagram."""
-    nodes, edges = _extract_execution_graph(handler, max_label_length)
+    nodes, edges = _extract_execution_graph(
+        handler, max_label_length, include_child_workflows
+    )
     mermaid_lines = ["flowchart TD"]
 
     cleaned_ids = {
@@ -916,6 +1073,8 @@ def draw_most_recent_execution_mermaid(
             css_class = "stepStyle"
         elif node_type == "external":
             css_class = "externalStyle"
+        elif node_type == "child_connector":
+            css_class = "childConnectorStyle"
         elif node_type == "event" and ev_type:
             if issubclass(ev_type, StartEvent):
                 css_class = "startEventStyle"
@@ -945,6 +1104,7 @@ def draw_most_recent_execution_mermaid(
         "classDef workflowAgentStyle fill:#66ccff,color:#000000",
         "classDef workflowToolStyle fill:#ff9966,color:#000000",
         "classDef workflowHandoffStyle fill:#E27AFF,color:#000000",
+        "classDef childConnectorStyle fill:#E0E0E080,color:#555555,stroke-width:0px",
     ]
     mermaid_lines.extend([f"    {s}" for s in styles])
 
