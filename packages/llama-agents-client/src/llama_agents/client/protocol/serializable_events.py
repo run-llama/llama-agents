@@ -8,7 +8,13 @@ import json
 from collections.abc import Sequence
 from typing import Any
 
-from pydantic import BaseModel, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    SerializerFunctionWrapHandler,
+    ValidationError,
+    model_serializer,
+    model_validator,
+)
 from workflows.context.serializers import JsonSerializer
 from workflows.events import (
     Event,
@@ -16,6 +22,8 @@ from workflows.events import (
     InputRequiredEvent,
     StartEvent,
     StopEvent,
+    _set_event_origin_namespace,
+    get_event_origin_namespace,
 )
 
 FRAMEWORK_EVENT_TYPES = (
@@ -40,6 +48,16 @@ class EventEnvelopeWithMetadata(BaseModel):
     # New metadata
     type: str
     types: list[str] | None
+
+    # The child invocation that published the event. Root events omit this field.
+    origin_namespace: tuple[str, ...] = ()
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data = handler(self)
+        if not self.origin_namespace:
+            data.pop("origin_namespace", None)
+        return data
 
     def load_event(
         self,
@@ -66,11 +84,14 @@ class EventEnvelopeWithMetadata(BaseModel):
         as_event_envelope = EventEnvelope(
             value=self.value, type=self.type, qualified_name=self.qualified_name
         ).model_dump()
-        return EventEnvelope.parse(
+        event = EventEnvelope.parse(
             client_data=as_event_envelope,
             registry=registry_lookup,
             serializer=serializer,
         )
+        if self.origin_namespace:
+            _set_event_origin_namespace(event, tuple(self.origin_namespace))
+        return event
 
     @classmethod
     def from_event(
@@ -92,6 +113,7 @@ class EventEnvelopeWithMetadata(BaseModel):
             else None,
             types=_get_event_subtypes(type(event)),
             type=type(event).__name__,
+            origin_namespace=get_event_origin_namespace(event),
         )
         return envelope
 
