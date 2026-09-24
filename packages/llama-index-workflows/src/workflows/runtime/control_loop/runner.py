@@ -23,6 +23,7 @@ from workflows.runtime.types.commands import (
     CommandQueueEvent,
     CommandRunWorker,
     CommandScheduleIdleCheck,
+    CommandScheduleTimeout,
     CommandScheduleWaiterTimeout,
     CommandScheduleWakeup,
     WorkflowCommand,
@@ -52,8 +53,10 @@ from workflows.runtime.types.results import (
 )
 from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import (
+    STAMPED_TICK_TYPES,
     TickAddEvent,
     TickIdleCheck,
+    TickSessionStart,
     TickStepResult,
     TickTimeout,
     TickWaiterTimeout,
@@ -69,11 +72,23 @@ if TYPE_CHECKING:
 from workflows.runtime.control_loop.reduce import (
     _decide_retry_delay,
     _reduce_tick,
-    _root_step_key,
     rewind_in_progress,
 )
 
 logger = logging.getLogger("workflows.runtime.control_loop")
+
+
+def _stamp_tick(tick: WorkflowTick, now: float) -> WorkflowTick:
+    """Stamp a tick's journaled timestamp with the live-run clock, if it has one.
+
+    Ticks that carry a ``stamped_at`` field record ``now`` before journaling so a
+    later replay makes the same time-based decisions as the live run instead of
+    reading the replay clock. Ticks without the field (cancel, publish, etc.) and
+    already-stamped ticks pass through unchanged.
+    """
+    if isinstance(tick, STAMPED_TICK_TYPES) and tick.stamped_at is None:
+        return tick.model_copy(update={"stamped_at": now})
+    return tick
 
 
 def _is_shutdown_error(e: BaseException) -> bool:
@@ -134,12 +149,23 @@ class _ControlLoopRunner:
         self._wakeup_sequence = 0
         # Pull task sequence counter for deterministic journaling
         self._pull_sequence = 0
-        # Map from worker task to (step_id, worker_id) key
-        self._task_keys: dict[asyncio.Task[TickStepResult], tuple[StepId, int]] = {}
+        # Map from worker task to (step_id, invocation_namespace, worker_id) key
+        self._task_keys: dict[
+            asyncio.Task[TickStepResult], tuple[StepId, tuple[str, ...], int]
+        ] = {}
         # Whether a TickIdleCheck is currently in tick_buffer
         self._idle_check_pending = False
         # Pending worker coroutines not yet started (started by adapter in wait_for_next_task)
         self._pending_workers: list[PendingStart] = []
+
+    def _broker_for_namespace(self, namespace: tuple[str, ...]) -> BrokerState | None:
+        broker = self.state
+        for seg in namespace:
+            child = broker.children.get(seg)
+            if child is None:
+                return None
+            broker = child
+        return broker
 
     def schedule_tick(self, tick: WorkflowTick, at_time: float) -> None:
         """Schedule a tick to be processed at a specific time."""
@@ -176,12 +202,17 @@ class _ControlLoopRunner:
 
         async def _run_worker() -> TickStepResult:
             worker: InProgressState | None = None
-            step_name = _root_step_key(command.step_id)
+            step_name = str(command.step_id)
             try:
+                broker = self._broker_for_namespace(command.invocation_namespace)
+                if broker is None:
+                    raise WorkflowRuntimeError(
+                        f"Broker {command.invocation_namespace} not found. This should not happen."
+                    )
                 worker = next(
                     (
                         w
-                        for w in self.state.workers[step_name].in_progress
+                        for w in broker.workers[command.step_id].in_progress
                         if w.worker_id == command.id
                     ),
                     None,
@@ -211,8 +242,14 @@ class _ControlLoopRunner:
                 return TickStepResult(
                     step_id=command.step_id,
                     worker_id=command.id,
+                    invocation_namespace=command.invocation_namespace,
                     event=command.event,
-                    result=self._stamp_retry_decisions(command.step_id, worker, result),
+                    result=self._stamp_retry_decisions(
+                        command.step_id,
+                        command.invocation_namespace,
+                        worker,
+                        result,
+                    ),
                 )
             except Exception as e:
                 if _is_shutdown_error(e):
@@ -227,19 +264,29 @@ class _ControlLoopRunner:
                 return TickStepResult(
                     step_id=command.step_id,
                     worker_id=command.id,
+                    invocation_namespace=command.invocation_namespace,
                     event=command.event,
                     result=self._stamp_retry_decisions(
-                        command.step_id, worker, [failed]
+                        command.step_id,
+                        command.invocation_namespace,
+                        worker,
+                        [failed],
                     ),
                 )
 
         self._pending_workers.append(
-            PendingWorker(command.step_id, command.id, _run_worker())
+            PendingWorker(
+                command.step_id,
+                command.id,
+                _run_worker(),
+                invocation_namespace=command.invocation_namespace,
+            )
         )
 
     def _stamp_retry_decisions(
         self,
         step_id: StepId,
+        invocation_namespace: tuple[str, ...],
         worker: InProgressState | None,
         results: list[StepFunctionResult],
     ) -> list[StepFunctionResult]:
@@ -253,8 +300,11 @@ class _ControlLoopRunner:
         """
         if worker is None:
             return results
-        step_name = _root_step_key(step_id)
-        policy = self.state.workers[step_name].config.retry_policy
+        step_name = str(step_id)
+        broker = self._broker_for_namespace(invocation_namespace)
+        if broker is None:
+            return results
+        policy = broker.workers[step_id].config.retry_policy
         out: list[StepFunctionResult] = []
         for result in results:
             if isinstance(result, StepWorkerFailed) and result.retry_decision is None:
@@ -282,6 +332,7 @@ class _ControlLoopRunner:
                 TickAddEvent(
                     event=command.event,
                     step_id=command.step_id,
+                    origin_namespace=command.origin_namespace,
                     recovery_counts=dict(command.recovery_counts),
                     scope_path=command.scope_path,
                 )
@@ -311,8 +362,17 @@ class _ControlLoopRunner:
         elif isinstance(command, CommandScheduleWaiterTimeout):
             now = await self.adapter.get_now()
             self.schedule_tick(
-                TickWaiterTimeout(step_id=command.step_id, waiter_id=command.waiter_id),
+                TickWaiterTimeout(
+                    step_id=command.step_id,
+                    waiter_id=command.waiter_id,
+                    invocation_namespace=command.invocation_namespace,
+                ),
                 at_time=now + command.timeout,
+            )
+            return None
+        elif isinstance(command, CommandScheduleTimeout):
+            self.schedule_tick(
+                TickTimeout(timeout=command.timeout), at_time=command.at_time
             )
             return None
         elif isinstance(command, CommandScheduleWakeup):
@@ -368,19 +428,28 @@ class _ControlLoopRunner:
             The final StopEvent from the workflow
         """
 
+        start = await self.adapter.get_now()
+        # Journal a session-start marker at every run()/resume. It marks the
+        # alive-session boundary so downtime never accrues. It leads the journal
+        # so replay sees the boundary before any work of this session.
+        self.tick_buffer.insert(0, TickSessionStart(stamped_at=start))
+
         # Queue initial event
         if start_event is not None:
             self.tick_buffer.append(TickAddEvent(event=start_event))
 
-        start = await self.adapter.get_now()
-        # Schedule workflow timeout if configured
+        # Schedule the root timeout on its remaining alive-time budget. Across a
+        # resume the root keeps the alive time it already spent (elapsed_alive),
+        # instead of the old fresh-budget-per-resume reset; downtime is forgiven
+        # by the session-start marker. A fresh run has elapsed_alive == 0, so
+        # this is the full timeout.
         if start_with_timeout and self.workflow._timeout is not None:
-            # Get initial time
-            timeout_time = start + self.workflow._timeout
-            self.schedule_tick(
-                TickTimeout(timeout=self.workflow._timeout),
-                at_time=timeout_time,
-            )
+            remaining = max(0.0, self.workflow._timeout - self.state.elapsed_alive)
+            timeout_tick = TickTimeout(timeout=self.workflow._timeout)
+            if remaining <= 0:
+                self.tick_buffer.insert(1, timeout_tick)
+            else:
+                self.schedule_tick(timeout_tick, at_time=start + remaining)
 
         # Resume any in-progress work
         self.state, commands = rewind_in_progress(self.state, start)
@@ -402,6 +471,12 @@ class _ControlLoopRunner:
 
                 # Get current time
                 now = await self.adapter.get_now()
+
+                # A completed worker or pull task must not starve scheduled work.
+                # Append due ticks after anything already buffered so the buffer's
+                # existing processing order remains stable.
+                for due_tick in self.pop_due_ticks(now):
+                    self.tick_buffer.append(due_tick)
 
                 # optimization, only reload "now" if any work was done
                 was_buffered = bool(self.tick_buffer)
@@ -439,7 +514,12 @@ class _ControlLoopRunner:
 
                 # Build running list from existing tasks
                 running: list[WorkerTask | PullTask] = [
-                    WorkerTask(key[0], key[1], task)
+                    WorkerTask(
+                        key[0],
+                        key[2],
+                        task,
+                        invocation_namespace=key[1],
+                    )
                     for task in self.worker_tasks
                     for key in [self._task_keys.get(task)]
                     if key is not None
@@ -464,7 +544,11 @@ class _ControlLoopRunner:
                         pull_task = nt.task
                     elif isinstance(nt, WorkerTask):
                         self.worker_tasks.add(nt.task)
-                        self._task_keys[nt.task] = (nt.step_id, nt.worker_id)
+                        self._task_keys[nt.task] = (
+                            nt.step_id,
+                            nt.invocation_namespace,
+                            nt.worker_id,
+                        )
 
                 completed_task = result.completed
 
@@ -527,6 +611,9 @@ class _ControlLoopRunner:
         """Process a single tick and return StopEvent if workflow completes."""
         try:
             start = await self.adapter.get_now()
+            # Stamp the live-run time before journaling so replay reads the same
+            # clock the live run used.
+            tick = _stamp_tick(tick, start)
             self.state, commands = _reduce_tick(
                 tick, self.state, start, run_id=self.adapter.run_id
             )

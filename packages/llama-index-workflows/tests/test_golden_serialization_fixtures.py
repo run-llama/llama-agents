@@ -11,7 +11,9 @@ equivalence, not byte identity.
 
 from __future__ import annotations
 
+import base64
 import json
+import pickle
 import sys
 import time
 from pathlib import Path
@@ -23,9 +25,14 @@ from workflows.context.serializers import JsonSerializer
 from workflows.decorators import step
 from workflows.events import Event, HumanResponseEvent, StartEvent, StopEvent
 from workflows.runtime.control_loop.reduce import _reduce_tick, rewind_in_progress
-from workflows.runtime.types.commands import CommandCompleteRun
+from workflows.runtime.types.commands import CommandCompleteRun, CommandRunWorker
 from workflows.runtime.types.internal_state import BrokerState
-from workflows.runtime.types.ticks import WorkflowTickAdapter
+from workflows.runtime.types.step_id import StepId
+from workflows.runtime.types.ticks import (
+    STAMPED_TICK_TYPES,
+    TickSessionStart,
+    WorkflowTickAdapter,
+)
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "golden_serialization"
 
@@ -80,6 +87,23 @@ class GoldenSnapshotWorkflow(Workflow):
         return StopEvent(result=response.response)
 
 
+class GoldenPersistedWorkflow(Workflow):
+    """Stable event types and step names for the old broker pickle fixture."""
+
+    @step
+    async def source(self, ev: StartEvent) -> list[Item]:
+        return [Item(n=1), Item(n=2)]
+
+    @step
+    async def process(self, ev: Item) -> Partial:
+        return Partial(n=ev.n)
+
+    @step
+    async def target(self, ctx: Context, events: list[Partial]) -> StopEvent:
+        response = await ctx.wait_for_event(HumanResponse)
+        return StopEvent(result=(sum(event.n for event in events), response.response))
+
+
 def _load(name: str) -> dict[str, Any]:
     return json.loads((_FIXTURES / name).read_text())
 
@@ -101,6 +125,34 @@ def test_golden_journal_replays_from_canonical_state() -> None:
 
     assert result is not None
     assert result.result == journal["result"]
+    # Legacy fallback: the pre-child journal has no stamps or session markers, so
+    # the elapsed-alive budget never accrues and no spurious timeout can fire.
+    assert state.elapsed_alive == 0.0
+    assert state.last_alive_stamp is None
+
+
+def test_current_golden_journal_replays_with_stamped_ticks() -> None:
+    journal = _load("current_journal.json")
+    ticks = [WorkflowTickAdapter.validate_python(t) for t in journal["ticks"]]
+
+    assert isinstance(ticks[0], TickSessionStart)
+    stamped_ticks = [tick for tick in ticks if isinstance(tick, STAMPED_TICK_TYPES)]
+    assert stamped_ticks
+    assert all(tick.stamped_at is not None for tick in stamped_ticks)
+
+    state = BrokerState.from_workflow(GoldenJournalWorkflow())
+    state, _ = rewind_in_progress(state, time.time())
+    result: Any = None
+    for tick in ticks:
+        state, commands = _reduce_tick(tick, state, time.time())
+        for command in commands:
+            if isinstance(command, CommandCompleteRun):
+                result = command.result
+
+    assert result is not None
+    assert result.result == journal["result"]
+    assert state.elapsed_alive > 0.0
+    assert state.last_alive_stamp is not None
 
 
 @pytest.mark.asyncio
@@ -118,3 +170,38 @@ async def test_golden_snapshot_loads_and_resumes() -> None:
 
     result = await handler
     assert result == meta["expected_result_after_resume"]
+
+
+@pytest.mark.parametrize("name", ["broker_state_main_py314.b64"])
+def test_golden_broker_pickle_restores_pending_work(name: str) -> None:
+    """DBOS persists the initial broker as a pickled workflow argument."""
+    # DBOS's default serializer decodes base64 and unpickles workflow inputs.
+    inputs = pickle.loads(base64.b64decode((_FIXTURES / name).read_text()))
+    (state, _, _) = inputs["args"]
+    assert isinstance(state, BrokerState)
+
+    source = StepId.root("source")
+    process = StepId.root("process")
+    target = StepId.root("target")
+
+    (binding,) = state.config.bindings_for_source(source)
+    assert binding.target_step == target
+    assert state.config.binding_for_target("stream", target, state.streams) == binding
+
+    (waiter,) = state.workers[target].collected_waiters
+    assert waiter.waiting_for_event is HumanResponse
+    assert waiter.work_item_id == "collect-stream"
+
+    recovered, commands = rewind_in_progress(state, 200.0)
+    assert {
+        command.event.n
+        for command in commands
+        if isinstance(command, CommandRunWorker) and command.step_id == process
+    } == {1, 2}
+    assert (
+        recovered.config.binding_for_target("stream", target, recovered.streams)
+        == binding
+    )
+    assert (
+        recovered.workers[target].collected_waiters[0].work_item_id == "collect-stream"
+    )

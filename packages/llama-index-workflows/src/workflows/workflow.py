@@ -112,8 +112,10 @@ class Workflow(metaclass=WorkflowMeta):
         Initialize a workflow instance.
 
         Args:
-            timeout (float | None): Max seconds to wait for completion. `None`
-                disables the timeout.
+            timeout (float | None): Max known alive seconds before timeout.
+                Only processed journal ticks accrue time. Resume downtime and
+                the interval after the last processed tick before a crash do
+                not count. `None` disables the timeout.
             disable_validation (bool): Skip pre-run validation of the event graph
                 (not recommended).
             verbose (bool): If True, print step activity.

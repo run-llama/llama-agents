@@ -44,7 +44,12 @@ from workflows.retry_policy import (
 )
 from workflows.runtime.control_loop.runner import _ControlLoopRunner, control_loop
 from workflows.runtime.types.internal_state import BrokerState
-from workflows.runtime.types.plugin import RunContext, run_context
+from workflows.runtime.types.named_task import NamedTask, PendingStart
+from workflows.runtime.types.plugin import (
+    RunContext,
+    WaitForNextTaskResult,
+    run_context,
+)
 from workflows.runtime.types.step_function import as_step_worker_function
 from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import (
@@ -218,6 +223,45 @@ async def wait_for_stop_event(
                 return None
     except Exception:
         return None
+
+
+@pytest.mark.asyncio
+async def test_scheduled_timeout_is_not_starved_by_completed_workers() -> None:
+    class LoopEvent(Event):
+        pass
+
+    class BusyWorkflow(Workflow):
+        @step
+        async def loop(self, ev: StartEvent | LoopEvent) -> LoopEvent | StopEvent:
+            return LoopEvent()
+
+    class TimeAdvancingAdapter(MockRunAdapter):
+        completed_tasks = 0
+
+        async def wait_for_next_task(
+            self,
+            running: list[NamedTask],
+            pending: list[PendingStart],
+            timeout: float | None = None,
+        ) -> WaitForNextTaskResult:
+            result = await super().wait_for_next_task(running, pending, timeout)
+            if result.completed is not None:
+                self.completed_tasks += 1
+                self.advance_time(1.0)
+            return result
+
+    adapter = TimeAdvancingAdapter(run_id="test")
+    with pytest.raises(WorkflowTimeoutError):
+        await asyncio.wait_for(
+            run_control_loop(
+                workflow=BusyWorkflow(timeout=3.0),
+                start_event=StartEvent(),
+                test_runtime=adapter,
+            ),
+            timeout=1.0,
+        )
+
+    assert adapter.completed_tasks >= 3
 
 
 @pytest.mark.asyncio
