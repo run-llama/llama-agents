@@ -36,6 +36,7 @@ from workflows.runtime.types.ticks import (
     TickAddEvent,
     TickCancelRun,
     TickPublishEvent,
+    TickSessionStart,
     TickStepResult,
     TickTimeout,
     TickWaiterTimeout,
@@ -157,6 +158,7 @@ def test_event_type_roundtrip() -> None:
                 step_id=StepId.root("my_step"),
                 attempts=3,
                 first_attempt_at=1234567890.0,
+                stamped_at=1234567891.0,
             ),
             id="add_event",
         ),
@@ -169,18 +171,31 @@ def test_event_type_roundtrip() -> None:
             id="cancel_run",
         ),
         pytest.param(
-            TickTimeout(timeout=30.5),
+            TickSessionStart(stamped_at=1234567890.0),
+            id="session_start",
+        ),
+        pytest.param(
+            TickTimeout(timeout=30.5, stamped_at=1234567892.0),
             id="timeout",
         ),
         pytest.param(
-            TickWakeup(due=12345.5),
+            TickWakeup(due=12345.5, stamped_at=1234567893.0),
             id="wakeup",
+        ),
+        pytest.param(
+            TickWaiterTimeout(
+                step_id=StepId.root("waiter"),
+                waiter_id="w-1",
+                stamped_at=1234567894.0,
+            ),
+            id="waiter_timeout",
         ),
         pytest.param(
             TickStepResult(
                 step_id=StepId.root("process"),
                 worker_id=42,
                 event=MyEvent(value="trigger"),
+                stamped_at=1234567890.0,
                 result=[StepWorkerResult(result=StopEvent(result="done"))],
             ),
             id="step_result_with_event",
@@ -360,6 +375,7 @@ def test_workflow_tick_discriminated_union_roundtrip() -> None:
         TickAddEvent(event=StartEvent(), step_id=StepId.root("s")),
         TickPublishEvent(event=MyEvent(value="x")),
         TickCancelRun(),
+        TickSessionStart(stamped_at=123.0),
         TickTimeout(timeout=10.0),
         TickStepResult(
             step_id=StepId.root("s"),
