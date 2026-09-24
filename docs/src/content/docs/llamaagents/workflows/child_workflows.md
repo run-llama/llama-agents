@@ -10,10 +10,12 @@ The child runs as part of the parent, but it keeps its own steps, its own state,
 
 ## Declaring a child
 
-A parent declares a child as a typed field on the class. The field name is up to you, and the type is the child workflow class:
+A parent marks a child field with `Annotated[Child, ChildWorkflow]`. Import `Annotated` from `typing` and `ChildWorkflow` from `workflows`. The field name is up to you, and the type is the child workflow class. A plain `Workflow` annotation is an ordinary field, not a child declaration:
 
 ```python
-from workflows import Workflow, step
+from typing import Annotated
+
+from workflows import ChildWorkflow, Workflow, step
 from workflows.events import StartEvent, StopEvent
 
 
@@ -32,7 +34,7 @@ class Summarize(Workflow):
 
 
 class Report(Workflow):
-    summarize: Summarize
+    summarize: Annotated[Summarize, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> SummarizeStart:
@@ -50,7 +52,7 @@ report = Report(summarize=Summarize())
 result = await report.run()
 ```
 
-The `summarize: Summarize` annotation generates a constructor that asks for the child, so `Report(summarize=Summarize())` type-checks the same as the base config arguments like `timeout`. If you would rather build the child yourself, write your own `__init__` and assign `self.summarize = Summarize()` after calling `super().__init__()`. Either way the child is wired in by the time construction finishes.
+The marked field lets `Report(summarize=Summarize())` pass the child to a generated constructor alongside base config arguments like `timeout`. If you would rather build the child yourself, write your own `__init__` and assign `self.summarize = Summarize()` after calling `super().__init__()`. Either way the child is wired in by the time construction finishes. A plain `Workflow` annotation can still describe a helper, but it does not create a child slot or constructor argument.
 
 ## The start and stop boundary
 
