@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, AsyncGenerator
+from typing import Annotated, Any, AsyncGenerator, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -20,7 +20,7 @@ from llama_agents.server._runtime.server_runtime import (
     ServerRuntimeDecorator,
     _ServerInternalRunAdapter,
 )
-from workflows import Workflow, step
+from workflows import ChildWorkflow, Workflow, step
 from workflows.context.state_store import StateStore
 from workflows.errors import WorkflowRuntimeError
 from workflows.events import (
@@ -168,14 +168,14 @@ class ChildStop(StopEvent):
     pass
 
 
-class ChildWorkflow(Workflow):
+class RuntimeChildWorkflow(Workflow):
     @step
     async def finish(self, ev: ChildStart) -> ChildStop:
         return ChildStop()
 
 
 class ParentWorkflow(Workflow):
-    child: ChildWorkflow
+    child: Annotated[RuntimeChildWorkflow, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> ChildStart:
@@ -193,7 +193,7 @@ def test_server_runtime_rejects_child_workflows() -> None:
     decorator = ServerRuntimeDecorator(StubRuntime(), store=MemoryWorkflowStore())
 
     with pytest.raises(WorkflowRuntimeError, match="durable child state support"):
-        ParentWorkflow(child=ChildWorkflow(), runtime=decorator)
+        cast(Any, ParentWorkflow)(child=RuntimeChildWorkflow(), runtime=decorator)
 
 
 def test_add_workflow_sets_workflow_name() -> None:

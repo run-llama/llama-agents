@@ -85,7 +85,7 @@ class ValidatedOutputWorkflow(Workflow):
 
 class LegacyMemoryWorkflowStore(MemoryWorkflowStore):
     # This was a valid override before result decoders were added to built-in stores.
-    async def query(  # ty: ignore[invalid-method-override]  # pyright: ignore[reportIncompatibleMethodOverride]
+    async def query(  # pyright: ignore[reportIncompatibleMethodOverride]
         self, query: HandlerQuery
     ) -> list[PersistentHandler]:
         return await super().query(query)

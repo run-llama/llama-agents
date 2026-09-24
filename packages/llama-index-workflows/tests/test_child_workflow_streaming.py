@@ -10,8 +10,10 @@ with the namespace path of the child execution that produced them.
 
 from __future__ import annotations
 
+from typing import Annotated, Any, cast
+
 import pytest
-from workflows import Context, Workflow
+from workflows import ChildWorkflow, Context, Workflow
 from workflows.decorators import step
 from workflows.events import (
     Event,
@@ -45,7 +47,7 @@ class StreamChild(Workflow):
 
 
 class StreamParent(Workflow):
-    child: StreamChild
+    child: Annotated[StreamChild, ChildWorkflow]
 
     @step
     async def start(self, ctx: Context, ev: StartEvent) -> ChildStart:
@@ -61,7 +63,7 @@ class StreamParent(Workflow):
 async def test_child_events_hidden_from_parent_stream_by_default() -> None:
     """The default stream is backward compatible: a parent consumer sees its own
     streamed events but none published from inside the child."""
-    handler = StreamParent(child=StreamChild()).run()
+    handler = cast(Any, StreamParent)(child=StreamChild()).run()
     collected: list[Event] = []
     async for ev in handler.stream_events():
         collected.append(ev)
@@ -76,7 +78,7 @@ async def test_child_events_hidden_from_parent_stream_by_default() -> None:
 @pytest.mark.asyncio
 async def test_child_events_surfaced_tagged_with_include_children() -> None:
     """Opt-in surfaces child events, tagged with the child's namespace path."""
-    handler = StreamParent(child=StreamChild()).run()
+    handler = cast(Any, StreamParent)(child=StreamChild()).run()
     collected: list[Event] = []
     async for ev in handler.stream_events(include_children=True):
         collected.append(ev)
@@ -101,7 +103,7 @@ class WriteStopChild(Workflow):
 
 
 class WriteStopParent(Workflow):
-    child: WriteStopChild
+    child: Annotated[WriteStopChild, ChildWorkflow]
 
     @step
     async def start(self, ctx: Context, ev: StartEvent) -> ChildStart:
@@ -118,7 +120,7 @@ async def test_child_stop_written_to_stream_does_not_truncate_parent() -> None:
     """A child writing its StopEvent to the stream must not end the parent's
     stream. Root events emitted after the child completes still arrive, and only
     the root StopEvent terminates."""
-    handler = WriteStopParent(child=WriteStopChild()).run()
+    handler = cast(Any, WriteStopParent)(child=WriteStopChild()).run()
     collected: list[Event] = []
     async for ev in handler.stream_events(include_children=True):
         collected.append(ev)
@@ -175,7 +177,7 @@ class GrandStream(Workflow):
 
 
 class MidStream(Workflow):
-    grand: GrandStream
+    grand: Annotated[GrandStream, ChildWorkflow]
 
     @step
     async def begin(self, ev: MidStart) -> GrandStart:
@@ -187,7 +189,7 @@ class MidStream(Workflow):
 
 
 class TopStream(Workflow):
-    mid: MidStream
+    mid: Annotated[MidStream, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> MidStart:
@@ -200,7 +202,7 @@ class TopStream(Workflow):
 
 @pytest.mark.asyncio
 async def test_grandchild_event_tagged_with_compound_namespace() -> None:
-    handler = TopStream(mid=MidStream(grand=GrandStream())).run()
+    handler = cast(Any, TopStream)(mid=cast(Any, MidStream)(grand=GrandStream())).run()
     collected: list[Event] = []
     async for ev in handler.stream_events(include_children=True):
         collected.append(ev)
@@ -215,7 +217,7 @@ async def test_grandchild_event_tagged_with_compound_namespace() -> None:
 
 @pytest.mark.asyncio
 async def test_grandchild_event_hidden_by_default() -> None:
-    handler = TopStream(mid=MidStream(grand=GrandStream())).run()
+    handler = cast(Any, TopStream)(mid=cast(Any, MidStream)(grand=GrandStream())).run()
     collected: list[Event] = []
     async for ev in handler.stream_events():
         collected.append(ev)

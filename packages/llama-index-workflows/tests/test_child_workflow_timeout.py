@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import asyncio
 import time
+from typing import Annotated, Any, cast
 
 import pytest
-from workflows import Context, Workflow
+from workflows import ChildWorkflow, Context, Workflow
 from workflows.context.serializers import JsonSerializer
 from workflows.decorators import catch_error, step
 from workflows.errors import WorkflowTimeoutError
@@ -49,7 +50,7 @@ class SlowChild(Workflow):
 
 
 class ParentOfSlowChild(Workflow):
-    child: SlowChild
+    child: Annotated[SlowChild, ChildWorkflow]
 
     @step
     async def begin(self, ev: StartEvent) -> ChildStart:
@@ -65,14 +66,18 @@ async def test_child_times_out_on_its_own_clock_and_fails_run_when_uncaught() ->
     # Child bound to 0.1s; parent bound to a much longer 30s. The child must time
     # out on its own clock (well before its 5s step and before the parent's 30s),
     # and with no handler the uncaught timeout fails the whole run.
-    handler = ParentOfSlowChild(child=SlowChild(timeout=0.1), timeout=30).run()
+    handler = cast(Any, ParentOfSlowChild)(
+        child=SlowChild(timeout=0.1), timeout=30
+    ).run()
     with pytest.raises(WorkflowTimeoutError):
         await handler
 
 
 @pytest.mark.asyncio
 async def test_uncaught_child_timeout_is_visible_on_default_stream() -> None:
-    handler = ParentOfSlowChild(child=SlowChild(timeout=0.1), timeout=30).run()
+    handler = cast(Any, ParentOfSlowChild)(
+        child=SlowChild(timeout=0.1), timeout=30
+    ).run()
     collected: list[Event] = []
     async for ev in handler.stream_events():
         collected.append(ev)
@@ -99,7 +104,7 @@ class RecoveringSlowChild(Workflow):
 
 
 class ParentOfRecoveringSlowChild(Workflow):
-    child: RecoveringSlowChild
+    child: Annotated[RecoveringSlowChild, ChildWorkflow]
 
     @step
     async def begin(self, ev: StartEvent) -> ChildStart:
@@ -112,7 +117,7 @@ class ParentOfRecoveringSlowChild(Workflow):
 
 @pytest.mark.asyncio
 async def test_child_timeout_is_caught_by_child_catch_error() -> None:
-    handler = ParentOfRecoveringSlowChild(
+    handler = cast(Any, ParentOfRecoveringSlowChild)(
         child=RecoveringSlowChild(timeout=0.1), timeout=30
     ).run()
     result = await handler
@@ -126,7 +131,7 @@ class FastDoneChild(Workflow):
 
 
 class ParentOfFastChild(Workflow):
-    child: FastDoneChild
+    child: Annotated[FastDoneChild, ChildWorkflow]
 
     @step
     async def begin(self, ev: StartEvent) -> ChildStart:
@@ -141,7 +146,9 @@ class ParentOfFastChild(Workflow):
 async def test_child_under_its_timeout_completes_normally() -> None:
     # Regression guard: a child that finishes well within its timeout is not
     # spuriously failed, and the per-namespace deadline tick is a no-op.
-    handler = ParentOfFastChild(child=FastDoneChild(timeout=5), timeout=30).run()
+    handler = cast(Any, ParentOfFastChild)(
+        child=FastDoneChild(timeout=5), timeout=30
+    ).run()
     assert await handler == "ok"
 
 
@@ -172,7 +179,7 @@ class SlowGrandchild(Workflow):
 
 
 class MidWithSlowGrand(Workflow):
-    grand: SlowGrandchild
+    grand: Annotated[SlowGrandchild, ChildWorkflow]
 
     @step
     async def begin(self, ev: MidStart) -> GrandStart:
@@ -184,7 +191,7 @@ class MidWithSlowGrand(Workflow):
 
 
 class TopOfSlowGrand(Workflow):
-    mid: MidWithSlowGrand
+    mid: Annotated[MidWithSlowGrand, ChildWorkflow]
 
     @step
     async def begin(self, ev: StartEvent) -> MidStart:
@@ -202,20 +209,22 @@ def test_unset_child_arms_no_deadline_root_keeps_default() -> None:
     # A child constructed without a timeout defers to its parent: its config
     # template carries no deadline, while the root still resolves to the 45s
     # default. Deadlines arm per-child at descent, keyed on this template.
-    state = BrokerState.from_workflow(ParentOfSlowChild(child=SlowChild()))
+    state = BrokerState.from_workflow(cast(Any, ParentOfSlowChild)(child=SlowChild()))
     assert state.config.child_configs["child"].timeout is None
     assert state.config.timeout == DEFAULT_TIMEOUT
 
 
 def test_explicit_child_timeout_arms_namespace_deadline() -> None:
-    state = BrokerState.from_workflow(ParentOfSlowChild(child=SlowChild(timeout=0.1)))
+    state = BrokerState.from_workflow(
+        cast(Any, ParentOfSlowChild)(child=SlowChild(timeout=0.1))
+    )
     assert state.config.child_configs["child"].timeout == 0.1
 
 
 def test_child_alive_budget_round_trips() -> None:
     # A live child broker's elapsed-alive timeout budget survives a
     # serialize/restore round-trip nested under ``child_brokers``.
-    workflow = ParentOfSlowChild(child=SlowChild(timeout=0.1))
+    workflow = cast(Any, ParentOfSlowChild)(child=SlowChild(timeout=0.1))
     state = BrokerState.from_workflow(workflow)
     child_state = BrokerState.from_config(state.config.child_configs["child"])
     child_state.elapsed_alive = 0.04
@@ -231,17 +240,21 @@ def test_child_alive_budget_round_trips() -> None:
 
 def test_explicit_child_none_timeout_arms_no_deadline() -> None:
     # Explicit None means "no deadline" — same armed state as unset, but chosen.
-    state = BrokerState.from_workflow(ParentOfSlowChild(child=SlowChild(timeout=None)))
+    state = BrokerState.from_workflow(
+        cast(Any, ParentOfSlowChild)(child=SlowChild(timeout=None))
+    )
     assert state.config.child_configs["child"].timeout is None
 
 
 def test_root_timeout_resolution() -> None:
     # Unset root → 45s default; explicit None → no root deadline.
     assert (
-        BrokerState.from_workflow(ParentOfSlowChild(child=SlowChild())).config.timeout
+        BrokerState.from_workflow(
+            cast(Any, ParentOfSlowChild)(child=SlowChild())
+        ).config.timeout
         == DEFAULT_TIMEOUT
     )
-    explicit_none = ParentOfSlowChild(child=SlowChild(), timeout=None)
+    explicit_none = cast(Any, ParentOfSlowChild)(child=SlowChild(), timeout=None)
     assert BrokerState.from_workflow(explicit_none).config.timeout is None
 
 
@@ -249,8 +262,8 @@ def test_root_timeout_resolution() -> None:
 async def test_grandchild_times_out_on_its_own_clock() -> None:
     # The grandchild (compound namespace ("mid", "grand")) is bound to 0.1s while
     # mid and top run with longer timeouts; the grandchild deadline fires first.
-    handler = TopOfSlowGrand(
-        mid=MidWithSlowGrand(grand=SlowGrandchild(timeout=0.1))
+    handler = cast(Any, TopOfSlowGrand)(
+        mid=cast(Any, MidWithSlowGrand)(grand=SlowGrandchild(timeout=0.1))
     ).run()
     with pytest.raises(WorkflowTimeoutError):
         await handler
@@ -283,7 +296,7 @@ class DelayChild(Workflow):
 
 
 class FanTimeoutParent(Workflow):
-    child: DelayChild
+    child: Annotated[DelayChild, ChildWorkflow]
 
     @step
     async def fan(self, ev: StartEvent) -> list[FanTrigger]:
@@ -317,7 +330,7 @@ async def test_child_timeout_inside_fanout_recovered_by_parent() -> None:
     # Two children fanned out over a Take-style join: one completes (value 1),
     # the other times out and is recovered by the parent's wildcard catch_error
     # (value 100). The join releases once both Done events arrive.
-    wf = FanTimeoutParent(child=DelayChild(timeout=0.2), timeout=30)
+    wf = cast(Any, FanTimeoutParent)(child=DelayChild(timeout=0.2), timeout=30)
     result = await asyncio.wait_for(wf.run(), timeout=15)
     assert result == 101
 
@@ -332,7 +345,7 @@ class ResumeSlowChild(Workflow):
 
 
 class ParentOfResumeSlowChild(Workflow):
-    child: ResumeSlowChild
+    child: Annotated[ResumeSlowChild, ChildWorkflow]
 
     @step
     async def begin(self, ev: StartEvent) -> ChildStart:
@@ -352,7 +365,9 @@ async def test_child_timeout_budget_survives_resume_with_downtime_forgiven() -> 
     # forgiven; only alive time counts.
     global RESUME_CHILD_STARTED
     RESUME_CHILD_STARTED = asyncio.Event()
-    workflow = ParentOfResumeSlowChild(child=ResumeSlowChild(timeout=0.5), timeout=30)
+    workflow = cast(Any, ParentOfResumeSlowChild)(
+        child=ResumeSlowChild(timeout=0.5), timeout=30
+    )
 
     handler = workflow.run()
     await asyncio.wait_for(RESUME_CHILD_STARTED.wait(), timeout=1)

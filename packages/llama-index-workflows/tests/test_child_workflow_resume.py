@@ -6,9 +6,10 @@ skips steps that already completed (children included)."""
 from __future__ import annotations
 
 import asyncio
+from typing import Annotated, Any, cast
 
 import pytest
-from workflows import Context, Workflow
+from workflows import ChildWorkflow, Context, Workflow
 from workflows.context.state_store import CHILD_STATES_KEY
 from workflows.decorators import step
 from workflows.events import (
@@ -42,7 +43,7 @@ class CountingChild(Workflow):
 
 
 class HitlParent(Workflow):
-    child: CountingChild
+    child: Annotated[CountingChild, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> ChildStart:
@@ -63,7 +64,7 @@ class HitlParent(Workflow):
 @pytest.mark.asyncio
 async def test_kill_after_child_completes_resume_does_not_rerun_child() -> None:
     RUN_COUNTS.pop("child", None)
-    workflow = HitlParent(child=CountingChild())
+    workflow = cast(Any, HitlParent)(child=CountingChild())
 
     handler = workflow.run()
     assert handler.ctx is not None
@@ -117,7 +118,7 @@ class MidStop(StopEvent):
 
 
 class Mid(Workflow):
-    grand: Grand
+    grand: Annotated[Grand, ChildWorkflow]
 
     @step
     async def begin(self, ctx: Context, ev: MidStart) -> GrandStart:
@@ -130,7 +131,7 @@ class Mid(Workflow):
 
 
 class Top(Workflow):
-    mid: Mid
+    mid: Annotated[Mid, ChildWorkflow]
 
     @step
     async def start(self, ctx: Context, ev: StartEvent) -> MidStart:
@@ -144,7 +145,7 @@ class Top(Workflow):
 
 @pytest.mark.asyncio
 async def test_completed_grandchild_state_is_not_carried_forward() -> None:
-    top = Top(mid=Mid(grand=Grand()))
+    top = cast(Any, Top)(mid=cast(Any, Mid)(grand=Grand()))
     ctx = Context(top)
     result = await top.run(ctx=ctx)
     assert result == "g!"
@@ -160,6 +161,6 @@ async def test_completed_grandchild_state_is_not_carried_forward() -> None:
 @pytest.mark.asyncio
 async def test_grandchild_runs_end_to_end_with_explicit_context() -> None:
     """Sanity: the 3-level tree runs with a user-provided Context."""
-    top = Top(mid=Mid(grand=Grand()))
+    top = cast(Any, Top)(mid=cast(Any, Mid)(grand=Grand()))
     res = await WorkflowTestRunner(top).run()
     assert res.result == "g!"

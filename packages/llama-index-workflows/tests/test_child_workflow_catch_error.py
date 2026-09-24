@@ -10,8 +10,10 @@ grandchild level.
 
 from __future__ import annotations
 
+from typing import Annotated, Any, cast
+
 import pytest
-from workflows import Workflow
+from workflows import ChildWorkflow, Workflow
 from workflows.decorators import catch_error, step
 from workflows.events import (
     Event,
@@ -58,7 +60,7 @@ class SharedNameChild(Workflow):
 
 
 class SharedNameParent(Workflow):
-    child: SharedNameChild
+    child: Annotated[SharedNameChild, ChildWorkflow]
 
     @step
     async def begin(self, ev: StartEvent) -> ChildStart:
@@ -75,7 +77,7 @@ class SharedNameParent(Workflow):
 
 @pytest.mark.asyncio
 async def test_same_handler_name_across_namespaces_has_separate_budgets() -> None:
-    handler = SharedNameParent(child=SharedNameChild()).run()
+    handler = cast(Any, SharedNameParent)(child=SharedNameChild()).run()
     events = await _collect_until_done(handler)
 
     result = await handler
@@ -116,7 +118,7 @@ class RecoveringGrandChild(Workflow):
 
 
 class MidPassthrough(Workflow):
-    grand: RecoveringGrandChild
+    grand: Annotated[RecoveringGrandChild, ChildWorkflow]
 
     @step
     async def begin(self, ev: MidStart) -> GrandStart:
@@ -128,7 +130,7 @@ class MidPassthrough(Workflow):
 
 
 class TopRecover(Workflow):
-    mid: MidPassthrough
+    mid: Annotated[MidPassthrough, ChildWorkflow]
 
     @step
     async def begin(self, ev: StartEvent) -> MidStart:
@@ -141,7 +143,9 @@ class TopRecover(Workflow):
 
 @pytest.mark.asyncio
 async def test_grandchild_catch_error_recovers_in_compound_namespace() -> None:
-    handler = TopRecover(mid=MidPassthrough(grand=RecoveringGrandChild())).run()
+    handler = cast(Any, TopRecover)(
+        mid=cast(Any, MidPassthrough)(grand=RecoveringGrandChild())
+    ).run()
     events = await _collect_until_done(handler)
 
     result = await handler

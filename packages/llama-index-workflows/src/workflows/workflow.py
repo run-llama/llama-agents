@@ -41,10 +41,8 @@ from .errors import (
 from .events import Event, StartEvent, StopEvent
 from .handler import WorkflowHandler
 from .resource import ResourceManager
-
 from .runtime.types.invocation import INVOCATION_SEPARATOR, slot_namespace
 from .runtime.types.step_id import StepId
-
 from .types import RunResultT
 from .utils import get_steps_from_class, get_steps_from_instance
 
@@ -52,7 +50,6 @@ dispatcher = get_dispatcher(__name__)
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 45.0
-
 
 
 class ChildWorkflow:
@@ -96,7 +93,6 @@ def _is_marked_annotation(
     )
 
 
-
 class _UnsetTimeout:
     """Sentinel for an unspecified ``timeout``.
 
@@ -137,13 +133,11 @@ def _collect_child_slot_annotations(
 
     workflow_cls = globals().get("Workflow")
     if workflow_cls is None:
-
         return {}, []
     slots: dict[str, type[Workflow]] = {}
     unresolved: list[tuple[str, str]] = []
 
     for klass in reversed(cls.__mro__):
-
         if klass is workflow_cls:
             continue
         annotations = klass.__dict__.get("__annotations__")
@@ -185,7 +179,6 @@ def _collect_child_slot_annotations(
                     "must name a Workflow subclass."
                 )
     return slots, unresolved
-
 
 
 def _synthesized_workflow_init(self: Workflow, *args: Any, **kwargs: Any) -> None:
@@ -232,7 +225,6 @@ def _validate_includable_child(child: Workflow, slot_name: str) -> None:
         )
 
 
-
 def _warn_ignored_child_config(child: Workflow, slot_name: str) -> None:
     ignored: list[str] = []
     if child._verbose:
@@ -249,10 +241,6 @@ def _warn_ignored_child_config(child: Workflow, slot_name: str) -> None:
         UserWarning,
         stacklevel=3,
     )
-
-
-def _has_custom_workflow_init(cls: type) -> bool:
-    return bool(getattr(cls, "_custom_workflow_init", False))
 
 
 def _child_forms_boundary(
@@ -278,7 +266,6 @@ def _child_forms_boundary(
 def _config_field(*, alias: str, default: Any = None) -> Any:
     """dataclass_transform field specifier for Workflow config params."""
     return default
-
 
 
 class WorkflowMeta(type):
@@ -401,7 +388,6 @@ def _child_slot_signature(cls: type) -> Signature:
     return Signature(params)
 
 
-
 class Workflow(metaclass=WorkflowMeta):
     """
     Event-driven orchestrator to define and run application flows using typed steps.
@@ -454,7 +440,7 @@ class Workflow(metaclass=WorkflowMeta):
     _step_functions: ClassVar[dict[str, StepFunction]]
     _step_functions_version: ClassVar[int] = 0
 
-    _child_workflow_slots_cache: ClassVar[dict[str, type] | None] = None
+    _child_workflow_slots_cache: ClassVar[dict[str, type[Workflow]] | None] = None
 
     # Phantom dataclass_transform fields for typed subclass constructors.
     _timeout_arg: float | None = _config_field(alias="timeout", default=_UNSET_TIMEOUT)
@@ -476,7 +462,6 @@ class Workflow(metaclass=WorkflowMeta):
     _skip_graph_checks_arg: set[WorkflowGraphCheck] | None = _config_field(
         alias="skip_graph_checks", default=None
     )
-
 
     def __init__(
         self,
@@ -705,7 +690,6 @@ class Workflow(metaclass=WorkflowMeta):
         """
         cached = cls.__dict__.get("_child_workflow_slots_cache")
         if cached is None:
-
             cached, unresolved = _collect_child_slot_annotations(cls)
             if not unresolved:
                 cls._child_workflow_slots_cache = cached
@@ -758,7 +742,6 @@ class Workflow(metaclass=WorkflowMeta):
         self._runtime._clear_serializer_cache(self)
 
     def _ensure_children_attached(self) -> None:
-
         """Attach every declared child and reject stale bindings."""
         # representation.validate imports Workflow through the graph helpers.
         from .representation.validate import _validate_child_type_graph
@@ -771,7 +754,6 @@ class Workflow(metaclass=WorkflowMeta):
                 f"on '{type(self).__name__}'; the type must be importable at runtime."
             )
         for name, expected in type(self)._get_child_workflow_slots().items():
-
             if name in self._child_workflows:
                 if getattr(self, name, None) is not self._child_workflows[name]:
                     raise WorkflowValidationError(
@@ -798,28 +780,6 @@ class Workflow(metaclass=WorkflowMeta):
                     "instance to the constructor."
                 )
             self._attach_child(name, child)
-
-
-    def _missing_child_is_used(self, name: str, expected: type) -> bool:
-        """Whether a missing declared child forms a parent graph boundary."""
-        # Inline import: representation validation imports Workflow.
-        from .representation.validate import (
-            _ensure_start_event_class,
-            _ensure_stop_event_class,
-        )
-
-        expected_workflow = cast("type[Workflow]", expected)
-        child_step_configs = {
-            step_name: step_func._step_config
-            for step_name, step_func in expected_workflow._get_steps_from_class().items()
-        }
-        child_start = _ensure_start_event_class(child_step_configs, expected.__name__)
-        child_stop = _ensure_stop_event_class(child_step_configs, expected.__name__)
-        if child_start is StartEvent or child_stop is StopEvent:
-            return False
-        return _child_forms_boundary(
-            child_start, child_stop, self._step_configs().values()
-        )
 
     @property
     def workflow_name(self) -> str:
@@ -882,6 +842,17 @@ class Workflow(metaclass=WorkflowMeta):
         return {**get_steps_from_class(cls), **cls._step_functions}
 
     @classmethod
+    def _get_namespaced_steps_from_class(cls) -> dict[StepId, StepFunction]:
+        """Return class-declared steps keyed by namespaced ``StepId``."""
+        result: dict[StepId, StepFunction] = {
+            StepId((), name): func for name, func in cls._get_steps_from_class().items()
+        }
+        for field_name, child_type in cls._get_child_workflow_slots().items():
+            for child_id, func in child_type._get_namespaced_steps_from_class().items():
+                result[StepId((field_name, *child_id.namespace), child_id.name)] = func
+        return result
+
+    @classmethod
     def add_step(cls, func: StepFunction) -> None:
         """
         Adds a free function as step for this workflow instance.
@@ -903,7 +874,6 @@ class Workflow(metaclass=WorkflowMeta):
     def _get_steps(self) -> dict[str, StepFunction]:
         """Returns all the steps, whether defined as methods or free functions."""
         return {**get_steps_from_instance(self), **self.__class__._step_functions}
-
 
     def _get_namespaced_steps(self) -> dict[StepId, StepFunction]:
         """Return this workflow's steps keyed by namespaced ``StepId``."""
@@ -932,7 +902,6 @@ class Workflow(metaclass=WorkflowMeta):
             for ns, inst in child._namespace_instances().items():
                 result[(field_name, *ns)] = inst
         return result
-
 
     def _get_start_event_instance(
         self, start_event: StartEvent | None, **kwargs: Any

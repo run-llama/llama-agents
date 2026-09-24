@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+from typing import Annotated, Any, cast
+
 import pytest
-from workflows import Context, Workflow
+from workflows import ChildWorkflow, Context, Workflow
 from workflows.decorators import step
 from workflows.errors import WorkflowRuntimeError
 from workflows.events import (
@@ -44,7 +46,7 @@ class _AddressChild(Workflow):
 
 
 class _AddressParent(Workflow):
-    child: _AddressChild
+    child: Annotated[_AddressChild, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> _AddressStart:
@@ -59,7 +61,7 @@ class _AddressParent(Workflow):
 async def test_external_static_child_path_raises_synchronously_and_run_continues() -> (
     None
 ):
-    handler = _AddressParent(child=_AddressChild(), timeout=10).run()
+    handler = cast(Any, _AddressParent)(child=_AddressChild(), timeout=10).run()
     raised = False
 
     async for ev in handler.stream_events(include_children=True):
@@ -86,7 +88,7 @@ async def test_external_static_child_path_raises_synchronously_and_run_continues
 
 @pytest.mark.asyncio
 async def test_external_unknown_concrete_slot_still_raises_synchronously() -> None:
-    handler = _AddressParent(child=_AddressChild(), timeout=10).run()
+    handler = cast(Any, _AddressParent)(child=_AddressChild(), timeout=10).run()
     raised = False
 
     async for ev in handler.stream_events(include_children=True):
@@ -110,7 +112,7 @@ async def test_external_unknown_concrete_slot_still_raises_synchronously() -> No
 
 @pytest.mark.asyncio
 async def test_external_concrete_child_path_still_completes() -> None:
-    handler = _AddressParent(child=_AddressChild(), timeout=10).run()
+    handler = cast(Any, _AddressParent)(child=_AddressChild(), timeout=10).run()
     sent = False
 
     async for ev in handler.stream_events(include_children=True):
@@ -140,7 +142,7 @@ class _RelayChild(Workflow):
 
 
 class _RelayParent(Workflow):
-    child: _RelayChild
+    child: Annotated[_RelayChild, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> _RelayStart:
@@ -169,4 +171,7 @@ class _LocalSendWorkflow(Workflow):
 @pytest.mark.asyncio
 async def test_internal_relative_send_and_start_event_trigger_still_work() -> None:
     assert await _LocalSendWorkflow(timeout=10).run() == "root-local"
-    assert await _RelayParent(child=_RelayChild(), timeout=10).run() == "child-local"
+    assert (
+        await cast(Any, _RelayParent)(child=_RelayChild(), timeout=10).run()
+        == "child-local"
+    )

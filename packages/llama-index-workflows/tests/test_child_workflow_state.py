@@ -5,9 +5,11 @@ are invisible to the parent (and vice versa)."""
 
 from __future__ import annotations
 
+from typing import Annotated, Any, cast
+
 import pytest
 from pydantic import BaseModel
-from workflows import Context, Workflow
+from workflows import ChildWorkflow, Context, Workflow
 from workflows.decorators import step
 from workflows.events import StartEvent, StopEvent
 from workflows.testing import WorkflowTestRunner
@@ -31,7 +33,7 @@ class IsoChild(Workflow):
 
 
 class IsoParent(Workflow):
-    child: IsoChild
+    child: Annotated[IsoChild, ChildWorkflow]
 
     @step
     async def start(self, ctx: Context, ev: StartEvent) -> CStart:
@@ -47,7 +49,7 @@ class IsoParent(Workflow):
 
 @pytest.mark.asyncio
 async def test_child_state_invisible_to_parent() -> None:
-    result = await WorkflowTestRunner(IsoParent(child=IsoChild())).run()
+    result = await WorkflowTestRunner(cast(Any, IsoParent)(child=IsoChild())).run()
     assert result.result == "parent-only"
     # The handler's (root) store sees only the parent's writes.
     assert await result.ctx.store.get("parent_key") == "parent-only"
@@ -82,7 +84,7 @@ class TypedChild(Workflow):
 
 
 class TypedParent(Workflow):
-    child: TypedChild
+    child: Annotated[TypedChild, ChildWorkflow]
 
     @step
     async def start(self, ctx: Context[ParentState], ev: StartEvent) -> TStart:
@@ -99,7 +101,7 @@ class TypedParent(Workflow):
 @pytest.mark.asyncio
 async def test_distinct_typed_state_per_namespace() -> None:
     """Parent and child carry different typed state models in one run."""
-    result = await WorkflowTestRunner(TypedParent(child=TypedChild())).run()
+    result = await WorkflowTestRunner(cast(Any, TypedParent)(child=TypedChild())).run()
     assert result.result == 7
     root_state = await result.ctx.store.get_state()
     assert isinstance(root_state, ParentState)

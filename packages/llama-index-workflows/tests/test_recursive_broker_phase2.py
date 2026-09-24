@@ -20,11 +20,11 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any
+from typing import Annotated, Any, cast
 
 import pytest
 import workflows.runtime.control_loop.reduce as reduce_mod
-from workflows import Context, Workflow
+from workflows import ChildWorkflow, Context, Workflow
 from workflows.context.serializers import JsonSerializer
 from workflows.decorators import catch_error, step
 from workflows.errors import WorkflowTimeoutError
@@ -122,7 +122,7 @@ class _BudgetChild(Workflow):
 
 
 class _BudgetParent(Workflow):
-    child: _BudgetChild
+    child: Annotated[_BudgetChild, ChildWorkflow]
 
     @step
     async def start(self, ctx: Context, ev: StartEvent) -> _BudgetChildStart:
@@ -156,14 +156,14 @@ async def test_snapshot_resume_matches_full_replay_elapsed_alive() -> None:
     captures ``elapsed_alive``/``last_alive_stamp`` exactly, so both paths agree."""
     from workflows.context.external_context import ExternalContext
 
-    handler = _BudgetParent(child=_BudgetChild()).run()
+    handler = cast(Any, _BudgetParent)(child=_BudgetChild()).run()
     await handler
     assert handler.ctx is not None
     face = handler.ctx._face
     assert isinstance(face, ExternalContext)
     journal = list(face._tick_log)
 
-    workflow = _BudgetParent(child=_BudgetChild())
+    workflow = cast(Any, _BudgetParent)(child=_BudgetChild())
     full = rebuild_state_from_ticks(BrokerState.from_workflow(workflow), journal)
 
     split_at = len(journal) // 2
@@ -199,7 +199,7 @@ class _BoomChild(Workflow):
 
 
 class _ParentCatchesChildFailure(Workflow):
-    child: _BoomChild
+    child: Annotated[_BoomChild, ChildWorkflow]
 
     @step
     async def begin(self, ev: StartEvent) -> _ChildStart:
@@ -220,7 +220,7 @@ class _ParentCatchesChildFailure(Workflow):
 @pytest.mark.asyncio
 async def test_parent_catch_error_catches_child_step_failure() -> None:
     result = await WorkflowTestRunner(
-        _ParentCatchesChildFailure(child=_BoomChild())
+        cast(Any, _ParentCatchesChildFailure)(child=_BoomChild())
     ).run()
     assert result.result == "caught:child"
 
@@ -233,7 +233,7 @@ class _SlowChild(Workflow):
 
 
 class _ParentCatchesChildTimeout(Workflow):
-    child: _SlowChild
+    child: Annotated[_SlowChild, ChildWorkflow]
 
     @step
     async def begin(self, ev: StartEvent) -> _ChildStart:
@@ -253,7 +253,7 @@ class _ParentCatchesChildTimeout(Workflow):
 async def test_parent_catch_error_catches_child_timeout() -> None:
     # The child has no handler of its own, so its timeout ascends to the parent's
     # @catch_error rather than firing the whole run.
-    handler = _ParentCatchesChildTimeout(
+    handler = cast(Any, _ParentCatchesChildTimeout)(
         child=_SlowChild(timeout=0.1), timeout=30
     ).run()
     assert await handler == "caught-timeout:child"
@@ -285,7 +285,7 @@ class _BoomGrand(Workflow):
 
 
 class _MidNoHandler(Workflow):
-    grand: _BoomGrand
+    grand: Annotated[_BoomGrand, ChildWorkflow]
 
     @step
     async def begin(self, ev: _MidStart) -> _GrandStart:
@@ -297,7 +297,7 @@ class _MidNoHandler(Workflow):
 
 
 class _TopCatchesGrand(Workflow):
-    mid: _MidNoHandler
+    mid: Annotated[_MidNoHandler, ChildWorkflow]
 
     @step
     async def begin(self, ev: StartEvent) -> _MidStart:
@@ -317,7 +317,7 @@ async def test_grandparent_catches_when_parent_lacks_handler() -> None:
     # grand fails uncaught -> ascends through mid (no handler) -> top catches it,
     # named for the top-level child ("mid") whose subtree failed.
     result = await WorkflowTestRunner(
-        _TopCatchesGrand(mid=_MidNoHandler(grand=_BoomGrand()))
+        cast(Any, _TopCatchesGrand)(mid=cast(Any, _MidNoHandler)(grand=_BoomGrand()))
     ).run()
     assert result.result == "top-caught:mid"
 
@@ -346,7 +346,7 @@ async def test_grandchild_failure_caught_emits_single_cancel(
     one namespace cancel — the top-level child's subtree — not one per level."""
     cancels = _spy_boundary_cancels(monkeypatch)
     result = await WorkflowTestRunner(
-        _TopCatchesGrand(mid=_MidNoHandler(grand=_BoomGrand()))
+        cast(Any, _TopCatchesGrand)(mid=cast(Any, _MidNoHandler)(grand=_BoomGrand()))
     ).run()
     assert result.result == "top-caught:mid"
     assert [c.namespace for c in cancels] == [("mid#0",)]
@@ -359,7 +359,7 @@ async def test_root_uncaught_grandchild_failure_emits_single_cancel(
     """A child failure ascending uncaught to the root emits exactly one namespace
     cancel for the failing child's subtree."""
     cancels = _spy_boundary_cancels(monkeypatch)
-    handler = _ParentNoHandler(child=_BoomChild()).run()
+    handler = cast(Any, _ParentNoHandler)(child=_BoomChild()).run()
     with pytest.raises(ValueError, match="boom-in-child"):
         await handler
     assert [c.namespace for c in cancels] == [("child#0",)]
@@ -369,7 +369,7 @@ async def test_root_uncaught_grandchild_failure_emits_single_cancel(
 
 
 class _ParentNoHandler(Workflow):
-    child: _BoomChild
+    child: Annotated[_BoomChild, ChildWorkflow]
 
     @step
     async def begin(self, ev: StartEvent) -> _ChildStart:
@@ -382,7 +382,7 @@ class _ParentNoHandler(Workflow):
 
 @pytest.mark.asyncio
 async def test_root_uncaught_child_failure_fails_run() -> None:
-    handler = _ParentNoHandler(child=_BoomChild()).run()
+    handler = cast(Any, _ParentNoHandler)(child=_BoomChild()).run()
     with pytest.raises(ValueError, match="boom-in-child"):
         await handler
 
@@ -402,7 +402,7 @@ class _AlwaysBoomChild(Workflow):
 
 
 class _ParentLimitedRecovery(Workflow):
-    child: _AlwaysBoomChild
+    child: Annotated[_AlwaysBoomChild, ChildWorkflow]
 
     @step
     async def begin(self, ev: StartEvent) -> _ChildStart:
@@ -423,7 +423,7 @@ class _ParentLimitedRecovery(Workflow):
 async def test_boundary_recovery_budget_is_enforced_across_chain() -> None:
     global CHILD_ATTEMPTS
     CHILD_ATTEMPTS = 0
-    handler = _ParentLimitedRecovery(child=_AlwaysBoomChild()).run()
+    handler = cast(Any, _ParentLimitedRecovery)(child=_AlwaysBoomChild()).run()
     with pytest.raises(ValueError, match="boom-again"):
         await handler
     # First attempt + 2 recoveries = 3 child invocations, then the budget is spent

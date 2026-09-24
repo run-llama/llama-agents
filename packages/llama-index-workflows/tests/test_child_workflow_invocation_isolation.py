@@ -5,9 +5,10 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Annotated, Any, cast
 
 import pytest
-from workflows import Context, Workflow
+from workflows import ChildWorkflow, Context, Workflow
 from workflows.context.state_store import CHILD_STATES_KEY
 from workflows.decorators import catch_error, step
 from workflows.errors import WorkflowRuntimeError
@@ -50,7 +51,7 @@ class _StreamingChild(Workflow):
 
 
 class _StreamingParent(Workflow):
-    child: _StreamingChild
+    child: Annotated[_StreamingChild, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> _StreamStart:
@@ -63,7 +64,7 @@ class _StreamingParent(Workflow):
 
 @pytest.mark.asyncio
 async def test_stream_origin_exposes_opaque_child_invocation_namespace() -> None:
-    handler = _StreamingParent(child=_StreamingChild()).run()
+    handler = cast(Any, _StreamingParent)(child=_StreamingChild()).run()
     collected: list[Event] = []
     async for ev in handler.stream_events(include_children=True):
         collected.append(ev)
@@ -91,7 +92,7 @@ class _CountingChild(Workflow):
 
 
 class _SequentialParent(Workflow):
-    child: _CountingChild
+    child: Annotated[_CountingChild, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> _CountingStart:
@@ -112,7 +113,9 @@ class _SequentialParent(Workflow):
 
 @pytest.mark.asyncio
 async def test_sequential_same_slot_child_invocations_get_fresh_store() -> None:
-    result = await WorkflowTestRunner(_SequentialParent(child=_CountingChild())).run()
+    result = await WorkflowTestRunner(
+        cast(Any, _SequentialParent)(child=_CountingChild())
+    ).run()
     assert result.result == [1, 1]
 
 
@@ -149,7 +152,7 @@ class _KeepAlive(Event):
 
 
 class _ParallelParent(Workflow):
-    child: Workflow
+    child: Annotated[Workflow, ChildWorkflow]
 
     @step
     async def start(self, ctx: Context, ev: StartEvent) -> _ParallelStart | _KeepAlive:
@@ -175,7 +178,7 @@ async def test_overlapping_same_slot_child_invocations_do_not_cancel_each_other(
     None
 ):
     result = await asyncio.wait_for(
-        _ParallelParent(child=_ParallelChild(), timeout=30).run(),
+        cast(Any, _ParallelParent)(child=_ParallelChild(), timeout=30).run(),
         timeout=10,
     )
     assert result == ["fast", "slow"]
@@ -184,7 +187,7 @@ async def test_overlapping_same_slot_child_invocations_do_not_cancel_each_other(
 @pytest.mark.asyncio
 async def test_overlapping_same_slot_timeout_is_invocation_scoped() -> None:
     result = await asyncio.wait_for(
-        _ParallelParent(
+        cast(Any, _ParallelParent)(
             child=_RecoveringParallelChild(timeout=0.05),
             timeout=30,
         ).run(),
@@ -213,7 +216,7 @@ class _HitlChild(Workflow):
 
 
 class _HitlParent(Workflow):
-    child: _HitlChild
+    child: Annotated[_HitlChild, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> _HitlStart:
@@ -226,7 +229,7 @@ class _HitlParent(Workflow):
 
 @pytest.mark.asyncio
 async def test_static_child_target_without_invocation_fails_loudly() -> None:
-    handler = _HitlParent(child=_HitlChild()).run()
+    handler = cast(Any, _HitlParent)(child=_HitlChild()).run()
     async for ev in handler.stream_events(include_children=True):
         if isinstance(ev, InputRequiredEvent):
             with pytest.raises(WorkflowRuntimeError, match="concrete child invocation"):
@@ -246,7 +249,7 @@ async def test_static_child_target_without_invocation_fails_loudly() -> None:
 
 @pytest.mark.asyncio
 async def test_live_idle_child_invocation_state_is_snapshotted() -> None:
-    handler = _HitlParent(child=_HitlChild()).run()
+    handler = cast(Any, _HitlParent)(child=_HitlChild()).run()
     child_origin: tuple[str, ...] | None = None
     async for ev in handler.stream_events(include_children=True):
         if isinstance(ev, InputRequiredEvent):
@@ -266,7 +269,7 @@ async def test_live_idle_child_invocation_state_is_snapshotted() -> None:
 
 
 class _ContinuationParent(Workflow):
-    child: _CountingChild
+    child: Annotated[_CountingChild, ChildWorkflow]
 
     @step
     async def start(self, ctx: Context, ev: StartEvent) -> _CountingStart:
@@ -280,7 +283,7 @@ class _ContinuationParent(Workflow):
 
 @pytest.mark.asyncio
 async def test_completed_context_continuation_drops_child_invocation_state() -> None:
-    workflow = _ContinuationParent(child=_CountingChild())
+    workflow = cast(Any, _ContinuationParent)(child=_CountingChild())
 
     first = await WorkflowTestRunner(workflow).run()
     assert first.result == 1

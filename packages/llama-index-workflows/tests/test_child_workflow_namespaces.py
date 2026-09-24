@@ -9,8 +9,10 @@ the file-level pragmas suppress the expected static-typing diagnostics on the
 
 from __future__ import annotations
 
+from typing import Annotated, Any, cast
+
 import pytest
-from workflows import Workflow
+from workflows import ChildWorkflow, Workflow
 from workflows.decorators import step
 from workflows.errors import WorkflowValidationError
 from workflows.events import StartEvent, StopEvent
@@ -40,7 +42,7 @@ class MidStop(StopEvent):
 
 
 class Mid(Workflow):
-    grand: GrandChild
+    grand: Annotated[GrandChild, ChildWorkflow]
 
     @step
     async def run_mid(self, ev: MidStart) -> MidStop:
@@ -48,7 +50,7 @@ class Mid(Workflow):
 
 
 class Root(Workflow):
-    mid: Mid
+    mid: Annotated[Mid, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> StopEvent:
@@ -70,7 +72,7 @@ class Child(Workflow):
 
 
 class Parent(Workflow):
-    child: Child
+    child: Annotated[Child, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> StopEvent:
@@ -78,7 +80,7 @@ class Parent(Workflow):
 
 
 def test_namespaced_steps_includes_child_under_field_path() -> None:
-    parent = Parent(child=Child())
+    parent = cast(Any, Parent)(child=Child())
     assert set(parent._get_namespaced_steps()) == {
         StepId.root("start"),
         StepId(("child",), "run_child"),
@@ -87,7 +89,7 @@ def test_namespaced_steps_includes_child_under_field_path() -> None:
 
 def test_namespace_instances_maps_paths_to_owning_instances() -> None:
     child = Child()
-    parent = Parent(child=child)
+    parent = cast(Any, Parent)(child=child)
     instances = parent._namespace_instances()
     assert instances[()] is parent
     assert instances[("child",)] is child
@@ -95,8 +97,8 @@ def test_namespace_instances_maps_paths_to_owning_instances() -> None:
 
 def test_grandchild_namespaced_as_flat_compound_tuple() -> None:
     grand = GrandChild()
-    mid = Mid(grand=grand)
-    root = Root(mid=mid)
+    mid = cast(Any, Mid)(grand=grand)
+    root = cast(Any, Root)(mid=mid)
 
     assert set(root._get_namespaced_steps()) == {
         StepId.root("start"),
@@ -111,7 +113,7 @@ def test_grandchild_namespaced_as_flat_compound_tuple() -> None:
 
 def test_static_class_path_matches_runtime_set() -> None:
     """The static (no-instantiation) walk derives the same StepId set."""
-    root = Root(mid=Mid(grand=GrandChild()))
+    root = cast(Any, Root)(mid=cast(Any, Mid)(grand=GrandChild()))
     assert set(Root._get_namespaced_steps_from_class()) == set(
         root._get_namespaced_steps()
     )
@@ -128,12 +130,12 @@ def test_childless_workflow_only_root_namespace() -> None:
 
 
 def test_valid_child_tree_validates() -> None:
-    Parent(child=Child()).validate()
-    Root(mid=Mid(grand=GrandChild())).validate()
+    cast(Any, Parent)(child=Child()).validate()
+    cast(Any, Root)(mid=cast(Any, Mid)(grand=GrandChild())).validate()
 
 
 class SelfReferential(Workflow):
-    me: SelfReferential
+    me: Annotated[SelfReferential, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> StopEvent:
@@ -142,7 +144,7 @@ class SelfReferential(Workflow):
 
 def test_self_referential_child_type_rejected() -> None:
     with pytest.raises(WorkflowValidationError, match="type cycle"):
-        SelfReferential().validate()  # type: ignore  # self-referential child is uninstantiable
+        cast(Any, SelfReferential)().validate()
 
 
 class DupChildA(Workflow):
@@ -158,8 +160,8 @@ class DupChildB(Workflow):
 
 
 class DupParent(Workflow):
-    x: DupChildA
-    y: DupChildB
+    x: Annotated[DupChildA, ChildWorkflow]
+    y: Annotated[DupChildB, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> StopEvent:
@@ -167,6 +169,6 @@ class DupParent(Workflow):
 
 
 def test_duplicate_child_start_event_type_rejected() -> None:
-    parent = DupParent(x=DupChildA(), y=DupChildB())
+    parent = cast(Any, DupParent)(x=DupChildA(), y=DupChildB())
     with pytest.raises(WorkflowValidationError, match="both accept StartEvent type"):
         parent.validate()

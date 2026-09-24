@@ -10,8 +10,10 @@ completes the run.
 
 from __future__ import annotations
 
+from typing import Annotated, Any, cast
+
 import pytest
-from workflows import Workflow
+from workflows import ChildWorkflow, Workflow
 from workflows.decorators import step
 from workflows.events import Event, StartEvent, StopEvent
 from workflows.testing import WorkflowTestRunner
@@ -32,7 +34,7 @@ class Child(Workflow):
 
 
 class Parent(Workflow):
-    child: Child
+    child: Annotated[Child, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> ChildStart:
@@ -44,14 +46,14 @@ class Parent(Workflow):
 
 
 def test_parent_with_boundary_child_validates() -> None:
-    Parent(child=Child()).validate()
+    cast(Any, Parent)(child=Child()).validate()
 
 
 @pytest.mark.asyncio
 async def test_child_stop_event_surfaces_as_parent_event() -> None:
     """Parent emits a child StartEvent; the child's StopEvent comes back as a
     routable parent event, and the parent completes on its own StopEvent."""
-    result = await WorkflowTestRunner(Parent(child=Child())).run()
+    result = await WorkflowTestRunner(cast(Any, Parent)(child=Child())).run()
     assert result.result == "HELLO"
 
 
@@ -90,7 +92,7 @@ class MidStop(StopEvent):
 
 
 class Mid(Workflow):
-    grand: Grand
+    grand: Annotated[Grand, ChildWorkflow]
 
     @step
     async def begin(self, ev: MidStart) -> GrandStart:
@@ -102,7 +104,7 @@ class Mid(Workflow):
 
 
 class Top(Workflow):
-    mid: Mid
+    mid: Annotated[Mid, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> MidStart:
@@ -115,7 +117,9 @@ class Top(Workflow):
 
 @pytest.mark.asyncio
 async def test_grandchild_boundary_runs_namespaced() -> None:
-    result = await WorkflowTestRunner(Top(mid=Mid(grand=Grand()))).run()
+    result = await WorkflowTestRunner(
+        cast(Any, Top)(mid=cast(Any, Mid)(grand=Grand()))
+    ).run()
     assert result.result == "g!"
 
 
@@ -150,7 +154,7 @@ class IsoChild(Workflow):
 
 
 class IsoParent(Workflow):
-    child: IsoChild
+    child: Annotated[IsoChild, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> SharedMid:
@@ -169,6 +173,6 @@ class IsoParent(Workflow):
 
 @pytest.mark.asyncio
 async def test_shared_event_type_routes_within_namespace() -> None:
-    result = await WorkflowTestRunner(IsoParent(child=IsoChild())).run()
+    result = await WorkflowTestRunner(cast(Any, IsoParent)(child=IsoChild())).run()
     # The child's SharedMid stays in the child; its end step sees tag="child".
     assert result.result == "child"

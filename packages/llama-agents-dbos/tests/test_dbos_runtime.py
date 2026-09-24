@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from types import SimpleNamespace
-from typing import Any, Generator, cast
+from typing import Annotated, Any, Generator, cast
 from unittest.mock import AsyncMock, patch
 
 import asyncpg
@@ -26,6 +26,7 @@ from llama_agents.server._pool import PoolProvider
 from llama_agents.server._store.postgres_state_store import PostgresStateStore
 from pydantic import Field
 from sqlalchemy.engine import Engine
+from workflows import ChildWorkflow
 from workflows.context import Context
 from workflows.context.serializers import JsonSerializer
 from workflows.context.state_store import DictState, InMemoryStateStore, StateStore
@@ -48,14 +49,14 @@ class ChildStop(StopEvent):
     pass
 
 
-class ChildWorkflow(Workflow):
+class RuntimeChildWorkflow(Workflow):
     @step
     async def finish(self, ev: ChildStart) -> ChildStop:
         return ChildStop()
 
 
 class ParentWorkflow(Workflow):
-    child: ChildWorkflow
+    child: Annotated[RuntimeChildWorkflow, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> ChildStart:
@@ -70,7 +71,7 @@ def test_dbos_runtime_rejects_child_workflows() -> None:
     runtime = DBOSRuntime()
 
     with pytest.raises(WorkflowRuntimeError, match="durable child state support"):
-        ParentWorkflow(child=ChildWorkflow(), runtime=runtime)
+        cast(Any, ParentWorkflow)(child=RuntimeChildWorkflow(), runtime=runtime)
 
 
 def _fake_sqlite_engine() -> Engine:

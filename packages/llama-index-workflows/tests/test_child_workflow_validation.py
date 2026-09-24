@@ -10,7 +10,7 @@ from typing import Annotated as A
 import pytest
 from workflows import ChildWorkflow, Workflow, step
 from workflows import ChildWorkflow as CW
-from workflows.errors import WorkflowRuntimeError, WorkflowValidationError
+from workflows.errors import WorkflowValidationError
 from workflows.events import StartEvent, StopEvent
 from workflows.plugins.basic import BasicRuntime
 
@@ -71,11 +71,10 @@ class ParentWithChild(Workflow):
         return StopEvent()
 
 
-def test_declared_child_execution_fails_before_recursive_runtime() -> None:
+@pytest.mark.asyncio
+async def test_declared_child_execution_runs_with_recursive_runtime() -> None:
     wf = cast(Any, ParentWithChild)(child=FirstChild())
-
-    with pytest.raises(WorkflowRuntimeError, match="recursive child runtime"):
-        wf.run()
+    assert await wf.run() is None
 
 
 @pytest.mark.asyncio
@@ -302,8 +301,8 @@ class BoundaryParent(Workflow):
         return StopEvent()
 
 
-def test_declared_child_boundary_validates_without_execution() -> None:
+@pytest.mark.asyncio
+async def test_declared_child_boundary_validates_and_executes() -> None:
     wf = cast(Any, BoundaryParent)(child=BoundaryChild())
     assert wf.validate() is False
-    with pytest.raises(WorkflowRuntimeError, match="recursive child runtime"):
-        wf.run()
+    assert await wf.run() is None

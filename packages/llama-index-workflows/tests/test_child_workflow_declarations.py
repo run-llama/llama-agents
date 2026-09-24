@@ -5,10 +5,10 @@ from __future__ import annotations
 
 import inspect
 import pickle
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
 import pytest
-from workflows import Workflow, step
+from workflows import ChildWorkflow, Workflow, step
 from workflows.errors import WorkflowValidationError
 from workflows.events import StartEvent, StopEvent
 from workflows.runtime.types.internal_state import BrokerState
@@ -66,7 +66,7 @@ class TypedChild(Workflow):
 
 
 class TypedParent(Workflow):
-    child: TypedChild
+    child: Annotated[TypedChild, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> ChildStart:
@@ -78,7 +78,7 @@ class TypedParent(Workflow):
 
 
 def test_typed_child_annotation_still_synthesizes_constructor_slot() -> None:
-    parent = TypedParent(child=TypedChild())
+    parent = cast(Any, TypedParent)(child=TypedChild())
 
     assert isinstance(parent.child_workflows["child"], TypedChild)
 
@@ -101,7 +101,7 @@ def test_missing_synthesized_child_slot_fails_at_construction() -> None:
 
 
 class CustomInitTypedParent(Workflow):
-    child: TypedChild
+    child: Annotated[TypedChild, ChildWorkflow]
 
     def __init__(self) -> None:
         super().__init__()
@@ -117,12 +117,12 @@ class CustomInitTypedParent(Workflow):
 
 def test_missing_custom_init_typed_child_slot_fails_at_construction() -> None:
     with pytest.raises(WorkflowValidationError, match="Missing child workflow"):
-        CustomInitTypedParent()
+        cast(Any, CustomInitTypedParent)()
 
 
 def test_class_body_child_instance_is_rejected() -> None:
     class SharedDefaultParent(Workflow):
-        child: TypedChild = TypedChild()
+        child: Annotated[TypedChild, ChildWorkflow] = TypedChild()
 
         @step
         async def start(self, ev: StartEvent) -> ChildStart:
@@ -133,7 +133,7 @@ def test_class_body_child_instance_is_rejected() -> None:
             return StopEvent(result="done")
 
     with pytest.raises(WorkflowValidationError, match="shared class-body"):
-        SharedDefaultParent()
+        cast(Any, SharedDefaultParent)()
 
 
 class WithPlainAnnotation(Workflow):
@@ -146,7 +146,7 @@ class WithPlainAnnotation(Workflow):
 
 def test_non_child_annotations_are_not_constructor_fields() -> None:
     with pytest.raises(TypeError):
-        WithPlainAnnotation(retries=5)  # type: ignore[call-arg]
+        cast(Any, WithPlainAnnotation)(retries=5)
 
 
 def test_pickled_broker_state_with_legacy_worker_keys_normalizes_on_load() -> None:

@@ -1,21 +1,15 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LlamaIndex Inc.
-"""Tests for declaring child workflows as typed class fields.
-
-``WorkflowMeta`` is a ``dataclass_transform``, so a parent's child fields and the
-base config kwargs both type-check on the constructor (``Parent(child=Child(),
-timeout=30)``) with no suppression. The only per-line ignore below is on a test
-that deliberately passes the wrong child type to exercise the runtime check.
-"""
+"""Tests for explicit child declarations and generated constructors."""
 
 from __future__ import annotations
 
 import inspect
 import warnings
-from typing import Any
+from typing import Annotated, Any, cast
 
 import pytest
-from workflows import Workflow
+from workflows import ChildWorkflow, Workflow
 from workflows.decorators import step
 from workflows.errors import WorkflowValidationError
 from workflows.events import StartEvent, StopEvent
@@ -38,7 +32,7 @@ class Child(Workflow):
 
 
 class Parent(Workflow):
-    child: Child
+    child: Annotated[Child, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> StopEvent:
@@ -46,7 +40,7 @@ class Parent(Workflow):
 
 
 def test_synthesized_init_constructs_and_forwards_kwargs() -> None:
-    parent = Parent(child=Child(), timeout=30)
+    parent = cast(Any, Parent)(child=Child(), timeout=30)
     assert isinstance(parent.child, Child)
     assert parent._timeout == 30
     assert parent.child_workflows == {"child": parent.child}
@@ -58,7 +52,7 @@ def test_child_slots_resolved_from_annotations() -> None:
 
 
 class ForwardRefParent(Workflow):
-    child: ForwardRefChild
+    child: Annotated[ForwardRefChild, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> ChildStart:
@@ -77,7 +71,7 @@ class ForwardRefChild(Workflow):
 
 @pytest.mark.asyncio
 async def test_forward_ref_child_defined_later_constructs_and_runs() -> None:
-    parent = ForwardRefParent(child=ForwardRefChild())
+    parent = cast(Any, ForwardRefParent)(child=ForwardRefChild())
     assert ForwardRefParent._get_child_workflow_slots() == {"child": ForwardRefChild}
     assert await parent.run() == "FORWARD"
 
@@ -125,9 +119,9 @@ async def test_unresolvable_non_slot_annotation_is_ignored() -> None:
     assert await unresolvable().run() == "ok"
 
 
-def test_kwarg_for_unresolvable_annotation_raises_helpful_error() -> None:
+def test_kwarg_for_unresolvable_plain_annotation_is_not_a_child_slot() -> None:
     unresolvable = globals()["UnresolvableAnnotation"]
-    with pytest.raises(WorkflowValidationError, match="NeverImportedAtRuntime"):
+    with pytest.raises(TypeError, match="unexpected keyword argument 'helper'"):
         unresolvable(helper=object())
 
 
@@ -138,7 +132,7 @@ def test_inherited_child_slot_with_unresolvable_annotation() -> None:
     assert parent._timeout == 30
     assert "child" in inspect.signature(parent_cls).parameters
     assert "timeout" in inspect.signature(parent_cls).parameters
-    with pytest.raises(WorkflowValidationError, match="NeverImportedAtRuntime"):
+    with pytest.raises(TypeError, match="unexpected keyword argument 'helper'"):
         parent_cls(child=Child(), helper=object())
 
 
@@ -156,7 +150,7 @@ def test_quoted_self_ref_under_future_annotations_raises_cycle_error() -> None:
 from __future__ import annotations
 
 class QuotedSelfRef(Workflow):
-    child: "QuotedSelfRef"
+    child: Annotated["QuotedSelfRef", ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> StopEvent:
@@ -172,7 +166,7 @@ class QuotedSelfRef(Workflow):
 def test_child_adopts_parent_runtime_and_is_tracked() -> None:
     runtime = BasicRuntime()
     with runtime.registering():
-        parent = Parent(child=Child())
+        parent = cast(Any, Parent)(child=Child())
     assert parent.runtime is runtime
     assert parent.child.runtime is runtime
     assert parent.child in runtime._pending
@@ -185,14 +179,14 @@ def test_child_constructed_under_different_runtime_is_reparented() -> None:
         child = Child()
     assert child.runtime is other_rt
     with parent_rt.registering():
-        parent = Parent(child=child)
+        parent = cast(Any, Parent)(child=child)
     assert parent.child.runtime is parent_rt
     assert child not in other_rt._pending
     assert child in parent_rt._pending
 
 
 def test_child_runtime_override_is_blocked() -> None:
-    parent = Parent(child=Child())
+    parent = cast(Any, Parent)(child=Child())
     with pytest.raises(RuntimeError, match="Cannot reassign runtime"):
         parent.child._switch_runtime(BasicRuntime())
 
@@ -210,7 +204,7 @@ class PlainStopChild(Workflow):
 
 
 class ParentBadStart(Workflow):
-    child: PlainStartChild
+    child: Annotated[PlainStartChild, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> StopEvent:
@@ -218,7 +212,7 @@ class ParentBadStart(Workflow):
 
 
 class ParentBadStop(Workflow):
-    child: PlainStopChild
+    child: Annotated[PlainStopChild, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> StopEvent:
@@ -227,12 +221,12 @@ class ParentBadStop(Workflow):
 
 def test_child_without_custom_start_event_rejected() -> None:
     with pytest.raises(WorkflowValidationError, match="custom StartEvent"):
-        ParentBadStart(child=PlainStartChild())
+        cast(Any, ParentBadStart)(child=PlainStartChild())
 
 
 def test_child_without_custom_stop_event_rejected() -> None:
     with pytest.raises(WorkflowValidationError, match="custom StopEvent"):
-        ParentBadStop(child=PlainStopChild())
+        cast(Any, ParentBadStop)(child=PlainStopChild())
 
 
 def test_wrong_child_type_rejected() -> None:
@@ -248,11 +242,11 @@ def test_wrong_child_type_rejected() -> None:
             return OtherStop()
 
     with pytest.raises(WorkflowValidationError, match="expects Child"):
-        Parent(child=Other())  # type: ignore  # wrong child type, rejected at runtime
+        cast(Any, Parent)(child=Other())  # wrong child type, rejected at runtime
 
 
 class ParentWithUserInit(Workflow):
-    child: Child
+    child: Annotated[Child, ChildWorkflow]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -264,7 +258,7 @@ class ParentWithUserInit(Workflow):
 
 
 def test_user_defined_init_attaches_children_at_construction() -> None:
-    parent = ParentWithUserInit()
+    parent = cast(Any, ParentWithUserInit)()
     # User-init path: the child is assigned as a plain attribute inside the
     # user __init__, then WorkflowMeta.__call__ runs _finalize_construction
     # (-> _ensure_children_attached) once the outermost __init__ returns, so
@@ -292,7 +286,7 @@ def test_dead_child_config_warns() -> None:
     emits a warning naming the dead params. ``timeout`` is NOT dead -- it bounds
     the child's own execution -- so only ``verbose`` is flagged here."""
     with pytest.warns(UserWarning, match="verbose=True"):
-        Parent(child=Child(timeout=10, verbose=True))
+        cast(Any, Parent)(child=Child(timeout=10, verbose=True))
 
 
 def test_child_timeout_does_not_warn() -> None:
@@ -300,14 +294,14 @@ def test_child_timeout_does_not_warn() -> None:
     setting it alone attaches silently."""
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        Parent(child=Child(timeout=10))
+        cast(Any, Parent)(child=Child(timeout=10))
 
 
 def test_honored_child_config_does_not_warn() -> None:
     """A child with default run-level config attaches silently."""
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        Parent(child=Child())
+        cast(Any, Parent)(child=Child())
 
 
 # ---------------------------------------------------------------------------
@@ -347,7 +341,7 @@ def _has_child_steps(steps: frozenset[StepId]) -> bool:
 def test_synthesized_init_tracks_after_children_attached() -> None:
     rt = _RecordingRuntime()
     with rt.registering():
-        parent = Parent(child=Child())
+        parent = cast(Any, Parent)(child=Child())
     captures = _steps_at_track(rt, parent)
     assert len(captures) == 1
     assert _has_child_steps(captures[0])
@@ -356,7 +350,7 @@ def test_synthesized_init_tracks_after_children_attached() -> None:
 def test_user_init_tracks_after_children_attached() -> None:
     rt = _RecordingRuntime()
     with rt.registering():
-        parent = ParentWithUserInit()
+        parent = cast(Any, ParentWithUserInit)()
     captures = _steps_at_track(rt, parent)
     assert len(captures) == 1
     assert _has_child_steps(captures[0])
@@ -369,10 +363,8 @@ def test_subclass_of_user_init_tracks_after_children_attached() -> None:
 
     rt = _RecordingRuntime()
     with rt.registering():
-        # dataclass_transform synthesizes a `child`-requiring __init__ for the
-        # subclass (it declares no __init__ of its own), but at runtime the
-        # inherited user __init__ constructs the child, so no arg is needed.
-        parent = SubOfUserInit()  # type: ignore  # synthesized init wants child; inherited user init supplies it
+        # The inherited constructor constructs the declared child.
+        parent = SubOfUserInit()
     captures = _steps_at_track(rt, parent)
     assert len(captures) == 1
     assert _has_child_steps(captures[0])
@@ -402,7 +394,7 @@ def test_track_fires_once_per_workflow_in_tree() -> None:
     rt = _RecordingRuntime()
     with rt.registering():
         child = Child()
-        parent = Parent(child=child)
+        parent = cast(Any, Parent)(child=child)
     # Parent and child each tracked exactly once; no double-track from
     # _attach_child re-homing a same-runtime child.
     assert len(_steps_at_track(rt, parent)) == 1

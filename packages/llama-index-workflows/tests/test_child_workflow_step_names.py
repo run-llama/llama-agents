@@ -12,8 +12,10 @@ is not silently changed back to a bare name.
 
 from __future__ import annotations
 
+from typing import Annotated, Any, cast
+
 import pytest
-from workflows import Context, Workflow
+from workflows import ChildWorkflow, Context, Workflow
 from workflows.decorators import catch_error, step
 from workflows.events import (
     Event,
@@ -40,7 +42,7 @@ class FailingChild(Workflow):
 
 
 class ParentOfFailingChild(Workflow):
-    child: FailingChild
+    child: Annotated[FailingChild, ChildWorkflow]
 
     @step
     async def begin(self, ev: StartEvent) -> ChildStart:
@@ -62,7 +64,7 @@ async def _collect_until_done(handler: WorkflowHandler) -> list[Event]:
 async def test_child_step_failure_event_carries_namespaced_step_name() -> None:
     """A failing child step surfaces a (root-origin) WorkflowFailedEvent whose
     ``step_name`` is the slash-joined ``child/run_child`` -- not the bare name."""
-    handler = ParentOfFailingChild(child=FailingChild()).run()
+    handler = cast(Any, ParentOfFailingChild)(child=FailingChild()).run()
     events = await _collect_until_done(handler)
 
     with pytest.raises(ValueError, match="boom-in-child"):
@@ -99,7 +101,7 @@ class FailingGrandChild(Workflow):
 
 
 class MidWithGrandChild(Workflow):
-    grand: FailingGrandChild
+    grand: Annotated[FailingGrandChild, ChildWorkflow]
 
     @step
     async def begin(self, ev: MidStart) -> GrandStart:
@@ -111,7 +113,7 @@ class MidWithGrandChild(Workflow):
 
 
 class TopWithGrandChild(Workflow):
-    mid: MidWithGrandChild
+    mid: Annotated[MidWithGrandChild, ChildWorkflow]
 
     @step
     async def begin(self, ctx: Context, ev: StartEvent) -> MidStart:
@@ -126,7 +128,9 @@ class TopWithGrandChild(Workflow):
 async def test_grandchild_step_failure_event_carries_compound_namespace() -> None:
     """A failing grandchild step's ``step_name`` is the full compound path
     ``mid/grand/run_grand``."""
-    handler = TopWithGrandChild(mid=MidWithGrandChild(grand=FailingGrandChild())).run()
+    handler = cast(Any, TopWithGrandChild)(
+        mid=cast(Any, MidWithGrandChild)(grand=FailingGrandChild())
+    ).run()
     events = await _collect_until_done(handler)
 
     with pytest.raises(ValueError, match="boom-in-grandchild"):
@@ -153,7 +157,7 @@ class RecoveringChild(Workflow):
 
 
 class ParentOfRecoveringChild(Workflow):
-    child: RecoveringChild
+    child: Annotated[RecoveringChild, ChildWorkflow]
 
     @step
     async def begin(self, ev: StartEvent) -> ChildStart:
@@ -171,14 +175,14 @@ def test_child_catch_error_handler_attaches_without_warning() -> None:
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        ParentOfRecoveringChild(child=RecoveringChild())
+        cast(Any, ParentOfRecoveringChild)(child=RecoveringChild())
 
 
 @pytest.mark.asyncio
 async def test_child_catch_error_handler_recovers_when_nested() -> None:
     """The child's @catch_error handler recovers its own failing step: the child
     StopEvent crosses back into the parent and the run completes."""
-    handler = ParentOfRecoveringChild(child=RecoveringChild()).run()
+    handler = cast(Any, ParentOfRecoveringChild)(child=RecoveringChild()).run()
     events = await _collect_until_done(handler)
 
     result = await handler

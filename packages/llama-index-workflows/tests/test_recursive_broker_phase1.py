@@ -12,9 +12,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from typing import Annotated, Any, cast
 
 import pytest
-from workflows import Context, Workflow
+from workflows import ChildWorkflow, Context, Workflow
 from workflows.context.external_context import ExternalContext
 from workflows.context.serializers import JsonSerializer
 from workflows.decorators import step
@@ -61,7 +62,7 @@ class _SimpleChild(Workflow):
 
 
 class _SimpleParent(Workflow):
-    child: _SimpleChild
+    child: Annotated[_SimpleChild, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> ChildStart:
@@ -79,7 +80,7 @@ def test_dead_invocation_targeted_send_publishes_unhandled() -> None:
     """A targeted send to a concrete-but-absent child invocation publishes an
     origin-tagged UnhandledEvent instead of silently re-entering a torn-down
     broker."""
-    root = BrokerState.from_workflow(_SimpleParent(child=_SimpleChild()))
+    root = BrokerState.from_workflow(cast(Any, _SimpleParent)(child=_SimpleChild()))
     tick = TickAddEvent(
         event=_Late(),
         step_id=StepId((), "also_late"),
@@ -109,7 +110,7 @@ class _MultiStartChild(Workflow):
 
 
 class _MultiStartParent(Workflow):
-    child: _MultiStartChild
+    child: Annotated[_MultiStartChild, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> ChildStart:
@@ -124,7 +125,9 @@ def test_child_descent_counts_as_one_regardless_of_start_steps() -> None:
     """A child slot descended into is exactly one work item in the parent's
     enclosing stream, however many of the child's start steps accept the
     event."""
-    root = BrokerState.from_workflow(_MultiStartParent(child=_MultiStartChild()))
+    root = BrokerState.from_workflow(
+        cast(Any, _MultiStartParent)(child=_MultiStartChild())
+    )
     # No parent step accepts ChildStart; two child start steps do — the birth
     # count (fan-out factor) is 1 (the single child slot), not 2.
     assert _count_accepting_steps(root, ChildStart()) == 1
@@ -144,7 +147,7 @@ class _FanChild(Workflow):
 
 
 class _FanOverChildrenParent(Workflow):
-    child: _FanChild
+    child: Annotated[_FanChild, ChildWorkflow]
 
     @step
     async def fan(self, ev: StartEvent) -> list[_Trigger]:
@@ -177,7 +180,7 @@ class _MixedChild(Workflow):
 
 
 class _MixedParent(Workflow):
-    child: _MixedChild
+    child: Annotated[_MixedChild, ChildWorkflow]
 
     @step
     async def gate(self, ctx: Context, ev: StartEvent) -> _GateDone:
@@ -193,7 +196,7 @@ def test_mixed_descend_and_waiter_resolve_in_one_tick() -> None:
     """One event that both resolves a parent waiter and is a child's StartEvent
     does both in the same tick: the waiter's step re-runs and a child is born
     (the descent is an independent boundary work item)."""
-    root = BrokerState.from_workflow(_MixedParent(child=_MixedChild()))
+    root = BrokerState.from_workflow(cast(Any, _MixedParent)(child=_MixedChild()))
     gate = StepId((), "gate")
     root.workers[gate].collected_waiters.append(
         StepWorkerWaiter(
@@ -220,7 +223,9 @@ async def test_child_inside_parent_fan_out_completes() -> None:
     """Three children born inside a parent fan-out each complete; the parent
     stream balances (each child is one work item, consumed once at ascent) and
     the join releases."""
-    result = await WorkflowTestRunner(_FanOverChildrenParent(child=_FanChild())).run()
+    result = await WorkflowTestRunner(
+        cast(Any, _FanOverChildrenParent)(child=_FanChild())
+    ).run()
     assert result.result == 3
 
 
@@ -244,7 +249,7 @@ class _CountingChild(Workflow):
 
 
 class _TwiceParent(Workflow):
-    child: _CountingChild
+    child: Annotated[_CountingChild, ChildWorkflow]
 
     @step
     async def start(self, ctx: Context, ev: StartEvent) -> _CountingStart:
@@ -263,7 +268,9 @@ class _TwiceParent(Workflow):
 
 @pytest.mark.asyncio
 async def test_overlapping_siblings_have_isolated_state() -> None:
-    result = await WorkflowTestRunner(_TwiceParent(child=_CountingChild())).run()
+    result = await WorkflowTestRunner(
+        cast(Any, _TwiceParent)(child=_CountingChild())
+    ).run()
     assert result.result == [1, 1]
 
 
@@ -277,7 +284,7 @@ class _CrossSendChild(Workflow):
 
 
 class _CrossSendParent(Workflow):
-    child: _CrossSendChild
+    child: Annotated[_CrossSendChild, ChildWorkflow]
 
     @step
     async def start(self, ctx: Context, ev: StartEvent) -> StopEvent:
@@ -290,7 +297,9 @@ async def test_internal_targeted_cross_broker_send_is_rejected() -> None:
     """A step targeting another broker (a child's step by path) is a loud
     WorkflowRuntimeError; broker-local sends use a bare step name."""
     with pytest.raises(WorkflowRuntimeError, match="another broker"):
-        await WorkflowTestRunner(_CrossSendParent(child=_CrossSendChild())).run()
+        await WorkflowTestRunner(
+            cast(Any, _CrossSendParent)(child=_CrossSendChild())
+        ).run()
 
 
 # --- Replay determinism: counter ids are stable across snapshot boundary ------
@@ -300,14 +309,14 @@ async def test_internal_targeted_cross_broker_send_is_rejected() -> None:
 async def test_snapshot_plus_suffix_replay_matches_full_replay_ids() -> None:
     """A mid-run snapshot + journal suffix reconstructs the same invocation ids
     and child_seq as a full-journal replay (counter minting is deterministic)."""
-    handler = _TwiceParent(child=_CountingChild()).run()
+    handler = cast(Any, _TwiceParent)(child=_CountingChild()).run()
     await handler
     assert handler.ctx is not None
     face = handler.ctx._face
     assert isinstance(face, ExternalContext)
     journal = face._tick_log
 
-    workflow = _TwiceParent(child=_CountingChild())
+    workflow = cast(Any, _TwiceParent)(child=_CountingChild())
 
     # Full replay from a canonical initial state.
     full = rebuild_state_from_ticks(BrokerState.from_workflow(workflow), list(journal))
@@ -343,7 +352,7 @@ class _OrphanChildStop(StopEvent):
 def test_late_result_to_dead_broker_publishes_unhandled() -> None:
     """A worker result descending to an already-popped broker publishes an
     UnhandledEvent (the loud orphan burn-off) rather than crashing the loop."""
-    root = BrokerState.from_workflow(_SimpleParent(child=_SimpleChild()))
+    root = BrokerState.from_workflow(cast(Any, _SimpleParent)(child=_SimpleChild()))
     tick = TickStepResult(
         step_id=StepId((), "run_child"),
         worker_id=0,
@@ -394,7 +403,7 @@ class _TwoBranchChild(Workflow):
 
 
 class _TwoBranchParent(Workflow):
-    child: _TwoBranchChild
+    child: Annotated[_TwoBranchChild, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> _OrphanChildStart:
@@ -414,7 +423,7 @@ async def test_orphan_task_outliving_cancel_is_handled(
     cleanly via the child's StopEvent boundary, and the orphan is logged."""
     with caplog.at_level(logging.WARNING, logger="workflows.runtime.control_loop"):
         result = await asyncio.wait_for(
-            _TwoBranchParent(child=_TwoBranchChild()).run(), timeout=10
+            cast(Any, _TwoBranchParent)(child=_TwoBranchChild()).run(), timeout=10
         )
     assert result == "done"
 

@@ -13,9 +13,10 @@ timeout recovery.
 from __future__ import annotations
 
 import asyncio
+from typing import Annotated, Any, cast
 
 import pytest
-from workflows import Context, Workflow
+from workflows import ChildWorkflow, Context, Workflow
 from workflows.decorators import catch_error, step
 from workflows.errors import WorkflowRuntimeError, WorkflowTimeoutError
 from workflows.events import (
@@ -62,7 +63,7 @@ class _FanChild(Workflow):
 
 
 class _FanParent(Workflow):
-    child: _FanChild
+    child: Annotated[_FanChild, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> _ChildFanStart:
@@ -79,7 +80,7 @@ async def test_child_list_fan_in_joins_all_items() -> None:
     namespace and joins every item — previously the binding was computed
     root-only, so the child collect never bound and every item was dropped.
     """
-    result = await WorkflowTestRunner(_FanParent(child=_FanChild())).run()
+    result = await WorkflowTestRunner(cast(Any, _FanParent)(child=_FanChild())).run()
     assert result.result == 6
 
 
@@ -106,7 +107,7 @@ class _ReuseChild(Workflow):
 
 
 class _ReuseParent(Workflow):
-    child: _ReuseChild
+    child: Annotated[_ReuseChild, ChildWorkflow]
 
     @step
     async def fan(self, ev: StartEvent) -> list[_Shared]:
@@ -124,7 +125,9 @@ async def test_root_stream_accounting_ignores_same_typed_child_step() -> None:
     child's ``also_accepts_shared`` is not counted into the root stream's open
     work items (which previously left a phantom item open forever).
     """
-    result = await WorkflowTestRunner(_ReuseParent(child=_ReuseChild())).run()
+    result = await WorkflowTestRunner(
+        cast(Any, _ReuseParent)(child=_ReuseChild())
+    ).run()
     assert result.result == 1
 
 
@@ -132,7 +135,7 @@ def test_root_binding_id_is_byte_identical_to_pre_namespace_format() -> None:
     """Root binding ids embed the bare step name (no namespace prefix), so a
     snapshot written before the StepId conversion still resolves on resume.
     """
-    state = BrokerState.from_workflow(_ReuseParent(child=_ReuseChild()))
+    state = BrokerState.from_workflow(cast(Any, _ReuseParent)(child=_ReuseChild()))
     root_bindings = [
         b
         for b in state.config.collection_bindings.values()
@@ -184,7 +187,7 @@ class _MidStop(StopEvent):
 
 
 class _MidChild(Workflow):
-    grand: _GrandFanChild
+    grand: Annotated[_GrandFanChild, ChildWorkflow]
 
     @step
     async def start(self, ev: _MidStart) -> _GrandStart:
@@ -196,7 +199,7 @@ class _MidChild(Workflow):
 
 
 class _GrandParent(Workflow):
-    mid: _MidChild
+    mid: Annotated[_MidChild, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> _MidStart:
@@ -212,7 +215,7 @@ async def test_grandchild_fan_in_binds_within_its_own_namespace() -> None:
     """A ``list[E]`` join three levels deep binds within the grandchild
     namespace ``(mid, grand)``."""
     result = await WorkflowTestRunner(
-        _GrandParent(mid=_MidChild(grand=_GrandFanChild()))
+        cast(Any, _GrandParent)(mid=cast(Any, _MidChild)(grand=_GrandFanChild()))
     ).run()
     assert result.result == 7
 
@@ -239,7 +242,7 @@ class _HitlChild(Workflow):
 
 
 class _HitlParent(Workflow):
-    child: _HitlChild
+    child: Annotated[_HitlChild, ChildWorkflow]
 
     @step
     async def start(self, ev: StartEvent) -> _HitlChildStart:
@@ -256,7 +259,7 @@ async def test_child_human_input_resolves_via_targeted_send() -> None:
     targeted ``send_event(resp, step="child/answer")`` that descends into the
     child namespace, and the run completes instead of timing out.
     """
-    handler = _HitlParent(child=_HitlChild()).run()
+    handler = cast(Any, _HitlParent)(child=_HitlChild()).run()
     saw_request = False
     async for ev in handler.stream_events(include_children=True):
         if isinstance(ev, InputRequiredEvent):
@@ -274,7 +277,7 @@ async def test_child_human_input_resolves_via_targeted_send() -> None:
 def test_resolve_target_rejects_unknown_child_step_with_actionable_error() -> None:
     """A bad child target names the valid namespaced steps, not just 'does not
     exist'."""
-    wf = _HitlParent(child=_HitlChild())
+    wf = cast(Any, _HitlParent)(child=_HitlChild())
     with pytest.raises(WorkflowRuntimeError) as excinfo:
         wf._resolve_target_step(
             "child/nope",
@@ -317,7 +320,7 @@ def test_pop_child_record_drops_descendants_only() -> None:
     drops that child and every descendant broker, leaving sibling/ancestor
     brokers untouched."""
     root = BrokerState.from_workflow(
-        _GrandParent(mid=_MidChild(grand=_GrandFanChild()))
+        cast(Any, _GrandParent)(mid=cast(Any, _MidChild)(grand=_GrandFanChild()))
     )
     mid_config = root.config.child_configs["mid"]
     grand_config = mid_config.child_configs["grand"]
@@ -372,7 +375,7 @@ class _BranchDone(Event):
 
 
 class _OrphanParent(Workflow):
-    child: _RecoveringSlowChild
+    child: Annotated[_RecoveringSlowChild, ChildWorkflow]
 
     @step
     async def begin(
@@ -403,7 +406,9 @@ async def test_caught_child_timeout_cancels_orphan_no_loop_crash() -> None:
     cannot later report into a torn-down worker slot and crash the loop with
     'Worker not found in in_progress'. The run completes via recovery + the
     parent branch."""
-    handler = _OrphanParent(child=_RecoveringSlowChild(timeout=0.05), timeout=30).run()
+    handler = cast(Any, _OrphanParent)(
+        child=_RecoveringSlowChild(timeout=0.05), timeout=30
+    ).run()
     result = await asyncio.wait_for(handler, timeout=10)
     assert result == "done"
 
@@ -445,7 +450,7 @@ class _KeepAlive(Event):
 
 
 class _LeakParent(Workflow):
-    child: _LeakChild
+    child: Annotated[_LeakChild, ChildWorkflow]
 
     @step
     async def begin(self, ctx: Context, ev: StartEvent) -> _LeakChildStart | _KeepAlive:
@@ -472,7 +477,7 @@ async def test_child_stop_terminates_sibling_no_double_fire() -> None:
     surfaces exactly one StopEvent to the parent — the boundary terminates the
     whole child namespace, cancelling the slow sibling before it can fire a
     second StopEvent."""
-    handler = _LeakParent(child=_LeakChild(), timeout=30).run()
+    handler = cast(Any, _LeakParent)(child=_LeakChild(), timeout=30).run()
     result = await asyncio.wait_for(handler, timeout=10)
     assert result == 1
 
@@ -505,7 +510,7 @@ class _GTeardownFast(Event):
 
 
 class _GTeardownChild(Workflow):
-    grand: _GTeardownGrand
+    grand: Annotated[_GTeardownGrand, ChildWorkflow]
 
     @step
     async def begin(
@@ -527,7 +532,7 @@ class _GTeardownChild(Workflow):
 
 
 class _GTeardownParent(Workflow):
-    child: _GTeardownChild
+    child: Annotated[_GTeardownChild, ChildWorkflow]
 
     @step
     async def begin(self, ev: StartEvent) -> _GTeardownChildStart:
@@ -543,7 +548,9 @@ async def test_child_stop_tears_down_inflight_grandchild() -> None:
     """When a child returns its StopEvent, an in-flight grandchild is torn down
     with it (prefix teardown + task cancellation), so the grandchild's later
     completion never surfaces and the run completes cleanly."""
-    handler = _GTeardownParent(child=_GTeardownChild(grand=_GTeardownGrand())).run()
+    handler = cast(Any, _GTeardownParent)(
+        child=cast(Any, _GTeardownChild)(grand=_GTeardownGrand())
+    ).run()
     result = await asyncio.wait_for(handler, timeout=10)
     assert result == "done"
     # Give a cancelled grandchild's 0.4s sleep time to (not) fire.
@@ -572,7 +579,7 @@ class _ReArmingChild(Workflow):
 
 
 class _ReArmParent(Workflow):
-    child: _ReArmingChild
+    child: Annotated[_ReArmingChild, ChildWorkflow]
 
     @step
     async def begin(self, ev: StartEvent) -> _ReArmChildStart:
@@ -587,6 +594,8 @@ class _ReArmParent(Workflow):
 async def test_rearming_child_timeout_bounded_by_max_recoveries() -> None:
     """A child whose @catch_error re-arms the timeout fails the run after
     max_recoveries, instead of looping forever."""
-    handler = _ReArmParent(child=_ReArmingChild(timeout=0.05), timeout=30).run()
+    handler = cast(Any, _ReArmParent)(
+        child=_ReArmingChild(timeout=0.05), timeout=30
+    ).run()
     with pytest.raises(WorkflowTimeoutError):
         await asyncio.wait_for(handler, timeout=10)
