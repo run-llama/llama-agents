@@ -52,7 +52,7 @@ report = Report(summarize=Summarize())
 result = await report.run()
 ```
 
-The marked field lets `Report(summarize=Summarize())` pass the child to a generated constructor alongside base config arguments like `timeout`. If you would rather build the child yourself, write your own `__init__` and assign `self.summarize = Summarize()` after calling `super().__init__()`. Either way the child is wired in by the time construction finishes. A plain `Workflow` annotation can still describe a helper, but it does not create a child slot or constructor argument.
+The marked field lets `Report(summarize=Summarize())` pass the child to a generated constructor alongside base config arguments like `timeout`. Static type checkers cannot infer child keyword arguments on that constructor, so type-checked code should define a typed `__init__` that accepts them. If you would rather build the child yourself, write your own `__init__` and assign `self.summarize = Summarize()` after calling `super().__init__()`. Either way the child is wired in by the time construction finishes. A plain `Workflow` annotation can still describe a helper, but it does not create a child slot or constructor argument.
 
 ## The start and stop boundary
 
