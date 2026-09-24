@@ -218,10 +218,12 @@ def _effective_now(tick: WorkflowTick, now_seconds: float) -> float:
 def _tick_stamp(tick: WorkflowTick) -> float | None:
     """The tick's journaled wall-clock stamp, or None for unstamped ticks.
 
-    Only stamped ticks accrue alive time. Old markerless journals carry no
-    stamps, so they replay with an empty budget and never fire a spurious
-    timeout under the legacy fallback.
+    Old markerless journals carry no stamps, so they replay with an empty
+    budget and never fire a spurious timeout under the legacy fallback.
     """
+    # Only stamped ticks accrue alive time. Graceful cancellation and tick-based
+    # idle release drop time since the last stamp. The server runtime's idle
+    # release aborts without emitting TickIdleRelease.
     return tick.stamped_at if isinstance(tick, STAMPED_TICK_TYPES) else None
 
 
