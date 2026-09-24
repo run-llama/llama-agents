@@ -9,7 +9,7 @@ stream.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any, cast
 
 import pytest
 from llama_agents.server import (
@@ -80,7 +80,7 @@ def _make_parent_server(store: SqliteWorkflowStore) -> WorkflowServer:
     server = WorkflowServer(workflow_store=store, idle_timeout=0.01)
     server.add_workflow(
         "parent",
-        DurableParent(child=DurableChild()),
+        cast(Any, DurableParent)(child=DurableChild()),
         additional_events=[HumanResponseEvent],
     )
     return server
@@ -168,7 +168,7 @@ async def test_child_events_tagged_with_origin_namespace(
     server = WorkflowServer(workflow_store=memory_store, idle_timeout=0.01)
     server.add_workflow(
         "parent",
-        DurableParent(child=DurableChild()),
+        cast(Any, DurableParent)(child=DurableChild()),
         additional_events=[HumanResponseEvent],
     )
 
@@ -246,7 +246,9 @@ async def test_grandchild_state_isolated_per_namespace_row(
     server = WorkflowServer(workflow_store=sqlite_store, idle_timeout=0.01)
     server.add_workflow(
         "grandparent",
-        DurableGrandparent(child=DurableMid(grand=DurableGrandchild())),
+        cast(Any, DurableGrandparent)(
+            child=cast(Any, DurableMid)(grand=DurableGrandchild())
+        ),
     )
 
     async with server.contextmanager():
@@ -310,7 +312,7 @@ async def test_fork_restores_child_state_when_first_access_is_in_child(
     await src_child.set("carried", "restored-value")
 
     server = WorkflowServer(workflow_store=sqlite_store, idle_timeout=0.01)
-    wf = CarryParent(child=CarryChild())
+    wf = cast(Any, CarryParent)(child=CarryChild())
     server.add_workflow("carry", wf)
 
     async with server.contextmanager():

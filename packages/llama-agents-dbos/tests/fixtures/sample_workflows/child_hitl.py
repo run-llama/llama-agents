@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from pydantic import Field
+from workflows import ChildWorkflow, Workflow
 from workflows.context import Context
 from workflows.decorators import step
 from workflows.events import (
@@ -20,7 +21,6 @@ from workflows.events import (
     StartEvent,
     StopEvent,
 )
-from workflows import ChildWorkflow, Workflow
 
 
 class AskInputEvent(InputRequiredEvent):

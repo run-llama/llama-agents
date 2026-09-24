@@ -9,9 +9,8 @@ namespace persists to its own durable state row.
 
 from __future__ import annotations
 
-from typing import Annotated
-
 from collections.abc import Generator
+from typing import Annotated, Any, cast
 
 import pytest
 from dbos import DBOS, DBOSConfig
@@ -81,7 +80,7 @@ async def test_dbos_child_state_isolated_per_namespace(
 ) -> None:
     """A parent and its child run in one DBOS workflow with isolated state."""
     with dbos_runtime.registering():
-        parent = StateParent(child=StateChild())
+        parent = cast(Any, StateParent)(child=StateChild())
     await dbos_runtime.launch()
 
     result = await WorkflowTestRunner(parent).run()
@@ -140,7 +139,9 @@ class GrandParent(Workflow):
 async def test_dbos_grandchild_state_isolated(dbos_runtime: DBOSRuntime) -> None:
     """Three nesting levels each persist to their own durable state row."""
     with dbos_runtime.registering():
-        parent = GrandParent(child=MidChild(grand=StateGrandchild()))
+        parent = cast(Any, GrandParent)(
+            child=cast(Any, MidChild)(grand=StateGrandchild())
+        )
     await dbos_runtime.launch()
 
     result = await WorkflowTestRunner(parent).run()
