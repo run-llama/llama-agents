@@ -263,11 +263,6 @@ def _child_forms_boundary(
     return False
 
 
-def _config_field(*, alias: str, default: Any = None) -> Any:
-    """dataclass_transform field specifier for Workflow config params."""
-    return default
-
-
 class WorkflowMeta(type):
     # Defined only at runtime, hidden from type checkers. As a metaclass
     # __call__ it is the single entry point for every instantiation and sits
@@ -441,27 +436,6 @@ class Workflow(metaclass=WorkflowMeta):
     _step_functions_version: ClassVar[int] = 0
 
     _child_workflow_slots_cache: ClassVar[dict[str, type[Workflow]] | None] = None
-
-    # Phantom dataclass_transform fields for typed subclass constructors.
-    _timeout_arg: float | None = _config_field(alias="timeout", default=_UNSET_TIMEOUT)
-    _disable_validation_arg: bool = _config_field(
-        alias="disable_validation", default=False
-    )
-    _verbose_arg: bool = _config_field(alias="verbose", default=False)
-    _resource_manager_arg: ResourceManager | None = _config_field(
-        alias="resource_manager", default=None
-    )
-    _num_concurrent_runs_arg: int | None = _config_field(
-        alias="num_concurrent_runs", default=None
-    )
-    _runtime_arg: Runtime | None = _config_field(alias="runtime", default=None)
-    _workflow_name_arg: str | None = _config_field(alias="workflow_name", default=None)
-    _serializer_arg: BaseSerializer | None = _config_field(
-        alias="serializer", default=None
-    )
-    _skip_graph_checks_arg: set[WorkflowGraphCheck] | None = _config_field(
-        alias="skip_graph_checks", default=None
-    )
 
     def __init__(
         self,
