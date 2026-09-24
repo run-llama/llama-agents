@@ -1,4 +1,3 @@
-# ty: ignore[unknown-argument]
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LlamaIndex Inc.
 """Load-and-replay checks for current golden serialization fixtures.

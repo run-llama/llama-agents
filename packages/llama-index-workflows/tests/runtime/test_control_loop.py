@@ -169,7 +169,7 @@ def run_control_loop(
     step_workers = {}
     for name, step_func in workflow._get_steps().items():
         unbound = getattr(step_func, "__func__", step_func)
-        step_workers[name] = as_step_worker_function(unbound)
+        step_workers[StepId.root(name)] = as_step_worker_function(unbound)
     run_id = str(uuid.uuid4())
     # Set up mock runtime with the test adapter
     mock_runtime = MockRuntime()
@@ -685,7 +685,7 @@ async def test_control_loop_defers_idle_behind_buffered_tick(
     step_workers = {}
     for name, step_func in workflow._get_steps().items():
         unbound = getattr(step_func, "__func__", step_func)
-        step_workers[name] = as_step_worker_function(unbound)
+        step_workers[StepId.root(name)] = as_step_worker_function(unbound)
 
     run_id = str(uuid.uuid4())
     mock_runtime = MockRuntime()

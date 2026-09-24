@@ -15,7 +15,13 @@ from workflows.runtime.types.plugin import (
 )
 
 from .errors import WorkflowCancelledByUser, WorkflowRuntimeError
-from .events import Event, InternalDispatchEvent, StopEvent, WorkflowCancelledEvent
+from .events import (
+    Event,
+    InternalDispatchEvent,
+    StopEvent,
+    WorkflowCancelledEvent,
+    get_event_origin_namespace,
+)
 from .types import RunResultT
 
 if TYPE_CHECKING:
@@ -102,7 +108,7 @@ class WorkflowHandler(Awaitable[RunResultT]):
         return self._result_task.done()
 
     async def stream_events(
-        self, expose_internal: bool = False
+        self, expose_internal: bool = False, include_children: bool = False
     ) -> AsyncGenerator[Event, None]:
         """
         Stream events from the workflow execution as they occur.
@@ -117,6 +123,11 @@ class WorkflowHandler(Awaitable[RunResultT]):
 
         Args:
             expose_internal (bool): Whether to expose internal events.
+            include_children (bool): Whether to surface events published from
+                within child-workflow executions. Off by default so existing
+                parent consumers are unaffected; when on, child events are
+                yielded tagged with their origin namespace (read via
+                [`get_event_origin_namespace`][workflows.events.get_event_origin_namespace]).
 
         Returns:
             AsyncGenerator[Event, None]: An async generator that yields Event objects
@@ -155,9 +166,15 @@ class WorkflowHandler(Awaitable[RunResultT]):
         async for ev in self.ctx.stream_events():
             if isinstance(ev, InternalDispatchEvent) and not expose_internal:
                 continue
+            is_child = bool(get_event_origin_namespace(ev))
+            if is_child and not include_children:
+                continue
             yield ev
 
-            if isinstance(ev, StopEvent):
+            # Only the root StopEvent terminates the run (child StopEvents are
+            # boundary events that are never published); break solely on it so a
+            # child writing a StopEvent to the stream can't truncate the parent.
+            if isinstance(ev, StopEvent) and not is_child:
                 self._all_events_consumed = True
                 break
 
