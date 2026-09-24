@@ -37,8 +37,8 @@ dependencies = [
 # Optionals are now just an alias to additionally install
 # a less pinned version of the client/server packages.
 [project.optional-dependencies]
-server = ["llama-agents-server>=0.1.0,<1.0.0"]
-client = ["llama-agents-client>=0.1.0,<1.0.0"]
+server = ["llama-agents-server>=0.8.1,<1.0.0"]
+client = ["llama-agents-client>=0.4.1,<1.0.0"]
 
 [tool.basedpyright]
 exclude = ["**/.venv", "**/node_modules", "**/.uv"]

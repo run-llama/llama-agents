@@ -634,6 +634,7 @@ class _WorkflowAPI:
         after_sequence: int | None,
         include_internal: bool,
         include_qualified_name: bool,
+        include_children: bool = False,
     ) -> AsyncGenerator[tuple[int, EventEnvelopeWithMetadata], None] | None:
         """Resolve a handler to an event stream.
 
@@ -643,6 +644,9 @@ class _WorkflowAPI:
                 (skip historical events).
             include_internal: Whether to include internal dispatch events.
             include_qualified_name: Whether to include qualified_name in envelopes.
+            include_children: Whether to surface events published from child
+                workflow invocations (tagged with a non-empty origin namespace).
+                Root events are always included.
 
         Returns:
             An async generator of (sequence, envelope) tuples, or None if the
@@ -699,6 +703,8 @@ class _WorkflowAPI:
                 envelope = stored_event.event
                 types = (envelope.types or []) + [envelope.type]
                 if not include_internal and _INTERNAL_EVENT_TYPE in types:
+                    continue
+                if envelope.origin_namespace and not include_children:
                     continue
                 if not include_qualified_name:
                     envelope = envelope.model_copy(update={"qualified_name": None})
@@ -860,6 +866,13 @@ class _WorkflowAPI:
               default: false
             description: If true, include internal workflow events (e.g., step state changes).
           - in: query
+            name: include_children
+            required: false
+            schema:
+              type: boolean
+              default: false
+            description: If true, include events published from child workflow invocations.
+          - in: query
             name: after_sequence
             required: false
             schema:
@@ -917,6 +930,9 @@ class _WorkflowAPI:
         include_qualified_name = (
             request.query_params.get("include_qualified_name", "true").lower() == "true"
         )
+        include_children = (
+            request.query_params.get("include_children", "false").lower() == "true"
+        )
         sse = request.query_params.get("sse", "true").lower() == "true"
         after_sequence_str = request.query_params.get("after_sequence", "now")
         after_sequence_is_now = after_sequence_str.lower() == "now"
@@ -945,6 +961,7 @@ class _WorkflowAPI:
             after_sequence=after_sequence,
             include_internal=include_internal,
             include_qualified_name=include_qualified_name,
+            include_children=include_children,
         )
         if gen is None:
             raise HTTPException(detail="Handler is completed", status_code=204)
