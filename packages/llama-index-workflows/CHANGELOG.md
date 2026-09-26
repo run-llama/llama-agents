@@ -1,5 +1,11 @@
 # llama-index-workflows
 
+## 2.25.0
+
+### Minor Changes
+
+- 181f7fd: Workflow timeouts now measure accumulated alive time across resumes instead of resetting on each resume; long-suspended runs that repeatedly resume can now time out where they previously would not.
+
 ## 2.24.1
 
 ### Patch Changes

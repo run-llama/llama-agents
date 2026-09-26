@@ -1,5 +1,15 @@
 # llama-agents
 
+## 0.12.7
+
+### Patch Changes
+
+- c5a5b10: Patch known vulnerabilities in the operator, appserver and control plane images by updating Go, npm, pip and Python dependencies
+- Updated dependencies [c5a5b10]
+  - llama-agents-operator@0.11.3
+  - llama-agents-appserver@0.12.1
+  - llama-agents-control-plane@0.12.5
+
 ## 0.12.6
 
 ### Patch Changes
