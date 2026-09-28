@@ -265,7 +265,14 @@ class AbstractWorkflowStore(ABC):
 
     @staticmethod
     def _is_terminal_event(event: StoredEvent) -> bool:
-        """Check if a stored event is terminal (StopEvent or subclass, etc.)."""
+        """Check if a stored event is terminal (StopEvent or subclass, etc.).
+
+        A StopEvent carrying a child origin namespace is a boundary event a
+        child step wrote to the stream via ``write_event_to_stream``; only the
+        root StopEvent terminates the run's event stream.
+        """
+        if event.event.origin_namespace:
+            return False
         types = (event.event.types or []) + [event.event.type]
         return StopEvent.__name__ in types
 

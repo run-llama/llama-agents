@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,7 @@ from workflows.events import (
     StopEvent,
     WorkflowCancelledEvent,
     WorkflowFailedEvent,
+    _set_event_origin_namespace,
 )
 
 
@@ -302,3 +304,23 @@ async def test_stream_ticks_empty_history(
     async for tick in store.stream_ticks("empty-run"):
         yielded.append(tick)
     assert yielded == []
+
+
+def _stored(event: Event) -> StoredEvent:
+    return StoredEvent(
+        run_id="run-1",
+        sequence=0,
+        timestamp=datetime.now(timezone.utc),
+        event=EventEnvelopeWithMetadata.from_event(event),
+    )
+
+
+def test_child_origin_stop_event_is_not_terminal() -> None:
+    """A StopEvent carrying a child origin namespace is a boundary event a child
+    wrote to the stream; it must not terminate the run's event stream."""
+    root_stop = _stop()
+    child_stop = _stop()
+    _set_event_origin_namespace(child_stop, ("child#0",))
+
+    assert AbstractWorkflowStore._is_terminal_event(_stored(root_stop)) is True
+    assert AbstractWorkflowStore._is_terminal_event(_stored(child_stop)) is False

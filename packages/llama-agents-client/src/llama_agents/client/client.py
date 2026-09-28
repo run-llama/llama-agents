@@ -367,6 +367,7 @@ class WorkflowClient:
         include_internal_events: bool = False,
         after_sequence: int | Literal["now"] = -1,
         max_reconnect_attempts: int = 3,
+        include_children: bool = False,
     ) -> EventStream:
         """Stream events as they are produced by the workflow.
 
@@ -391,12 +392,15 @@ class WorkflowClient:
                 after sequence ``N``.
             max_reconnect_attempts: Maximum reconnect attempts on connection
                 drop. Defaults to ``3``.
+            include_children: Surface events published from child workflow
+                invocations. Defaults to ``False`` (root events only).
         """
         queue: asyncio.Queue[_QueueItem] = asyncio.Queue()
         stream = EventStream(queue, None, after_sequence)
 
         async def reader() -> None:
             incl_inter = "true" if include_internal_events else "false"
+            incl_children = "true" if include_children else "false"
             url = f"/events/{handler_id}"
             last_sequence: int | Literal["now"] = after_sequence
             attempts = 0
@@ -410,6 +414,7 @@ class WorkflowClient:
                                 params={
                                     "sse": "true",
                                     "include_internal": incl_inter,
+                                    "include_children": incl_children,
                                     "after_sequence": str(last_sequence),
                                 },
                                 headers={"Connection": "keep-alive"},

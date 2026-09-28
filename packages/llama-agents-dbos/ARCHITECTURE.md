@@ -106,6 +106,16 @@ Tick persistence is provided by `TickPersistenceDecorator` in the decorator chai
 
 Both operations go through the database, so any replica can resume an idle-released workflow — the new DBOS workflow starts on whichever replica handles the incoming event.
 
+## Child Workflows
+
+A child workflow invocation is a nested broker reduced by the same control loop as its parent (see `architecture-docs/control-loop.md`). On DBOS this has three consequences:
+
+- **One DBOS workflow per run.** A child does not get its own `@DBOS.workflow` control loop; it runs inside the parent's. `DBOSRuntime._register_child_workflows = False` makes `Workflow._attach_child` untrack a child so it is never registered as a separate, top-level DBOS workflow. The flag is read off the workflow's runtime through the decorator chain (`BaseRuntimeDecorator` forwards it), so it holds even when DBOS is wrapped by the idle-release/persistence decorators. Idle release therefore only ever tracks the root.
+- **Child steps are registered under the parent, by static slot path.** `register()` wraps every namespaced step from `workflow._get_namespaced_steps()`, so a child step is a DBOS step named `f"{parent}.{slot}/{step}"` (e.g. `parent.child/process`). Registration happens once, from the static topology; runtime invocation ids (`child#0`, `child#0/grand#1`) never enter a DBOS-registered name. The control loop projects a runtime path onto its static slot path (`slot_namespace`) to look the step up at dispatch.
+- **State is one durable row per namespace.** `InternalDBOSAdapter.get_state_store(namespace)` routes the invocation path into a `PostgresStateStore`/`SqliteStateStore` bound to that `(run_id, namespace)`, caching per namespace and resolving the typed state model by static slot path. Resuming a run splits a portable snapshot into per-namespace seeds (`namespaced_seed_payloads`); a durable handle instead seeds only the root and relies on `copy_from_handle` to fan out every namespace row for the `run_id`. Completed children are popped from the broker tree and their rows are retained but not re-enumerated as live.
+
+Because children ride in the parent's journal and durable rows, idle release and resume work unchanged: a suspended child waiter is reconstructed from the tick log on resume, and the child's elapsed-alive timeout budget forgives the release downtime.
+
 ## Guidelines for DBOS Code
 
 **Process boundary awareness**: External adapter methods may execute in a different process from the workflow. They must communicate exclusively through the database — no local state, no asyncio task references. Internal adapter methods are co-located with the workflow and can use process-local state when needed.
