@@ -18,13 +18,20 @@ from llama_index_instrumentation import get_dispatcher
 
 from workflows.context.serializers import BaseSerializer
 from workflows.context.state_store import (
-    InMemoryStateStore,
+    NamespacedStateStores,
     StateStore,
-    infer_state_type,
+    build_namespaced_state,
+    in_memory_namespace_factory,
     is_durable_serialized_state,
+    namespaced_state_types,
 )
 from workflows.errors import WorkflowRuntimeError
-from workflows.events import Event, StartEvent, StopEvent
+from workflows.events import (
+    Event,
+    StartEvent,
+    StopEvent,
+    get_event_origin_namespace,
+)
 from workflows.runtime.types.internal_state import BrokerState
 from workflows.runtime.types.plugin import (
     ExternalRunAdapter,
@@ -60,12 +67,14 @@ class AsyncioAdapterQueues:
         self,
         run_id: str,
         init_state: BrokerState,
-        state_store: StateStore[Any] | None = None,
+        namespaced: NamespacedStateStores | None = None,
     ):
         self.run_id = run_id
         self.init_state = init_state
         self.ticks: list[WorkflowTick] = []
-        self.state_store = state_store
+        # Per-namespace in-memory stores for the run; each namespace owns an
+        # isolated record. ``None`` until run_workflow() builds it.
+        self.namespaced = namespaced
 
     # created lazily via cached_property for Python 3.14+ compatibility (they require a running event loop)
     @functools.cached_property
@@ -140,9 +149,9 @@ class InternalAsyncioAdapter(InternalRunAdapter, SnapshottableAdapter):
     def get_state_store(
         self, namespace: tuple[str, ...] = ()
     ) -> StateStore[Any] | None:
-        if namespace:
+        if self._queues.namespaced is None:
             return None
-        return self._queues.state_store
+        return self._queues.namespaced.view(namespace)
 
 
 class ExternalAsyncioAdapter(
@@ -176,7 +185,11 @@ class ExternalAsyncioAdapter(
             while True:
                 item = await self._queues.publish_queue.get()
                 yield item
-                if isinstance(item, StopEvent):
+                # Only the root StopEvent terminates the stream. A child step can
+                # write its own StopEvent to the stream via write_event_to_stream;
+                # that event carries a child origin namespace and must not
+                # truncate the parent's stream.
+                if isinstance(item, StopEvent) and not get_event_origin_namespace(item):
                     break
 
     def replay(self) -> list[WorkflowTick]:
@@ -185,9 +198,9 @@ class ExternalAsyncioAdapter(
     def get_state_store(
         self, namespace: tuple[str, ...] = ()
     ) -> StateStore[Any] | None:
-        if namespace:
+        if self._queues.namespaced is None:
             return None
-        return self._queues.state_store
+        return self._queues.namespaced.view(namespace)
 
     async def get_result(self) -> StopEvent:
         return await self._queues.complete
@@ -287,11 +300,18 @@ class BasicRuntime(Runtime):
 
         registered = self.get_or_register(workflow)
 
-        # Create state store from serialized state or infer type from workflow
+        # Build per-namespace in-memory stores, seeding the whole tree from a
+        # portable snapshot when resuming. Each namespace owns an isolated record.
         active_serializer = (
             serializer
             if serializer is not None
             else workflow.runtime.get_serializer(workflow)
+        )
+        state_types = namespaced_state_types(registered.workflow)
+        namespaced = build_namespaced_state(
+            registered.workflow,
+            in_memory_namespace_factory(state_types),
+            active_serializer,
         )
         if serialized_state:
             if is_durable_serialized_state(serialized_state):
@@ -300,16 +320,10 @@ class BasicRuntime(Runtime):
                     f"BasicRuntime cannot restore durable state store '{store_type}'. "
                     "Use the matching durable runtime or pass an in-memory context snapshot."
                 )
-            state_store = InMemoryStateStore.from_dict(
-                serialized_state, active_serializer
-            )
-        else:
-            # Infer state type from workflow step configs
-            state_type = infer_state_type(registered.workflow)
-            state_store = InMemoryStateStore(state_type())
+            namespaced.add_seed_tree(serialized_state, active_serializer)
         # might want to lock this better. Unlikely race condition if you spam with the same run_id.
         queues = self._get_or_create_queues(run_id, init_state)
-        queues.state_store = state_store
+        queues.namespaced = namespaced
 
         # Capture propagation context (otel trace, instrument tags, etc.)
         # BEFORE creating the task — contextvars won't be inherited.

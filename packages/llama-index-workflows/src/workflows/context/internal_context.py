@@ -13,7 +13,9 @@ from typing import TYPE_CHECKING, Any, Coroutine, Generic, TypeVar, cast
 from workflows.context.context_types import MODEL_T
 from workflows.context.state_store import StateStore
 from workflows.errors import WorkflowRuntimeError
+from workflows.events import _set_event_origin_namespace
 from workflows.retry_policy import RetryInfo
+from workflows.runtime.types.invocation import slot_namespace
 from workflows.runtime.types.results import (
     AddCollectedEvent,
     AddWaiter,
@@ -51,9 +53,14 @@ class InternalContext(Generic[MODEL_T]):
         self,
         internal_adapter: InternalRunAdapter,
         workflow: Workflow,
+        state_store: StateStore[Any] | None = None,
     ) -> None:
         self._internal_adapter = internal_adapter
         self._workflow = workflow
+        # The per-namespace state view threaded in by the control loop for a
+        # step. ``None`` outside a step (e.g. the run-level context); ``store``
+        # then resolves the root view on demand from the underlying store.
+        self._state_store = state_store
         self._workers = []
 
     def _execute_task(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
@@ -141,11 +148,18 @@ class InternalContext(Generic[MODEL_T]):
 
     @property
     def store(self) -> StateStore[MODEL_T]:
-        """Access workflow state store."""
-        state_store = self._internal_adapter.get_state_store(())
-        if state_store is None:
+        """Access workflow state store.
+
+        Inside a step the per-namespace view is threaded in at construction. For
+        a context built outside a step (no threaded view), resolve the root
+        namespace's store on demand from the adapter.
+        """
+        if self._state_store is not None:
+            return cast("StateStore[MODEL_T]", self._state_store)
+        store = self._internal_adapter.get_state_store(())
+        if store is None:
             raise RuntimeError("State store not available from adapter")
-        return state_store  # type: ignore[return-value]
+        return cast("StateStore[MODEL_T]", store)
 
     def collect_events(
         self,
@@ -186,22 +200,49 @@ class InternalContext(Generic[MODEL_T]):
         return total
 
     def send_event(self, message: Event, step: str | None = None) -> None:
-        """Send an event to trigger another step."""
-        if step is not None:
-            self._workflow._validate_valid_step_message(step, message)
+        """Send an event to trigger another step.
 
+        A targeted ``send_event(step=...)`` is **broker-local**: the target is a
+        bare step name resolved against the emitting step's own workflow. A
+        child triggers only via the StartEvent it returns; addressing another
+        broker (a child's step, or a parent/root step from inside a child) is
+        rejected loudly.
+        """
         recovery_counts: dict[str, int] = {}
+        namespace: tuple[str, ...] = ()
         try:
             step_ctx = StepWorkerStateContextVar.get()
             recovery_counts = dict(step_ctx.retry.recovery_counts)
+            # Inherit the emitting step's namespace so the event routes within
+            # the same broker.
+            namespace = step_ctx.namespace
         except LookupError:
             pass
+
+        step_id = None
+        if step is not None:
+            parsed = StepId.from_str(step)
+            if parsed.namespace:
+                raise WorkflowRuntimeError(
+                    f"ctx.send_event(step={step!r}) addresses another broker. A "
+                    "step's targeted send is broker-local: use a bare step name "
+                    "to target a sibling step in the same workflow. Triggering a "
+                    "child happens by returning its StartEvent, not by targeting "
+                    "its steps."
+                )
+            # Validate the bare target against this broker's own step set (the
+            # emitting namespace's static projection), then deliver it locally.
+            base_namespace = slot_namespace(namespace)
+            static_step = "/".join((*base_namespace, parsed.name))
+            self._workflow._resolve_target_step(static_step, message)
+            step_id = StepId((), parsed.name)
 
         self._execute_task(
             self._internal_adapter.send_event(
                 TickAddEvent(
                     event=message,
-                    step_id=StepId.root(step) if step is not None else None,
+                    step_id=step_id,
+                    origin_namespace=namespace,
                     recovery_counts=recovery_counts,
                 )
             )
@@ -262,6 +303,16 @@ class InternalContext(Generic[MODEL_T]):
     def write_event_to_stream(self, ev: Event | None) -> None:
         """Write an event to the published event stream."""
         if ev is not None:
+            # Tag the event with the emitting step's namespace so child streams
+            # can be filtered out by default (and surfaced via
+            # ``stream_events(include_children=True)``). Same contextvar source
+            # ``send_event`` reads; root steps leave the default ``()``.
+            try:
+                namespace = StepWorkerStateContextVar.get().namespace
+            except LookupError:
+                namespace = ()
+            if namespace:
+                _set_event_origin_namespace(ev, namespace)
             self._execute_task(self._internal_adapter.write_to_event_stream(ev))
 
     def retry_info(self) -> RetryInfo:

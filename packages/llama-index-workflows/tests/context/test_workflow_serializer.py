@@ -96,6 +96,29 @@ async def test_default_context_restore_resolves_undeclared_store_value() -> None
 
 
 @pytest.mark.asyncio
+async def test_context_export_serializes_root_value_once() -> None:
+    class CountingSerializer(JsonSerializer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.root_calls = 0
+
+        def serialize(self, value: Any) -> str:
+            if value == "root sentinel":
+                self.root_calls += 1
+            return super().serialize(value)
+
+    workflow = ExampleWorkflow()
+    context = Context(workflow)
+    await workflow.run(ctx=context)
+    await context.store.set("value", "root sentinel")
+    serializer = CountingSerializer()
+
+    context.to_dict(serializer)
+
+    assert serializer.root_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_default_context_restore_resolves_typed_state_model() -> None:
     workflow = TypedWorkflow()
     context = Context(workflow)

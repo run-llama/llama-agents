@@ -9,7 +9,6 @@ from enum import Enum
 
 from workflows._event_matching import (
     step_accepts_event,
-    step_accepts_type,
 )
 from workflows.collect import Collect, Take
 from workflows.errors import (
@@ -17,12 +16,14 @@ from workflows.errors import (
 )
 from workflows.events import (
     Event,
+    StartEvent,
 )
 from workflows.runtime.types.commands import (
     WorkflowCommand,
     indicates_exit,
 )
 from workflows.runtime.types.internal_state import (
+    BrokerConfig,
     BrokerState,
     CollectionBinding,
     CollectionReleaseState,
@@ -54,13 +55,11 @@ def _detect_stuck_streams(
 
     - An unreleased release-state whose stream no longer exists. The close
       path fires releases inline within the same reduce, so this should be
-      impossible; if it ever appears (corrupted or version-skewed persisted
-      state), the release can never fire — fail loudly instead of hanging.
-    - Open streams with no unresolved waiter *inside any of them*. A pending
-      in-stream waiter represents scoped work that can still resume and close
-      the stream. Without runnable work or such a waiter, an open stream can
-      never reach zero open work items: the run would hang to timeout (or
-      forever).
+      impossible; if it appears (corrupted or version-skewed state) the release
+      can never fire — fail loudly instead of hanging.
+    - Open streams with no unresolved waiter *inside any of them*. Without
+      runnable work or such a waiter an open stream can never reach zero open
+      work items: the run would hang to timeout (or forever).
     """
     prefix = "/".join(path) + "/" if path else ""
     orphaned = next(
@@ -124,37 +123,58 @@ def _clear_collection_state(state: BrokerState) -> None:
     state.collection_release_states.clear()
 
 
-def _count_accepting_steps(state: BrokerState, event: Event | type[Event]) -> int:
+def _child_slots_accepting(config: BrokerConfig, event: Event) -> list[str]:
+    """Child slots whose class accepts ``event`` as its StartEvent.
+
+    A parent triggers a child by emitting the child's ``StartEvent``. More
+    than one accepting child indicates an invalid or stale configuration.
+    """
+    if not isinstance(event, StartEvent):
+        return []
+    slots: list[str] = []
+    for slot, child_config in config.child_configs.items():
+        if any(
+            step_accepts_event(
+                event,
+                cfg.accepted_events,
+                allow_subclasses=cfg.accept_event_subclasses,
+            )
+            for cfg in child_config.steps.values()
+        ):
+            slots.append(slot)
+    if len(slots) > 1:
+        raise WorkflowRuntimeError(
+            f"StartEvent {type(event).__name__!r} matches multiple child "
+            f"workflows: {', '.join(sorted(slots))}"
+        )
+    return slots
+
+
+def _count_accepting_steps(state: BrokerState, event: Event) -> int:
     """Work-item fan-out factor for an emitted ``event`` within one broker.
 
     Broker-local birth count for the open_work_items set: one per accepting
-    local step. It must mirror the delivery predicate exactly.
+    local step, PLUS exactly 1 per child slot descended into. It *is* the
+    delivery predicate counted, so birth count can never drift from delivery.
     """
-    return sum(
+    local = sum(
         1
         for cfg in state.config.steps.values()
-        if (
-            step_accepts_type(
-                event,
-                cfg.accepted_events,
-                allow_subclasses=cfg.accept_event_subclasses,
-            )
-            if isinstance(event, type)
-            else step_accepts_event(
-                event,
-                cfg.accepted_events,
-                allow_subclasses=cfg.accept_event_subclasses,
-            )
+        if step_accepts_event(
+            event,
+            cfg.accepted_events,
+            allow_subclasses=cfg.accept_event_subclasses,
         )
     )
+    return local + len(_child_slots_accepting(state.config, event))
 
 
 def _adjust_open_work_items(
     state: BrokerState,
     stream_id: str | None,
     delta: int,
-    path: tuple[str, ...] | float,
-    now_seconds: float | None = None,
+    path: tuple[str, ...],
+    now_seconds: float,
 ) -> list[WorkflowCommand]:
     if now_seconds is None:
         if isinstance(path, tuple):
@@ -190,10 +210,7 @@ def _adjust_open_work_items(
 
 
 def _close_collection_stream(
-    state: BrokerState,
-    stream_id: str,
-    path: tuple[str, ...] | float,
-    now_seconds: float | None = None,
+    state: BrokerState, stream_id: str, path: tuple[str, ...], now_seconds: float
 ) -> list[WorkflowCommand]:
     """Close a zero-count stream and release any buffered collection batches."""
     if now_seconds is None:
@@ -276,6 +293,7 @@ def _classify_work_item(
     rerun_scheduled: bool,
     redelivery_scheduled: bool,
     fanned_out: bool,
+    boundary_descent: bool,
 ) -> WorkDisposition:
     """Classify a finished execution's work item, positively, in one place.
 
@@ -300,7 +318,14 @@ def _classify_work_item(
         # us explicitly when the failed work item was re-delivered.
         return WorkDisposition.STILL_LIVE
     if did_complete_step:
-        return WorkDisposition.FANNED_OUT if fanned_out else WorkDisposition.COMPLETED
+        # A completion that opened a child stream OR descended into a child
+        # broker consumes this item into child work; either way it is not a
+        # same-level completion.
+        return (
+            WorkDisposition.FANNED_OUT
+            if (fanned_out or boundary_descent)
+            else WorkDisposition.COMPLETED
+        )
     if added_waiter:
         return WorkDisposition.STILL_LIVE
     if all(isinstance(x, AddCollectedEvent) for x in tick.result):

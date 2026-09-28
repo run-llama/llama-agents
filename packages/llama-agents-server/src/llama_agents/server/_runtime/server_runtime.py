@@ -22,6 +22,7 @@ from workflows.context.state_store import (
     StateStore,
     infer_state_type,
 )
+from workflows.errors import WorkflowRuntimeError
 from workflows.events import (
     Event,
     StartEvent,
@@ -223,6 +224,11 @@ class ServerRuntimeDecorator(BaseRuntimeDecorator):
 
     @override
     def track_workflow(self, workflow: Workflow) -> None:
+        if workflow.child_workflows:
+            raise WorkflowRuntimeError(
+                "ServerRuntimeDecorator cannot run child workflows until "
+                "durable child state support is installed."
+            )
         # Keep a strong reference — the base WorkflowSet uses weak refs,
         # so without this the workflow can be GC'd before launch().
         self._registered_workflows[workflow.workflow_name] = workflow

@@ -14,7 +14,7 @@ from workflows.events import StartEvent, StopEvent
 from workflows.runtime.control_loop.reduce import _reduce_tick
 from workflows.runtime.control_loop.runner import _ControlLoopRunner
 from workflows.runtime.types.commands import CommandHalt, CommandScheduleTimeout
-from workflows.runtime.types.internal_state import BrokerState
+from workflows.runtime.types.internal_state import BrokerState, ChildBroker
 from workflows.runtime.types.results import StepWorkerWaiter
 from workflows.runtime.types.step_function import as_step_worker_functions
 from workflows.runtime.types.step_id import StepId
@@ -190,7 +190,9 @@ def test_clock_regression_does_not_move_accrual_anchor_backwards() -> None:
 
 def test_namespaced_tick_accrues_root_to_leaf_descent_chain() -> None:
     state = BrokerState.from_workflow(_AliveBudgetWorkflow())
-    state.children["nested"] = BrokerState.from_workflow(_AliveBudgetWorkflow())
+    state.children["nested"] = ChildBroker(
+        slot="nested", state=BrokerState.from_workflow(_AliveBudgetWorkflow())
+    )
     state, _ = _reduce_tick(TickSessionStart(stamped_at=10.0), state, 999.0)
 
     state, _ = _reduce_tick(
@@ -204,7 +206,7 @@ def test_namespaced_tick_accrues_root_to_leaf_descent_chain() -> None:
     )
 
     assert state.elapsed_alive == 2.0
-    assert state.children["nested"].elapsed_alive == 2.0
+    assert state.children["nested"].state.elapsed_alive == 2.0
 
 
 def test_wakeup_and_waiter_timeout_ticks_accrue_alive_budget() -> None:

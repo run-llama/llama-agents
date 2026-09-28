@@ -62,6 +62,7 @@ from workflows.context.state_store import (
     StateStoreFacade,
     infer_state_type,
 )
+from workflows.errors import WorkflowRuntimeError
 from workflows.events import Event, StartEvent, StopEvent
 from workflows.runtime.types.internal_state import BrokerState
 from workflows.runtime.types.named_task import (
@@ -88,6 +89,7 @@ from workflows.runtime.types.step_function import (
     as_step_worker_functions,
     create_workflow_run_function,
 )
+from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import WorkflowTick
 from workflows.workflow import Workflow
 
@@ -409,6 +411,11 @@ class DBOSRuntime(Runtime):
         If launch() was already called, registers the workflow immediately.
         This allows late registration for testing scenarios.
         """
+        if workflow.child_workflows:
+            raise WorkflowRuntimeError(
+                "DBOSRuntime cannot run child workflows until durable child "
+                "state support is installed."
+            )
         if self._dbos_launched:
             # Already launched - register immediately
             registered = self.register(workflow)
@@ -476,7 +483,7 @@ class DBOSRuntime(Runtime):
             return await workflow_run_fn(init_state, start_event, tags)
 
         # Wrap steps with stable names
-        wrapped_steps: dict[str, StepWorkerFunction] = {
+        wrapped_steps: dict[StepId, StepWorkerFunction] = {
             step_name: DBOS.step(name=f"{name}.{step_name}")(step)
             for step_name, step in as_step_worker_functions(workflow).items()
         }

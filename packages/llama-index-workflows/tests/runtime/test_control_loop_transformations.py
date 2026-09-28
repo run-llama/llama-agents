@@ -39,16 +39,20 @@ from workflows.retry_policy import (
 from workflows.runtime.control_loop.reduce import (
     _add_or_enqueue_event,
     _check_idle_state,
-    _process_add_event_tick,
     _process_cancel_run_tick,
     _process_publish_event_tick,
-    _process_step_result_tick,
     _process_timeout_tick,
     _reduce_tick,
     rebuild_state_from_ticks,
     rebuild_state_from_ticks_stream,
     replay_ticks_stream,
     rewind_in_progress,
+)
+from workflows.runtime.control_loop.reduce import (
+    _dispatch_add_event as _process_add_event_tick,
+)
+from workflows.runtime.control_loop.reduce import (
+    _dispatch_step_result as _process_step_result_tick,
 )
 from workflows.runtime.types.commands import (
     CommandCompleteRun,
@@ -94,6 +98,10 @@ from workflows.runtime.types.ticks import (
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 TEST_STEP_ID = StepId.root("test_step")
 OTHER_STEP_ID = StepId.root("other_step")
+
+
+TEST_STEP = StepId.root("test_step")
+OTHER_STEP = StepId.root("other_step")
 
 
 class MyTestEvent(Event):
@@ -438,7 +446,7 @@ def test_event_routing(base_state: BrokerState) -> None:
 
     run_cmds = [c for c in commands if isinstance(c, CommandRunWorker)]
     assert len(run_cmds) == 1
-    assert str(run_cmds[0].step_id) == "test_step"
+    assert run_cmds[0].step_id == TEST_STEP
 
 
 def test_per_step_explicit_routing_accepts_only_matching_types(
@@ -480,16 +488,14 @@ def test_explicit_routing_requires_acceptance(base_state: BrokerState) -> None:
     tick = TickAddEvent(event=MyTestEvent(value=1), step_id=StepId.root("other_step"))
     _, commands = _process_add_event_tick(tick, base_state, now_seconds=100.0)
     assert not any(
-        isinstance(c, CommandRunWorker) and str(c.step_id) == "other_step"
-        for c in commands
+        isinstance(c, CommandRunWorker) and c.step_id == OTHER_STEP for c in commands
     )
 
     # Explicitly route to accepting step → should start
     tick_ok = TickAddEvent(event=MyTestEvent(value=2), step_id=StepId.root("test_step"))
     _, commands_ok = _process_add_event_tick(tick_ok, base_state, now_seconds=100.0)
     assert any(
-        isinstance(c, CommandRunWorker) and str(c.step_id) == "test_step"
-        for c in commands_ok
+        isinstance(c, CommandRunWorker) and c.step_id == TEST_STEP for c in commands_ok
     )
 
 
@@ -936,7 +942,7 @@ def test_retry_with_zero_delay_dispatches_immediately(base_state: BrokerState) -
     add_worker(base_state, event)
 
     tick: TickStepResult = TickStepResult(
-        step_id=StepId.root("test_step"),
+        step_id=TEST_STEP,
         worker_id=0,
         event=event,
         result=[StepWorkerFailed(exception=ValueError("test"), failed_at=110.0)],
@@ -1016,7 +1022,7 @@ def test_old_journal_retry_add_event_supersedes_queued_delayed_attempt(
     event = MyTestEvent(value=42)
     add_worker(base_state, event)
     fail_tick: TickStepResult = TickStepResult(
-        step_id=StepId.root("test_step"),
+        step_id=TEST_STEP,
         worker_id=0,
         event=event,
         result=[StepWorkerFailed(exception=ValueError("test"), failed_at=110.0)],
@@ -1027,7 +1033,7 @@ def test_old_journal_retry_add_event_supersedes_queued_delayed_attempt(
     # Old-format journal re-delivers the retry after the delay elapsed
     add_tick = TickAddEvent(
         event=event,
-        step_id=StepId.root("test_step"),
+        step_id=TEST_STEP,
         attempts=1,
         first_attempt_at=100.0,
         last_failed_at=110.0,
@@ -1080,7 +1086,7 @@ def test_replay_recomputes_jittered_not_before_with_run_id(
     event = MyTestEvent(value=42)
     add_worker(base_state, event)
     fail_tick: TickStepResult = TickStepResult(
-        step_id=StepId.root("test_step"),
+        step_id=TEST_STEP,
         worker_id=0,
         event=event,
         result=[StepWorkerFailed(exception=ValueError("test"), failed_at=110.0)],
@@ -1134,7 +1140,7 @@ def test_journaled_retry_decision_is_used_without_invoking_policy(
     event = MyTestEvent(value=42)
     add_worker(base_state, event)
     fail_tick: TickStepResult = TickStepResult(
-        step_id=StepId.root("test_step"),
+        step_id=TEST_STEP,
         worker_id=0,
         event=event,
         result=[
@@ -1164,7 +1170,7 @@ def test_journaled_stop_decision_fails_workflow_even_if_policy_would_retry(
     event = MyTestEvent(value=42)
     add_worker(base_state, event)
     fail_tick: TickStepResult = TickStepResult(
-        step_id=StepId.root("test_step"),
+        step_id=TEST_STEP,
         worker_id=0,
         event=event,
         result=[
@@ -1195,7 +1201,7 @@ def test_replay_with_changed_policy_honors_journaled_decision(
     """
     event = MyTestEvent(value=42)
     fail_tick: TickStepResult = TickStepResult(
-        step_id=StepId.root("test_step"),
+        step_id=TEST_STEP,
         worker_id=0,
         event=event,
         result=[
@@ -1240,7 +1246,7 @@ def test_journaled_first_attempt_at_survives_rebuilt_state(
     # while the failure tick journaled the true dispatch time 100.0.
     add_worker(base_state, event, first_attempt_at=500.0)
     fail_tick: TickStepResult = TickStepResult(
-        step_id=StepId.root("test_step"),
+        step_id=TEST_STEP,
         worker_id=0,
         event=event,
         result=[
@@ -1266,7 +1272,7 @@ def test_journaled_first_attempt_at_used_for_elapsed_on_failure(
     event = MyTestEvent(value=42)
     add_worker(base_state, event, first_attempt_at=500.0)
     fail_tick: TickStepResult = TickStepResult(
-        step_id=StepId.root("test_step"),
+        step_id=TEST_STEP,
         worker_id=0,
         event=event,
         result=[

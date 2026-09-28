@@ -43,6 +43,7 @@ class WorkflowTestRunner:
         ctx: Optional["Context"] = None,
         expose_internal: bool = True,
         exclude_events: list[EventType] | None = None,
+        include_children: bool = False,
     ) -> WorkflowTestResult:
         """
         Run a workflow end-to-end and collect the events that are streamed during its execution.
@@ -51,6 +52,7 @@ class WorkflowTestRunner:
             start_event (StartEvent): The input event for the workflow
             expose_internal (bool): Whether or not to expose internal events. Defaults to True if not set.
             exclude_events. (list[EventType]): A list of event types to exclude from the collected events. Defaults to None if not set.
+            include_children (bool): Whether to surface events published from within child-workflow executions. Defaults to False.
 
         Returns:
             WorkflowTestResult
@@ -67,7 +69,9 @@ class WorkflowTestRunner:
         """
         handler = self._workflow.run(start_event=start_event, ctx=ctx)
         collected_events: list[Event] = []
-        async for event in handler.stream_events(expose_internal=expose_internal):
+        async for event in handler.stream_events(
+            expose_internal=expose_internal, include_children=include_children
+        ):
             if exclude_events and type(event) in exclude_events:
                 continue
             collected_events.append(event)
