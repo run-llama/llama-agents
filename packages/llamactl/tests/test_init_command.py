@@ -272,7 +272,7 @@ def test_copy_scaffold(tmp_path: Path) -> None:
     _copy_scaffold()
 
     # AGENTS.md
-    content = (tmp_path / "AGENTS.md").read_text()
+    content = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert "developers.llamaindex.ai/mcp" in content
     assert "search_docs" in content
 
