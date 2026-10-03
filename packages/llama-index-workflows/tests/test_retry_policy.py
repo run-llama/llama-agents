@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import random
 import re
 from typing import Any, cast
 
@@ -15,6 +16,7 @@ from workflows.events import Event, StartEvent, StopEvent
 from workflows.retry_policy import (
     ConstantDelayRetryPolicy,
     ExponentialBackoffRetryPolicy,
+    WaitStrategy,
     retry_all,
     retry_always,
     retry_any,
@@ -217,6 +219,34 @@ def test_wait_exponential_floor() -> None:
 def test_wait_exponential_cap() -> None:
     w = wait_exponential(multiplier=1.0, exp_base=10.0, max=50.0, min=0.0)
     assert w(2) == 50.0
+
+
+@pytest.mark.parametrize("attempts", [1024, 10000])
+@pytest.mark.parametrize(
+    "wait, expected",
+    [
+        pytest.param(wait_exponential(max=60), 60, id="exponential"),
+        pytest.param(wait_exponential_jitter(max=60), 60, id="additive-jitter"),
+        pytest.param(
+            wait_random_exponential(min=2, max=60),
+            random.Random(42).uniform(2, 60),
+            id="full-jitter",
+        ),
+        pytest.param(
+            wait_full_jitter(min=2, max=60),
+            random.Random(42).uniform(2, 60),
+            id="full-jitter-alias",
+        ),
+    ],
+)
+def test_exponential_wait_caps_overflow(
+    wait: WaitStrategy, expected: float, attempts: int
+) -> None:
+    assert wait(attempts, seed=42) == expected
+    policy = retry_policy(wait=wait, stop=stop_never())
+    assert (
+        policy.next(100, attempts + 1, RuntimeError("transient"), seed=42) == expected
+    )
 
 
 def test_wait_incrementing() -> None:

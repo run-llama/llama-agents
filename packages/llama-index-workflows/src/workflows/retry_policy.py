@@ -490,9 +490,13 @@ class wait_exponential(_WaitStrategyBase):
         self.min = _to_seconds(min)
 
     def __call__(self, attempts: int, *, seed: int | None = None) -> float:
+        try:
+            delay = self.multiplier * self.exp_base**attempts
+        except OverflowError:
+            delay = self.max
         return max(
             max(0.0, self.min),
-            min(self.multiplier * self.exp_base**attempts, self.max),
+            min(delay, self.max),
         )
 
 
@@ -572,7 +576,10 @@ class wait_exponential_jitter(_WaitStrategyBase):
         self.jitter = jitter
 
     def __call__(self, attempts: int, *, seed: int | None = None) -> float:
-        base = min(self.initial * self.exp_base**attempts, self.max)
+        try:
+            base = min(self.initial * self.exp_base**attempts, self.max)
+        except OverflowError:
+            base = self.max
         rng = random.Random(seed) if seed is not None else random
         return min(base + rng.uniform(0, self.jitter), self.max)
 
@@ -604,9 +611,13 @@ class wait_random_exponential(_WaitStrategyBase):
 
     def __call__(self, attempts: int, *, seed: int | None = None) -> float:
         rng = random.Random(seed) if seed is not None else random
+        try:
+            delay = self.multiplier * self.exp_base**attempts
+        except OverflowError:
+            delay = self.max
         upper = max(
             max(0.0, self.min),
-            min(self.multiplier * self.exp_base**attempts, self.max),
+            min(delay, self.max),
         )
         return rng.uniform(self.min, upper)
 
