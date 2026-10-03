@@ -421,6 +421,8 @@ class WorkflowClient:
                                     await queue.put(_QueuedDone())
                                     return
 
+                                if 400 <= response.status_code < 600:
+                                    await response.aread()
                                 _raise_for_status_with_body(response)
 
                                 # Reset attempts on successful connection
