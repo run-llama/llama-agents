@@ -1,10 +1,13 @@
 # ty: ignore[invalid-argument-type, not-iterable]
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 LlamaIndex Inc.
+
 from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Callable, Literal
-from unittest.mock import AsyncMock, call
+from unittest.mock import AsyncMock, call, patch
 
 import httpx
 import pytest
@@ -529,7 +532,7 @@ class FakeStreamClient:
         url: str,
         params: dict[str, str] | None = None,
         **kwargs: object,
-    ) -> AsyncIterator[AsyncMock]:
+    ) -> AsyncIterator[httpx.Response]:
         self.captured_params.append(params or {})
         assert self._call < len(self._script), "More connections than scripted"
         entry = self._script[self._call]
@@ -545,8 +548,7 @@ class FakeStreamClient:
             tail_error = events[-1]  # type: ignore[assignment]
             events = events[:-1]  # type: ignore[assignment]
 
-        resp = AsyncMock()
-        resp.status_code = 200
+        resp = httpx.Response(200, request=httpx.Request(method, url))
 
         async def aiter_lines() -> AsyncIterator[str]:
             for seq, env in events:  # type: ignore[union-attr]
@@ -556,8 +558,8 @@ class FakeStreamClient:
             if tail_error is not None:
                 raise tail_error
 
-        resp.aiter_lines = aiter_lines
-        yield resp
+        with patch.object(resp, "aiter_lines", aiter_lines):
+            yield resp
 
 
 async def _collect(
@@ -645,6 +647,41 @@ async def test_reconnect_exceeds_max_attempts_raises() -> None:
             [httpx.ConnectError("refused")] * 3,
             max_reconnect_attempts=2,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [0, 1, 2])
+async def test_response_headers_do_not_reset_reconnect_budget(limit: int) -> None:
+    script: list[ConnectionScript] = [
+        [httpx.ReadError("disconnected before an event")] for _ in range(limit + 1)
+    ]
+    # A later success keeps the regression finite if the budget is ignored.
+    script.append([(0, _envelope("too late"))])
+    fake = FakeStreamClient(script)
+    wf_client = WorkflowClient(httpx_client=fake)  # type: ignore[arg-type]
+
+    with pytest.raises(ConnectionError, match=f"after {limit} attempts"):
+        async for _ in wf_client.get_workflow_events(
+            handler_id="h", max_reconnect_attempts=limit
+        ):
+            pass
+
+    assert len(fake.captured_params) == limit + 1
+    assert all(params["after_sequence"] == "-1" for params in fake.captured_params)
+
+
+@pytest.mark.asyncio
+async def test_received_event_resets_reconnect_budget() -> None:
+    first, second = _envelope("first"), _envelope("second")
+    events = await _collect(
+        [
+            httpx.ConnectError("refused"),
+            [(0, first), httpx.ReadError("disconnected after an event")],
+            [(1, second)],
+        ],
+        max_reconnect_attempts=1,
+    )
+    assert events == [first, second]
 
 
 @pytest.mark.asyncio
