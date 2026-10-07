@@ -19,6 +19,7 @@ from workflows.context.context_types import (
     SerializedContext,
     SerializedEventAttempt,
     SerializedPendingEvent,
+    SerializedSentBy,
     SerializedStepWorkerState,
     SerializedWaiter,
 )
@@ -28,6 +29,7 @@ from workflows.events import Event, SerializableEventType
 from workflows.retry_policy import RetryPolicy
 from workflows.runtime.types.results import (
     CollectionReleasePayload,
+    SentBy,
     StepWorkerState,
     StepWorkerWaiter,
 )
@@ -108,12 +110,16 @@ class CollectionReleaseState:
 
 @dataclass(frozen=True)
 class PendingEvent:
-    """An event a step returned whose TickAddEvent has not been reduced yet.
+    """An event a step returned or sent whose TickAddEvent has not been reduced yet.
 
     The step-result reduce emits a CommandQueueEvent and the runner turns it
     into a TickAddEvent that is reduced (and journaled) as a later tick. Until
     then the event lives only here, so a snapshot or journal cut in between
     still carries it. Fields mirror CommandQueueEvent.
+
+    An event sent with ctx.send_event has ``sent_by`` set. Its TickAddEvent
+    can be reduced before or after the step result, so it is only held here
+    when the step result is reduced first.
     """
 
     event: Event
@@ -121,6 +127,7 @@ class PendingEvent:
     origin_namespace: tuple[str, ...] = ()
     recovery_counts: dict[str, int] = field(default_factory=dict)
     scope_path: tuple[str, ...] = ()
+    sent_by: SentBy | None = None
 
 
 @dataclass()
@@ -141,8 +148,8 @@ class BrokerState:
             timeout budget.
         last_alive_stamp: Accrual reference point (the last stamp seen), reset by
             session-start markers without accruing downtime.
-        pending_events: Events returned by steps, in emission order, whose
-            TickAddEvent has not been reduced yet.
+        pending_events: Events returned or sent by steps, in emission order,
+            whose TickAddEvent has not been reduced yet.
     """
 
     is_running: bool
@@ -444,6 +451,12 @@ def _broker_to_serialized(
                 step_id=str(pending.step_id) if pending.step_id is not None else None,
                 recovery_counts=dict(pending.recovery_counts),
                 scope_path=list(pending.scope_path),
+                sent_by=SerializedSentBy(
+                    work_item_id=pending.sent_by.work_item_id,
+                    index=pending.sent_by.index,
+                )
+                if pending.sent_by is not None
+                else None,
             )
             for pending in state.pending_events
         ],
@@ -468,6 +481,12 @@ def _load_broker_from_serialized(
             else None,
             recovery_counts=dict(pending.recovery_counts),
             scope_path=tuple(pending.scope_path),
+            sent_by=SentBy(
+                work_item_id=pending.sent_by.work_item_id,
+                index=pending.sent_by.index,
+            )
+            if pending.sent_by is not None
+            else None,
         )
         for pending in serialized.pending_events
     ]
@@ -872,6 +891,14 @@ class InProgressState:
     bound_events: dict[str, Event] | None = None
     scope_path: tuple[str, ...] = field(default_factory=tuple)
     work_item_id: str | None = None
+    # Send indices of this execution whose TickAddEvent was reduced before its
+    # step result. Not serialized: in-progress work is re-run on resume.
+    received_sends: set[int] = field(default_factory=set)
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        if "received_sends" not in state:
+            self.received_sends = set()
 
     def _deepcopy(self) -> InProgressState:
         return InProgressState(
@@ -886,6 +913,7 @@ class InProgressState:
             recovery_counts=dict(self.recovery_counts),
             scope_path=self.scope_path,
             work_item_id=self.work_item_id,
+            received_sends=set(self.received_sends),
         )
 
 

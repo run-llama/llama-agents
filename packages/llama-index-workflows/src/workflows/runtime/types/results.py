@@ -32,6 +32,7 @@ from workflows.events import (
     SerializableException,
     SerializableOptionalEvent,
 )
+from workflows.runtime.types.step_id import StepId
 
 EventType = TypeVar("EventType", bound=Event)
 
@@ -60,6 +61,31 @@ class RetryAttempt:
     recovery_counts: dict[str, int] = dataclasses.field(default_factory=dict)
 
 
+class SentBy(BaseModel):
+    """Identifies one ctx.send_event call: the sending work item and its send index."""
+
+    model_config = ConfigDict(frozen=True)
+
+    work_item_id: str
+    # Counts this work item's sends from 0, per step execution.
+    index: int
+
+
+class SentEvent(BaseModel):
+    """An event a step sent with ctx.send_event, as its TickAddEvent carried it.
+
+    The step worker returns these next to its results so the step result can
+    hold the sends whose TickAddEvent was not reduced first.
+    """
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    index: int
+    event: SerializableEvent
+    step_id: StepId | None = None
+    recovery_counts: dict[str, int] = {}
+
+
 @dataclass(frozen=True)
 class StepWorkerContext:
     """
@@ -73,6 +99,8 @@ class StepWorkerContext:
     # add commands here to mutate the internal worker state after step execution
     returns: Returns
     retry: RetryAttempt = dataclasses.field(default_factory=RetryAttempt)
+    # events sent with ctx.send_event during this execution, in send order
+    sent_events: list[SentEvent] = dataclasses.field(default_factory=list)
 
 
 @dataclass(frozen=True)

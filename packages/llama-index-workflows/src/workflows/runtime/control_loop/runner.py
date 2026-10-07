@@ -47,6 +47,7 @@ from workflows.runtime.types.plugin import (
 from workflows.runtime.types.results import (
     RetryAttempt,
     RetryDecision,
+    SentEvent,
     StepFunctionResult,
     StepWorkerFailed,
     StepWorkerResult,
@@ -225,7 +226,7 @@ class _ControlLoopRunner:
                 snapshot = worker.shared_state
                 step_fn: StepWorkerFunction = self.step_workers[step_name]
 
-                result = await step_fn(
+                output = await step_fn(
                     state=snapshot,
                     step_name=step_name,
                     event=command.event,
@@ -239,6 +240,13 @@ class _ControlLoopRunner:
                         recovery_counts=dict(worker.recovery_counts),
                     ),
                 )
+                result: list[StepFunctionResult] = []
+                sent_events: list[SentEvent] = []
+                for item in output:
+                    if isinstance(item, SentEvent):
+                        sent_events.append(item)
+                    else:
+                        result.append(item)
                 # Return result for main loop to process
                 return TickStepResult(
                     step_id=command.step_id,
@@ -251,6 +259,7 @@ class _ControlLoopRunner:
                         worker,
                         result,
                     ),
+                    sent_events=sent_events,
                 )
             except Exception as e:
                 if _is_shutdown_error(e):
@@ -336,6 +345,7 @@ class _ControlLoopRunner:
                     origin_namespace=command.origin_namespace,
                     recovery_counts=dict(command.recovery_counts),
                     scope_path=command.scope_path,
+                    sent_by=command.sent_by,
                 )
             )
             return None

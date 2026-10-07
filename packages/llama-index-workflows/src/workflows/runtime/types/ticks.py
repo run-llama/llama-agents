@@ -28,6 +28,8 @@ from pydantic import (
 from workflows.context.serializers import _register_framework_types
 from workflows.events import SerializableEvent, SerializableOptionalException
 from workflows.runtime.types.results import (
+    SentBy,
+    SentEvent,
     SerializableCollectionReleasePayload,
     StepFunctionResult,
 )
@@ -54,6 +56,9 @@ class TickStepResult(BaseModel):
     # the same time the live run used instead of the replay clock. Additive:
     # old journals default to None and fall back to the reducer's ``now``.
     stamped_at: float | None = None
+    # Events the step sent with ctx.send_event. The reducer holds the ones whose
+    # TickAddEvent was not reduced yet as pending. Additive: defaults to empty.
+    sent_events: list[SentEvent] = Field(default_factory=list)
 
 
 class TickAddEvent(BaseModel):
@@ -81,6 +86,9 @@ class TickAddEvent(BaseModel):
     work_item_id: str | None = None
     # See TickStepResult.stamped_at.
     stamped_at: float | None = None
+    # Set when a step sent this event with ctx.send_event. Lets the reducer
+    # match it to the sending step's result. Additive: old journals load None.
+    sent_by: SentBy | None = None
 
 
 class TickCancelRun(BaseModel):

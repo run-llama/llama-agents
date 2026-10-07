@@ -168,6 +168,13 @@ class SerializedStepWorkerState(BaseModel):
     collected_waiters: list[SerializedWaiter] = Field(default_factory=list)
 
 
+class SerializedSentBy(BaseModel):
+    """Serialized identity of one ctx.send_event call."""
+
+    work_item_id: str
+    index: int
+
+
 class SerializedPendingEvent(BaseModel):
     """Serialized event a step returned whose add_event tick is not yet reduced."""
 
@@ -179,6 +186,8 @@ class SerializedPendingEvent(BaseModel):
     recovery_counts: dict[str, int] = Field(default_factory=dict)
     # Collection stream scope path (innermost stream id last).
     scope_path: list[str] = Field(default_factory=list)
+    # Set for an event a step sent with ctx.send_event, else None.
+    sent_by: SerializedSentBy | None = None
 
 
 class SerializedCollectionStreamInstance(BaseModel):

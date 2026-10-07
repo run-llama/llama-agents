@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from workflows.events import Event, StopEvent
+from workflows.runtime.types.results import SentBy
 from workflows.runtime.types.step_id import StepId
 
 
@@ -38,6 +39,7 @@ class CommandQueueEvent:
     origin_namespace: tuple[str, ...] = ()
     recovery_counts: dict[str, int] = field(default_factory=dict)
     scope_path: tuple[str, ...] = field(default_factory=tuple)
+    sent_by: SentBy | None = None
 
 
 @dataclass(frozen=True)

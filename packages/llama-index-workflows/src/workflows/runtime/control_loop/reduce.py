@@ -78,6 +78,7 @@ from workflows.runtime.types.results import (
     AddWaiter,
     DeleteCollectedEvent,
     DeleteWaiter,
+    SentBy,
     StepFunctionResult,
     StepWorkerFailed,
     StepWorkerResult,
@@ -484,7 +485,8 @@ def pending_event_commands(state: BrokerState) -> list[WorkflowCommand]:
     Called at session start next to rewind_in_progress. A snapshot or journal
     cut after a TickStepResult but before its derived TickAddEvent keeps the
     event only in ``pending_events``. Re-emitting the same CommandQueueEvent
-    produces a TickAddEvent that matches and pops the pending entry.
+    produces a TickAddEvent that matches and pops the pending entry. A sent
+    event keeps its ``sent_by`` so the re-emitted tick pops it by key.
     """
     commands: list[WorkflowCommand] = []
 
@@ -497,6 +499,7 @@ def pending_event_commands(state: BrokerState) -> list[WorkflowCommand]:
                     origin_namespace=pending.origin_namespace,
                     recovery_counts=dict(pending.recovery_counts),
                     scope_path=pending.scope_path,
+                    sent_by=pending.sent_by,
                 )
             )
         for _, child in sorted(broker.children.items()):
@@ -548,12 +551,16 @@ def _consume_pending_event(tick: TickAddEvent, broker: BrokerState) -> None:
     """Pop the head pending event when this TickAddEvent is its derived tick.
 
     The runner appends derived TickAddEvents in emission order, so only the
-    head can match. A tick that doesn't match is external (send_event, start
-    event, rehydrated waiter) and leaves pending untouched.
+    head returned event can match. A tick that doesn't match is external
+    (send_event from outside a step, start event, rehydrated waiter) and leaves
+    pending untouched. Sent events are matched by key in _note_sent_event.
     """
-    if not broker.pending_events:
+    index, head = next(
+        ((i, p) for i, p in enumerate(broker.pending_events) if p.sent_by is None),
+        (None, None),
+    )
+    if index is None or head is None:
         return
-    head = broker.pending_events[0]
     if (
         head.step_id == tick.step_id
         and head.origin_namespace == tick.origin_namespace
@@ -561,7 +568,52 @@ def _consume_pending_event(tick: TickAddEvent, broker: BrokerState) -> None:
         and head.scope_path == tick.scope_path
         and _same_event(head.event, tick.event)
     ):
-        broker.pending_events.pop(0)
+        broker.pending_events.pop(index)
+
+
+def _note_sent_event(sent_by: SentBy, broker: BrokerState) -> None:
+    """Match a ctx.send_event tick to its sending step's execution.
+
+    After the step result, the send is a pending entry: pop it. Before the
+    step result, record it as received on the in-progress execution so the
+    result does not hold it. A pending entry is checked first: it belongs to
+    an earlier execution of the same work item, whose sends were queued
+    before any send of the current one.
+    """
+    for i, pending in enumerate(broker.pending_events):
+        if pending.sent_by == sent_by:
+            broker.pending_events.pop(i)
+            return
+    for worker_state in broker.workers.values():
+        for execution in worker_state.in_progress:
+            if execution.work_item_id == sent_by.work_item_id:
+                execution.received_sends.add(sent_by.index)
+                return
+
+
+def _hold_unreceived_sends(
+    tick: TickStepResult, broker: BrokerState, this_execution: InProgressState
+) -> None:
+    """Hold the step's sends whose TickAddEvent is not reduced yet as pending.
+
+    Each held send pops itself when its tick arrives, and a snapshot or
+    journal cut before then re-queues it on resume.
+    """
+    work_item_id = this_execution.work_item_id
+    if work_item_id is not None:
+        for sent in tick.sent_events:
+            if sent.index in this_execution.received_sends:
+                continue
+            broker.pending_events.append(
+                PendingEvent(
+                    event=sent.event,
+                    step_id=sent.step_id,
+                    recovery_counts=dict(sent.recovery_counts),
+                    sent_by=SentBy(work_item_id=work_item_id, index=sent.index),
+                )
+            )
+    # A re-run of this execution counts its sends from 0 again.
+    this_execution.received_sends.clear()
 
 
 def _check_idle_state(state: BrokerState) -> bool:
@@ -1137,6 +1189,7 @@ def _process_step_result_tick(
     step_name = _root_step_key(step_id)
     worker_state = broker.workers[step_id]
     this_execution = _find_in_progress(worker_state, tick.worker_id)
+    _hold_unreceived_sends(tick, broker, this_execution)
 
     rerun = _rerun_for_stale_collect_buffer(tick, worker_state, this_execution)
     if rerun is not None:
@@ -1652,7 +1705,10 @@ def _process_add_event_tick(
     _accrue_descent(descent, _tick_stamp(tick))
     broker = descent.broker
     path = descent.path
-    _consume_pending_event(tick, broker)
+    if tick.sent_by is not None:
+        _note_sent_event(tick.sent_by, broker)
+    else:
+        _consume_pending_event(tick, broker)
     if tick.work_item_id is None:
         # A collect re-delivery derives its id from the payload's stable
         # stream+binding key so it matches the invocation fired at release time
