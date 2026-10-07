@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -150,6 +151,65 @@ async def test_restored_context_runs_to_completion(runtime: BasicRuntime) -> Non
     wf, records = await _record_resumed_run(runtime)
     mid = runtime.restore(wf, None, records[: len(records) // 2])
     assert await wf.run(ctx=mid) == 3
+
+
+def _settled(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Fields of a finished run's snapshot that do not depend on timing.
+
+    Store state is left out: the journal holds ticks, not store writes.
+    Collect buffer generations are left out too: they count every append and
+    clear, so a context restored from a finished cut and run again keeps the
+    finished run's count.
+    """
+    return {
+        "is_running": snapshot["is_running"],
+        "workers": {
+            name: {k: v for k, v in worker.items() if k != "collect_generations"}
+            for name, worker in snapshot["workers"].items()
+        },
+        "deliveries": snapshot["deliveries"],
+    }
+
+
+def _record_type(records: list[JournalRecord]) -> str:
+    if not records:
+        return "<empty>"
+    return json.loads(records[-1].data)["value"]["type"]
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "An event a step sends with ctx.send_event is journaled as its own "
+        "add_event after the step's step_result. A cut between the two marks "
+        "the step done and loses the event, so the collect step never fires."
+    ),
+)
+async def test_every_journal_cut_runs_to_the_uninterrupted_result(
+    runtime: BasicRuntime,
+) -> None:
+    wf, records = await _record_resumed_run(runtime)
+    # The gate is set, so a rerun of the slow step finishes on its own.
+    baseline = wf.run()
+    expected_result = await asyncio.wait_for(baseline, timeout=5)
+    assert baseline.ctx is not None
+    expected = _settled(baseline.ctx.to_dict())
+
+    failures: list[str] = []
+    for k in range(len(records) + 1):
+        where = f"k={k} after {_record_type(records[:k])}"
+        handler = wf.run(ctx=runtime.restore(wf, None, records[:k]))
+        try:
+            result = await asyncio.wait_for(handler, timeout=2)
+        except asyncio.TimeoutError:
+            failures.append(f"{where}: stalled")
+            continue
+        assert handler.ctx is not None
+        if result != expected_result:
+            failures.append(f"{where}: result {result!r}")
+        elif _settled(handler.ctx.to_dict()) != expected:
+            failures.append(f"{where}: final context differs")
+    assert failures == [], f"{len(records) + 1} cuts restored, failures: {failures}"
 
 
 async def test_to_dict_without_state_leaves_state_empty(
