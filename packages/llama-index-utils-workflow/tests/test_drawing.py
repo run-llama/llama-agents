@@ -325,6 +325,7 @@ async def test_draw_most_recent_execution_mermaid_sanitizes_slash_step_ids(
         TickStepResult(
             step_id=StepId.from_str("parent/child"),
             worker_id=0,
+            invocation_id="worker-0",
             event=StartEvent(),
             result=[StepWorkerResult(result=StopEvent())],
         )

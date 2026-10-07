@@ -72,6 +72,7 @@ def test_root_step_id_tick_serializes_step_id_as_bare_name() -> None:
     tick = TickStepResult(
         step_id=StepId.root("process"),
         worker_id=42,
+        invocation_id="worker-42",
         event=MyEvent(value="trigger"),
         result=[StepWorkerResult(result=StopEvent(result="done"))],
     )
@@ -94,6 +95,7 @@ def test_legacy_step_name_tick_payloads_deserialize_to_root_step_ids() -> None:
     step_result_payload = TickStepResult(
         step_id=StepId.root("process"),
         worker_id=1,
+        invocation_id="worker-1",
         event=StartEvent(),
         result=[StepWorkerResult(result=None)],
     ).model_dump(mode="json")
@@ -194,6 +196,7 @@ def test_event_type_roundtrip() -> None:
             TickStepResult(
                 step_id=StepId.root("process"),
                 worker_id=42,
+                invocation_id="worker-42",
                 event=MyEvent(value="trigger"),
                 stamped_at=1234567890.0,
                 result=[StepWorkerResult(result=StopEvent(result="done"))],
@@ -204,6 +207,7 @@ def test_event_type_roundtrip() -> None:
             TickStepResult(
                 step_id=StepId.root("process"),
                 worker_id=1,
+                invocation_id="worker-1",
                 event=StartEvent(),
                 result=[StepWorkerResult(result=None)],
             ),
@@ -213,6 +217,7 @@ def test_event_type_roundtrip() -> None:
             TickStepResult(
                 step_id=StepId.root("collector"),
                 worker_id=2,
+                invocation_id="worker-2",
                 event=StartEvent(),
                 result=[
                     AddCollectedEvent(
@@ -226,6 +231,7 @@ def test_event_type_roundtrip() -> None:
             TickStepResult(
                 step_id=StepId.root("collector"),
                 worker_id=3,
+                invocation_id="worker-3",
                 event=StartEvent(),
                 result=[DeleteCollectedEvent(event_id="evt-2")],
             ),
@@ -235,6 +241,7 @@ def test_event_type_roundtrip() -> None:
             TickStepResult(
                 step_id=StepId.root("cleanup"),
                 worker_id=5,
+                invocation_id="worker-5",
                 event=StartEvent(),
                 result=[DeleteWaiter(waiter_id="w-2")],
             ),
@@ -257,6 +264,7 @@ def test_tick_step_result_with_failed_value_error() -> None:
     tick = TickStepResult(
         step_id=StepId.root("broken_step"),
         worker_id=7,
+        invocation_id="worker-7",
         event=StartEvent(),
         result=[
             StepWorkerFailed(
@@ -282,6 +290,7 @@ def test_tick_step_result_with_failed_unimportable_exception() -> None:
     tick = TickStepResult(
         step_id=StepId.root("broken_step"),
         worker_id=8,
+        invocation_id="worker-8",
         event=StartEvent(),
         result=[StepWorkerFailed(exception=CustomError("oops"), failed_at=failed_at)],
     )
@@ -301,6 +310,7 @@ def test_tick_step_result_with_add_waiter() -> None:
     tick = TickStepResult(
         step_id=StepId.root("waiter_step"),
         worker_id=4,
+        invocation_id="worker-4",
         event=StartEvent(),
         result=[
             AddWaiter(
@@ -380,6 +390,7 @@ def test_workflow_tick_discriminated_union_roundtrip() -> None:
         TickStepResult(
             step_id=StepId.root("s"),
             worker_id=0,
+            invocation_id="worker-0",
             event=StartEvent(),
             result=[StepWorkerResult(result=None)],
         ),

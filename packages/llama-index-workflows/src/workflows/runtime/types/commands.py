@@ -27,6 +27,8 @@ class CommandRunWorker:
     step_id: StepId
     event: Event
     id: int
+    # Identity of this dispatch, minted by the reducer.
+    invocation_id: str
     invocation_namespace: tuple[str, ...] = ()
     bound_events: dict[str, Event] | None = None
 

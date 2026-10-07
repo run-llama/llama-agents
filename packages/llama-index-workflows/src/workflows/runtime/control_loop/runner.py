@@ -212,7 +212,7 @@ class _ControlLoopRunner:
                     (
                         w
                         for w in broker.workers[command.step_id].in_progress
-                        if w.worker_id == command.id
+                        if w.invocation_id == command.invocation_id
                     ),
                     None,
                 )
@@ -249,6 +249,7 @@ class _ControlLoopRunner:
                         worker,
                         result,
                     ),
+                    invocation_id=command.invocation_id,
                 )
             except Exception as e:
                 if _is_shutdown_error(e):
@@ -271,6 +272,7 @@ class _ControlLoopRunner:
                         worker,
                         [failed],
                     ),
+                    invocation_id=command.invocation_id,
                 )
 
         self._pending_workers.append(
