@@ -354,18 +354,25 @@ class Context(Generic[MODEL_T]):
         """
         return self._face.store
 
-    def to_dict(self, serializer: BaseSerializer | None = None) -> dict[str, Any]:
+    def to_dict(
+        self, serializer: BaseSerializer | None = None, *, include_state: bool = True
+    ) -> dict[str, Any]:
         """Serialize the context to a JSON-serializable dict.
 
-        Persists the global state store, event queues, buffers, accepted events,
-        broker log, and running flag. This payload can be fed to
+        Persists the global state store, event queues, buffers, in-progress
+        work, and running flag. This payload can be fed to
         [from_dict][workflows.context.context.Context.from_dict] to resume a run
-        or carry state across runs.
+        or carry state across runs. It also records `journal_seq`, the number of
+        journaled ticks it covers. A context that has not started returns the
+        snapshot it will start from.
 
         Args:
             serializer (BaseSerializer | None): Value serializer used for state
                 and event payloads. Defaults to
                 [JsonSerializer][workflows.context.serializers.JsonSerializer].
+            include_state (bool): When False, the state store is not
+                serialized and `state` is left empty. A context restored from
+                that payload starts with a fresh state store.
 
         Returns:
             dict[str, Any]: A dict suitable for JSON encoding and later
@@ -384,7 +391,11 @@ class Context(Generic[MODEL_T]):
             result = await my_workflow.run(..., ctx=restored_ctx)
             ```
         """
-        return self._require_external(fn="to_dict").to_dict(serializer)
+        if isinstance(self._face, PreContext):
+            return self._face.to_dict(serializer, include_state=include_state)
+        return self._require_external(fn="to_dict").to_dict(
+            serializer, include_state=include_state
+        )
 
     @classmethod
     def from_dict(

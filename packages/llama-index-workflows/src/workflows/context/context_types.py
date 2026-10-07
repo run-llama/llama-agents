@@ -260,6 +260,9 @@ class SerializedContext(BaseModel):
     # persisted value is informational.
     elapsed_alive: float = Field(default=0.0)
     last_alive_stamp: float | None = Field(default=None)
+    # Number of journaled ticks folded into this state, which is also the seq
+    # of the next journal record.
+    journal_seq: int = Field(default=0)
 
     @staticmethod
     def from_v0(v0: SerializedContextV0) -> "SerializedContext":

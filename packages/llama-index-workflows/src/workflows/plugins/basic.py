@@ -9,13 +9,23 @@ import time
 import weakref
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Generator
+from dataclasses import dataclass
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncGenerator,
+    AsyncIterator,
+    Generator,
+    Iterable,
+)
 
 if TYPE_CHECKING:
     from workflows.workflow import Workflow
 
 from llama_index_instrumentation import get_dispatcher
 
+from workflows.context.context import Context
+from workflows.context.context_types import SerializedContext
 from workflows.context.serializers import BaseSerializer
 from workflows.context.state_store import (
     InMemoryStateStore,
@@ -25,6 +35,7 @@ from workflows.context.state_store import (
 )
 from workflows.errors import WorkflowRuntimeError
 from workflows.events import Event, StartEvent, StopEvent
+from workflows.runtime.control_loop.reduce import _reduce_tick
 from workflows.runtime.types.internal_state import BrokerState
 from workflows.runtime.types.plugin import (
     ExternalRunAdapter,
@@ -41,8 +52,23 @@ from workflows.runtime.types.step_function import (
     as_step_worker_functions,
     create_workflow_run_function,
 )
-from workflows.runtime.types.ticks import WorkflowTick
+from workflows.runtime.types.ticks import WorkflowTick, WorkflowTickAdapter
 from workflows.workflow import Workflow
+
+
+@dataclass(frozen=True)
+class JournalRecord:
+    """One journaled tick of a run, as yielded by `BasicRuntime.journal`.
+
+    Attributes:
+        seq: Position in the context's journal. Contiguous across resumes of
+            the same context, starting from the snapshot's `journal_seq`.
+        data: The serializer-encoded tick. Opaque; store it and hand it back to
+            `BasicRuntime.restore`.
+    """
+
+    seq: int
+    data: str
 
 
 class AsyncioAdapterQueues:
@@ -66,6 +92,8 @@ class AsyncioAdapterQueues:
         self.init_state = init_state
         self.ticks: list[WorkflowTick] = []
         self.state_store = state_store
+        # Set by run_workflow(); encodes journal records
+        self.serializer: BaseSerializer | None = None
 
     # created lazily via cached_property for Python 3.14+ compatibility (they require a running event loop)
     @functools.cached_property
@@ -81,6 +109,12 @@ class AsyncioAdapterQueues:
     @functools.cached_property
     def stream_lock(self) -> asyncio.Lock:
         return asyncio.Lock()
+
+    # created lazily via cached_property for Python 3.14+ compatibility (they require a running event loop)
+    @functools.cached_property
+    def ticks_changed(self) -> asyncio.Event:
+        """Set when a tick is appended or the run completes. Wakes journal readers."""
+        return asyncio.Event()
 
 
 class InternalAsyncioAdapter(InternalRunAdapter, SnapshottableAdapter):
@@ -133,6 +167,7 @@ class InternalAsyncioAdapter(InternalRunAdapter, SnapshottableAdapter):
 
     async def on_tick(self, tick: WorkflowTick) -> None:
         self._queues.ticks.append(tick)
+        self._queues.ticks_changed.set()
 
     def replay(self) -> list[WorkflowTick]:
         return self._queues.ticks
@@ -310,6 +345,7 @@ class BasicRuntime(Runtime):
         # might want to lock this better. Unlikely race condition if you spam with the same run_id.
         queues = self._get_or_create_queues(run_id, init_state)
         queues.state_store = state_store
+        queues.serializer = active_serializer
 
         # Capture propagation context (otel trace, instrument tags, etc.)
         # BEFORE creating the task — contextvars won't be inherited.
@@ -327,6 +363,7 @@ class BasicRuntime(Runtime):
         with setting_run_id(run_id):
             # actually pump the task through the runtime
             task = asyncio.create_task(run_with_concurrency_limit())
+            task.add_done_callback(lambda _: queues.ticks_changed.set())
             queues.complete = task
             return self.get_external_adapter(run_id)
 
@@ -347,6 +384,96 @@ class BasicRuntime(Runtime):
         if run_id not in self._queues:
             raise RuntimeError(f"No active workflow with run_id '{run_id}'. ")
         return ExternalAsyncioAdapter(self, self._queues[run_id])
+
+    async def journal(self, run_id: str) -> AsyncIterator[JournalRecord]:
+        """Yield the run's journal: recorded ticks, then live ones until it ends.
+
+        The runtime keeps the current session's ticks in memory, so a reader
+        that starts after `run()` still sees every record from the session's
+        first seq. The iterator ends once the run has completed and every
+        record has been yielded.
+        """
+        queues = self._queues.get(run_id)
+        if queues is None:
+            raise RuntimeError(f"No active workflow with run_id '{run_id}'. ")
+        serializer = queues.serializer
+        assert serializer is not None
+        start_seq = queues.init_state.journal_seq
+        index = 0
+        while True:
+            # Clear before reading, so a tick appended while the caller holds a
+            # yielded record sets the event again.
+            queues.ticks_changed.clear()
+            while index < len(queues.ticks):
+                yield JournalRecord(
+                    seq=start_seq + index,
+                    data=serializer.serialize(queues.ticks[index]),
+                )
+                index += 1
+            if queues.complete.done():
+                return
+            await queues.ticks_changed.wait()
+
+    def restore(
+        self,
+        workflow: Workflow,
+        snapshot: dict[str, Any] | None,
+        records: Iterable[JournalRecord],
+        serializer: BaseSerializer | None = None,
+    ) -> Context:
+        """Fold journal records onto a snapshot and return a pre-run Context.
+
+        Args:
+            workflow: The workflow the records were journaled for.
+            snapshot: A `Context.to_dict()` result, or None for a fresh run.
+                Its `state` is carried over unchanged.
+            records: Records from `journal()`. Records below the snapshot's
+                `journal_seq` are skipped, so overlapping records are fine.
+            serializer: Serializer the snapshot and records were written with.
+                Defaults to the workflow's serializer.
+
+        Raises:
+            ValueError: If the records skip a seq.
+
+        Compaction is `restore(workflow, snapshot, records).to_dict()`.
+        """
+        active_serializer = (
+            serializer if serializer is not None else self.get_serializer(workflow)
+        )
+        if snapshot is None:
+            parsed = SerializedContext()
+            state = BrokerState.from_workflow(workflow)
+        else:
+            parsed = SerializedContext.from_dict_auto(snapshot, active_serializer)
+            state = BrokerState.from_serialized(parsed, workflow, active_serializer)
+        for record in records:
+            if record.seq < state.journal_seq:
+                continue
+            if record.seq > state.journal_seq:
+                raise ValueError(
+                    f"Journal gap: expected seq {state.journal_seq}, got {record.seq}"
+                )
+            with active_serializer.validation_context():
+                tick = WorkflowTickAdapter.validate_python(
+                    active_serializer.deserialize(record.data)
+                )
+            state, _ = _reduce_tick(tick, state, time.time())
+        restored = state.to_serialized(active_serializer)
+        restored.state = parsed.state
+        return Context.from_dict(
+            workflow, restored.model_dump(mode="python"), serializer=active_serializer
+        )
+
+
+def assert_is_basic(runtime: Runtime) -> BasicRuntime:
+    """Return `runtime` typed as a BasicRuntime, or raise TypeError.
+
+    A decorated BasicRuntime, such as the server's persistence runtime, is
+    rejected: it keeps its own journal.
+    """
+    if not isinstance(runtime, BasicRuntime):
+        raise TypeError(f"Expected a BasicRuntime, got {type(runtime).__qualname__}")
+    return runtime
 
 
 _current_run_id: ContextVar[str | None] = ContextVar("current_run_id", default=None)

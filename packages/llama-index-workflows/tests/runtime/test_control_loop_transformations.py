@@ -586,8 +586,9 @@ def test_idle_release(base_state: BrokerState) -> None:
     tick = TickIdleRelease()
     new_state, commands = _reduce_tick(tick, base_state, 0.0)
 
-    # State is unchanged (returned early without deepcopy)
-    assert new_state is base_state
+    # State is unchanged apart from the journal position
+    assert new_state.workers == base_state.workers
+    assert new_state.journal_seq == base_state.journal_seq + 1
     # Single command: complete run with IdleReleasedEvent
     assert len(commands) == 1
     assert isinstance(commands[0], CommandCompleteRun)

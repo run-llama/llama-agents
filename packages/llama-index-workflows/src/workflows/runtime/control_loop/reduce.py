@@ -260,6 +260,20 @@ def _reduce_tick(
     now_seconds: float,
     run_id: str | None = None,
 ) -> tuple[BrokerState, list[WorkflowCommand]]:
+    state, commands = _reduce_tick_body(tick, init, now_seconds, run_id)
+    # Count every reduced tick, so a snapshot records its journal position.
+    if state is init:
+        state = replace(init)
+    state.journal_seq = init.journal_seq + 1
+    return state, commands
+
+
+def _reduce_tick_body(
+    tick: WorkflowTick,
+    init: BrokerState,
+    now_seconds: float,
+    run_id: str | None,
+) -> tuple[BrokerState, list[WorkflowCommand]]:
     now_seconds = _effective_now(tick, now_seconds)
     if isinstance(tick, TickStepResult):
         state, commands = _process_step_result_tick(tick, init, now_seconds, run_id)
