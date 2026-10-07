@@ -177,14 +177,6 @@ def _record_type(records: list[JournalRecord]) -> str:
     return json.loads(records[-1].data)["value"]["type"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "An event a step sends with ctx.send_event is journaled as its own "
-        "add_event after the step's step_result. A cut between the two marks "
-        "the step done and loses the event, so the collect step never fires."
-    ),
-)
 async def test_every_journal_cut_runs_to_the_uninterrupted_result(
     runtime: BasicRuntime,
 ) -> None:
