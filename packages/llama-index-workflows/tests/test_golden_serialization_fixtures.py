@@ -108,29 +108,6 @@ def _load(name: str) -> dict[str, Any]:
     return json.loads((_FIXTURES / name).read_text())
 
 
-def test_golden_journal_replays_from_canonical_state() -> None:
-    """Replaying the golden tick journal from a fresh ``from_workflow`` state
-    reaches the same terminal ``StopEvent`` the live run recorded."""
-    journal = _load("journal.json")
-    ticks = [WorkflowTickAdapter.validate_python(t) for t in journal["ticks"]]
-
-    state = BrokerState.from_workflow(GoldenJournalWorkflow())
-    state, _ = rewind_in_progress(state, time.time())
-    result: Any = None
-    for tick in ticks:
-        state, commands = _reduce_tick(tick, state, time.time())
-        for command in commands:
-            if isinstance(command, CommandCompleteRun):
-                result = command.result
-
-    assert result is not None
-    assert result.result == journal["result"]
-    # Legacy fallback: the pre-child journal has no stamps or session markers, so
-    # the elapsed-alive budget never accrues and no spurious timeout can fire.
-    assert state.elapsed_alive == 0.0
-    assert state.last_alive_stamp is None
-
-
 def test_current_golden_journal_replays_with_stamped_ticks() -> None:
     journal = _load("current_journal.json")
     ticks = [WorkflowTickAdapter.validate_python(t) for t in journal["ticks"]]
