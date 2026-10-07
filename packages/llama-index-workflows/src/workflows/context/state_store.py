@@ -16,14 +16,17 @@ from typing import (
     Any,
     AsyncContextManager,
     AsyncGenerator,
+    Callable,
     Generic,
     Literal,
+    NamedTuple,
     Protocol,
     cast,
     runtime_checkable,
 )
 
 from pydantic import BaseModel, RootModel, ValidationError, model_validator
+from pydantic_core import to_jsonable_python
 from typing_extensions import TypeVar
 
 from workflows.decorators import StepConfig
@@ -202,6 +205,7 @@ def serialize_dict_state_data(
     state: DictState,
     serializer: BaseSerializer,
     known_unserializable_keys: tuple[str, ...] = KNOWN_UNSERIALIZABLE_KEYS,
+    encode: Callable[[Any], Any] | None = None,
 ) -> dict[str, Any]:
     """Serialize DictState items to {"_data": {...}} format.
 
@@ -209,6 +213,7 @@ def serialize_dict_state_data(
         state: The DictState to serialize.
         serializer: Strategy for encoding values.
         known_unserializable_keys: Keys to skip with warning if they fail to serialize.
+        encode: Per-value encoder used instead of ``serializer.serialize``.
 
     Returns:
         Dict with {"_data": {...}} structure containing serialized values.
@@ -216,10 +221,11 @@ def serialize_dict_state_data(
     Raises:
         ValueError: If serialization fails for a non-known-unserializable key.
     """
+    encode = encode or serializer.serialize
     serialized_data = {}
     for key, value in state.items():
         try:
-            serialized_data[key] = serializer.serialize(value)
+            serialized_data[key] = encode(value)
         except Exception as e:
             if key in known_unserializable_keys:
                 warnings.warn(
@@ -248,93 +254,45 @@ def encode_state(
     return state_data, type(state).__name__, type(state).__module__
 
 
-# Marks the tree-shaped ``state_data`` written by ``StateCheckpoint.to_dict``.
-# Its value is ``"dict"`` for DictState, whose values sit under ``_data``, or
-# ``"model"`` for a typed model, which sits beside it in ``serialize_value``
-# form. The diff path rules in ``_PatchLocation`` depend on this layout.
+# Marks the tree-shaped ``state_data`` written by ``StateCheckpoint.to_dict``:
+# ``"dict"`` for DictState, with values under ``_data``, or ``"model"`` for a
+# typed model, whose ``serialize_value`` wrapper sits beside the marker.
+# ``_PatchLocation`` maps diff paths onto this layout.
 STATE_TREE_KEY = "_tree"
 
 
-def _serialize_tree_value(serializer: JsonSerializer, value: Any) -> Any:
+def _tree_value(serializer: JsonSerializer, value: Any) -> Any:
     tree = serializer.serialize_value(value)
     # serialize_value passes unknown objects through, so check the result is JSON.
     json.dumps(tree)
     return tree
 
 
-def encode_state_tree(
-    state: BaseModel,
-    serializer: BaseSerializer,
-    known_unserializable_keys: tuple[str, ...] = KNOWN_UNSERIALIZABLE_KEYS,
-) -> dict[str, Any]:
-    """Encode state as one JSON tree that a JSON Patch can address.
-
-    Unlike ``encode_state``, nested values stay JSON structure instead of
-    per-value encoded strings. Requires a ``JsonSerializer``.
-    """
-    json_serializer = _require_json_serializer(serializer)
+def encode_state_tree(state: BaseModel, serializer: JsonSerializer) -> dict[str, Any]:
+    """Encode state as one JSON tree that a JSON Patch can address."""
     if isinstance(state, DictState):
-        data: dict[str, Any] = {}
-        for key, value in state.items():
-            try:
-                data[key] = _serialize_tree_value(json_serializer, value)
-            except Exception as e:
-                if key in known_unserializable_keys:
-                    warnings.warn(
-                        f"Skipping serialization of known unserializable key: {key} -- "
-                        "This is expected but will require this item to be set manually after deserialization.",
-                        category=UnserializableKeyWarning,
-                    )
-                    continue
-                raise ValueError(f"Failed to serialize state value for key {key}: {e}")
-        return {STATE_TREE_KEY: "dict", "_data": data}
-    try:
-        tree = _serialize_tree_value(json_serializer, state)
-    except Exception as e:
-        raise ValueError(f"Failed to serialize state: {e}")
-    return {STATE_TREE_KEY: "model", **tree}
-
-
-def _deserialize_tree_value(serializer: BaseSerializer, tree: Any) -> Any:
-    if isinstance(serializer, JsonSerializer):
-        return serializer.deserialize_value(tree)
-    return serializer.deserialize(json.dumps(tree))
+        encode = functools.partial(_tree_value, serializer)
+        data = serialize_dict_state_data(state, serializer, encode=encode)
+        return {STATE_TREE_KEY: "dict", **data}
+    return {STATE_TREE_KEY: "model", **_tree_value(serializer, state)}
 
 
 def decode_state_tree(
     state_data: dict[str, Any], serializer: BaseSerializer
 ) -> BaseModel:
     """Decode a ``state_data`` tree written by ``encode_state_tree``."""
-    kind = state_data[STATE_TREE_KEY]
-    if kind == "dict":
-        data: dict[str, Any] = {}
-        for key, value in state_data.get("_data", {}).items():
-            try:
-                data[key] = _deserialize_tree_value(serializer, value)
-            except Exception as e:
-                raise ValueError(
-                    f"Failed to deserialize state value for key {key}: {e}"
-                )
-        return DictState(_data=data)
-    if kind == "model":
-        tree = {k: v for k, v in state_data.items() if k != STATE_TREE_KEY}
-        value = _deserialize_tree_value(serializer, tree)
-        if isinstance(value, BaseModel):
-            return value
-        raise ValueError(
-            f"Unrecognized state tree: decoded to {type(value).__name__}, "
-            "expected a model"
-        )
-    raise ValueError(f"Unrecognized state tree kind {kind!r}")
 
+    def decode(tree: Any) -> Any:
+        if isinstance(serializer, JsonSerializer):
+            return serializer.deserialize_value(tree)
+        return serializer.deserialize(json.dumps(tree))
 
-def _require_json_serializer(serializer: BaseSerializer) -> JsonSerializer:
-    if not isinstance(serializer, JsonSerializer):
-        raise TypeError(
-            "State checkpoints require a JsonSerializer, got "
-            f"{type(serializer).__name__}"
-        )
-    return serializer
+    if state_data[STATE_TREE_KEY] == "dict":
+        return DictState(_data={k: decode(v) for k, v in state_data["_data"].items()})
+    value = decode({k: v for k, v in state_data.items() if k != STATE_TREE_KEY})
+    if not isinstance(value, BaseModel):
+        raise ValueError(f"State tree decoded to {type(value).__name__}, not a model")
+    return value
 
 
 def decode_state(
@@ -1310,7 +1268,9 @@ class InMemoryStateStore(StateStoreFacade[MODEL_T]):
         """Return a checkpoint referencing the committed state. Copies nothing."""
         record = self._memory_storage.load_sync()
         state = record.data if record is not None else self.state_type()
-        return StateCheckpoint(state, _require_json_serializer(self._serializer))
+        if not isinstance(self._serializer, JsonSerializer):
+            raise TypeError("State checkpoints require a JsonSerializer")
+        return StateCheckpoint(state, self._serializer)
 
     async def _write_state(
         self, state: BaseModel, storage: _StateStorage | None = None
@@ -1488,79 +1448,45 @@ def _find_most_derived_state_type(state_types: set[type[BaseModel]]) -> type[Bas
     return most_derived
 
 
-def _escape_pointer_segment(segment: str) -> str:
-    return segment.replace("~", "~0").replace("/", "~1")
-
-
-def _unescape_pointer_segment(segment: str) -> str:
-    return segment.replace("~1", "/").replace("~0", "~")
-
-
-class _PatchLocation:
+class _PatchLocation(NamedTuple):
     """Where a node of the live state sits in the ``StateCheckpoint.to_dict()`` tree.
 
-    This is the one place that maps the diff walk onto patch paths and patch
-    values. Outside a model, values are in ``serialize_value`` form: dict keys
-    and list indexes map one to one, and a model is a wrapper whose fields sit
-    under ``value``. Inside a model, values are in ``model_dump(mode="json")``
-    form, so a value is encoded by dumping the outermost enclosing model with
-    an ``include`` filter that selects only this location.
+    The one place that maps the diff walk onto patch paths and values. Outside
+    a model, values are in ``serialize_value`` form: dict keys and list indexes
+    map one to one, and a model's fields sit under ``value``. Inside a model,
+    values are in ``model_dump(mode="json")`` form, which for a diffable model
+    is ``to_jsonable_python`` of each field.
     """
 
-    __slots__ = ("pointer", "dump_root", "dump_path")
-
-    def __init__(
-        self,
-        pointer: tuple[str, ...],
-        dump_root: BaseModel | None = None,
-        dump_path: tuple[Any, ...] = (),
-    ) -> None:
-        self.pointer = pointer
-        self.dump_root = dump_root
-        self.dump_path = dump_path
-
-    @property
-    def in_dump(self) -> bool:
-        return self.dump_root is not None
+    pointer: tuple[str, ...]
+    in_model: bool = False
 
     @property
     def path(self) -> str:
-        return "".join("/" + _escape_pointer_segment(s) for s in self.pointer)
+        return "".join(
+            "/" + s.replace("~", "~0").replace("/", "~1") for s in self.pointer
+        )
 
     def child(self, key: Any) -> _PatchLocation:
-        """Location of a dict value or list element."""
-        dump_path = self.dump_path + (key,) if self.in_dump else ()
-        return _PatchLocation(self.pointer + (str(key),), self.dump_root, dump_path)
+        return _PatchLocation((*self.pointer, str(key)), self.in_model)
 
-    def field(self, model: BaseModel, name: str) -> _PatchLocation:
-        """Location of a field of ``model``, which sits at this location."""
-        if self.dump_root is None:
-            return _PatchLocation(self.pointer + ("value", name), model, (name,))
-        return self.child(name)
+    def field(self, name: str) -> _PatchLocation:
+        if self.in_model:
+            return self.child(name)
+        return _PatchLocation((*self.pointer, "value", name), True)
 
     def encode(self, serializer: JsonSerializer, value: Any) -> Any:
-        """Encode ``value``, the live value at this location, as it appears in the tree."""
-        if self.dump_root is None:
-            return serializer.serialize_value(value)
-        include: dict[Any, Any] = {self.dump_path[-1]: True}
-        for segment in reversed(self.dump_path[:-1]):
-            include = {segment: include}
-        dumped: Any = self.dump_root.model_dump(mode="json", include=include)
-        for segment in self.dump_path:
-            # An include filter keeps only the selected list element.
-            dumped = dumped[0] if isinstance(dumped, list) else dumped[str(segment)]
-        return dumped
+        if self.in_model:
+            return to_jsonable_python(value)
+        return serializer.serialize_value(value)
 
 
-def _diffable_model(model: BaseModel, in_dump: bool) -> bool:
-    """Whether a model's encoded form is its declared fields, keyed by name.
-
-    Other models are compared and replaced whole.
-    """
+def _diffable_model(model: BaseModel, in_model: bool) -> bool:
+    """Whether a model encodes as its declared fields. Others are replaced whole."""
     cls = type(model)
     if isinstance(model, (DictLikeModel, RootModel)):
         return False
-    if not in_dump and hasattr(model, "class_name"):
+    if not in_model and hasattr(model, "class_name"):
         # serialize_value encodes components through their own to_dict.
         return False
     decorators = cls.__pydantic_decorators__
@@ -1573,23 +1499,11 @@ def _diffable_model(model: BaseModel, in_dump: bool) -> bool:
     )
 
 
-def _dumped_fields(cls: type[BaseModel]) -> list[str]:
-    return [name for name, info in cls.model_fields.items() if not info.exclude]
-
-
 def _safe_eq(a: Any, b: Any) -> bool:
     try:
         return bool(a == b)
     except Exception:
         return False
-
-
-def _tree_encodable(serializer: JsonSerializer, value: Any) -> bool:
-    try:
-        _serialize_tree_value(serializer, value)
-    except Exception:
-        return False
-    return True
 
 
 class _StateDiff:
@@ -1602,22 +1516,12 @@ class _StateDiff:
         # descending into an element would otherwise compare it twice.
         self._eq_memo: dict[tuple[int, int], bool] = {}
 
-    def add(self, loc: _PatchLocation, value: Any) -> None:
-        self.ops.append(
-            {"op": "add", "path": loc.path, "value": loc.encode(self.serializer, value)}
-        )
-
-    def replace(self, loc: _PatchLocation, value: Any) -> None:
-        self.ops.append(
-            {
-                "op": "replace",
-                "path": loc.path,
-                "value": loc.encode(self.serializer, value),
-            }
-        )
-
-    def remove(self, loc: _PatchLocation) -> None:
-        self.ops.append({"op": "remove", "path": loc.path})
+    def emit(self, op: str, loc: _PatchLocation, value: Any = None) -> None:
+        if op == "remove":
+            self.ops.append({"op": op, "path": loc.path})
+        else:
+            value = loc.encode(self.serializer, value)
+            self.ops.append({"op": op, "path": loc.path, "value": value})
 
     def same(self, a: Any, b: Any) -> bool:
         if a is b:
@@ -1636,13 +1540,14 @@ class _StateDiff:
         if a is b:
             return
         if type(a) is not type(b):
-            self.replace(loc, b)
-        elif isinstance(b, BaseModel) and _diffable_model(b, loc.in_dump):
+            self.emit("replace", loc, b)
+        elif isinstance(b, BaseModel) and _diffable_model(b, loc.in_model):
             if self.same(a, b):
                 return
             old, new = a.__dict__, b.__dict__
-            for name in _dumped_fields(type(b)):
-                self.node(old.get(name), new.get(name), loc.field(b, name))
+            for name, info in type(b).model_fields.items():
+                if not info.exclude:
+                    self.node(old.get(name), new.get(name), loc.field(name))
         elif isinstance(b, dict):
             if not self.same(a, b):
                 self.diff_dict(a, b, loc)
@@ -1650,7 +1555,7 @@ class _StateDiff:
             if not self.same(a, b):
                 self.diff_list(a, b, loc)
         elif not self.same(a, b):
-            self.replace(loc, b)
+            self.emit("replace", loc, b)
 
     def diff_dict(
         self, a: dict[Any, Any], b: dict[Any, Any], loc: _PatchLocation
@@ -1659,10 +1564,10 @@ class _StateDiff:
             if key in a:
                 self.node(a[key], value, loc.child(key))
             else:
-                self.add(loc.child(key), value)
+                self.emit("add", loc.child(key), value)
         for key in a:
             if key not in b:
-                self.remove(loc.child(key))
+                self.emit("remove", loc.child(key))
 
     def diff_list(self, a: list[Any], b: list[Any], loc: _PatchLocation) -> None:
         len_a, len_b = len(a), len(b)
@@ -1682,9 +1587,9 @@ class _StateDiff:
             return
         # The changed span has a new length: replace it as one block.
         for _ in range(middle_a):
-            self.remove(loc.child(prefix))
+            self.emit("remove", loc.child(prefix))
         for i in range(prefix, prefix + middle_b):
-            self.add(loc.child(i), b[i])
+            self.emit("add", loc.child(i), b[i])
 
 
 class StateCheckpoint:
@@ -1695,114 +1600,53 @@ class StateCheckpoint:
     it was. Values mutated in place (for example, a list returned by
     ``store.get`` and appended to) change under every checkpoint that shares
     them, so the diff cannot see such edits.
-
-    Requires a ``JsonSerializer``: payloads and patch values are its
-    ``serialize_value`` form.
     """
 
-    def __init__(
-        self,
-        state: BaseModel,
-        serializer: JsonSerializer,
-        known_unserializable_keys: tuple[str, ...] = KNOWN_UNSERIALIZABLE_KEYS,
-    ) -> None:
+    def __init__(self, state: BaseModel, serializer: JsonSerializer) -> None:
         self._state = state
         self._serializer = serializer
-        self._known_unserializable_keys = known_unserializable_keys
-
-    @property
-    def state(self) -> BaseModel:
-        """The committed state model. Treat it as read only."""
-        return self._state
 
     def to_dict(self) -> dict[str, Any]:
-        """Full state payload, usable as a context snapshot's ``state``.
-
-        ``state_data`` is a JSON tree that patches from ``diff`` apply to.
-        """
-        state = self._state
+        """Full state payload, usable as a context snapshot's ``state``."""
         return {
             "store_type": "in_memory",
-            "state_type": type(state).__name__,
-            "state_module": type(state).__module__,
-            "state_data": encode_state_tree(
-                state, self._serializer, self._known_unserializable_keys
-            ),
+            "state_type": type(self._state).__name__,
+            "state_module": type(self._state).__module__,
+            "state_data": encode_state_tree(self._state, self._serializer),
         }
 
     def diff(self, since: StateCheckpoint) -> list[dict[str, Any]]:
-        """JSON Patch ops that turn ``since.to_dict()`` into ``self.to_dict()``.
+        """JSON Patch ops from ``since.to_dict()`` to ``self.to_dict()``.
 
-        Values shared by reference are skipped without comparing them, so
-        the cost follows what was written rather than the state size. A list
-        that grew or shrank in the middle gets one block of removes and adds
-        for the changed span.
+        Values shared by reference are skipped, so cost follows what was written.
         """
         old, new = since._state, self._state
-        if old is new:
-            return []
         walk = _StateDiff(self._serializer)
         root = _PatchLocation(("state_data",))
-        if type(old) is not type(new):
-            for key, value in self.to_dict().items():
-                if key != "store_type":
-                    walk.ops.append(
-                        {"op": "replace", "path": f"/{key}", "value": value}
-                    )
-        elif isinstance(new, DictState):
-            self._diff_dict_state(
-                walk, cast(DictState, old)._data, new._data, root.child("_data")
+        if old is new:
+            return []
+        if type(old) is type(new) and isinstance(new, DictState):
+            walk.diff_dict(
+                self._encodable(cast(DictState, old)._data),
+                self._encodable(new._data),
+                root.child("_data"),
             )
-        elif _diffable_model(new, in_dump=False):
+        elif type(old) is type(new) and _diffable_model(new, in_model=False):
             walk.node(old, new, root)
         elif not walk.same(old, new):
-            walk.ops.append(
-                {
-                    "op": "replace",
-                    "path": root.path,
-                    "value": encode_state_tree(
-                        new, self._serializer, self._known_unserializable_keys
-                    ),
-                }
-            )
+            walk.ops.append({"op": "replace", "path": "", "value": self.to_dict()})
         return walk.ops
 
-    def _diff_dict_state(
-        self,
-        walk: _StateDiff,
-        old: dict[str, Any],
-        new: dict[str, Any],
-        loc: _PatchLocation,
-    ) -> None:
-        # Known unserializable keys are left out of the tree when they fail to
-        # encode, so they are added or removed as they start or stop encoding.
-        known = self._known_unserializable_keys
-        serializer = self._serializer
-        for key, value in new.items():
-            child = loc.child(key)
-            if key not in old:
-                if key not in known or _tree_encodable(serializer, value):
-                    walk.add(child, value)
-                continue
-            previous = old[key]
-            if previous is value:
-                continue
-            if key in known:
-                old_ok = _tree_encodable(serializer, previous)
-                new_ok = _tree_encodable(serializer, value)
-                if not new_ok:
-                    if old_ok:
-                        walk.remove(child)
-                    continue
-                if not old_ok:
-                    walk.add(child, value)
-                    continue
-            walk.node(previous, value, child)
-        for key, value in old.items():
-            if key not in new and (
-                key not in known or _tree_encodable(serializer, value)
-            ):
-                walk.remove(loc.child(key))
+    def _encodable(self, data: dict[str, Any]) -> dict[str, Any]:
+        # to_dict leaves out known unserializable keys that fail to encode.
+        view = data
+        for key in KNOWN_UNSERIALIZABLE_KEYS:
+            if key in data:
+                try:
+                    _tree_value(self._serializer, data[key])
+                except Exception:
+                    view = {k: v for k, v in view.items() if k != key}
+        return view
 
 
 def apply_state_patch(
@@ -1817,12 +1661,10 @@ def apply_state_patch(
     copied = {id(root)}
     for op in patch:
         kind = op["op"]
-        if kind not in ("add", "remove", "replace"):
-            raise ValueError(f"Unsupported state patch op {kind!r}")
-        segments = [_unescape_pointer_segment(s) for s in op["path"].split("/")[1:]]
+        segments = [
+            s.replace("~1", "/").replace("~0", "~") for s in op["path"].split("/")[1:]
+        ]
         if not segments:
-            if kind == "remove":
-                raise ValueError("Cannot remove the state payload root")
             root = copy(op["value"])
             copied = {id(root)}
             continue
@@ -1831,23 +1673,16 @@ def apply_state_patch(
             key: Any = int(segment) if isinstance(parent, list) else segment
             child = parent[key]
             if id(child) not in copied:
-                child = copy(child)
-                parent[key] = child
+                child = parent[key] = copy(child)
                 copied.add(id(child))
             parent = child
-        last = segments[-1]
-        if isinstance(parent, list):
-            index = len(parent) if last == "-" else int(last)
-            if kind == "add":
-                parent.insert(index, op["value"])
-            elif kind == "remove":
-                del parent[index]
-            else:
-                parent[index] = op["value"]
-        elif kind == "remove":
+        last: Any = int(segments[-1]) if isinstance(parent, list) else segments[-1]
+        if kind == "remove":
             del parent[last]
-        else:
-            if kind == "replace" and last not in parent:
-                raise KeyError(f"Cannot replace missing path {op['path']}")
+        elif kind == "add" and isinstance(parent, list):
+            parent.insert(last, op["value"])
+        elif kind in ("add", "replace"):
             parent[last] = op["value"]
+        else:
+            raise ValueError(f"Unsupported state patch op {kind!r}")
     return root
