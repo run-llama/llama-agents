@@ -87,6 +87,9 @@ class StepWorkerState:
     collection_release_payload: CollectionReleasePayload | None = None
     scope_path: tuple[str, ...] = ()
     work_item_id: str | None = None
+    # Identity of the dispatch this state was handed to. ctx.send_event keys
+    # its sends with it.
+    invocation_id: str | None = None
 
     def _deepcopy(self) -> StepWorkerState:
         return StepWorkerState(
@@ -98,6 +101,7 @@ class StepWorkerState:
             else None,
             scope_path=self.scope_path,
             work_item_id=self.work_item_id,
+            invocation_id=self.invocation_id,
         )
 
 

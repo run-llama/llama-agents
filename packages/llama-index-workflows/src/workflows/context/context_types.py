@@ -106,6 +106,27 @@ class SerializedEventAttempt(BaseModel):
     work_item_id: str | None = None
 
 
+class SerializedInProgressAttempt(SerializedEventAttempt):
+    """An in-progress invocation serialized in place.
+
+    Items with an ``invocation_id`` restore as in-progress, so ticks journaled
+    after the snapshot (the invocation's sends and result) still apply to the
+    same invocation. Items without one were written by an older version and
+    are re-queued on load.
+    """
+
+    # Worker slot the invocation runs in.
+    worker_id: int | None = None
+    # Identity of this dispatch. None marks a legacy item.
+    invocation_id: str | None = None
+    # Send indexes of this invocation already routed.
+    received: list[int] = Field(default_factory=list)
+    # ctx.collect_events() buffers the invocation was dispatched with.
+    collected_events: dict[str, list[str]] = Field(default_factory=dict)
+    # Collect buffer generations the invocation was dispatched with.
+    collect_generations: dict[str, int] = Field(default_factory=dict)
+
+
 class SerializedCollectionReleasePayload(BaseModel):
     """Serialized list-collect invocation payload."""
 
@@ -156,12 +177,14 @@ class SerializedStepWorkerState(BaseModel):
 
     # Queue of events waiting to be processed (with retry info)
     queue: list[SerializedEventAttempt] = Field(default_factory=list)
-    # Events currently being processed. Serialized with full retry + stream scope
-    # so a resumed run re-queues them without losing collection liveness.
-    in_progress: list[SerializedEventAttempt] = Field(default_factory=list)
+    # Events currently being processed. Serialized in place with their
+    # invocation identity; legacy entries without one are re-queued on load.
+    in_progress: list[SerializedInProgressAttempt] = Field(default_factory=list)
     # Collected events for ctx.collect_events(), keyed by buffer_id -> [event, ...]
     # Events are serialized strings
     collected_events: dict[str, list[str]] = Field(default_factory=dict)
+    # Per-buffer generation counters, bumped on every append and clear.
+    collect_generations: dict[str, int] = Field(default_factory=dict)
     # Pending static multi-parameter fan-in events.
     static_collect_events: list[str] = Field(default_factory=list)
     # Active waiters created by ctx.wait_for_event()
