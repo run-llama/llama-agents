@@ -60,9 +60,7 @@ class SendAndReturnWorkflow(Workflow):
         return ReturnedEv(value=2)
 
     @step
-    async def collect(
-        self, ctx: Context, ev: SentEv | ReturnedEv
-    ) -> StopEvent | None:
+    async def collect(self, ctx: Context, ev: SentEv | ReturnedEv) -> StopEvent | None:
         events = ctx.collect_events(ev, [SentEv, ReturnedEv])
         if events is None:
             return None
@@ -170,9 +168,7 @@ async def test_replay_matches_live_state_and_resumes_at_every_cut() -> None:
 
     for cut in range(1, len(ticks)):
         live = rebuild_state_from_ticks(BrokerState.from_workflow(wf), ticks[:cut])
-        replay = rebuild_state_from_ticks(
-            BrokerState.from_workflow(wf), replayed[:cut]
-        )
+        replay = rebuild_state_from_ticks(BrokerState.from_workflow(wf), replayed[:cut])
         assert _serialized(wf, replay) == _serialized(wf, live), cut
         if not live.is_running:
             continue
