@@ -29,6 +29,7 @@ from workflows.context.context_types import SerializedContext
 from workflows.context.serializers import BaseSerializer
 from workflows.context.state_store import (
     InMemoryStateStore,
+    StateCheckpoint,
     StateStore,
     infer_state_type,
     is_durable_serialized_state,
@@ -462,6 +463,24 @@ class BasicRuntime(Runtime):
         return Context.from_dict(
             workflow, restored.model_dump(mode="python"), serializer=active_serializer
         )
+
+    def state_checkpoint(self, run_id: str) -> StateCheckpoint:
+        """Return a checkpoint of the run's committed state.
+
+        O(1): the checkpoint references the committed model and copies
+        nothing. Use ``StateCheckpoint.diff`` against an earlier checkpoint
+        for a JSON Patch of what changed. Edits made by mutating a value
+        returned from ``store.get`` in place are not visible to the diff.
+        """
+        queues = self._queues.get(run_id)
+        if queues is None:
+            raise RuntimeError(f"No active workflow with run_id '{run_id}'.")
+        store = queues.state_store
+        if not isinstance(store, InMemoryStateStore):
+            raise TypeError(
+                f"Run '{run_id}' has no in-memory state store to checkpoint"
+            )
+        return store.checkpoint()
 
 
 _current_run_id: ContextVar[str | None] = ContextVar("current_run_id", default=None)

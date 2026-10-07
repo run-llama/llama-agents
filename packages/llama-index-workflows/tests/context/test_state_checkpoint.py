@@ -1,0 +1,239 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 LlamaIndex Inc.
+
+"""Tests for `StateCheckpoint` diffs and the tree-shaped state payload."""
+
+from __future__ import annotations
+
+import json
+from typing import Any, Awaitable, Callable
+
+import pytest
+from pydantic import BaseModel, Field
+from workflows.context import Context
+from workflows.context.serializers import JsonSerializer
+from workflows.context.state_store import (
+    DictState,
+    InMemoryStateStore,
+    StateCheckpoint,
+    apply_state_patch,
+    decode_state,
+    encode_state_tree,
+)
+from workflows.decorators import step
+from workflows.events import StartEvent, StopEvent
+from workflows.plugins.basic import basic_runtime
+from workflows.workflow import Workflow
+
+EQ_CALLS: list[str] = []
+
+
+class Message(BaseModel):
+    text: str
+    tags: list[str] = Field(default_factory=list)
+
+    def __eq__(self, other: object) -> bool:
+        EQ_CALLS.append(self.text)
+        return super().__eq__(other)
+
+    __hash__ = None  # type: ignore[assignment]
+
+
+class Conversation(BaseModel):
+    title: str = ""
+    messages: list[Message] = Field(default_factory=list)
+    meta: dict[str, Any] = Field(default_factory=dict)
+
+
+Mutation = Callable[[InMemoryStateStore[Any]], Awaitable[None]]
+
+
+def seed(kind: str) -> BaseModel:
+    messages = [Message(text=f"m{i}", tags=[f"t{i}"]) for i in range(4)]
+    meta = {"a": 1, "b": {"c": [1, 2]}}
+    if kind == "typed":
+        return Conversation(title="hi", messages=messages, meta=meta)
+    state = DictState()
+    state["title"] = "hi"
+    state["messages"] = messages
+    state["meta"] = meta
+    return state
+
+
+def with_updates(state: BaseModel, **updates: Any) -> BaseModel:
+    if isinstance(state, DictState):
+        return DictState(_data={**state._data, **updates})
+    return state.model_copy(update=updates)
+
+
+def fresh_copy(state: BaseModel) -> BaseModel:
+    serializer = JsonSerializer()
+    return decode_state(encode_state_tree(state, serializer), serializer)
+
+
+async def append_message(store: InMemoryStateStore[Any]) -> None:
+    messages = await store.get("messages")
+    await store.set("messages", [*messages, Message(text="new")])
+
+
+async def edit_earlier_message(store: InMemoryStateStore[Any]) -> None:
+    await store.set("messages.1.text", "edited")
+
+
+async def set_state_model_copy(store: InMemoryStateStore[Any]) -> None:
+    state = await store.get_state()
+    await store.set_state(with_updates(state, title="renamed"))
+
+
+async def edit_state_block(store: InMemoryStateStore[Any]) -> None:
+    async with store.edit_state() as state:
+        state.messages[2].tags.append("x")
+
+
+async def set_fresh_validated_state(store: InMemoryStateStore[Any]) -> None:
+    state = fresh_copy(await store.get_state())
+    await store.set_state(with_updates(state, title="fresh"))
+
+
+async def delete_dict_key(store: InMemoryStateStore[Any]) -> None:
+    meta = await store.get("meta")
+    await store.set("meta", {k: v for k, v in meta.items() if k != "a"})
+
+
+async def insert_at_front(store: InMemoryStateStore[Any]) -> None:
+    messages = await store.get("messages")
+    await store.set("messages", [Message(text="first"), *messages])
+
+
+MUTATIONS: list[Mutation] = [
+    append_message,
+    edit_earlier_message,
+    set_state_model_copy,
+    edit_state_block,
+    set_fresh_validated_state,
+    delete_dict_key,
+    insert_at_front,
+]
+
+
+def assert_patch_round_trips(
+    base: StateCheckpoint, current: StateCheckpoint
+) -> list[dict[str, Any]]:
+    patch = current.diff(base)
+    # Patches are plain JSON.
+    patch = json.loads(json.dumps(patch))
+    expected = json.loads(json.dumps(current.to_dict()))
+    assert apply_state_patch(json.loads(json.dumps(base.to_dict())), patch) == expected
+    return patch
+
+
+@pytest.mark.parametrize("kind", ["dict", "typed"])
+@pytest.mark.parametrize("mutation", MUTATIONS, ids=lambda m: m.__name__)
+async def test_diff_round_trips_after_each_write(kind: str, mutation: Mutation) -> None:
+    store = InMemoryStateStore(seed(kind))
+    base = store.checkpoint()
+    await mutation(store)
+    patch = assert_patch_round_trips(base, store.checkpoint())
+    assert patch
+
+
+@pytest.mark.parametrize("kind", ["dict", "typed"])
+async def test_diff_round_trips_across_a_sequence_of_writes(kind: str) -> None:
+    store = InMemoryStateStore(seed(kind))
+    first = previous = store.checkpoint()
+    for mutation in MUTATIONS:
+        await mutation(store)
+        current = store.checkpoint()
+        assert_patch_round_trips(previous, current)
+        previous = current
+    assert_patch_round_trips(first, previous)
+
+
+@pytest.mark.parametrize("kind", ["dict", "typed"])
+async def test_append_does_not_compare_untouched_prefix(kind: str) -> None:
+    store = InMemoryStateStore(seed(kind))
+    base = store.checkpoint()
+    await append_message(store)
+    EQ_CALLS.clear()
+    patch = store.checkpoint().diff(base)
+    assert EQ_CALLS == []
+    assert [(op["op"], op["path"]) for op in patch] == [
+        (
+            "add",
+            "/state_data/_data/messages/4"
+            if kind == "dict"
+            else "/state_data/value/messages/4",
+        )
+    ]
+
+
+@pytest.mark.parametrize("kind", ["dict", "typed"])
+async def test_fresh_equal_state_diffs_to_the_changed_field_only(kind: str) -> None:
+    store = InMemoryStateStore(seed(kind))
+    base = store.checkpoint()
+    await set_fresh_validated_state(store)
+    patch = store.checkpoint().diff(base)
+    assert [op["op"] for op in patch] == ["replace"]
+    assert patch[0]["value"] == "fresh"
+
+
+async def test_unchanged_checkpoint_diffs_to_empty_patch() -> None:
+    store = InMemoryStateStore(seed("typed"))
+    assert store.checkpoint().diff(store.checkpoint()) == []
+
+
+async def test_nested_model_values_in_dict_state_use_serialize_value_form() -> None:
+    store = InMemoryStateStore(seed("dict"))
+    base = store.checkpoint()
+    await append_message(store)
+    (op,) = store.checkpoint().diff(base)
+    assert op["value"] == JsonSerializer().serialize_value(Message(text="new"))
+
+
+def test_tree_payload_decodes_for_both_state_kinds() -> None:
+    serializer = JsonSerializer()
+    for kind in ("dict", "typed"):
+        state = seed(kind)
+        payload = StateCheckpoint(state, serializer).to_dict()
+        restored = InMemoryStateStore.from_dict(payload, serializer)
+        assert restored.checkpoint().to_dict() == payload
+
+
+def test_apply_state_patch_leaves_input_unchanged() -> None:
+    state = {"state_data": {"_data": {"xs": [1, 2]}}}
+    patched = apply_state_patch(
+        state,
+        [
+            {"op": "add", "path": "/state_data/_data/xs/2", "value": 3},
+            {"op": "replace", "path": "/state_data/_data/xs/0", "value": 0},
+        ],
+    )
+    assert patched == {"state_data": {"_data": {"xs": [0, 2, 3]}}}
+    assert state == {"state_data": {"_data": {"xs": [1, 2]}}}
+
+
+class NotesWorkflow(Workflow):
+    @step
+    async def write(self, ctx: Context, ev: StartEvent) -> StopEvent:
+        notes = await ctx.store.get("notes", default=[])
+        await ctx.store.set("notes", [*notes, len(notes)])
+        return StopEvent(result=len(notes) + 1)
+
+
+async def test_context_from_dict_accepts_checkpoint_state() -> None:
+    wf = NotesWorkflow()
+    handler = wf.run()
+    await handler
+    checkpoint = basic_runtime.state_checkpoint(handler.run_id)
+    assert handler.ctx is not None
+    snapshot = handler.ctx.to_dict()
+    snapshot["state"] = json.loads(json.dumps(checkpoint.to_dict()))
+    assert await wf.run(ctx=Context.from_dict(wf, snapshot)) == 2
+
+    # Old payloads still load.
+    assert await wf.run(ctx=Context.from_dict(wf, handler.ctx.to_dict())) == 2
+
+
+def test_state_checkpoint_rejects_unknown_run() -> None:
+    with pytest.raises(RuntimeError, match="No active workflow"):
+        basic_runtime.state_checkpoint("missing-run")
