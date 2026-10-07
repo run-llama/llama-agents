@@ -16,6 +16,7 @@ from workflows._event_matching import (
     event_matches,
     step_accepts_event,
 )
+from workflows.context.serializers import JsonSerializer
 from workflows.errors import (
     WorkflowCancelledByUser,
     WorkflowRuntimeError,
@@ -70,6 +71,7 @@ from workflows.runtime.types.internal_state import (
     EventAttempt,
     InProgressState,
     InternalStepWorkerState,
+    PendingEvent,
 )
 from workflows.runtime.types.results import (
     AddCollectedEvent,
@@ -476,6 +478,92 @@ def _rewind_broker(
         _rewind_broker(child, (*path, key), commands, now_seconds)
 
 
+def pending_event_commands(state: BrokerState) -> list[WorkflowCommand]:
+    """Re-queue every step-returned event whose TickAddEvent was never reduced.
+
+    Called at session start next to rewind_in_progress. A snapshot or journal
+    cut after a TickStepResult but before its derived TickAddEvent keeps the
+    event only in ``pending_events``. Re-emitting the same CommandQueueEvent
+    produces a TickAddEvent that matches and pops the pending entry.
+    """
+    commands: list[WorkflowCommand] = []
+
+    def walk(broker: BrokerState) -> None:
+        for pending in broker.pending_events:
+            commands.append(
+                CommandQueueEvent(
+                    event=pending.event,
+                    step_id=pending.step_id,
+                    origin_namespace=pending.origin_namespace,
+                    recovery_counts=dict(pending.recovery_counts),
+                    scope_path=pending.scope_path,
+                )
+            )
+        for _, child in sorted(broker.children.items()):
+            walk(child)
+
+    walk(state)
+    return commands
+
+
+def _queue_step_output(
+    broker: BrokerState, command: CommandQueueEvent
+) -> CommandQueueEvent:
+    """Record a step-returned event as pending until its TickAddEvent is reduced."""
+    broker.pending_events.append(
+        PendingEvent(
+            event=command.event,
+            step_id=command.step_id,
+            origin_namespace=command.origin_namespace,
+            recovery_counts=dict(command.recovery_counts),
+            scope_path=command.scope_path,
+        )
+    )
+    return command
+
+
+_pending_match_serializer = JsonSerializer()
+
+
+def _same_event(a: Event, b: Event) -> bool:
+    """Value equality for events, robust to a journal round trip.
+
+    Replayed ticks deserialize the step result and the add_event separately,
+    and some fields (exceptions on StepFailedEvent) don't compare equal after
+    that. Fall back to comparing the serialized form.
+    """
+    if a is b or a == b:
+        return True
+    if type(a) is not type(b):
+        return False
+    try:
+        return _pending_match_serializer.serialize(
+            a
+        ) == _pending_match_serializer.serialize(b)
+    except Exception:
+        return False
+
+
+def _consume_pending_event(tick: TickAddEvent, broker: BrokerState) -> None:
+    """Pop the head pending event when this TickAddEvent is its derived tick.
+
+    The runner appends derived TickAddEvents in emission order, so only the
+    head can match. A tick that doesn't match is external (send_event, start
+    event, rehydrated waiter) and leaves pending untouched.
+    """
+    if not broker.pending_events:
+        return
+    head = broker.pending_events[0]
+    if (
+        head.step_id == tick.step_id
+        and head.origin_namespace == tick.origin_namespace
+        and head.recovery_counts == tick.recovery_counts
+        and head.scope_path == tick.scope_path
+        and _same_event(head.event, tick.event)
+    ):
+        broker.pending_events.pop(0)
+
+
 def _check_idle_state(state: BrokerState) -> bool:
     """Returns True if workflow is idle (no work can advance internally).
 
@@ -524,6 +612,7 @@ def _collect_buffer_diverged(live: list[Event], snapshot: list[Event]) -> bool:
 
 def _queue_catch_error_event(
     this_execution: InProgressState,
+    broker: BrokerState,
     *,
     event: Event,
     step_id: StepId,
@@ -531,12 +620,15 @@ def _queue_catch_error_event(
     recovery_counts: dict[str, int],
 ) -> CommandQueueEvent:
     """Build a catch_error dispatch in the failed work item's stream scope."""
-    return CommandQueueEvent(
-        event=event,
-        step_id=step_id,
-        origin_namespace=path,
-        recovery_counts=recovery_counts,
-        scope_path=this_execution.scope_path,
+    return _queue_step_output(
+        broker,
+        CommandQueueEvent(
+            event=event,
+            step_id=step_id,
+            origin_namespace=path,
+            recovery_counts=recovery_counts,
+            scope_path=this_execution.scope_path,
+        ),
     )
 
 
@@ -684,6 +776,7 @@ def _apply_step_result(
                 worker.collected_waiters.clear()
             # Drop open collection state; no release can fire after the run ends.
             _clear_collection_state(state)
+            state.pending_events.clear()
             acc.commands.append(CommandCompleteRun(result=result.result))
         elif isinstance(result.result, Event):
             # queue any subsequent events
@@ -691,11 +784,14 @@ def _apply_step_result(
             if isinstance(result.result, InputRequiredEvent):
                 acc.commands.append(CommandPublishEvent(event=result.result))
             acc.commands.append(
-                CommandQueueEvent(
-                    event=result.result,
-                    origin_namespace=path,
-                    recovery_counts=dict(this_execution.recovery_counts),
-                    scope_path=scope.emit_stack,
+                _queue_step_output(
+                    state,
+                    CommandQueueEvent(
+                        event=result.result,
+                        origin_namespace=path,
+                        recovery_counts=dict(this_execution.recovery_counts),
+                        scope_path=scope.emit_stack,
+                    ),
                 )
             )
         elif result.result is None:
@@ -908,6 +1004,7 @@ def _schedule_retry_or_route_failure(
         acc.commands.append(
             _queue_catch_error_event(
                 this_execution,
+                state,
                 event=step_failed_event,
                 step_id=StepId((), handler.step_name),
                 path=path,
@@ -1555,6 +1652,7 @@ def _process_add_event_tick(
     _accrue_descent(descent, _tick_stamp(tick))
     broker = descent.broker
     path = descent.path
+    _consume_pending_event(tick, broker)
     if tick.work_item_id is None:
         # A collect re-delivery derives its id from the payload's stable
         # stream+binding key so it matches the invocation fired at release time

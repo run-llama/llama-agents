@@ -18,6 +18,7 @@ from workflows.context.context_types import (
     SerializedCollectionStreamInstance,
     SerializedContext,
     SerializedEventAttempt,
+    SerializedPendingEvent,
     SerializedStepWorkerState,
     SerializedWaiter,
 )
@@ -105,6 +106,23 @@ class CollectionReleaseState:
         return dataclasses.replace(self, buffer=list(self.buffer))
 
 
+@dataclass(frozen=True)
+class PendingEvent:
+    """An event a step returned whose TickAddEvent has not been reduced yet.
+
+    The step-result reduce emits a CommandQueueEvent and the runner turns it
+    into a TickAddEvent that is reduced (and journaled) as a later tick. Until
+    then the event lives only here, so a snapshot or journal cut in between
+    still carries it. Fields mirror CommandQueueEvent.
+    """
+
+    event: Event
+    step_id: StepId | None = None
+    origin_namespace: tuple[str, ...] = ()
+    recovery_counts: dict[str, int] = field(default_factory=dict)
+    scope_path: tuple[str, ...] = ()
+
+
 @dataclass()
 class BrokerState:
     """
@@ -123,6 +141,8 @@ class BrokerState:
             timeout budget.
         last_alive_stamp: Accrual reference point (the last stamp seen), reset by
             session-start markers without accruing downtime.
+        pending_events: Events returned by steps, in emission order, whose
+            TickAddEvent has not been reduced yet.
     """
 
     is_running: bool
@@ -137,6 +157,7 @@ class BrokerState:
     children: dict[str, BrokerState] = field(default_factory=dict)
     elapsed_alive: float = 0.0
     last_alive_stamp: float | None = None
+    pending_events: list[PendingEvent] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self._normalize_worker_keys()
@@ -149,6 +170,8 @@ class BrokerState:
             self.elapsed_alive = 0.0
         if "last_alive_stamp" not in state:
             self.last_alive_stamp = None
+        if "pending_events" not in state:
+            self.pending_events = []
         self._normalize_worker_keys()
 
     def _normalize_worker_keys(self) -> None:
@@ -175,6 +198,7 @@ class BrokerState:
             children={key: child.deepcopy() for key, child in self.children.items()},
             elapsed_alive=self.elapsed_alive,
             last_alive_stamp=self.last_alive_stamp,
+            pending_events=list(self.pending_events),
         )
 
     @staticmethod
@@ -413,6 +437,16 @@ def _broker_to_serialized(
         },
         elapsed_alive=state.elapsed_alive,
         last_alive_stamp=state.last_alive_stamp,
+        # origin_namespace is not serialized, matching TickAddEvent.
+        pending_events=[
+            SerializedPendingEvent(
+                event=serializer.serialize(pending.event),
+                step_id=str(pending.step_id) if pending.step_id is not None else None,
+                recovery_counts=dict(pending.recovery_counts),
+                scope_path=list(pending.scope_path),
+            )
+            for pending in state.pending_events
+        ],
     )
 
 
@@ -426,6 +460,17 @@ def _load_broker_from_serialized(
     base_state.work_item_seq = serialized.work_item_seq
     base_state.elapsed_alive = serialized.elapsed_alive
     base_state.last_alive_stamp = serialized.last_alive_stamp
+    base_state.pending_events = [
+        PendingEvent(
+            event=serializer.deserialize(pending.event),
+            step_id=StepId.from_str(pending.step_id)
+            if pending.step_id is not None
+            else None,
+            recovery_counts=dict(pending.recovery_counts),
+            scope_path=tuple(pending.scope_path),
+        )
+        for pending in serialized.pending_events
+    ]
     base_state.streams = {
         sid: CollectionStreamInstance(
             stream_id=stream.stream_id,

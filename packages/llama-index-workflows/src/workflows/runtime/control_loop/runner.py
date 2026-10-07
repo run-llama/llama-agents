@@ -72,6 +72,7 @@ if TYPE_CHECKING:
 from workflows.runtime.control_loop.reduce import (
     _decide_retry_delay,
     _reduce_tick,
+    pending_event_commands,
     rewind_in_progress,
 )
 
@@ -453,6 +454,9 @@ class _ControlLoopRunner:
 
         # Resume any in-progress work
         self.state, commands = rewind_in_progress(self.state, start)
+        # Re-queue step outputs whose add_event tick was lost to a snapshot or
+        # journal cut. Each re-emitted tick pops its own pending entry.
+        commands.extend(pending_event_commands(self.state))
         for command in commands:
             try:
                 await self.process_command(command)

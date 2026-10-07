@@ -168,6 +168,19 @@ class SerializedStepWorkerState(BaseModel):
     collected_waiters: list[SerializedWaiter] = Field(default_factory=list)
 
 
+class SerializedPendingEvent(BaseModel):
+    """Serialized event a step returned whose add_event tick is not yet reduced."""
+
+    # The returned event (as serializer-encoded string)
+    event: str
+    # Target step for a directed dispatch (catch_error routing), else None.
+    step_id: str | None = None
+    # Per-handler recovery counts carried by the queued event.
+    recovery_counts: dict[str, int] = Field(default_factory=dict)
+    # Collection stream scope path (innermost stream id last).
+    scope_path: list[str] = Field(default_factory=list)
+
+
 class SerializedCollectionStreamInstance(BaseModel):
     """Serialized representation of an open collection stream."""
 
@@ -224,6 +237,10 @@ class SerializedContext(BaseModel):
     # persisted value is informational.
     elapsed_alive: float = Field(default=0.0)
     last_alive_stamp: float | None = Field(default=None)
+    # Events returned by steps whose add_event tick had not been reduced when
+    # the snapshot was taken. Re-queued in order on resume. Additive: older
+    # payloads validate with an empty list.
+    pending_events: list[SerializedPendingEvent] = Field(default_factory=list)
 
     @staticmethod
     def from_v0(v0: SerializedContextV0) -> "SerializedContext":
