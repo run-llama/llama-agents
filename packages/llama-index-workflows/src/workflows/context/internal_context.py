@@ -19,6 +19,7 @@ from workflows.runtime.types.results import (
     AddWaiter,
     DeleteCollectedEvent,
     DeleteWaiter,
+    EmissionKey,
     StepWorkerContext,
     StepWorkerStateContextVar,
     WaitingForEvent,
@@ -190,10 +191,15 @@ class InternalContext(Generic[MODEL_T]):
         if step is not None:
             self._workflow._validate_valid_step_message(step, message)
 
+        step_id = StepId.root(step) if step is not None else None
         recovery_counts: dict[str, int] = {}
+        emission: EmissionKey | None = None
         try:
             step_ctx = StepWorkerStateContextVar.get()
             recovery_counts = dict(step_ctx.retry.recovery_counts)
+            # Inside a step the send is numbered and returned with the step's
+            # result, so the reducer can record it if this tick is lost.
+            emission = step_ctx.record_send(message, step_id, recovery_counts)
         except LookupError:
             pass
 
@@ -201,8 +207,9 @@ class InternalContext(Generic[MODEL_T]):
             self._internal_adapter.send_event(
                 TickAddEvent(
                     event=message,
-                    step_id=StepId.root(step) if step is not None else None,
+                    step_id=step_id,
                     recovery_counts=recovery_counts,
+                    emission=emission,
                 )
             )
         )

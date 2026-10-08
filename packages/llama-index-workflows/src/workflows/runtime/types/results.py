@@ -18,6 +18,7 @@ from typing import (
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Field,
     PlainSerializer,
     PlainValidator,
     TypeAdapter,
@@ -32,8 +33,51 @@ from workflows.events import (
     SerializableException,
     SerializableOptionalEvent,
 )
+from workflows.runtime.types.step_id import StepId
 
 EventType = TypeVar("EventType", bound=Event)
+
+
+@dataclass(frozen=True)
+class EmissionKey:
+    """Identity of one event an invocation emitted.
+
+    ``index`` counts the invocation's emissions in order: sends made during
+    the step, then the events its result returns, then a ``catch_error``
+    dispatch if its failure is routed to a handler.
+    """
+
+    invocation_id: str
+    index: int
+
+
+class SentEvent(BaseModel):
+    """One ``ctx.send_event`` call made by a step invocation.
+
+    The step returns these after its results, so a runtime that memoizes the
+    step's return replays them too. The runner moves them onto
+    ``TickStepResult.sends``.
+    """
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+    index: int
+    event: SerializableEvent
+    step_id: StepId | None = None
+    recovery_counts: dict[str, int] = Field(default_factory=dict)
+
+
+@dataclass
+class StepSends:
+    """Sends recorded by one step invocation, numbered in send order.
+
+    Closed when the step returns. A send made after that (from a task the
+    step left running) is not part of the invocation's result and goes out
+    unkeyed.
+    """
+
+    entries: list[SentEvent] = dataclasses.field(default_factory=list)
+    closed: bool = False
+
 
 #################################################################
 # State Passed to step functions and returned by step functions #
@@ -73,6 +117,30 @@ class StepWorkerContext:
     # add commands here to mutate the internal worker state after step execution
     returns: Returns
     retry: RetryAttempt = dataclasses.field(default_factory=RetryAttempt)
+    sends: StepSends = dataclasses.field(default_factory=StepSends)
+
+    def record_send(
+        self, event: Event, step_id: StepId | None, recovery_counts: dict[str, int]
+    ) -> EmissionKey | None:
+        """Number a ``ctx.send_event`` call and return its emission key.
+
+        Returns None (an unkeyed send) when the invocation has no id or has
+        already returned. A send from a task the step left running is
+        therefore outside the delivery guarantee and routes as it always has.
+        """
+        invocation_id = self.state.invocation_id
+        if invocation_id is None or self.sends.closed:
+            return None
+        index = len(self.sends.entries)
+        self.sends.entries.append(
+            SentEvent(
+                index=index,
+                event=event,
+                step_id=step_id,
+                recovery_counts=dict(recovery_counts),
+            )
+        )
+        return EmissionKey(invocation_id=invocation_id, index=index)
 
 
 @dataclass(frozen=True)
@@ -366,3 +434,6 @@ StepFunctionResult = (
     | AddWaiter[Event]
     | DeleteWaiter
 )
+
+# What a step worker function returns: its results, then the sends it made.
+StepWorkerOutput = StepFunctionResult | SentEvent

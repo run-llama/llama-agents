@@ -17,6 +17,7 @@ from workflows.context.context_types import (
     SerializedCollectionReleaseState,
     SerializedCollectionStreamInstance,
     SerializedContext,
+    SerializedDelivery,
     SerializedEventAttempt,
     SerializedInProgressAttempt,
     SerializedStepWorkerState,
@@ -26,8 +27,10 @@ from workflows.context.serializers import JsonSerializer
 from workflows.decorators import CatchErrorHandler, StepConfig
 from workflows.events import Event, SerializableEventType
 from workflows.retry_policy import RetryPolicy
+from workflows.runtime.types.commands import CommandQueueEvent
 from workflows.runtime.types.results import (
     CollectionReleasePayload,
+    EmissionKey,
     StepWorkerState,
     StepWorkerWaiter,
 )
@@ -106,6 +109,37 @@ class CollectionReleaseState:
         return dataclasses.replace(self, buffer=list(self.buffer))
 
 
+@dataclass
+class Delivery:
+    """An undischarged obligation to deliver one event a step emitted.
+
+    Recorded when the reducer learns of the emission and removed when the
+    keyed ``TickAddEvent`` for it is reduced. ``key`` is None only for an
+    event returned by a result journaled before invocation ids existed,
+    which is emitted unkeyed and never recorded.
+    """
+
+    key: EmissionKey | None
+    event: Event
+    step_id: StepId | None
+    recovery_counts: dict[str, int]
+    scope_path: tuple[str, ...]
+
+    def to_command(self, origin_namespace: tuple[str, ...]) -> CommandQueueEvent:
+        """The only place a ``CommandQueueEvent`` is built."""
+        return CommandQueueEvent(
+            event=self.event,
+            step_id=self.step_id,
+            origin_namespace=origin_namespace,
+            recovery_counts=dict(self.recovery_counts),
+            scope_path=self.scope_path,
+            emission=self.key,
+        )
+
+    def _copy(self) -> Delivery:
+        return dataclasses.replace(self, recovery_counts=dict(self.recovery_counts))
+
+
 @dataclass()
 class BrokerState:
     """
@@ -124,6 +158,10 @@ class BrokerState:
             timeout budget.
         last_alive_stamp: Accrual reference point (the last stamp seen), reset by
             session-start markers without accruing downtime.
+        invocation_seq: Monotonic counter used to mint step invocation ids
+        deliveries: Events steps emitted that have not been delivered yet,
+            keyed by emission, in insertion order. Reducing TickSessionStart
+            re-emits every one.
     """
 
     is_running: bool
@@ -139,6 +177,7 @@ class BrokerState:
     children: dict[str, BrokerState] = field(default_factory=dict)
     elapsed_alive: float = 0.0
     last_alive_stamp: float | None = None
+    deliveries: dict[EmissionKey, Delivery] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self._normalize_worker_keys()
@@ -153,6 +192,8 @@ class BrokerState:
             self.last_alive_stamp = None
         if "invocation_seq" not in state:
             self.invocation_seq = 0
+        if "deliveries" not in state:
+            self.deliveries = {}
         self._normalize_worker_keys()
 
     def _normalize_worker_keys(self) -> None:
@@ -180,6 +221,7 @@ class BrokerState:
             children={key: child.deepcopy() for key, child in self.children.items()},
             elapsed_alive=self.elapsed_alive,
             last_alive_stamp=self.last_alive_stamp,
+            deliveries={key: d._copy() for key, d in self.deliveries.items()},
         )
 
     @staticmethod
@@ -437,6 +479,17 @@ def _broker_to_serialized(
         },
         elapsed_alive=state.elapsed_alive,
         last_alive_stamp=state.last_alive_stamp,
+        deliveries=[
+            SerializedDelivery(
+                invocation_id=key.invocation_id,
+                index=key.index,
+                event=serializer.serialize(delivery.event),
+                step_id=str(delivery.step_id) if delivery.step_id is not None else None,
+                recovery_counts=dict(delivery.recovery_counts),
+                scope_path=list(delivery.scope_path),
+            )
+            for key, delivery in state.deliveries.items()
+        ],
     )
 
 
@@ -449,6 +502,16 @@ def _load_broker_from_serialized(
     base_state.stream_seq = serialized.stream_seq
     base_state.work_item_seq = serialized.work_item_seq
     base_state.invocation_seq = serialized.invocation_seq
+    base_state.deliveries = {}
+    for data in serialized.deliveries:
+        key = EmissionKey(invocation_id=data.invocation_id, index=data.index)
+        base_state.deliveries[key] = Delivery(
+            key=key,
+            event=serializer.deserialize(data.event),
+            step_id=StepId.from_str(data.step_id) if data.step_id is not None else None,
+            recovery_counts=dict(data.recovery_counts),
+            scope_path=tuple(data.scope_path),
+        )
     base_state.elapsed_alive = serialized.elapsed_alive
     base_state.last_alive_stamp = serialized.last_alive_stamp
     base_state.streams = {

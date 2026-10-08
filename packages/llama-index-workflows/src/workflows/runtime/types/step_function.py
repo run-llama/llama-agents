@@ -40,9 +40,9 @@ from workflows.runtime.types.results import (
     InternalContextVar,
     RetryAttempt,
     Returns,
-    StepFunctionResult,
     StepWorkerContext,
     StepWorkerFailed,
+    StepWorkerOutput,
     StepWorkerResult,
     StepWorkerState,
     StepWorkerStateContextVar,
@@ -111,7 +111,7 @@ class StepWorkerFunction(Protocol):
         workflow: Workflow,
         bound_events: dict[str, Event] | None = None,
         retry: RetryAttempt = RetryAttempt(),
-    ) -> Awaitable[list[StepFunctionResult]]: ...
+    ) -> Awaitable[list[StepWorkerOutput]]: ...
 
 
 async def partial(
@@ -176,7 +176,7 @@ def as_step_worker_function(
         workflow: Workflow,
         bound_events: dict[str, Event] | None = None,
         retry: RetryAttempt = RetryAttempt(),
-    ) -> list[StepFunctionResult]:
+    ) -> list[StepWorkerOutput]:
         from workflows.context.context import Context
 
         internal_context = Context._create_internal(workflow=workflow)
@@ -362,8 +362,11 @@ def as_step_worker_function(
                 )
 
             await internal_context._finalize_step()
-            return returns.return_values
+            # Sends go after the results, so a runtime that memoizes this
+            # return replays them with it.
+            return [*returns.return_values, *step_ctx.sends.entries]
         finally:
+            step_ctx.sends.closed = True
             try:
                 InternalContextVar.reset(ctx_token)
             except Exception:

@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from workflows.events import Event, StopEvent
+from workflows.runtime.types.results import EmissionKey
 from workflows.runtime.types.step_id import StepId
 
 
@@ -35,11 +36,14 @@ class CommandRunWorker:
 
 @dataclass(frozen=True)
 class CommandQueueEvent:
+    """Deliver one event. Built only by ``Delivery.to_command``."""
+
     event: Event
     step_id: StepId | None = None
     origin_namespace: tuple[str, ...] = ()
     recovery_counts: dict[str, int] = field(default_factory=dict)
     scope_path: tuple[str, ...] = field(default_factory=tuple)
+    emission: EmissionKey | None = None
 
 
 @dataclass(frozen=True)

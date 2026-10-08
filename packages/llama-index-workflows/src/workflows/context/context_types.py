@@ -189,6 +189,17 @@ class SerializedStepWorkerState(BaseModel):
     collected_waiters: list[SerializedWaiter] = Field(default_factory=list)
 
 
+class SerializedDelivery(BaseModel):
+    """An event the runner owes delivery of, keyed by its emission."""
+
+    invocation_id: str
+    index: int
+    event: str
+    step_id: str | None = None
+    recovery_counts: dict[str, int] = Field(default_factory=dict)
+    scope_path: list[str] = Field(default_factory=list)
+
+
 class SerializedCollectionStreamInstance(BaseModel):
     """Serialized representation of an open collection stream."""
 
@@ -235,6 +246,8 @@ class SerializedContext(BaseModel):
     work_item_seq: int = Field(default=0)
     # Save the counter so replay assigns the same invocation IDs.
     invocation_seq: int = Field(default=0)
+    # Undischarged deliveries in insertion order. Resume re-emits each one.
+    deliveries: list[SerializedDelivery] = Field(default_factory=list)
     streams: dict[str, SerializedCollectionStreamInstance] = Field(default_factory=dict)
     collection_release_states: dict[str, SerializedCollectionReleaseState] = Field(
         default_factory=dict
