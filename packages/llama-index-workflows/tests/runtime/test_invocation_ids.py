@@ -184,3 +184,35 @@ def test_start_event_dispatch_is_keyed_too(state: BrokerState) -> None:
     _, [run] = _reduce(state, TickAddEvent(event=StartEvent()))
 
     assert run.invocation_id == "invocation_1"
+
+
+def _buffer(state: BrokerState) -> list[int]:
+    return [ev.n for ev in state.workers[WORK].collected_events["buf"]]  # type: ignore[attr-defined]
+
+
+def test_one_result_batch_schedules_at_most_one_rerun(state: BrokerState) -> None:
+    state, [run] = _reduce(state, TickAddEvent(event=Job(n=0)))
+    collect = [AddCollectedEvent(event_id="buf", event=Job(n=n)) for n in (1, 2, 3, 4)]
+
+    # After 1 is appended the buffer is longer than the dispatch snapshot, so 2
+    # schedules the rerun. 3 and 4 append without a second command.
+    state, runs = _reduce(state, _result(run, *collect, StepWorkerResult(result=None)))
+
+    [rerun] = runs
+    assert rerun.event is collect[1].event
+    [execution] = state.workers[WORK].in_progress
+    assert execution.invocation_id == rerun.invocation_id
+    assert _buffer(state) == [1, 3, 4]
+
+    # The rerun re-collects its own event. Its snapshot predates 3 and 4, so it
+    # reruns once more before the write lands.
+    state, [again] = _reduce(
+        state, _result(rerun, collect[1], StepWorkerResult(result=None))
+    )
+    state, runs = _reduce(
+        state, _result(again, collect[1], StepWorkerResult(result=None))
+    )
+
+    assert runs == []
+    assert state.workers[WORK].in_progress == []
+    assert _buffer(state) == [1, 3, 4, 2]

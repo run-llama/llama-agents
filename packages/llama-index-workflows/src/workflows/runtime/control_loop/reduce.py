@@ -587,6 +587,9 @@ class _StepResultAcc:
     """
 
     commands: list[WorkflowCommand]
+    # Set once this batch has scheduled a replacement invocation. A batch
+    # schedules at most one: later collect writes belong to the rerun.
+    rerun_invocation_id: str | None = None
     output_event_name: str | None = None
     # Cleared when a worker is re-run mid-flight (stale collect buffer): the
     # execution stays in_progress and must not emit a NOT_RUNNING transition.
@@ -783,12 +786,17 @@ def _apply_step_result(
         snapshot_events = this_execution.shared_state.collected_events.get(
             result.event_id, []
         )
-        if len(collected_events) > len(snapshot_events):
+        # A batch schedules at most one replacement invocation. Later writes in
+        # the same batch append as they would have without the rerun.
+        if acc.rerun_invocation_id is None and len(collected_events) > len(
+            snapshot_events
+        ):
             # rerun it, and don't append now to ensure serializability
             # updating the run state
             acc.step_no_longer_in_progress = False
             _refresh_collect_snapshot(state.workers[step_id], this_execution)
             invocation_id = _start_rerun(state, path, this_execution)
+            acc.rerun_invocation_id = invocation_id
             acc.commands.append(
                 CommandRunWorker(
                     step_id=step_id,
