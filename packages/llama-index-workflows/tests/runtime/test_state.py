@@ -258,6 +258,15 @@ def test_legacy_in_progress_without_invocation_id_is_requeued() -> None:
     assert [a.attempts for a in worker.queue] == [1]
 
 
+def test_serializing_a_state_with_child_brokers_raises() -> None:
+    workflow = _RetryStateWorkflow()
+    state = BrokerState.from_workflow(workflow)
+    state.children["nested"] = BrokerState.from_workflow(workflow)
+
+    with pytest.raises(ValueError, match="nested"):
+        state.to_serialized(JsonSerializer())
+
+
 def test_queued_not_before_survives_serialization() -> None:
     """The v2 change preserves the delayed-retry field added to queued attempts."""
     workflow = _RetryStateWorkflow()

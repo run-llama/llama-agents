@@ -212,7 +212,16 @@ class BrokerState:
         return commands
 
     def to_serialized(self, serializer: BaseSerializer) -> SerializedContext:
-        """Serialize the broker state to a SerializedContext."""
+        """Serialize the broker state to a SerializedContext.
+
+        Only the root broker is serialized, so a state with child brokers
+        raises instead of silently dropping their work.
+        """
+        if self.children:
+            raise ValueError(
+                f"Cannot serialize child broker {min(self.children)!r}: child "
+                "brokers are not serialized."
+            )
         return _broker_to_serialized(self, serializer)
 
     @staticmethod
