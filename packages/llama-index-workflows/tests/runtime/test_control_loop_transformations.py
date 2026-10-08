@@ -1588,6 +1588,59 @@ def test_rebuild_state_from_ticks_keeps_in_progress_work(
     assert result.is_running is False
 
 
+def _one_active_one_queued(base_state: BrokerState) -> tuple[MyTestEvent, MyTestEvent]:
+    """event1 in progress on worker 0 with retry info, event2 queued; num_workers=1."""
+    event1 = MyTestEvent(value=1)
+    event2 = MyTestEvent(value=2)
+    shared_state = StepWorkerState(
+        step_name="test_step", collected_events={}, collected_waiters=[]
+    )
+    base_state.workers[TEST_STEP_ID].in_progress = [
+        InProgressState(
+            event=event1,
+            worker_id=0,
+            shared_state=shared_state,
+            attempts=2,
+            first_attempt_at=100.0,
+        ),
+    ]
+    base_state.workers[TEST_STEP_ID].queue = [
+        EventAttempt(event=event2, attempts=0, first_attempt_at=None)
+    ]
+    return event1, event2
+
+
+def test_session_start_restarts_in_progress_ahead_of_queue(
+    base_state: BrokerState,
+) -> None:
+    """The rewind re-dispatches active work first, keeping its retry info, and
+    leaves queued work queued."""
+    event1, event2 = _one_active_one_queued(base_state)
+
+    result = rebuild_state_from_ticks(base_state, [TickSessionStart(stamped_at=200.0)])
+
+    worker = result.workers[TEST_STEP_ID]
+    assert [ip.event for ip in worker.in_progress] == [event1]
+    assert worker.in_progress[0].worker_id == 0
+    assert worker.in_progress[0].attempts == 2
+    assert [attempt.event for attempt in worker.queue] == [event2]
+
+
+async def test_empty_fold_leaves_state_unchanged(base_state: BrokerState) -> None:
+    """Folding no ticks does not rewind: active work stays on its worker."""
+    event1, event2 = _one_active_one_queued(base_state)
+
+    for result in (
+        rebuild_state_from_ticks(base_state, []),
+        await rebuild_state_from_ticks_stream(base_state, _aiter([])),
+    ):
+        worker = result.workers[TEST_STEP_ID]
+        assert [ip.event for ip in worker.in_progress] == [event1]
+        assert worker.in_progress[0].worker_id == 0
+        assert worker.in_progress[0].attempts == 2
+        assert [attempt.event for attempt in worker.queue] == [event2]
+
+
 async def test_replay_ticks_stream_rewinds_each_session(
     base_state: BrokerState,
 ) -> None:
