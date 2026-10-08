@@ -1,0 +1,567 @@
+{
+  "result": 12,
+  "ticks": [
+    {
+      "type": "add_event",
+      "event": {
+        "__is_pydantic": true,
+        "value": {},
+        "qualified_name": "workflows.events.StartEvent"
+      },
+      "step_id": null,
+      "bound_events": null,
+      "attempts": null,
+      "first_attempt_at": null,
+      "last_exception": null,
+      "last_failed_at": null,
+      "recovery_counts": {},
+      "scope_path": [],
+      "collection_release_payload": null,
+      "work_item_id": null
+    },
+    {
+      "type": "step_result",
+      "step_id": "start",
+      "worker_id": 0,
+      "event": {
+        "__is_pydantic": true,
+        "value": {},
+        "qualified_name": "workflows.events.StartEvent"
+      },
+      "result": [
+        {
+          "type": "result",
+          "result": {
+            "__is_pydantic": true,
+            "value": {
+              "n": 0
+            },
+            "qualified_name": "__main__.Item"
+          },
+          "fanned_out": true
+        },
+        {
+          "type": "result",
+          "result": {
+            "__is_pydantic": true,
+            "value": {
+              "n": 1
+            },
+            "qualified_name": "__main__.Item"
+          },
+          "fanned_out": true
+        },
+        {
+          "type": "result",
+          "result": {
+            "__is_pydantic": true,
+            "value": {
+              "n": 2
+            },
+            "qualified_name": "__main__.Item"
+          },
+          "fanned_out": true
+        },
+        {
+          "type": "result",
+          "result": {
+            "__is_pydantic": true,
+            "value": {
+              "n": 3
+            },
+            "qualified_name": "__main__.Item"
+          },
+          "fanned_out": true
+        }
+      ]
+    },
+    {
+      "type": "add_event",
+      "event": {
+        "__is_pydantic": true,
+        "value": {
+          "n": 0
+        },
+        "qualified_name": "__main__.Item"
+      },
+      "step_id": null,
+      "bound_events": null,
+      "attempts": null,
+      "first_attempt_at": null,
+      "last_exception": null,
+      "last_failed_at": null,
+      "recovery_counts": {},
+      "scope_path": [
+        "stream-b9acd2b2e403993b"
+      ],
+      "collection_release_payload": null,
+      "work_item_id": null
+    },
+    {
+      "type": "add_event",
+      "event": {
+        "__is_pydantic": true,
+        "value": {
+          "n": 1
+        },
+        "qualified_name": "__main__.Item"
+      },
+      "step_id": null,
+      "bound_events": null,
+      "attempts": null,
+      "first_attempt_at": null,
+      "last_exception": null,
+      "last_failed_at": null,
+      "recovery_counts": {},
+      "scope_path": [
+        "stream-b9acd2b2e403993b"
+      ],
+      "collection_release_payload": null,
+      "work_item_id": null
+    },
+    {
+      "type": "add_event",
+      "event": {
+        "__is_pydantic": true,
+        "value": {
+          "n": 2
+        },
+        "qualified_name": "__main__.Item"
+      },
+      "step_id": null,
+      "bound_events": null,
+      "attempts": null,
+      "first_attempt_at": null,
+      "last_exception": null,
+      "last_failed_at": null,
+      "recovery_counts": {},
+      "scope_path": [
+        "stream-b9acd2b2e403993b"
+      ],
+      "collection_release_payload": null,
+      "work_item_id": null
+    },
+    {
+      "type": "add_event",
+      "event": {
+        "__is_pydantic": true,
+        "value": {
+          "n": 3
+        },
+        "qualified_name": "__main__.Item"
+      },
+      "step_id": null,
+      "bound_events": null,
+      "attempts": null,
+      "first_attempt_at": null,
+      "last_exception": null,
+      "last_failed_at": null,
+      "recovery_counts": {},
+      "scope_path": [
+        "stream-b9acd2b2e403993b"
+      ],
+      "collection_release_payload": null,
+      "work_item_id": null
+    },
+    {
+      "type": "idle_check"
+    },
+    {
+      "type": "step_result",
+      "step_id": "work",
+      "worker_id": 0,
+      "event": {
+        "__is_pydantic": true,
+        "value": {
+          "n": 0
+        },
+        "qualified_name": "__main__.Item"
+      },
+      "result": [
+        {
+          "type": "result",
+          "result": {
+            "__is_pydantic": true,
+            "value": {
+              "n": 0
+            },
+            "qualified_name": "__main__.Partial"
+          },
+          "fanned_out": false
+        }
+      ]
+    },
+    {
+      "type": "add_event",
+      "event": {
+        "__is_pydantic": true,
+        "value": {
+          "n": 0
+        },
+        "qualified_name": "__main__.Partial"
+      },
+      "step_id": null,
+      "bound_events": null,
+      "attempts": null,
+      "first_attempt_at": null,
+      "last_exception": null,
+      "last_failed_at": null,
+      "recovery_counts": {},
+      "scope_path": [
+        "stream-b9acd2b2e403993b"
+      ],
+      "collection_release_payload": null,
+      "work_item_id": null
+    },
+    {
+      "type": "step_result",
+      "step_id": "work",
+      "worker_id": 3,
+      "event": {
+        "__is_pydantic": true,
+        "value": {
+          "n": 3
+        },
+        "qualified_name": "__main__.Item"
+      },
+      "result": [
+        {
+          "type": "result",
+          "result": {
+            "__is_pydantic": true,
+            "value": {
+              "n": 6
+            },
+            "qualified_name": "__main__.Partial"
+          },
+          "fanned_out": false
+        }
+      ]
+    },
+    {
+      "type": "add_event",
+      "event": {
+        "__is_pydantic": true,
+        "value": {
+          "n": 6
+        },
+        "qualified_name": "__main__.Partial"
+      },
+      "step_id": null,
+      "bound_events": null,
+      "attempts": null,
+      "first_attempt_at": null,
+      "last_exception": null,
+      "last_failed_at": null,
+      "recovery_counts": {},
+      "scope_path": [
+        "stream-b9acd2b2e403993b"
+      ],
+      "collection_release_payload": null,
+      "work_item_id": null
+    },
+    {
+      "type": "step_result",
+      "step_id": "collect",
+      "worker_id": 0,
+      "event": {
+        "__is_pydantic": true,
+        "value": {
+          "n": 0
+        },
+        "qualified_name": "__main__.Partial"
+      },
+      "result": [
+        {
+          "type": "add_collected",
+          "event_id": "default",
+          "event": {
+            "__is_pydantic": true,
+            "value": {
+              "n": 0
+            },
+            "qualified_name": "__main__.Partial"
+          }
+        },
+        {
+          "type": "result",
+          "result": null,
+          "fanned_out": false
+        }
+      ]
+    },
+    {
+      "type": "step_result",
+      "step_id": "collect",
+      "worker_id": 1,
+      "event": {
+        "__is_pydantic": true,
+        "value": {
+          "n": 6
+        },
+        "qualified_name": "__main__.Partial"
+      },
+      "result": [
+        {
+          "type": "add_collected",
+          "event_id": "default",
+          "event": {
+            "__is_pydantic": true,
+            "value": {
+              "n": 6
+            },
+            "qualified_name": "__main__.Partial"
+          }
+        },
+        {
+          "type": "result",
+          "result": null,
+          "fanned_out": false
+        }
+      ]
+    },
+    {
+      "type": "step_result",
+      "step_id": "work",
+      "worker_id": 2,
+      "event": {
+        "__is_pydantic": true,
+        "value": {
+          "n": 2
+        },
+        "qualified_name": "__main__.Item"
+      },
+      "result": [
+        {
+          "type": "result",
+          "result": {
+            "__is_pydantic": true,
+            "value": {
+              "n": 4
+            },
+            "qualified_name": "__main__.Partial"
+          },
+          "fanned_out": false
+        }
+      ]
+    },
+    {
+      "type": "add_event",
+      "event": {
+        "__is_pydantic": true,
+        "value": {
+          "n": 4
+        },
+        "qualified_name": "__main__.Partial"
+      },
+      "step_id": null,
+      "bound_events": null,
+      "attempts": null,
+      "first_attempt_at": null,
+      "last_exception": null,
+      "last_failed_at": null,
+      "recovery_counts": {},
+      "scope_path": [
+        "stream-b9acd2b2e403993b"
+      ],
+      "collection_release_payload": null,
+      "work_item_id": null
+    },
+    {
+      "type": "step_result",
+      "step_id": "collect",
+      "worker_id": 1,
+      "event": {
+        "__is_pydantic": true,
+        "value": {
+          "n": 6
+        },
+        "qualified_name": "__main__.Partial"
+      },
+      "result": [
+        {
+          "type": "add_collected",
+          "event_id": "default",
+          "event": {
+            "__is_pydantic": true,
+            "value": {
+              "n": 6
+            },
+            "qualified_name": "__main__.Partial"
+          }
+        },
+        {
+          "type": "result",
+          "result": null,
+          "fanned_out": false
+        }
+      ]
+    },
+    {
+      "type": "step_result",
+      "step_id": "collect",
+      "worker_id": 0,
+      "event": {
+        "__is_pydantic": true,
+        "value": {
+          "n": 4
+        },
+        "qualified_name": "__main__.Partial"
+      },
+      "result": [
+        {
+          "type": "add_collected",
+          "event_id": "default",
+          "event": {
+            "__is_pydantic": true,
+            "value": {
+              "n": 4
+            },
+            "qualified_name": "__main__.Partial"
+          }
+        },
+        {
+          "type": "result",
+          "result": null,
+          "fanned_out": false
+        }
+      ]
+    },
+    {
+      "type": "step_result",
+      "step_id": "work",
+      "worker_id": 1,
+      "event": {
+        "__is_pydantic": true,
+        "value": {
+          "n": 1
+        },
+        "qualified_name": "__main__.Item"
+      },
+      "result": [
+        {
+          "type": "result",
+          "result": {
+            "__is_pydantic": true,
+            "value": {
+              "n": 2
+            },
+            "qualified_name": "__main__.Partial"
+          },
+          "fanned_out": false
+        }
+      ]
+    },
+    {
+      "type": "add_event",
+      "event": {
+        "__is_pydantic": true,
+        "value": {
+          "n": 2
+        },
+        "qualified_name": "__main__.Partial"
+      },
+      "step_id": null,
+      "bound_events": null,
+      "attempts": null,
+      "first_attempt_at": null,
+      "last_exception": null,
+      "last_failed_at": null,
+      "recovery_counts": {},
+      "scope_path": [
+        "stream-b9acd2b2e403993b"
+      ],
+      "collection_release_payload": null,
+      "work_item_id": null
+    },
+    {
+      "type": "step_result",
+      "step_id": "collect",
+      "worker_id": 0,
+      "event": {
+        "__is_pydantic": true,
+        "value": {
+          "n": 4
+        },
+        "qualified_name": "__main__.Partial"
+      },
+      "result": [
+        {
+          "type": "add_collected",
+          "event_id": "default",
+          "event": {
+            "__is_pydantic": true,
+            "value": {
+              "n": 4
+            },
+            "qualified_name": "__main__.Partial"
+          }
+        },
+        {
+          "type": "result",
+          "result": null,
+          "fanned_out": false
+        }
+      ]
+    },
+    {
+      "type": "step_result",
+      "step_id": "collect",
+      "worker_id": 1,
+      "event": {
+        "__is_pydantic": true,
+        "value": {
+          "n": 2
+        },
+        "qualified_name": "__main__.Partial"
+      },
+      "result": [
+        {
+          "type": "add_collected",
+          "event_id": "default",
+          "event": {
+            "__is_pydantic": true,
+            "value": {
+              "n": 2
+            },
+            "qualified_name": "__main__.Partial"
+          }
+        },
+        {
+          "type": "result",
+          "result": null,
+          "fanned_out": false
+        }
+      ]
+    },
+    {
+      "type": "step_result",
+      "step_id": "collect",
+      "worker_id": 1,
+      "event": {
+        "__is_pydantic": true,
+        "value": {
+          "n": 2
+        },
+        "qualified_name": "__main__.Partial"
+      },
+      "result": [
+        {
+          "type": "delete_collected",
+          "event_id": "default"
+        },
+        {
+          "type": "result",
+          "result": {
+            "__is_pydantic": true,
+            "value": {
+              "result": 12
+            },
+            "qualified_name": "workflows.events.StopEvent"
+          },
+          "fanned_out": false
+        }
+      ]
+    }
+  ]
+}
