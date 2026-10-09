@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LlamaIndex Inc.
 
-"""Tests for `StateCheckpoint` diffs and the tree-shaped state payload."""
+"""Test checkpoint patches and the JSON state tree."""
 
 from __future__ import annotations
 
@@ -120,7 +120,6 @@ def assert_patch_round_trips(
     base: StateCheckpoint, current: StateCheckpoint
 ) -> list[dict[str, Any]]:
     patch = current.diff(base)
-    # Patches are plain JSON.
     patch = json.loads(json.dumps(patch))
     expected = json.loads(json.dumps(current.to_dict()))
     assert apply_state_patch(json.loads(json.dumps(base.to_dict())), patch) == expected
@@ -230,7 +229,6 @@ async def test_context_from_dict_accepts_checkpoint_state() -> None:
     snapshot["state"] = json.loads(json.dumps(checkpoint.to_dict()))
     assert await wf.run(ctx=Context.from_dict(wf, snapshot)) == 2
 
-    # Old payloads still load.
     assert await wf.run(ctx=Context.from_dict(wf, handler.ctx.to_dict())) == 2
 
 

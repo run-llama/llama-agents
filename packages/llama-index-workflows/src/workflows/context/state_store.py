@@ -213,7 +213,7 @@ def serialize_dict_state_data(
         state: The DictState to serialize.
         serializer: Strategy for encoding values.
         known_unserializable_keys: Keys to skip with warning if they fail to serialize.
-        encode: Per-value encoder used instead of ``serializer.serialize``.
+        encode: Optional encoder for each value. Defaults to ``serializer.serialize``.
 
     Returns:
         Dict with {"_data": {...}} structure containing serialized values.
@@ -254,22 +254,21 @@ def encode_state(
     return state_data, type(state).__name__, type(state).__module__
 
 
-# Marks the tree-shaped ``state_data`` written by ``StateCheckpoint.to_dict``:
-# ``"dict"`` for DictState, with values under ``_data``, or ``"model"`` for a
-# typed model, whose ``serialize_value`` wrapper sits beside the marker.
-# ``_PatchLocation`` maps diff paths onto this layout.
+# StateCheckpoint.to_dict uses this marker to identify the state layout.
+# DictState stores values under ``_data``. Typed models use a
+# ``serialize_value`` wrapper. _PatchLocation builds paths for each layout.
 STATE_TREE_KEY = "_tree"
 
 
 def _tree_value(serializer: JsonSerializer, value: Any) -> Any:
     tree = serializer.serialize_value(value)
-    # serialize_value passes unknown objects through, so check the result is JSON.
+    # Reject unknown objects that serialize_value leaves unencoded.
     json.dumps(tree)
     return tree
 
 
 def encode_state_tree(state: BaseModel, serializer: JsonSerializer) -> dict[str, Any]:
-    """Encode state as one JSON tree that a JSON Patch can address."""
+    """Encode state as a JSON tree with paths that patches can address."""
     if isinstance(state, DictState):
         encode = functools.partial(_tree_value, serializer)
         data = serialize_dict_state_data(state, serializer, encode=encode)
@@ -280,7 +279,7 @@ def encode_state_tree(state: BaseModel, serializer: JsonSerializer) -> dict[str,
 def decode_state_tree(
     state_data: dict[str, Any], serializer: BaseSerializer
 ) -> BaseModel:
-    """Decode a ``state_data`` tree written by ``encode_state_tree``."""
+    """Restore state from the JSON tree produced by ``encode_state_tree``."""
 
     def decode(tree: Any) -> Any:
         if isinstance(serializer, JsonSerializer):
@@ -1265,7 +1264,7 @@ class InMemoryStateStore(StateStoreFacade[MODEL_T]):
         return create_in_memory_payload(state, serializer).model_dump()
 
     def checkpoint(self) -> StateCheckpoint:
-        """Return a checkpoint referencing the committed state. Copies nothing."""
+        """Reference the committed state without copying it."""
         record = self._memory_storage.load_sync()
         state = record.data if record is not None else self.state_type()
         if not isinstance(self._serializer, JsonSerializer):
@@ -1449,13 +1448,11 @@ def _find_most_derived_state_type(state_types: set[type[BaseModel]]) -> type[Bas
 
 
 class _PatchLocation(NamedTuple):
-    """Where a node of the live state sits in the ``StateCheckpoint.to_dict()`` tree.
+    """The patch path and encoding for a state value.
 
-    The one place that maps the diff walk onto patch paths and values. Outside
-    a model, values are in ``serialize_value`` form: dict keys and list indexes
-    map one to one, and a model's fields sit under ``value``. Inside a model,
-    values are in ``model_dump(mode="json")`` form, which for a diffable model
-    is ``to_jsonable_python`` of each field.
+    Outside models, ``serialize_value`` preserves dict keys and list indexes.
+    Model fields sit under a ``value`` wrapper. Inside models, encode fields
+    with ``to_jsonable_python`` to match ``model_dump(mode="json")``.
     """
 
     pointer: tuple[str, ...]
@@ -1482,12 +1479,12 @@ class _PatchLocation(NamedTuple):
 
 
 def _diffable_model(model: BaseModel, in_model: bool) -> bool:
-    """Whether a model encodes as its declared fields. Others are replaced whole."""
+    """Check whether fields can be patched separately in the encoded model."""
     cls = type(model)
     if isinstance(model, (DictLikeModel, RootModel)):
         return False
     if not in_model and hasattr(model, "class_name"):
-        # serialize_value encodes components through their own to_dict.
+        # Components use their own to_dict layout, so replace them whole.
         return False
     decorators = cls.__pydantic_decorators__
     return not (
@@ -1507,13 +1504,12 @@ def _safe_eq(a: Any, b: Any) -> bool:
 
 
 class _StateDiff:
-    """One diff walk. Collects JSON Patch ops from an old tree to a new one."""
+    """Build JSON Patch operations between two state trees."""
 
     def __init__(self, serializer: JsonSerializer) -> None:
         self.serializer = serializer
         self.ops: list[dict[str, Any]] = []
-        # Container equality by (id(a), id(b)): trimming a list and then
-        # descending into an element would otherwise compare it twice.
+        # Cache equality results so list trimming and recursion share comparisons.
         self._eq_memo: dict[tuple[int, int], bool] = {}
 
     def emit(self, op: str, loc: _PatchLocation, value: Any = None) -> None:
@@ -1585,7 +1581,7 @@ class _StateDiff:
             for i in range(prefix, prefix + middle_b):
                 self.node(a[i], b[i], loc.child(i))
             return
-        # The changed span has a new length: replace it as one block.
+        # Remove the old span before inserting values at the new indexes.
         for _ in range(middle_a):
             self.emit("remove", loc.child(prefix))
         for i in range(prefix, prefix + middle_b):
@@ -1595,11 +1591,9 @@ class _StateDiff:
 class StateCheckpoint:
     """A reference to committed workflow state at one point in time.
 
-    Taking a checkpoint copies nothing. Store writes replace the committed
-    model rather than mutating it, so a checkpoint keeps seeing the state as
-    it was. Values mutated in place (for example, a list returned by
-    ``store.get`` and appended to) change under every checkpoint that shares
-    them, so the diff cannot see such edits.
+    Store writes create a new model, so the checkpoint keeps the old state
+    without copying it. Mutating a value from ``store.get`` changes every
+    checkpoint sharing that value. The diff cannot detect those edits.
     """
 
     def __init__(self, state: BaseModel, serializer: JsonSerializer) -> None:
@@ -1607,7 +1601,7 @@ class StateCheckpoint:
         self._serializer = serializer
 
     def to_dict(self) -> dict[str, Any]:
-        """Full state payload, usable as a context snapshot's ``state``."""
+        """Serialize the checkpoint for a context snapshot's ``state`` field."""
         return {
             "store_type": "in_memory",
             "state_type": type(self._state).__name__,
@@ -1616,9 +1610,9 @@ class StateCheckpoint:
         }
 
     def diff(self, since: StateCheckpoint) -> list[dict[str, Any]]:
-        """JSON Patch ops from ``since.to_dict()`` to ``self.to_dict()``.
+        """Build a JSON Patch from ``since.to_dict()`` to ``self.to_dict()``.
 
-        Values shared by reference are skipped, so cost follows what was written.
+        Skip values shared by reference to avoid traversing unchanged subtrees.
         """
         old, new = since._state, self._state
         walk = _StateDiff(self._serializer)
@@ -1638,7 +1632,7 @@ class StateCheckpoint:
         return walk.ops
 
     def _encodable(self, data: dict[str, Any]) -> dict[str, Any]:
-        # to_dict leaves out known unserializable keys that fail to encode.
+        # Skip the same unserializable keys as to_dict so patch paths match.
         view = data
         for key in KNOWN_UNSERIALIZABLE_KEYS:
             if key in data:
@@ -1652,10 +1646,10 @@ class StateCheckpoint:
 def apply_state_patch(
     state: dict[str, Any], patch: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    """Apply JSON Patch ``add``, ``remove`` and ``replace`` ops to a state payload.
+    """Apply JSON Patch ``add``, ``remove`` and ``replace`` operations.
 
-    Returns a new payload and leaves ``state`` unchanged. Containers on the
-    patched paths are copied once each, and everything else is shared.
+    Copy each container on a patched path once to preserve the input.
+    Share all other values with the returned payload.
     """
     root: Any = cast(Any, copy(state))
     copied = {id(root)}

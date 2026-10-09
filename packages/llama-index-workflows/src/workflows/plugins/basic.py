@@ -465,12 +465,11 @@ class BasicRuntime(Runtime):
         )
 
     def state_checkpoint(self, run_id: str) -> StateCheckpoint:
-        """Return a checkpoint of the run's committed state.
+        """Reference the run's committed state without copying it.
 
-        O(1): the checkpoint references the committed model and copies
-        nothing. Use ``StateCheckpoint.diff`` against an earlier checkpoint
-        for a JSON Patch of what changed. Edits made by mutating a value
-        returned from ``store.get`` in place are not visible to the diff.
+        Call ``diff`` with an earlier checkpoint to get a JSON Patch.
+        Mutating values returned by ``store.get`` changes both checkpoints,
+        so the diff cannot detect those edits.
         """
         queues = self._queues.get(run_id)
         if queues is None:
