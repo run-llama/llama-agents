@@ -36,6 +36,7 @@ from workflows.events import (
     StopEvent,
 )
 from workflows.handler import WorkflowHandler
+from workflows.runtime.types.results import EmissionKey
 from workflows.runtime.types.ticks import TickAddEvent
 from workflows.testing import WorkflowTestRunner
 from workflows.workflow import Workflow
@@ -148,7 +149,14 @@ async def test_workflow_step_send_event_to_None() -> None:
         for t in replay
         if isinstance(t, TickAddEvent)
     ]
-    assert TickAddEvent(event=OneTestEvent()) in add_events
+    # Use the sending invocation to identify this event.
+    assert (
+        TickAddEvent(
+            event=OneTestEvent(),
+            emission=EmissionKey(invocation_id="invocation_1", index=0),
+        )
+        in add_events
+    )
 
 
 @pytest.mark.asyncio

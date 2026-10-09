@@ -18,6 +18,7 @@ from typing import (
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Field,
     PlainSerializer,
     PlainValidator,
     TypeAdapter,
@@ -32,8 +33,48 @@ from workflows.events import (
     SerializableException,
     SerializableOptionalEvent,
 )
+from workflows.runtime.types.step_id import StepId
 
 EventType = TypeVar("EventType", bound=Event)
+
+
+@dataclass(frozen=True)
+class EmissionKey:
+    """A key for one event emitted by an invocation.
+
+    ``index`` counts sends first, then returned events. A ``catch_error``
+    dispatch gets the next index if the step fails.
+    """
+
+    invocation_id: str
+    index: int
+
+
+class SentEvent(BaseModel):
+    """A send included in the step result.
+
+    Runtimes that cache step results also replay these sends. The runner
+    copies them to ``TickStepResult.sends``.
+    """
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+    index: int
+    event: SerializableEvent
+    step_id: StepId | None = None
+    recovery_counts: dict[str, int] = Field(default_factory=dict)
+
+
+@dataclass
+class StepSends:
+    """Sends numbered in call order for one invocation.
+
+    Recording stops when the step returns. Background tasks that send later
+    emit events without keys.
+    """
+
+    entries: list[SentEvent] = dataclasses.field(default_factory=list)
+    closed: bool = False
+
 
 #################################################################
 # State Passed to step functions and returned by step functions #
@@ -73,6 +114,29 @@ class StepWorkerContext:
     # add commands here to mutate the internal worker state after step execution
     returns: Returns
     retry: RetryAttempt = dataclasses.field(default_factory=RetryAttempt)
+    sends: StepSends = dataclasses.field(default_factory=StepSends)
+
+    def record_send(
+        self, event: Event, step_id: StepId | None, recovery_counts: dict[str, int]
+    ) -> EmissionKey | None:
+        """Assign a send index and return its emission key.
+
+        Return None if the invocation has no ID or has already returned.
+        Resume cannot recover sends made by background tasks after return.
+        """
+        invocation_id = self.state.invocation_id
+        if invocation_id is None or self.sends.closed:
+            return None
+        index = len(self.sends.entries)
+        self.sends.entries.append(
+            SentEvent(
+                index=index,
+                event=event,
+                step_id=step_id,
+                recovery_counts=dict(recovery_counts),
+            )
+        )
+        return EmissionKey(invocation_id=invocation_id, index=index)
 
 
 @dataclass(frozen=True)
@@ -366,3 +430,5 @@ StepFunctionResult = (
     | AddWaiter[Event]
     | DeleteWaiter
 )
+
+StepWorkerOutput = StepFunctionResult | SentEvent

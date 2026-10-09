@@ -67,6 +67,7 @@ from workflows.runtime.types.commands import (
 from workflows.runtime.types.internal_state import (
     BrokerState,
     CollectionStreamInstance,
+    Delivery,
     EventAttempt,
     InProgressState,
     InternalStepWorkerState,
@@ -76,6 +77,7 @@ from workflows.runtime.types.results import (
     AddWaiter,
     DeleteCollectedEvent,
     DeleteWaiter,
+    EmissionKey,
     StepFunctionResult,
     StepWorkerFailed,
     StepWorkerResult,
@@ -278,6 +280,9 @@ def _reduce_tick(
         # forgiven. Then rewind in-progress work from the previous session, so
         # a fold over a multi-session journal rewinds once per session.
         state, commands = rewind_in_progress(init, now_seconds)
+        # Re-emit pending deliveries. If replay delivers the original first,
+        # the reducer drops this copy.
+        commands.extend(_reemit_deliveries(state))
         _reset_alive_stamps(state, _tick_stamp(tick))
         return state, commands
     elif isinstance(tick, TickWaiterTimeout):
@@ -289,7 +294,7 @@ def _reduce_tick(
             if stuck is not None:
                 stuck_step, stuck_error = stuck
                 state = init.deepcopy()
-                state.is_running = False
+                _mark_terminal(state, state)
                 return state, [
                     CommandPublishEvent(
                         event=WorkflowFailedEvent(
@@ -340,6 +345,82 @@ def _descend(root_state: BrokerState, path: tuple[str, ...]) -> _Descent | None:
         broker = child
         chain.append(broker)
     return _Descent(broker=broker, path=path, chain=tuple(chain))
+
+
+def _walk_brokers(
+    root: BrokerState, path: tuple[str, ...] = ()
+) -> list[tuple[tuple[str, ...], BrokerState]]:
+    """List brokers with their paths. Visit the root first, then sorted children."""
+    found = [(path, root)]
+    for key, child in sorted(root.children.items()):
+        found.extend(_walk_brokers(child, (*path, key)))
+    return found
+
+
+def _mark_terminal(root: BrokerState, broker: BrokerState) -> None:
+    """Stop the run and clear pending deliveries across all brokers.
+
+    Call before emitting a terminal completion or failure command.
+    Cancellation and idle release keep deliveries because those runs resume.
+    """
+    broker.is_running = False
+    root.is_running = False
+    for _, each in _walk_brokers(root):
+        each.deliveries.clear()
+
+
+def _reemit_deliveries(root: BrokerState) -> list[WorkflowCommand]:
+    """Build delivery commands addressed to the broker that recorded each event."""
+    return [
+        delivery.to_command(path)
+        for path, broker in _walk_brokers(root)
+        for delivery in broker.deliveries.values()
+    ]
+
+
+def _claim_emission(root: BrokerState, key: EmissionKey) -> bool:
+    """Return whether to route a keyed TickAddEvent.
+
+    Remove a pending delivery when claimed. For an active invocation, record
+    the send index to reject duplicates. Drop all other keys because the
+    invocation has finished and the event was already delivered.
+    """
+    brokers = _walk_brokers(root)
+    for _, broker in brokers:
+        if broker.deliveries.pop(key, None) is not None:
+            return True
+    for _, broker in brokers:
+        for worker in broker.workers.values():
+            for execution in worker.in_progress:
+                if execution.invocation_id != key.invocation_id:
+                    continue
+                if key.index in execution.received:
+                    return False
+                execution.received.add(key.index)
+                return True
+    return False
+
+
+def _settle_sends(
+    broker: BrokerState, tick: TickStepResult, execution: InProgressState
+) -> None:
+    """Record sends still waiting in the mailbox.
+
+    Resume re-emits any recorded send whose tick was lost.
+    """
+    if tick.invocation_id is None:
+        return
+    for sent in tick.sends:
+        if sent.index in execution.received:
+            continue
+        key = EmissionKey(invocation_id=tick.invocation_id, index=sent.index)
+        broker.deliveries[key] = Delivery(
+            key=key,
+            event=sent.event,
+            step_id=sent.step_id,
+            recovery_counts=dict(sent.recovery_counts),
+            scope_path=(),
+        )
 
 
 def _is_eligible(attempt: EventAttempt) -> bool:
@@ -558,22 +639,35 @@ def _refresh_collect_snapshot(
     execution.collect_generations = dict(worker_state.collect_generations)
 
 
-def _queue_catch_error_event(
-    this_execution: InProgressState,
+def _emit(
+    acc: _StepResultAcc,
+    broker: BrokerState,
+    path: tuple[str, ...],
     *,
     event: Event,
-    step_id: StepId,
-    path: tuple[str, ...],
+    step_id: StepId | None,
     recovery_counts: dict[str, int],
+    scope_path: tuple[str, ...],
 ) -> CommandQueueEvent:
-    """Build a catch_error dispatch in the failed work item's stream scope."""
-    return CommandQueueEvent(
+    """Record a returned event and build its delivery command.
+
+    Assign the next emission index as its key. Older results have no
+    invocation ID, so emit their events without recording a delivery.
+    """
+    key: EmissionKey | None = None
+    if acc.invocation_id is not None:
+        key = EmissionKey(invocation_id=acc.invocation_id, index=acc.next_emission)
+        acc.next_emission += 1
+    delivery = Delivery(
+        key=key,
         event=event,
         step_id=step_id,
-        origin_namespace=path,
         recovery_counts=recovery_counts,
-        scope_path=this_execution.scope_path,
+        scope_path=scope_path,
     )
+    if key is not None:
+        broker.deliveries[key] = delivery
+    return delivery.to_command(path)
 
 
 @dataclass
@@ -585,6 +679,13 @@ class _StepResultAcc:
     """
 
     commands: list[WorkflowCommand]
+    # Terminal exits clear deliveries across the whole tree.
+    root: BrokerState
+    # Older results have no invocation ID. Sends use the first indexes.
+    invocation_id: str | None
+    next_emission: int = 0
+    # A StopEvent suppresses other deliveries from the batch.
+    stop_in_batch: bool = False
     # Record the rerun ID to prevent a second rerun in the same batch.
     rerun_invocation_id: str | None = None
     output_event_name: str | None = None
@@ -729,7 +830,7 @@ def _apply_step_result(
             acc.commands.append(
                 CommandPublishEvent(event=result.result)
             )  # stop event always published to the stream
-            state.is_running = False
+            _mark_terminal(acc.root, state)
             # Clear collected_events and collected_waiters since workflow is complete
             for worker in state.workers.values():
                 worker.queue.clear()
@@ -747,14 +848,18 @@ def _apply_step_result(
             # human input required are automatically published to the stream
             if isinstance(result.result, InputRequiredEvent):
                 acc.commands.append(CommandPublishEvent(event=result.result))
-            acc.commands.append(
-                CommandQueueEvent(
-                    event=result.result,
-                    origin_namespace=path,
-                    recovery_counts=dict(this_execution.recovery_counts),
-                    scope_path=scope.emit_stack,
+            if not acc.stop_in_batch:
+                acc.commands.append(
+                    _emit(
+                        acc,
+                        state,
+                        path,
+                        event=result.result,
+                        step_id=None,
+                        recovery_counts=dict(this_execution.recovery_counts),
+                        scope_path=scope.emit_stack,
+                    )
                 )
-            )
         elif result.result is None:
             # None means skip
             pass
@@ -967,21 +1072,23 @@ def _schedule_retry_or_route_failure(
         # close. It routes to the handler step, so it must not
         # carry the collect payload.
         acc.commands.append(
-            _queue_catch_error_event(
-                this_execution,
+            _emit(
+                acc,
+                state,
+                path,
                 event=step_failed_event,
                 step_id=StepId((), handler.step_name),
-                path=path,
                 recovery_counts={
                     **this_execution.recovery_counts,
                     handler.step_name: new_count,
                 },
+                scope_path=this_execution.scope_path,
             )
         )
         acc.redelivery_scheduled = True
     else:
         # Publish a WorkflowFailedEvent to inform stream consumers about the failure
-        state.is_running = False
+        _mark_terminal(acc.root, state)
         acc.commands.append(
             CommandPublishEvent(
                 event=WorkflowFailedEvent(
@@ -1102,6 +1209,9 @@ def _process_step_result_tick(
     worker_state = broker.workers[step_id]
     this_execution = _find_in_progress(worker_state, tick)
 
+    # Record pending sends before a rerun replaces the invocation ID.
+    _settle_sends(broker, tick, this_execution)
+
     rerun = _rerun_for_stale_collect_buffer(
         tick, broker, path, worker_state, this_execution
     )
@@ -1114,7 +1224,16 @@ def _process_step_result_tick(
     scope = _fan_out_scope(broker, step_name, this_execution, fanned_out=fanned_out)
 
     did_complete_step = any(isinstance(x, StepWorkerResult) for x in tick.result)
-    acc = _StepResultAcc(commands=[])
+    acc = _StepResultAcc(
+        commands=[],
+        root=state,
+        invocation_id=tick.invocation_id,
+        next_emission=len(tick.sends),
+        stop_in_batch=any(
+            isinstance(x, StepWorkerResult) and isinstance(x.result, StopEvent)
+            for x in tick.result
+        ),
+    )
     for result in tick.result:
         _apply_step_result(
             result,
@@ -1414,6 +1533,7 @@ def _resolve_waiters(
 
 def _route_member_to_collect_step(
     tick: TickAddEvent,
+    root: BrokerState,
     state: BrokerState,
     step_id: StepId,
     path: tuple[str, ...],
@@ -1443,7 +1563,7 @@ def _route_member_to_collect_step(
                 "only collects events emitted inside a fan-out "
                 "stream."
             )
-            state.is_running = False
+            _mark_terminal(root, state)
             commands.append(
                 CommandPublishEvent(
                     event=WorkflowFailedEvent(step_name=step_name, exception=error)
@@ -1501,6 +1621,7 @@ def _route_member_to_collect_step(
 
 def _route_to_accepting_steps(
     tick: TickAddEvent,
+    root: BrokerState,
     state: BrokerState,
     path: tuple[str, ...],
     waiter_resolved_steps: set[StepId],
@@ -1540,7 +1661,7 @@ def _route_to_accepting_steps(
         worker_state = state.workers[step_id]
         if worker_state.config.collection_param is not None:
             member_commands, failed = _route_member_to_collect_step(
-                tick, state, step_id, path, worker_state, now_seconds
+                tick, root, state, step_id, path, worker_state, now_seconds
             )
             result.commands.extend(member_commands)
             if failed:
@@ -1620,6 +1741,8 @@ def _process_add_event_tick(
     if descent is None:
         return state, _unhandled_event_commands(tick, state)
     _accrue_descent(descent, _tick_stamp(tick))
+    if tick.emission is not None and not _claim_emission(state, tick.emission):
+        return state, []
     broker = descent.broker
     path = descent.path
     if tick.work_item_id is None:
@@ -1643,7 +1766,7 @@ def _process_add_event_tick(
     commands, waiter_resolved_steps = _resolve_waiters(tick, broker, path, now_seconds)
 
     routed = _route_to_accepting_steps(
-        tick, broker, path, waiter_resolved_steps, now_seconds
+        tick, state, broker, path, waiter_resolved_steps, now_seconds
     )
     commands.extend(routed.commands)
     if routed.failed:
@@ -1719,7 +1842,7 @@ def _process_timeout_tick(
                     at_time=base + remaining,
                 )
             ]
-    state.is_running = False
+    _mark_terminal(state, state)
     _clear_collection_state(state)
     active_steps = [
         str(step_id)

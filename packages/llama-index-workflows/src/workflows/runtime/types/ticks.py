@@ -28,6 +28,8 @@ from pydantic import (
 from workflows.context.serializers import _register_framework_types
 from workflows.events import SerializableEvent, SerializableOptionalException
 from workflows.runtime.types.results import (
+    EmissionKey,
+    SentEvent,
     SerializableCollectionReleasePayload,
     StepFunctionResult,
 )
@@ -56,6 +58,8 @@ class TickStepResult(BaseModel):
     stamped_at: float | None = None
     # Older results have no invocation ID. Match those by worker_id.
     invocation_id: str | None = None
+    # The reducer records sends still awaiting delivery, in call order.
+    sends: list[SentEvent] = Field(default_factory=list)
 
 
 class TickAddEvent(BaseModel):
@@ -83,6 +87,9 @@ class TickAddEvent(BaseModel):
     work_item_id: str | None = None
     # See TickStepResult.stamped_at.
     stamped_at: float | None = None
+    # Step sends and queue commands use emission keys to reject duplicates.
+    # Start events, external sends and rehydration ticks have no key.
+    emission: EmissionKey | None = None
 
 
 class TickCancelRun(BaseModel):
