@@ -131,6 +131,7 @@ class BrokerState:
     workers: dict[Any, InternalStepWorkerState]
     stream_seq: int = 0
     work_item_seq: int = 0
+    invocation_seq: int = 0
     streams: dict[str, CollectionStreamInstance] = field(default_factory=dict)
     collection_release_states: dict[str, CollectionReleaseState] = field(
         default_factory=dict
@@ -150,6 +151,8 @@ class BrokerState:
             self.elapsed_alive = 0.0
         if "last_alive_stamp" not in state:
             self.last_alive_stamp = None
+        if "invocation_seq" not in state:
+            self.invocation_seq = 0
         self._normalize_worker_keys()
 
     def _normalize_worker_keys(self) -> None:
@@ -168,6 +171,7 @@ class BrokerState:
             },
             stream_seq=self.stream_seq,
             work_item_seq=self.work_item_seq,
+            invocation_seq=self.invocation_seq,
             streams={sid: stream._copy() for sid, stream in self.streams.items()},
             collection_release_states={
                 key: state._copy()
@@ -411,6 +415,7 @@ def _broker_to_serialized(
         workers=workers_dict,
         stream_seq=state.stream_seq,
         work_item_seq=state.work_item_seq,
+        invocation_seq=state.invocation_seq,
         streams={
             sid: SerializedCollectionStreamInstance(
                 stream_id=stream.stream_id,
@@ -443,6 +448,7 @@ def _load_broker_from_serialized(
     base_state.is_running = serialized.is_running
     base_state.stream_seq = serialized.stream_seq
     base_state.work_item_seq = serialized.work_item_seq
+    base_state.invocation_seq = serialized.invocation_seq
     base_state.elapsed_alive = serialized.elapsed_alive
     base_state.last_alive_stamp = serialized.last_alive_stamp
     base_state.streams = {

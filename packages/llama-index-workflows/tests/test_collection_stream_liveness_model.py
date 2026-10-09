@@ -156,6 +156,7 @@ def test_failed_work_without_redelivery_is_not_classified_live() -> None:
     tick = TickStepResult(
         step_id=StepId.root("work"),
         worker_id=0,
+        invocation_id="worker-0",
         event=Task(n=0),
         result=[StepWorkerFailed(exception=RuntimeError("boom"), failed_at=1.0)],
     )
