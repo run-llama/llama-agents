@@ -467,7 +467,18 @@ class BasicRuntime(Runtime):
     def state_checkpoint(self, run_id: str) -> StateCheckpoint:
         """Reference the run's committed state without copying it.
 
-        Call ``diff`` with an earlier checkpoint to get a JSON Patch.
+        Call ``diff`` with an earlier checkpoint to get a JSON Patch. To
+        persist a run incrementally, store ``base.to_dict()`` once, then a
+        patch at each flush. To resume, rebuild the state with
+        ``apply_state_patch`` and put it in a broker snapshot's ``state``::
+
+            state = base_payload
+            for patch in patches:
+                state = apply_state_patch(state, patch)
+            snapshot = runtime.restore(wf, None, records).to_dict(include_state=False)
+            snapshot["state"] = state
+            await wf.run(ctx=Context.from_dict(wf, snapshot))
+
         Mutating values returned by ``store.get`` changes both checkpoints,
         so the diff cannot detect those edits.
         """

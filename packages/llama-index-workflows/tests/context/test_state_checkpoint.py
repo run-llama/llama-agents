@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Awaitable, Callable
 
@@ -21,8 +22,8 @@ from workflows.context.state_store import (
     encode_state_tree,
 )
 from workflows.decorators import step
-from workflows.events import StartEvent, StopEvent
-from workflows.plugins.basic import basic_runtime
+from workflows.events import Event, StartEvent, StopEvent
+from workflows.plugins.basic import JournalRecord, basic_runtime
 from workflows.workflow import Workflow
 
 EQ_CALLS: list[str] = []
@@ -230,6 +231,75 @@ async def test_context_from_dict_accepts_checkpoint_state() -> None:
     assert await wf.run(ctx=Context.from_dict(wf, snapshot)) == 2
 
     assert await wf.run(ctx=Context.from_dict(wf, handler.ctx.to_dict())) == 2
+
+
+class Tick(Event):
+    n: int
+
+
+class PausingNotesWorkflow(Workflow):
+    """Write one note per step, idempotently, and pause before the last step."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.gate = asyncio.Event()
+        self.paused = asyncio.Event()
+
+    @step
+    async def first(self, ctx: Context, ev: StartEvent) -> Tick:
+        await ctx.store.set("note_0", "first")
+        return Tick(n=1)
+
+    @step
+    async def second(self, ctx: Context, ev: Tick) -> Tick | StopEvent:
+        await ctx.store.set(f"note_{ev.n}", f"second-{ev.n}")
+        if ev.n == 1:
+            return Tick(n=2)
+        self.paused.set()
+        await self.gate.wait()
+        return StopEvent(result=ev.n)
+
+
+async def test_resume_from_state_rebuilt_from_patches() -> None:
+    """Persist the journal plus state patches, then rebuild and resume from them."""
+    wf = PausingNotesWorkflow()
+    handler = wf.run()
+    run_id = handler.run_id
+    base = basic_runtime.state_checkpoint(run_id)
+    stored_state = json.loads(json.dumps(base.to_dict()))
+    patches: list[list[dict[str, Any]]] = []
+
+    await asyncio.wait_for(wf.paused.wait(), timeout=5)
+    cur = basic_runtime.state_checkpoint(run_id)
+    patches.append(json.loads(json.dumps(cur.diff(base))))
+    records = _journal_so_far(run_id)
+    wf.gate.set()
+    assert await handler == 2
+
+    for patch in patches:
+        stored_state = apply_state_patch(stored_state, patch)
+    snapshot = basic_runtime.restore(wf, None, records).to_dict(include_state=False)
+    snapshot["state"] = stored_state
+
+    resumed = PausingNotesWorkflow()
+    resumed.gate.set()
+    ctx = Context.from_dict(resumed, json.loads(json.dumps(snapshot)))
+    assert await resumed.run(ctx=ctx) == 2
+    assert handler.ctx is not None
+    for key in ("note_0", "note_1", "note_2"):
+        assert await ctx.store.get(key) == await handler.ctx.store.get(key)
+
+
+def _journal_so_far(run_id: str) -> list[JournalRecord]:
+    """The records journaled so far, without waiting for the run to end."""
+    queues = basic_runtime._queues[run_id]
+    serializer = queues.serializer
+    assert serializer is not None
+    start = queues.init_state.journal_seq
+    return [
+        JournalRecord(seq=start + i, data=serializer.serialize(tick))
+        for i, tick in enumerate(list(queues.ticks))
+    ]
 
 
 def test_state_checkpoint_rejects_unknown_run() -> None:
