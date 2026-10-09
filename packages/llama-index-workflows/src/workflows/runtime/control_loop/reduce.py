@@ -116,25 +116,16 @@ def rebuild_state_from_ticks(
 ) -> BrokerState:
     """Rebuild the state from a list of ticks.
 
-    When reconstructing state (e.g., for checkpointing), we must first apply
-    rewind_in_progress() to match what happens at runtime when resuming a workflow.
-    This clears in_progress, moves events back to the queue, and then re-assigns
-    new worker IDs starting from 0.
-
-    Without this, resuming a workflow and then checkpointing again would fail
-    because the original in_progress worker IDs don't match the new worker IDs
-    assigned after rewind.
+    Each session's ``TickSessionStart`` rewinds in-progress work inside the
+    reducer, matching the live run, so worker ids recorded after every resume
+    line up. The helper never rewinds on its own, so a suffix fold keeps an
+    active invocation intact. Journals written before the session marker
+    existed are not supported.
 
     run_id must match the live run's id whenever it is known: it seeds retry
     jitter, so replaying a failure tick recomputes the same delay (and thus
     the same not_before) the live run journaled in its TickWakeup.
     """
-    # Apply rewind_in_progress to match what happens at runtime when resuming.
-    # This re-assigns worker IDs so they align with the ticks that were recorded
-    # after the workflow was resumed.
-    state, _ = rewind_in_progress(state, time.time())
-
-    # Replay ticks to rebuild state
     for tick in ticks:
         state, _ = _reduce_tick(
             tick, state, time.time(), run_id=run_id
@@ -178,7 +169,6 @@ async def replay_ticks_stream(
     jitter, so replaying a failure tick recomputes the same delay (and thus
     the same not_before) the live run journaled in its TickWakeup.
     """
-    state, _ = rewind_in_progress(state, time.time())
     exit_command: ExitCommand | None = None
     async for tick in ticks:
         state, commands = _reduce_tick(tick, state, time.time(), run_id=run_id)
@@ -285,10 +275,11 @@ def _reduce_tick(
     elif isinstance(tick, TickSessionStart):
         # Session boundary: advance every broker's accrual reference to this
         # stamp WITHOUT accruing, so the downtime since the previous session is
-        # forgiven. Never schedules further work.
-        state = init.deepcopy()
+        # forgiven. Then rewind in-progress work from the previous session, so
+        # a fold over a multi-session journal rewinds once per session.
+        state, commands = rewind_in_progress(init, now_seconds)
         _reset_alive_stamps(state, _tick_stamp(tick))
-        return state, []
+        return state, commands
     elif isinstance(tick, TickWaiterTimeout):
         state, commands = _process_waiter_timeout_tick(tick, init, now_seconds)
     elif isinstance(tick, TickIdleCheck):

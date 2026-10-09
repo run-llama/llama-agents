@@ -72,7 +72,6 @@ if TYPE_CHECKING:
 from workflows.runtime.control_loop.reduce import (
     _decide_retry_delay,
     _reduce_tick,
-    rewind_in_progress,
 )
 
 logger = logging.getLogger("workflows.runtime.control_loop")
@@ -430,8 +429,10 @@ class _ControlLoopRunner:
 
         start = await self.adapter.get_now()
         # Journal a session-start marker at every run()/resume. It marks the
-        # alive-session boundary so downtime never accrues. It leads the journal
-        # so replay sees the boundary before any work of this session.
+        # alive-session boundary so downtime never accrues, and the reducer
+        # rewinds in-progress work from the previous session when it sees it. It
+        # leads the journal so replay sees the boundary before any work of this
+        # session.
         self.tick_buffer.insert(0, TickSessionStart(stamped_at=start))
 
         # Queue initial event
@@ -450,15 +451,6 @@ class _ControlLoopRunner:
                 self.tick_buffer.insert(1, timeout_tick)
             else:
                 self.schedule_tick(timeout_tick, at_time=start + remaining)
-
-        # Resume any in-progress work
-        self.state, commands = rewind_in_progress(self.state, start)
-        for command in commands:
-            try:
-                await self.process_command(command)
-            except Exception:
-                await self.cleanup_tasks()
-                raise
 
         # Initialize pull task (single-iteration)
         pull_task: asyncio.Task[list[WorkflowTick]] | None = None
