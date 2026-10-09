@@ -32,6 +32,8 @@ New to the project? Start at the top of the list and work down — each step bui
 
 ## Advanced patterns
 
+- **[`parallel_search/`](parallel_search/)** — Search the web and fetch pages from a workflow using anonymous Parallel Search MCP.
+
 - **[`streaming_internal_events.ipynb`](streaming_internal_events.ipynb)** — Stream intermediate events from nested workflow steps.
 - **[`state_management_with_vector_databases.ipynb`](state_management_with_vector_databases.ipynb)** — Persist workflow state in a vector database.
 - **[`document_agents/`](document_agents/)** — A finance triage agent built with document workflows.
