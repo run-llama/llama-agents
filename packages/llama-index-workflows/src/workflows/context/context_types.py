@@ -233,8 +233,7 @@ class SerializedContext(BaseModel):
     # Monotonic work-item counter. Persisted so implicit waiter ids remain
     # stable and unique across serialize/resume boundaries.
     work_item_seq: int = Field(default=0)
-    # Monotonic invocation counter. Persisted so live runs and replays mint
-    # the same invocation ids.
+    # Save the counter so replay assigns the same invocation IDs.
     invocation_seq: int = Field(default=0)
     streams: dict[str, SerializedCollectionStreamInstance] = Field(default_factory=dict)
     collection_release_states: dict[str, SerializedCollectionReleaseState] = Field(

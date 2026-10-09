@@ -359,11 +359,9 @@ def _next_work_item_id(state: BrokerState) -> str:
 
 
 def _next_invocation_id(broker: BrokerState, path: tuple[str, ...]) -> str:
-    """Mint the identity of one step dispatch.
+    """Assign a new ID to each dispatch, including retries and reruns.
 
-    Every ``CommandRunWorker`` carries a fresh id: first dispatch, retry,
-    rewind rerun and stale-collect rerun. The counter is serialized, so a live
-    run and a replay of its journal mint the same ids in the same order.
+    Save the counter so replay assigns the same IDs in the same order.
     """
     broker.invocation_seq += 1
     local = f"invocation_{broker.invocation_seq}"
@@ -373,7 +371,7 @@ def _next_invocation_id(broker: BrokerState, path: tuple[str, ...]) -> str:
 def _start_rerun(
     broker: BrokerState, path: tuple[str, ...], execution: InProgressState
 ) -> str:
-    """Turn an in-progress execution into a new invocation of the same work."""
+    """Assign a new invocation ID and clear receipts before rerunning."""
     invocation_id = _next_invocation_id(broker, path)
     execution.invocation_id = invocation_id
     execution.received = set()
@@ -587,8 +585,7 @@ class _StepResultAcc:
     """
 
     commands: list[WorkflowCommand]
-    # Set once this batch has scheduled a replacement invocation. A batch
-    # schedules at most one: later collect writes belong to the rerun.
+    # Record the rerun ID to prevent a second rerun in the same batch.
     rerun_invocation_id: str | None = None
     output_event_name: str | None = None
     # Cleared when a worker is re-run mid-flight (stale collect buffer): the
@@ -622,10 +619,9 @@ class _FanOutScope:
 def _find_in_progress(
     worker_state: InternalStepWorkerState, tick: TickStepResult
 ) -> InProgressState:
-    """Locate the execution a step result belongs to.
+    """Find the execution by invocation ID.
 
-    Current results name their invocation. Results journaled before
-    invocation ids existed fall back to the worker slot.
+    Older results have no ID, so match them by worker slot.
     """
     if tick.invocation_id is not None:
         execution = next(
@@ -786,8 +782,7 @@ def _apply_step_result(
         snapshot_events = this_execution.shared_state.collected_events.get(
             result.event_id, []
         )
-        # A batch schedules at most one replacement invocation. Later writes in
-        # the same batch append as they would have without the rerun.
+        # Schedule one rerun per batch. Later writes append to the buffer.
         if acc.rerun_invocation_id is None and len(collected_events) > len(
             snapshot_events
         ):

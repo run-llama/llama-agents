@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LlamaIndex Inc.
-"""Every step dispatch gets a fresh invocation id minted by the reducer."""
+"""The reducer assigns a new invocation ID on every dispatch."""
 
 from __future__ import annotations
 
@@ -95,7 +95,7 @@ def test_step_result_is_matched_by_invocation_id(state: BrokerState) -> None:
     state, [first] = _reduce(state, TickAddEvent(event=Job(n=1)))
     state, [second] = _reduce(state, TickAddEvent(event=Job(n=2)))
 
-    # The worker slot is deliberately wrong: the invocation id decides.
+    # Use the wrong slot to check that matching uses the invocation ID.
     state, _ = _reduce(
         state, _result(second, StepWorkerResult(result=None), worker_id=first.id)
     )
@@ -138,7 +138,7 @@ def test_stale_collect_reruns_mint_new_invocations(state: BrokerState) -> None:
         _result(first, AddCollectedEvent(event_id="buf", event=Job(n=1))),
     )
 
-    # second was dispatched before the buffer changed, so its firing is stale.
+    # The second worker has a stale buffer from before the first write.
     state, [rerun] = _reduce(
         state, _result(second, DeleteCollectedEvent(event_id="buf"))
     )
@@ -194,8 +194,8 @@ def test_one_result_batch_schedules_at_most_one_rerun(state: BrokerState) -> Non
     state, [run] = _reduce(state, TickAddEvent(event=Job(n=0)))
     collect = [AddCollectedEvent(event_id="buf", event=Job(n=n)) for n in (1, 2, 3, 4)]
 
-    # After 1 is appended the buffer is longer than the dispatch snapshot, so 2
-    # schedules the rerun. 3 and 4 append without a second command.
+    # Writing 1 makes the snapshot stale. Writing 2 schedules a rerun.
+    # Writes 3 and 4 append to the buffer.
     state, runs = _reduce(state, _result(run, *collect, StepWorkerResult(result=None)))
 
     [rerun] = runs
@@ -204,8 +204,8 @@ def test_one_result_batch_schedules_at_most_one_rerun(state: BrokerState) -> Non
     assert execution.invocation_id == rerun.invocation_id
     assert _buffer(state) == [1, 3, 4]
 
-    # The rerun re-collects its own event. Its snapshot predates 3 and 4, so it
-    # reruns once more before the write lands.
+    # Writes 3 and 4 made the rerun snapshot stale too.
+    # Retry once more before appending 2.
     state, [again] = _reduce(
         state, _result(rerun, collect[1], StepWorkerResult(result=None))
     )

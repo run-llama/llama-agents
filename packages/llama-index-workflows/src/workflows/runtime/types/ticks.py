@@ -54,8 +54,7 @@ class TickStepResult(BaseModel):
     # the same time the live run used instead of the replay clock. Additive:
     # old journals default to None and fall back to the reducer's ``now``.
     stamped_at: float | None = None
-    # The dispatch this result belongs to. None marks a result journaled
-    # before invocation ids existed, which the reducer matches by worker_id.
+    # Older results have no invocation ID. Match those by worker_id.
     invocation_id: str | None = None
 
 
