@@ -58,13 +58,12 @@ from workflows.workflow import Workflow
 
 @dataclass(frozen=True)
 class JournalRecord:
-    """One journaled tick of a run, as yielded by `BasicRuntime.journal`.
+    """A tick yielded by `BasicRuntime.journal`.
 
     Attributes:
-        seq: Position in the context's journal. Contiguous across resumes of
-            the same context, starting from the snapshot's `journal_seq`.
-        data: The serializer-encoded tick. Opaque; store it and hand it back to
-            `BasicRuntime.restore`.
+        seq: Journal position, starting at the snapshot's `journal_seq`.
+            Numbering continues across resumes.
+        data: Encoded tick. Store it unchanged for `BasicRuntime.restore`.
     """
 
     seq: int
@@ -92,7 +91,7 @@ class AsyncioAdapterQueues:
         self.init_state = init_state
         self.ticks: list[WorkflowTick] = []
         self.state_store = state_store
-        # Set by run_workflow(); encodes journal records
+        # run_workflow sets the serializer used for journal records.
         self.serializer: BaseSerializer | None = None
 
     # created lazily via cached_property for Python 3.14+ compatibility (they require a running event loop)
@@ -110,10 +109,10 @@ class AsyncioAdapterQueues:
     def stream_lock(self) -> asyncio.Lock:
         return asyncio.Lock()
 
-    # created lazily via cached_property for Python 3.14+ compatibility (they require a running event loop)
+    # Create the event lazily because Python 3.14+ requires a running loop.
     @functools.cached_property
     def ticks_changed(self) -> asyncio.Event:
-        """Set when a tick is appended or the run completes. Wakes journal readers."""
+        """Wake journal readers when a tick arrives or the run ends."""
         return asyncio.Event()
 
 
@@ -386,12 +385,11 @@ class BasicRuntime(Runtime):
         return ExternalAsyncioAdapter(self, self._queues[run_id])
 
     async def journal(self, run_id: str) -> AsyncIterator[JournalRecord]:
-        """Yield the run's journal: recorded ticks, then live ones until it ends.
+        """Yield saved ticks, then new ticks as they arrive.
 
-        The runtime keeps the current session's ticks in memory, so a reader
-        that starts after `run()` still sees every record from the session's
-        first seq. The iterator ends once the run has completed and every
-        record has been yielded.
+        The runtime keeps all ticks from the current session in memory.
+        Readers can start after `run()` and still receive the whole session.
+        Stop after the run ends and all records have been yielded.
         """
         queues = self._queues.get(run_id)
         if queues is None:
@@ -401,8 +399,7 @@ class BasicRuntime(Runtime):
         start_seq = queues.init_state.journal_seq
         index = 0
         while True:
-            # Clear before reading, so a tick appended while the caller holds a
-            # yielded record sets the event again.
+            # Clear before yielding so ticks arriving during a yield wake the reader.
             queues.ticks_changed.clear()
             while index < len(queues.ticks):
                 yield JournalRecord(
@@ -421,21 +418,21 @@ class BasicRuntime(Runtime):
         records: Iterable[JournalRecord],
         serializer: BaseSerializer | None = None,
     ) -> Context:
-        """Fold journal records onto a snapshot and return a pre-run Context.
+        """Replay records after a snapshot and return a context ready to run.
 
         Args:
             workflow: The workflow the records were journaled for.
             snapshot: A `Context.to_dict()` result, or None for a fresh run.
                 Its `state` is carried over unchanged.
-            records: Records from `journal()`. Records below the snapshot's
-                `journal_seq` are skipped, so overlapping records are fine.
+            records: Records from `journal()`. Skip records already covered
+                by the snapshot's `journal_seq`.
             serializer: Serializer the snapshot and records were written with.
                 Defaults to the workflow's serializer.
 
         Raises:
-            ValueError: If the records skip a seq.
+            ValueError: If a sequence number is missing.
 
-        Compaction is `restore(workflow, snapshot, records).to_dict()`.
+        Save the restored context with `to_dict()` to compact the journal.
         """
         active_serializer = (
             serializer if serializer is not None else self.get_serializer(workflow)
@@ -466,10 +463,10 @@ class BasicRuntime(Runtime):
 
 
 def assert_is_basic(runtime: Runtime) -> BasicRuntime:
-    """Return `runtime` typed as a BasicRuntime, or raise TypeError.
+    """Return a BasicRuntime or raise TypeError.
 
-    A decorated BasicRuntime, such as the server's persistence runtime, is
-    rejected: it keeps its own journal.
+    Reject wrappers such as the server persistence runtime because they
+    manage their own journals.
     """
     if not isinstance(runtime, BasicRuntime):
         raise TypeError(f"Expected a BasicRuntime, got {type(runtime).__qualname__}")

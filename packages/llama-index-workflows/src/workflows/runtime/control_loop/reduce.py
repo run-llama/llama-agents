@@ -261,7 +261,7 @@ def _reduce_tick(
     run_id: str | None = None,
 ) -> tuple[BrokerState, list[WorkflowCommand]]:
     state, commands = _reduce_tick_body(tick, init, now_seconds, run_id)
-    # Count every reduced tick, so a snapshot records its journal position.
+    # Save the journal position after every tick.
     if state is init:
         state = replace(init)
     state.journal_seq = init.journal_seq + 1

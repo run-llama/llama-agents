@@ -1017,7 +1017,6 @@ async def test_store_continuation_with_pre_run_seeding() -> None:
 
 @pytest.mark.asyncio
 async def test_to_dict_before_run_returns_start_snapshot(workflow: Workflow) -> None:
-    """to_dict() before workflow.run() returns the snapshot the run starts from."""
     data = Context(workflow).to_dict()
     assert data["journal_seq"] == 0
     assert data["is_running"] is False

@@ -160,8 +160,7 @@ class BrokerState:
         invocation_seq: Counter incremented for each step dispatch.
         deliveries: Pending events keyed by emission, in insertion order.
             The reducer re-emits them at TickSessionStart.
-        journal_seq: Number of journaled ticks reduced into this state. The
-            seq of a tick is the state's journal_seq before it is reduced.
+        journal_seq: Count of reduced ticks and the next record's sequence number.
     """
 
     is_running: bool

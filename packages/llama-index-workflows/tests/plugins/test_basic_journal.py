@@ -27,7 +27,7 @@ class MidEvent(Event):
 
 
 class JournalWorkflow(Workflow):
-    """Fans out two events, collects them, then waits on a gate in a slow step."""
+    """Collect two events and pause before finishing."""
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -92,7 +92,7 @@ async def test_journal_after_completion_ends(runtime: BasicRuntime) -> None:
 async def _record_resumed_run(
     runtime: BasicRuntime,
 ) -> tuple[JournalWorkflow, list[JournalRecord]]:
-    """Run until the slow step is in progress, snapshot, drop the session, resume."""
+    """Snapshot during the slow step and record the resumed run."""
     wf = JournalWorkflow(runtime=runtime)
     handler = wf.run()
     reader = asyncio.create_task(_collect(runtime, handler.run_id))
@@ -109,8 +109,7 @@ async def _record_resumed_run(
     assert await resumed == 3
     second = await asyncio.wait_for(reader, timeout=5)
 
-    # The resumed session continues from the snapshot's position. Records the
-    # first session journaled after the snapshot are not part of this context.
+    # Resume from the snapshot position. Discard later ticks from the old session.
     assert second[0].seq == snapshot["journal_seq"]
     return wf, [r for r in first if r.seq < snapshot["journal_seq"]] + second
 
@@ -126,8 +125,7 @@ async def test_restore_from_any_cut_point_matches_full_fold(
         for m in range(len(records) + 1)
     ]
     assert [f["journal_seq"] for f in folds] == list(range(len(records) + 1))
-    # Completion clears in-progress work, so compare every prefix, not only the
-    # final state: a cut that diverges mid-run must not be hidden by the end.
+    # Compare every prefix because completion clears evidence of active work.
     for k, head in enumerate(folds):
         for m in range(k, len(records) + 1):
             resumed = runtime.restore(wf, head, records[k:m]).to_dict()
@@ -154,12 +152,10 @@ async def test_restored_context_runs_to_completion(runtime: BasicRuntime) -> Non
 
 
 def _settled(snapshot: dict[str, Any]) -> dict[str, Any]:
-    """Fields of a finished run's snapshot that do not depend on timing.
+    """Select finished state that can be compared across resumes.
 
-    Store state is left out: the journal holds ticks, not store writes.
-    Collect buffer generations are left out too: they count every append and
-    clear, so a context restored from a finished cut and run again keeps the
-    finished run's count.
+    Exclude store state because the journal does not record store writes.
+    Exclude buffer counters because reruns can append and clear again.
     """
     return {
         "is_running": snapshot["is_running"],
@@ -181,7 +177,7 @@ async def test_every_journal_cut_runs_to_the_uninterrupted_result(
     runtime: BasicRuntime,
 ) -> None:
     wf, records = await _record_resumed_run(runtime)
-    # The gate is set, so a rerun of the slow step finishes on its own.
+    # The open gate lets the slow step finish on each rerun.
     baseline = wf.run()
     expected_result = await asyncio.wait_for(baseline, timeout=5)
     assert baseline.ctx is not None

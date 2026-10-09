@@ -114,7 +114,7 @@ class PreContext(Generic[MODEL_T]):
     def to_dict(
         self, serializer: BaseSerializer | None = None, *, include_state: bool = True
     ) -> dict[str, Any]:
-        """Serialize the snapshot this context will start from."""
+        """Serialize the initial snapshot for the next run."""
         active_serializer = serializer or self._serializer
         context = BrokerState.from_serialized(
             self._init_snapshot, self._workflow, self._serializer

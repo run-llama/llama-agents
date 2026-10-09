@@ -359,20 +359,17 @@ class Context(Generic[MODEL_T]):
     ) -> dict[str, Any]:
         """Serialize the context to a JSON-serializable dict.
 
-        Persists the global state store, event queues, buffers, in-progress
-        work, and running flag. This payload can be fed to
+        Save the store, queues, buffers, active work and running flag. Use
         [from_dict][workflows.context.context.Context.from_dict] to resume a run
-        or carry state across runs. It also records `journal_seq`, the number of
-        journaled ticks it covers. A context that has not started returns the
-        snapshot it will start from.
+        or carry state across runs. `journal_seq` counts the saved ticks.
+        Before the run starts, return its initial snapshot.
 
         Args:
             serializer (BaseSerializer | None): Value serializer used for state
                 and event payloads. Defaults to
                 [JsonSerializer][workflows.context.serializers.JsonSerializer].
-            include_state (bool): When False, the state store is not
-                serialized and `state` is left empty. A context restored from
-                that payload starts with a fresh state store.
+            include_state (bool): Set False to leave `state` empty. Restoring
+                that payload creates a fresh state store.
 
         Returns:
             dict[str, Any]: A dict suitable for JSON encoding and later
