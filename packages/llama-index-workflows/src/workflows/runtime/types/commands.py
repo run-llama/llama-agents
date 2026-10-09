@@ -36,7 +36,7 @@ class CommandRunWorker:
 
 @dataclass(frozen=True)
 class CommandQueueEvent:
-    """Deliver one event. Built only by ``Delivery.to_command``."""
+    """A delivery command built by ``Delivery.to_command``."""
 
     event: Event
     step_id: StepId | None = None

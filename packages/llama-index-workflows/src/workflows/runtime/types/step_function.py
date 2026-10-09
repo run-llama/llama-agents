@@ -362,8 +362,7 @@ def as_step_worker_function(
                 )
 
             await internal_context._finalize_step()
-            # Sends go after the results, so a runtime that memoizes this
-            # return replays them with it.
+            # Include sends so runtimes that cache results can replay them.
             return [*returns.return_values, *step_ctx.sends.entries]
         finally:
             step_ctx.sends.closed = True

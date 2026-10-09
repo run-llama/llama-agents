@@ -197,8 +197,7 @@ class InternalContext(Generic[MODEL_T]):
         try:
             step_ctx = StepWorkerStateContextVar.get()
             recovery_counts = dict(step_ctx.retry.recovery_counts)
-            # Inside a step the send is numbered and returned with the step's
-            # result, so the reducer can record it if this tick is lost.
+            # Include the send in the step result so resume can recover a lost tick.
             emission = step_ctx.record_send(message, step_id, recovery_counts)
         except LookupError:
             pass

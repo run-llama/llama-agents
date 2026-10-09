@@ -280,8 +280,8 @@ def _reduce_tick(
         # forgiven. Then rewind in-progress work from the previous session, so
         # a fold over a multi-session journal rewinds once per session.
         state, commands = rewind_in_progress(init, now_seconds)
-        # Re-emit every delivery the runner still owes. A journaled original
-        # that is reduced first discharges it instead, and the copy is dropped.
+        # Re-emit pending deliveries. If replay delivers the original first,
+        # the reducer drops this copy.
         commands.extend(_reemit_deliveries(state))
         _reset_alive_stamps(state, _tick_stamp(tick))
         return state, commands
@@ -350,7 +350,7 @@ def _descend(root_state: BrokerState, path: tuple[str, ...]) -> _Descent | None:
 def _walk_brokers(
     root: BrokerState, path: tuple[str, ...] = ()
 ) -> list[tuple[tuple[str, ...], BrokerState]]:
-    """Every broker in the tree with its path, root first, children sorted."""
+    """List brokers with their paths. Visit the root first, then sorted children."""
     found = [(path, root)]
     for key, child in sorted(root.children.items()):
         found.extend(_walk_brokers(child, (*path, key)))
@@ -358,13 +358,11 @@ def _walk_brokers(
 
 
 def _mark_terminal(root: BrokerState, broker: BrokerState) -> None:
-    """End the run: stop the broker and drop every undischarged delivery.
+    """Stop the run and clear pending deliveries across all brokers.
 
-    Called by every site that emits a terminal CommandCompleteRun or
-    CommandFailWorkflow, so a terminal snapshot never re-emits work.
-    Cancellation and idle release do not call it: those states resume.
+    Call before emitting a terminal completion or failure command.
+    Cancellation and idle release keep deliveries because those runs resume.
     """
-    # A terminal command ends the whole run, not just the broker that hit it.
     broker.is_running = False
     root.is_running = False
     for _, each in _walk_brokers(root):
@@ -372,7 +370,7 @@ def _mark_terminal(root: BrokerState, broker: BrokerState) -> None:
 
 
 def _reemit_deliveries(root: BrokerState) -> list[WorkflowCommand]:
-    """Commands for every recorded delivery, each addressed to its own broker."""
+    """Build delivery commands addressed to the broker that recorded each event."""
     return [
         delivery.to_command(path)
         for path, broker in _walk_brokers(root)
@@ -381,12 +379,11 @@ def _reemit_deliveries(root: BrokerState) -> list[WorkflowCommand]:
 
 
 def _claim_emission(root: BrokerState, key: EmissionKey) -> bool:
-    """Decide whether a keyed TickAddEvent routes (True) or is dropped.
+    """Return whether to route a keyed TickAddEvent.
 
-    A recorded delivery is discharged and routes. A send from an invocation
-    still in progress routes once per index. Anything else is a duplicate:
-    its producer finished and either recorded and discharged this key, or
-    never recorded it because the send was routed live.
+    Remove a pending delivery when claimed. For an active invocation, record
+    the send index to reject duplicates. Drop all other keys because the
+    invocation has finished and the event was already delivered.
     """
     brokers = _walk_brokers(root)
     for _, broker in brokers:
@@ -407,10 +404,9 @@ def _claim_emission(root: BrokerState, key: EmissionKey) -> bool:
 def _settle_sends(
     broker: BrokerState, tick: TickStepResult, execution: InProgressState
 ) -> None:
-    """Record the invocation's sends that have not been routed yet.
+    """Record sends still waiting in the mailbox.
 
-    Their ticks are already in the mailbox, so nothing is emitted. If one is
-    lost to a snapshot or journal cut, resume re-emits it from state.
+    Resume re-emits any recorded send whose tick was lost.
     """
     if tick.invocation_id is None:
         return
@@ -653,11 +649,10 @@ def _emit(
     recovery_counts: dict[str, int],
     scope_path: tuple[str, ...],
 ) -> CommandQueueEvent:
-    """Record one event the step result emits and return its delivery command.
+    """Record a returned event and build its delivery command.
 
-    The key is the next index in the invocation's emission order. A result
-    journaled before invocation ids existed is emitted unkeyed and records
-    nothing.
+    Assign the next emission index as its key. Older results have no
+    invocation ID, so emit their events without recording a delivery.
     """
     key: EmissionKey | None = None
     if acc.invocation_id is not None:
@@ -684,14 +679,12 @@ class _StepResultAcc:
     """
 
     commands: list[WorkflowCommand]
-    # Root of the broker tree, for terminal exits.
+    # Terminal exits clear deliveries across the whole tree.
     root: BrokerState
-    # Invocation the result belongs to (None for a result journaled before
-    # invocation ids existed) and the index its next emission gets. Sends
-    # take the first indexes.
+    # Older results have no invocation ID. Sends use the first indexes.
     invocation_id: str | None
     next_emission: int = 0
-    # The batch contains a StopEvent: nothing in it is recorded or emitted.
+    # A StopEvent suppresses other deliveries from the batch.
     stop_in_batch: bool = False
     # Record the rerun ID to prevent a second rerun in the same batch.
     rerun_invocation_id: str | None = None
@@ -1216,8 +1209,7 @@ def _process_step_result_tick(
     worker_state = broker.workers[step_id]
     this_execution = _find_in_progress(worker_state, tick)
 
-    # Settle sends before anything else, including a rerun: a rerun mints a
-    # new invocation, and the old one's unrouted sends must already be owed.
+    # Record pending sends before a rerun replaces the invocation ID.
     _settle_sends(broker, tick, this_execution)
 
     rerun = _rerun_for_stale_collect_buffer(

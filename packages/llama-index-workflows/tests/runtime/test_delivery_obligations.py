@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LlamaIndex Inc.
-"""Reducer rules for delivery obligations.
+"""Test delivery one tick at a time.
 
-Each test drives the reducer tick by tick, the way the runner does, and turns
-every ``CommandQueueEvent`` into the ``TickAddEvent`` the runner would buffer.
+Convert queue commands to ticks as the runner would.
 """
 
 from __future__ import annotations
@@ -75,7 +74,7 @@ def test_suffix_after_active_invocation_delivers_send_once(
 
     assert routed(restored, "sink") == ["ping-a"]
     assert routed(restored, "producer") == []
-    # The send was routed while A was active; only the returned event is owed.
+    # The send arrived while A was active. The returned event is still pending.
     assert keys(restored) == [(run.invocation_id, 1)]
     restored, _ = fold(restored, derived(commands))
     assert routed(restored, "consumer") == ["a"]
@@ -113,7 +112,7 @@ def test_shared_producer_with_delayed_send_tick_delivers_each_event_once(
     by_step = {r.step_id.name: r for r in runs(commands)}
     sender, returner = by_step["sender"], by_step["returner"]
 
-    # The sender's mailbox tick is delayed past both results.
+    # Delay the send until both steps have returned.
     state, result_commands = fold(
         state,
         [
@@ -122,7 +121,7 @@ def test_shared_producer_with_delayed_send_tick_delivers_each_event_once(
         ],
     )
     restored = resume(state)
-    # The journaled originals arrive late and are duplicates.
+    # Replay the originals after resume has already delivered their copies.
     late = [send(sender, 0, Ping(label="x")), *derived(result_commands)]
     restored, _ = fold(restored, late)
 
@@ -142,7 +141,7 @@ def test_rerun_consumes_once_per_invocation_and_drops_the_stale_tick(
     [second] = [r for r in runs(commands) if r.step_id.name == "producer"]
     assert second.invocation_id != first.invocation_id
 
-    # The first invocation's tick arrives again after the rewind: dropped.
+    # Repeat the old tick after rewind to check that it is dropped.
     state, _ = fold(
         state,
         [
@@ -164,8 +163,8 @@ def test_send_from_a_stale_collect_rerun_survives_snapshot_before_its_tick(
     state, _ = reduce(
         state, result(first, AddCollectedEvent(event_id="buf", event=Job(label="a")))
     )
-    # second fires against a stale buffer and reruns; its send X is still in
-    # the mailbox when the snapshot is taken.
+    # The second worker reruns with a stale buffer. Its send X is still
+    # in the mailbox at the snapshot.
     state, commands = reduce(
         state,
         result(
@@ -259,7 +258,7 @@ def test_unkeyed_add_event_always_routes(state: BrokerState) -> None:
 
 
 def test_emissions_number_sends_then_returns_then_catch_error() -> None:
-    # Validation builds the catch_error routing table.
+    # Validate first to build the catch_error routing table.
     workflow = Recovering()
     workflow.validate()
     state = BrokerState.from_workflow(workflow)

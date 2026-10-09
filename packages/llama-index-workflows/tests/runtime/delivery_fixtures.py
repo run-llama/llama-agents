@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LlamaIndex Inc.
-"""Workflows and helpers shared by the delivery obligation tests.
+"""Workflows and helpers for delivery tests.
 
-Events carry a ``label`` that is unique per value, so tests tell events apart
-by label and never compare events.
+Tests identify events by their unique ``label`` values.
 """
 
 from __future__ import annotations
@@ -58,15 +57,13 @@ def label(ev: Event) -> str:
     return getattr(ev, "label", type(ev).__name__)
 
 
-# ---------------------------------------------------------------------------
-# Recorded runs: consumption ledger, nonce and the relay gate
-# ---------------------------------------------------------------------------
+# Track completed steps and pause the relay for resume tests.
 
-# (step name, event label) appended by every step run that finishes.
+# Each completed step appends its name and event label.
 LEDGER: list[tuple[str, str]] = []
-# Send payloads carry a per-execution nonce, so a rerun's sends are new values.
+# Use a new nonce on each invocation to distinguish sends after a rerun.
 _NONCE = itertools.count()
-# While closed, ``relay`` parks forever so the recording can cancel and resume.
+# Pause the relay here to cancel and resume it during recording.
 RELAY_GATE: dict[str, bool] = {"open": True, "parked": False}
 
 
@@ -116,12 +113,11 @@ class RelayPair(Labeled):
 
 
 class EveryCutWorkflow(Workflow):
-    """Exercises sends, returns, a fan-out, collect_events and a retry.
+    """Exercise delivery across retries, collection and fan-out.
 
-    ``sender`` and ``returner`` accept the same event: one only sends, the
-    other only returns. ``relay`` sends and then returns. ``pair`` keys its
-    collect buffer by the relay's tag, so only a completed relay invocation's
-    ping can complete it.
+    ``sender`` sends an event and ``returner`` returns one for the same input.
+    ``relay`` does both. ``pair`` uses the relay tag as its buffer key so it
+    can only complete with a ping from a completed relay invocation.
     """
 
     @step
@@ -194,7 +190,7 @@ class EveryCutWorkflow(Workflow):
         return StopEvent(result=f"total={pair.total}")
 
 
-# Every (consumer, label) of EveryCutWorkflow without a nonce.
+# Expected consumer and label pairs for events with fixed labels.
 EVERY_CUT_DETERMINISTIC = {
     ("start", "StartEvent"),
     *(("work", f"item-{n}") for n in range(3)),
@@ -207,7 +203,7 @@ EVERY_CUT_DETERMINISTIC = {
 
 
 class Unjsonable:
-    """A payload JSON cannot encode."""
+    """A non-JSON payload for pickle tests."""
 
     def __init__(self, value: int) -> None:
         self.value = value
@@ -218,7 +214,7 @@ class Opaque(Labeled):
 
 
 class _Uncomparable(Labeled):
-    """An event the runtime must never compare."""
+    """Raise on equality checks to catch accidental event comparisons."""
 
     def __eq__(self, other: object) -> bool:
         raise AssertionError("events must not be compared")
@@ -296,10 +292,9 @@ def adapter_ticks(
 async def record_with_resume(
     wf: Workflow,
 ) -> tuple[BrokerState, list[WorkflowTick], Any]:
-    """Run once with a cancel and resume while ``relay`` is in progress.
+    """Cancel and resume a run while ``relay`` is active.
 
-    Returns the first session's initial state and both sessions' ticks, which
-    fold as one journal because the snapshot keeps in-progress work in place.
+    Return the initial state and ticks from both sessions for replay.
     """
     RELAY_GATE.update(open=False, parked=False)
     first = wf.run()
@@ -308,7 +303,7 @@ async def record_with_resume(
             break
         await asyncio.sleep(0.01)
     assert RELAY_GATE["parked"], "relay never started"
-    await asyncio.sleep(0.05)  # let in-flight ticks settle into the journal
+    await asyncio.sleep(0.05)  # Wait for pending ticks to reach the journal.
     snapshot = first.ctx.to_dict()
     await first.cancel_run()
     with pytest.raises(Exception):
@@ -325,7 +320,7 @@ async def record_with_resume(
 async def record_once(
     wf: Workflow, serializer: BaseSerializer
 ) -> tuple[BrokerState, list[WorkflowTick], Any]:
-    """Run once and return the journal round-tripped through ``serializer``."""
+    """Record a run, then serialize and reload its journal."""
     handler = wf.run()
     result = await asyncio.wait_for(handler, timeout=5)
     init, ticks = adapter_ticks(wf, handler)
@@ -337,7 +332,7 @@ async def record_once(
 
 
 def prefix_consumption(ticks: list[WorkflowTick]) -> Counter[tuple[str, str]]:
-    """Consumption recorded in a journal prefix: finished step results."""
+    """Find completed steps in a journal prefix."""
     counts: Counter[tuple[str, str]] = Counter()
     for tick in ticks:
         if not isinstance(tick, TickStepResult) or not any(
@@ -368,9 +363,7 @@ def assert_settled(data: dict[str, Any]) -> None:
         assert worker["in_progress"] == [], name
 
 
-# ---------------------------------------------------------------------------
-# Reducer-level driving
-# ---------------------------------------------------------------------------
+# Drive the reducer directly for delivery tests.
 
 
 class Job(Labeled):
@@ -467,7 +460,7 @@ def runs(commands: list[WorkflowCommand]) -> list[CommandRunWorker]:
 
 
 def derived(commands: list[WorkflowCommand]) -> list[WorkflowTick]:
-    """The add-event ticks the runner buffers for these commands."""
+    """Build the ticks the runner would queue for these commands."""
     return [
         TickAddEvent(
             event=c.event,
@@ -508,7 +501,7 @@ def ok(event: Event | None) -> StepWorkerResult:
 
 
 def send(run: CommandRunWorker, index: int, event: Event) -> TickAddEvent:
-    """The mailbox tick ctx.send_event writes inside ``run``."""
+    """Build the mailbox tick for a send during ``run``."""
     assert run.invocation_id is not None
     return TickAddEvent(
         event=event,
@@ -521,7 +514,7 @@ def restore(
     workflow: Workflow | None = None,
     serializer: BaseSerializer = SERIALIZER,
 ) -> BrokerState:
-    """Snapshot and restore, as Context.to_dict / Context.from_dict would."""
+    """Serialize and restore broker state using the context format."""
     return BrokerState.from_serialized(
         state.to_serialized(serializer),
         workflow or Flow(disable_validation=True),
@@ -530,7 +523,7 @@ def restore(
 
 
 def routed(state: BrokerState, step_name: str) -> list[str]:
-    """Labels of the events routed to a step that it has not finished."""
+    """List labels for events waiting for a step to finish."""
     worker = state.workers[StepId.root(step_name)]
     events = [a.event for a in worker.queue] + [ip.event for ip in worker.in_progress]
     return sorted(label(ev) for ev in events)
@@ -543,7 +536,7 @@ def keys(state: BrokerState) -> list[tuple[str, int]]:
 def fold_snapshot(
     init: BrokerState, ticks: list[WorkflowTick], serializer: BaseSerializer
 ) -> tuple[BrokerState, dict[str, Any]]:
-    """Fold a journal prefix and serialize it as Context.to_dict would."""
+    """Replay a journal prefix and serialize the resulting state."""
     state = rebuild_state_from_ticks(init, ticks)
     return state, state.to_serialized(serializer).model_dump()
 
@@ -552,14 +545,14 @@ SESSION_START = TickSessionStart(stamped_at=200.0)
 
 
 def resume(state: BrokerState) -> BrokerState:
-    """Restore a snapshot, start a session and deliver what it re-emits."""
+    """Resume a snapshot and route its pending deliveries."""
     state, reemitted = reduce(restore(state), SESSION_START)
     state, _ = fold(state, derived(reemitted))
     return state
 
 
 def owing(state: BrokerState) -> tuple[BrokerState, TickStepResult]:
-    """A state that owes one send, plus a failure result for a running step."""
+    """Build state with a pending send and a step failure to reduce."""
     state, commands = reduce(state, TickAddEvent(event=Both(label="s")))
     sender = next(r for r in runs(commands) if r.step_id.name == "sender")
     state, _ = reduce(state, result(sender, ok(None), sends=[Ping(label="owed")]))

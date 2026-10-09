@@ -40,11 +40,10 @@ EventType = TypeVar("EventType", bound=Event)
 
 @dataclass(frozen=True)
 class EmissionKey:
-    """Identity of one event an invocation emitted.
+    """A key for one event emitted by an invocation.
 
-    ``index`` counts the invocation's emissions in order: sends made during
-    the step, then the events its result returns, then a ``catch_error``
-    dispatch if its failure is routed to a handler.
+    ``index`` counts sends first, then returned events. A ``catch_error``
+    dispatch gets the next index if the step fails.
     """
 
     invocation_id: str
@@ -52,11 +51,10 @@ class EmissionKey:
 
 
 class SentEvent(BaseModel):
-    """One ``ctx.send_event`` call made by a step invocation.
+    """A send included in the step result.
 
-    The step returns these after its results, so a runtime that memoizes the
-    step's return replays them too. The runner moves them onto
-    ``TickStepResult.sends``.
+    Runtimes that cache step results also replay these sends. The runner
+    copies them to ``TickStepResult.sends``.
     """
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
@@ -68,11 +66,10 @@ class SentEvent(BaseModel):
 
 @dataclass
 class StepSends:
-    """Sends recorded by one step invocation, numbered in send order.
+    """Sends numbered in call order for one invocation.
 
-    Closed when the step returns. A send made after that (from a task the
-    step left running) is not part of the invocation's result and goes out
-    unkeyed.
+    Recording stops when the step returns. Background tasks that send later
+    emit events without keys.
     """
 
     entries: list[SentEvent] = dataclasses.field(default_factory=list)
@@ -122,11 +119,10 @@ class StepWorkerContext:
     def record_send(
         self, event: Event, step_id: StepId | None, recovery_counts: dict[str, int]
     ) -> EmissionKey | None:
-        """Number a ``ctx.send_event`` call and return its emission key.
+        """Assign a send index and return its emission key.
 
-        Returns None (an unkeyed send) when the invocation has no id or has
-        already returned. A send from a task the step left running is
-        therefore outside the delivery guarantee and routes as it always has.
+        Return None if the invocation has no ID or has already returned.
+        Resume cannot recover sends made by background tasks after return.
         """
         invocation_id = self.state.invocation_id
         if invocation_id is None or self.sends.closed:
@@ -435,5 +431,4 @@ StepFunctionResult = (
     | DeleteWaiter
 )
 
-# What a step worker function returns: its results, then the sends it made.
 StepWorkerOutput = StepFunctionResult | SentEvent

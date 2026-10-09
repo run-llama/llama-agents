@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LlamaIndex Inc.
-"""A snapshot or journal cut at any position restores and resumes correctly.
+"""Resume a recorded run from every journal position.
 
-These tests record real runs on the in-memory runtime, fold every prefix of the
-recorded tick journal, resume each fold through ``Context.from_dict``, and check
-the run's result and how many times each event was consumed.
+Check the result and count how often each event is consumed.
 """
 
 from __future__ import annotations
@@ -64,18 +62,16 @@ async def test_every_journal_cut_resumes_with_each_output_consumed_once(
     record: Callable[[], Awaitable[tuple[Workflow, BaseSerializer, Recording]]],
     deterministic: set[tuple[str, str]],
 ) -> None:
-    """Fold every prefix of a recorded journal, resume it, and count consumers.
+    """Resume every journal prefix and count consumed events.
 
-    ``json-resume`` records a run with sends, returns, a fan-out,
-    collect_events, a retry and a cancel and resume. ``pickle-uncomparable``
-    persists its journal with the pickle serializer, carries a payload JSON
-    cannot encode, and uses events whose ``__eq__`` raises.
+    ``json-resume`` covers sends, returns, fan-out, collection, retry and
+    resume. ``pickle-uncomparable`` covers non-JSON payloads and events
+    that raise on equality checks.
 
-    A cut that leaves a producer in progress after its send was routed reruns
-    that producer as a new invocation, which sends a new value. So sent values
-    carry a per-execution nonce: every value is consumed at most once, every
-    deterministic output exactly once, and every delivery the snapshot owes is
-    consumed by the resumed run.
+    An interrupted producer runs again with a new invocation ID. Each
+    invocation sends values with a new nonce so we can count them separately.
+    Each sent value must be consumed at most once. Fixed outputs must be
+    consumed exactly once. Resume must consume all pending deliveries.
     """
     wf, serializer, (init, ticks, expected) = await record()
 
@@ -102,8 +98,7 @@ async def test_every_journal_cut_resumes_with_each_output_consumed_once(
 
 
 async def test_send_then_wait_in_the_same_step_still_works() -> None:
-    # Answer reaches ``ask`` only through its waiter, which graph validation
-    # cannot see.
+    # Graph validation cannot see the waiter that routes Answer to ``ask``.
     wf = SendThenWaitWorkflow(timeout=10, disable_validation=True)
     result = await asyncio.wait_for(wf.run(), timeout=5)
 

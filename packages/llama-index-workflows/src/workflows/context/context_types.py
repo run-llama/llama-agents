@@ -190,7 +190,7 @@ class SerializedStepWorkerState(BaseModel):
 
 
 class SerializedDelivery(BaseModel):
-    """An event the runner owes delivery of, keyed by its emission."""
+    """A saved event awaiting delivery, identified by its emission key."""
 
     invocation_id: str
     index: int
@@ -246,7 +246,7 @@ class SerializedContext(BaseModel):
     work_item_seq: int = Field(default=0)
     # Save the counter so replay assigns the same invocation IDs.
     invocation_seq: int = Field(default=0)
-    # Undischarged deliveries in insertion order. Resume re-emits each one.
+    # Resume re-emits pending deliveries in insertion order.
     deliveries: list[SerializedDelivery] = Field(default_factory=list)
     streams: dict[str, SerializedCollectionStreamInstance] = Field(default_factory=dict)
     collection_release_states: dict[str, SerializedCollectionReleaseState] = Field(

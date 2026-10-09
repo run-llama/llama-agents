@@ -111,12 +111,11 @@ class CollectionReleaseState:
 
 @dataclass
 class Delivery:
-    """An undischarged obligation to deliver one event a step emitted.
+    """An event awaiting delivery.
 
-    Recorded when the reducer learns of the emission and removed when the
-    keyed ``TickAddEvent`` for it is reduced. ``key`` is None only for an
-    event returned by a result journaled before invocation ids existed,
-    which is emitted unkeyed and never recorded.
+    The reducer records the event until it reduces the keyed ``TickAddEvent``.
+    Older results have no invocation ID. Their events use ``key=None`` and
+    are emitted without recording a delivery.
     """
 
     key: EmissionKey | None
@@ -126,7 +125,7 @@ class Delivery:
     scope_path: tuple[str, ...]
 
     def to_command(self, origin_namespace: tuple[str, ...]) -> CommandQueueEvent:
-        """The only place a ``CommandQueueEvent`` is built."""
+        """Build a queue command with the event's delivery key and routing details."""
         return CommandQueueEvent(
             event=self.event,
             step_id=self.step_id,
@@ -158,10 +157,9 @@ class BrokerState:
             timeout budget.
         last_alive_stamp: Accrual reference point (the last stamp seen), reset by
             session-start markers without accruing downtime.
-        invocation_seq: Monotonic counter used to mint step invocation ids
-        deliveries: Events steps emitted that have not been delivered yet,
-            keyed by emission, in insertion order. Reducing TickSessionStart
-            re-emits every one.
+        invocation_seq: Counter incremented for each step dispatch.
+        deliveries: Pending events keyed by emission, in insertion order.
+            The reducer re-emits them at TickSessionStart.
     """
 
     is_running: bool

@@ -149,7 +149,7 @@ async def test_workflow_step_send_event_to_None() -> None:
         for t in replay
         if isinstance(t, TickAddEvent)
     ]
-    # A send inside a step is keyed by the sending invocation.
+    # Use the sending invocation to identify this event.
     assert (
         TickAddEvent(
             event=OneTestEvent(),

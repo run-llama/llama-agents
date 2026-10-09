@@ -58,8 +58,7 @@ class TickStepResult(BaseModel):
     stamped_at: float | None = None
     # Older results have no invocation ID. Match those by worker_id.
     invocation_id: str | None = None
-    # Every ctx.send_event the invocation made, in send order. The reducer
-    # records the ones not yet routed as deliveries.
+    # The reducer records sends still awaiting delivery, in call order.
     sends: list[SentEvent] = Field(default_factory=list)
 
 
@@ -88,10 +87,8 @@ class TickAddEvent(BaseModel):
     work_item_id: str | None = None
     # See TickStepResult.stamped_at.
     stamped_at: float | None = None
-    # Which invocation emitted this event, and where in its emissions. Set
-    # only by ctx.send_event inside a step and by the runner from a
-    # CommandQueueEvent. Start events, external sends and rehydration ticks
-    # stay unkeyed and route unconditionally.
+    # Step sends and queue commands use emission keys to reject duplicates.
+    # Start events, external sends and rehydration ticks have no key.
     emission: EmissionKey | None = None
 
 
