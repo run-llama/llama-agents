@@ -144,10 +144,7 @@ def add_worker(
     first_attempt_at: float = 100.0,
     snapshot_collected: dict[str, list[Event]] | None = None,
 ) -> None:
-    """Helper to add an in-progress worker to state.
-
-    The worker is dispatched against the live collect buffer generations.
-    """
+    """Add a worker with the current buffer counters."""
     worker_state = state.workers[TEST_STEP_ID]
     worker_state.in_progress.append(
         InProgressState(
@@ -369,7 +366,7 @@ def test_stale_collect_events_firing_reruns_without_deleting_buffer(
     live = OtherEvent(data="live")
     stale = OtherEvent(data="stale")
     add_worker(base_state, event, snapshot_collected={"buf1": [stale]})
-    # Another invocation replaced the buffer after this one was dispatched.
+    # Simulate a buffer replacement after dispatch.
     base_state.workers[TEST_STEP_ID].collected_events["buf1"] = [live]
     base_state.workers[TEST_STEP_ID].bump_collect_generation("buf1")
 

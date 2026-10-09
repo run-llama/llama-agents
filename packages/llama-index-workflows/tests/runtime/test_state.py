@@ -187,7 +187,6 @@ def test_in_progress_retry_state_survives_serialization() -> None:
 
 
 def test_in_progress_with_invocation_id_restores_in_place() -> None:
-    """A current in-progress item keeps its identity, receipts and snapshot."""
     workflow = _RetryStateWorkflow()
     state = BrokerState.from_workflow(workflow)
     step_id = StepId.root("start")

@@ -513,11 +513,10 @@ def _collect_buffer_diverged(
     execution: InProgressState,
     buffer_id: str,
 ) -> bool:
-    """True when a live ctx.collect_events() buffer changed since dispatch.
+    """Compare buffer counters to detect changes since dispatch.
 
-    Compares generation counters, never events, so the check survives a
-    serialize round trip and tells an equal-but-replaced entry from the
-    original.
+    The counters survive serialization. Replacing an event with an equal
+    event still bumps the counter.
     """
     return worker_state.collect_generations.get(
         buffer_id, 0
@@ -527,7 +526,7 @@ def _collect_buffer_diverged(
 def _refresh_collect_snapshot(
     worker_state: InternalStepWorkerState, execution: InProgressState
 ) -> None:
-    """Point a re-run execution at the live collect buffers and generations."""
+    """Copy the current buffers and counters before rerunning the worker."""
     execution.shared_state = replace(
         execution.shared_state,
         collected_events={x: list(y) for x, y in worker_state.collected_events.items()},

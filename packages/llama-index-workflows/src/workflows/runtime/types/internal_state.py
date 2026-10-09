@@ -214,8 +214,7 @@ class BrokerState:
     def to_serialized(self, serializer: BaseSerializer) -> SerializedContext:
         """Serialize the broker state to a SerializedContext.
 
-        Only the root broker is serialized, so a state with child brokers
-        raises instead of silently dropping their work.
+        Raise if child brokers exist. Saving only the root would lose their work.
         """
         if self.children:
             raise ValueError(
@@ -329,9 +328,8 @@ def _broker_to_serialized(
             )
             for attempt in worker_state.queue
         ]
-        # Serialize in-progress attempts in place. The next TickSessionStart
-        # rewinds them; until then ticks journaled after this snapshot still
-        # apply to the same invocation.
+        # Keep attempts in progress so replay can apply later ticks.
+        # TickSessionStart queues them again when the next session starts.
         in_progress = [
             SerializedInProgressAttempt(
                 event=serializer.serialize(ip.event),
@@ -476,9 +474,8 @@ def _load_broker_from_serialized(
 
         worker = base_state.workers[step_id]
 
-        # Restore queue with retry and stream scope info. Legacy in-progress
-        # items (no invocation id) are moved to the queue and restarted when
-        # the workflow runs; current ones are restored in place below.
+        # Queue older entries again because they have no invocation ID.
+        # Entries with IDs stay in progress so replay can apply later ticks.
         legacy_in_progress = [
             ip for ip in worker_data.in_progress if ip.invocation_id is None
         ]
@@ -545,7 +542,7 @@ def _deserialize_in_progress(
     worker: InternalStepWorkerState,
     serializer: BaseSerializer,
 ) -> InProgressState:
-    """Restore one in-progress invocation in place, with its dispatch snapshot."""
+    """Restore the invocation and its buffers from dispatch time."""
     attempt = _deserialize_event_attempt(data, serializer)
     return InProgressState(
         event=attempt.event,
@@ -844,9 +841,8 @@ class InternalStepWorkerState:
         in_progress: Currently executing workers for this step
         collected_events: Events being collected via ctx.collect_events(), keyed by buffer_id
         collected_waiters: Active waiters created by ctx.wait_for_event()
-        collect_generations: Per-buffer counter bumped on every append to and
-            clear of ``collected_events``. An invocation whose dispatch-time
-            generation differs from the live one saw a stale buffer.
+        collect_generations: Buffer counters bumped on each append or clear.
+            A changed counter means the invocation used a stale buffer.
     """
 
     queue: list[EventAttempt]
@@ -874,7 +870,7 @@ class InternalStepWorkerState:
         )
 
     def bump_collect_generation(self, buffer_id: str) -> None:
-        """Record that ``collected_events[buffer_id]`` was appended to or cleared."""
+        """Bump the buffer counter after an append or clear."""
         self.collect_generations[buffer_id] = (
             self.collect_generations.get(buffer_id, 0) + 1
         )
@@ -900,10 +896,10 @@ class InProgressState:
         last_failed_at: Unix timestamp of the most recent failure, or None.
         recovery_counts: Per-handler recovery counts on this event's lineage.
         scope_path: Collection stream scope path for the worker's current event.
-        invocation_id: Identity of this dispatch, minted by the reducer. None
-            only for items built outside the reducer (legacy state, tests).
-        received: Send indexes of this invocation already routed.
-        collect_generations: Collect buffer generations at dispatch time.
+        invocation_id: Dispatch ID assigned by the reducer. Older state and
+            tests may omit it.
+        received: Indexes of sends already routed for this invocation.
+        collect_generations: Buffer counters at dispatch time.
     """
 
     event: Event
