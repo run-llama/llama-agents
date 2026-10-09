@@ -186,6 +186,86 @@ def test_in_progress_retry_state_survives_serialization() -> None:
     assert attempt.recovery_counts == {"handler": 1}
 
 
+def test_in_progress_with_invocation_id_restores_in_place() -> None:
+    workflow = _RetryStateWorkflow()
+    state = BrokerState.from_workflow(workflow)
+    step_id = StepId.root("start")
+    worker = state.workers[step_id]
+    buffered = StartEvent()
+    worker.collected_events["buf"] = [buffered, StartEvent()]
+    worker.collect_generations["buf"] = 2
+    worker.in_progress.append(
+        InProgressState(
+            event=StartEvent(),
+            worker_id=3,
+            shared_state=StepWorkerState(
+                step_name="start",
+                collected_events={"buf": [buffered]},
+                collected_waiters=[],
+                invocation_id="invocation_7",
+            ),
+            attempts=1,
+            first_attempt_at=100.0,
+            invocation_id="invocation_7",
+            received={0, 2},
+            collect_generations={"buf": 1},
+        )
+    )
+
+    serializer = JsonSerializer()
+    restored = BrokerState.from_serialized(
+        state.to_serialized(serializer), workflow, serializer
+    )
+    restored_worker = restored.workers[step_id]
+
+    assert restored_worker.queue == []
+    [item] = restored_worker.in_progress
+    assert item.worker_id == 3
+    assert item.invocation_id == "invocation_7"
+    assert item.shared_state.invocation_id == "invocation_7"
+    assert item.received == {0, 2}
+    assert item.attempts == 1
+    assert item.collect_generations == {"buf": 1}
+    assert len(item.shared_state.collected_events["buf"]) == 1
+    assert restored_worker.collect_generations == {"buf": 2}
+    assert len(restored_worker.collected_events["buf"]) == 2
+
+
+def test_legacy_in_progress_without_invocation_id_is_requeued() -> None:
+    workflow = _RetryStateWorkflow()
+    serialized = SerializedContext.model_validate(
+        {
+            "is_running": True,
+            "workers": {
+                "start": {
+                    "in_progress": [
+                        {
+                            "event": JsonSerializer().serialize(StartEvent()),
+                            "attempts": 1,
+                            "first_attempt_at": 100.0,
+                        }
+                    ],
+                }
+            },
+        }
+    )
+
+    restored = BrokerState.from_serialized(serialized, workflow, JsonSerializer())
+    worker = restored.workers[StepId.root("start")]
+
+    assert worker.in_progress == []
+    assert [a.attempts for a in worker.queue] == [1]
+
+
+def test_serializing_a_state_with_child_brokers_raises() -> None:
+    workflow = _RetryStateWorkflow()
+    state = BrokerState.from_workflow(workflow)
+    state.children["nested"] = BrokerState.from_workflow(workflow)
+
+    with pytest.raises(ValueError, match="nested"):
+        state.to_serialized(JsonSerializer())
+
+
 def test_queued_not_before_survives_serialization() -> None:
     """The v2 change preserves the delayed-retry field added to queued attempts."""
     workflow = _RetryStateWorkflow()

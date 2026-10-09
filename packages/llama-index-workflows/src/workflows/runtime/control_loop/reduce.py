@@ -508,9 +508,30 @@ def _detect_stuck_streams_tree(
     return walk(state, ())
 
 
-def _collect_buffer_diverged(live: list[Event], snapshot: list[Event]) -> bool:
-    """True when a live ctx.collect_events() buffer no longer matches a snapshot."""
-    return len(live) != len(snapshot) or any(a is not b for a, b in zip(live, snapshot))
+def _collect_buffer_diverged(
+    worker_state: InternalStepWorkerState,
+    execution: InProgressState,
+    buffer_id: str,
+) -> bool:
+    """Compare buffer counters to detect changes since dispatch.
+
+    The counters survive serialization. Replacing an event with an equal
+    event still bumps the counter.
+    """
+    return worker_state.collect_generations.get(
+        buffer_id, 0
+    ) != execution.collect_generations.get(buffer_id, 0)
+
+
+def _refresh_collect_snapshot(
+    worker_state: InternalStepWorkerState, execution: InProgressState
+) -> None:
+    """Copy the current buffers and counters before rerunning the worker."""
+    execution.shared_state = replace(
+        execution.shared_state,
+        collected_events={x: list(y) for x, y in worker_state.collected_events.items()},
+    )
+    execution.collect_generations = dict(worker_state.collect_generations)
 
 
 def _queue_catch_error_event(
@@ -596,18 +617,12 @@ def _rerun_for_stale_collect_buffer(
     """
     stale_firing = any(
         isinstance(r, DeleteCollectedEvent)
-        and _collect_buffer_diverged(
-            worker_state.collected_events.get(r.event_id, []),
-            this_execution.shared_state.collected_events.get(r.event_id, []),
-        )
+        and _collect_buffer_diverged(worker_state, this_execution, r.event_id)
         for r in tick.result
     )
     if not stale_firing:
         return None
-    this_execution.shared_state = replace(
-        this_execution.shared_state,
-        collected_events={x: list(y) for x, y in worker_state.collected_events.items()},
-    )
+    _refresh_collect_snapshot(worker_state, this_execution)
     return [
         CommandRunWorker(
             step_id=tick.step_id,
@@ -670,6 +685,8 @@ def _apply_step_result(
             for worker in state.workers.values():
                 worker.queue.clear()
                 worker.in_progress.clear()
+                for buffer_id in worker.collected_events:
+                    worker.bump_collect_generation(buffer_id)
                 worker.collected_events.clear()
                 worker.static_collect_events.clear()
                 worker.collected_waiters.clear()
@@ -720,14 +737,7 @@ def _apply_step_result(
             # rerun it, and don't append now to ensure serializability
             # updating the run state
             acc.step_no_longer_in_progress = False
-            updated_state = replace(
-                this_execution.shared_state,
-                collected_events={
-                    x: list(y)
-                    for x, y in state.workers[step_id].collected_events.items()
-                },
-            )
-            this_execution.shared_state = updated_state
+            _refresh_collect_snapshot(state.workers[step_id], this_execution)
             acc.commands.append(
                 CommandRunWorker(
                     step_id=step_id,
@@ -739,10 +749,15 @@ def _apply_step_result(
             )
         else:
             collected_events.append(result.event)
+            state.workers[step_id].bump_collect_generation(result.event_id)
     elif isinstance(result, DeleteCollectedEvent):
         if did_complete_step:  # allow retries to grab the events
             # indicates that a run has successfully collected its events, and they can be deleted from the collected events state
-            state.workers[step_id].collected_events.pop(result.event_id, None)
+            if (
+                state.workers[step_id].collected_events.pop(result.event_id, None)
+                is not None
+            ):
+                state.workers[step_id].bump_collect_generation(result.event_id)
     elif isinstance(result, AddWaiter):
         # indicates that a run has added a waiter to the collected waiters state
         existing = next(
@@ -1195,6 +1210,7 @@ def _add_or_enqueue_event(
                 recovery_counts=dict(event.recovery_counts),
                 scope_path=event.scope_path,
                 work_item_id=event.work_item_id,
+                collect_generations=dict(state.collect_generations),
             )
         )
         commands.append(
