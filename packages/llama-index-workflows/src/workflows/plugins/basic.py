@@ -387,9 +387,11 @@ class BasicRuntime(Runtime):
     async def journal(self, run_id: str) -> AsyncIterator[JournalRecord]:
         """Yield saved ticks, then new ticks as they arrive.
 
-        The runtime keeps all ticks from the current session in memory.
-        Readers can start after `run()` and still receive the whole session.
-        Stop after the run ends and all records have been yielded.
+        Call this on the `BasicRuntime` the workflow runs on, usually the
+        `workflows.plugins.basic_runtime` default. The runtime keeps all
+        ticks from the current session in memory, so readers can start after
+        `run()` and still receive the whole session. Stops after the run ends
+        and all records have been yielded.
         """
         queues = self._queues.get(run_id)
         if queues is None:
@@ -460,17 +462,6 @@ class BasicRuntime(Runtime):
         return Context.from_dict(
             workflow, restored.model_dump(mode="python"), serializer=active_serializer
         )
-
-
-def assert_is_basic(runtime: Runtime) -> BasicRuntime:
-    """Return a BasicRuntime or raise TypeError.
-
-    Reject wrappers such as the server persistence runtime because they
-    manage their own journals.
-    """
-    if not isinstance(runtime, BasicRuntime):
-        raise TypeError(f"Expected a BasicRuntime, got {type(runtime).__qualname__}")
-    return runtime
 
 
 _current_run_id: ContextVar[str | None] = ContextVar("current_run_id", default=None)

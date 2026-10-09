@@ -10,12 +10,7 @@ from typing import Any
 import pytest
 from workflows import Context, Workflow, step
 from workflows.events import Event, StartEvent, StopEvent
-from workflows.plugins.basic import (
-    BasicRuntime,
-    JournalRecord,
-    assert_is_basic,
-)
-from workflows.runtime.verbose import VerboseDecorator
+from workflows.plugins.basic import BasicRuntime, JournalRecord
 
 
 class GatherEvent(Event):
@@ -218,10 +213,12 @@ async def test_to_dict_without_state_leaves_state_empty(
     assert await ctx.store.get("started", default=None) is None
 
 
-def test_assert_is_basic_accepts_basic_runtime(runtime: BasicRuntime) -> None:
-    assert assert_is_basic(runtime) is runtime
-
-
-def test_assert_is_basic_rejects_decorated_runtime(runtime: BasicRuntime) -> None:
-    with pytest.raises(TypeError):
-        assert_is_basic(VerboseDecorator(runtime))
+async def test_journal_reads_through_a_verbose_wrapper(runtime: BasicRuntime) -> None:
+    """verbose=True wraps wf.runtime, but the held BasicRuntime still owns the run."""
+    wf = JournalWorkflow(runtime=runtime, verbose=True)
+    wf.gate.set()
+    handler = wf.run()
+    assert await handler == 3
+    records = await asyncio.wait_for(_collect(runtime, handler.run_id), timeout=5)
+    assert records[0].seq == 0
+    assert runtime.restore(wf, None, records).to_dict()["journal_seq"] == len(records)
