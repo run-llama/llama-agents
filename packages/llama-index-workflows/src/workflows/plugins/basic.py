@@ -29,6 +29,7 @@ from workflows.context.context_types import SerializedContext
 from workflows.context.serializers import BaseSerializer
 from workflows.context.state_store import (
     InMemoryStateStore,
+    StateCheckpoint,
     StateStore,
     infer_state_type,
     is_durable_serialized_state,
@@ -462,6 +463,34 @@ class BasicRuntime(Runtime):
         return Context.from_dict(
             workflow, restored.model_dump(mode="python"), serializer=active_serializer
         )
+
+    def state_checkpoint(self, run_id: str) -> StateCheckpoint:
+        """Reference the run's committed state without copying it.
+
+        Call ``diff`` with an earlier checkpoint to get a JSON Patch. To
+        persist a run incrementally, store ``base.to_dict()`` once, then a
+        patch at each flush. To resume, rebuild the state with
+        ``apply_state_patch`` and put it in a broker snapshot's ``state``::
+
+            state = base_payload
+            for patch in patches:
+                state = apply_state_patch(state, patch)
+            snapshot = runtime.restore(wf, None, records).to_dict(include_state=False)
+            snapshot["state"] = state
+            await wf.run(ctx=Context.from_dict(wf, snapshot))
+
+        Mutating values returned by ``store.get`` changes both checkpoints,
+        so the diff cannot detect those edits.
+        """
+        queues = self._queues.get(run_id)
+        if queues is None:
+            raise RuntimeError(f"No active workflow with run_id '{run_id}'.")
+        store = queues.state_store
+        if not isinstance(store, InMemoryStateStore):
+            raise TypeError(
+                f"Run '{run_id}' has no in-memory state store to checkpoint"
+            )
+        return store.checkpoint()
 
 
 _current_run_id: ContextVar[str | None] = ContextVar("current_run_id", default=None)

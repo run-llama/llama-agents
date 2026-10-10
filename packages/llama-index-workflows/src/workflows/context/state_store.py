@@ -16,14 +16,17 @@ from typing import (
     Any,
     AsyncContextManager,
     AsyncGenerator,
+    Callable,
     Generic,
     Literal,
+    NamedTuple,
     Protocol,
     cast,
     runtime_checkable,
 )
 
-from pydantic import BaseModel, ValidationError, model_validator
+from pydantic import BaseModel, RootModel, ValidationError, model_validator
+from pydantic_core import to_jsonable_python
 from typing_extensions import TypeVar
 
 from workflows.decorators import StepConfig
@@ -202,6 +205,7 @@ def serialize_dict_state_data(
     state: DictState,
     serializer: BaseSerializer,
     known_unserializable_keys: tuple[str, ...] = KNOWN_UNSERIALIZABLE_KEYS,
+    encode: Callable[[Any], Any] | None = None,
 ) -> dict[str, Any]:
     """Serialize DictState items to {"_data": {...}} format.
 
@@ -209,6 +213,7 @@ def serialize_dict_state_data(
         state: The DictState to serialize.
         serializer: Strategy for encoding values.
         known_unserializable_keys: Keys to skip with warning if they fail to serialize.
+        encode: Optional encoder for each value. Defaults to ``serializer.serialize``.
 
     Returns:
         Dict with {"_data": {...}} structure containing serialized values.
@@ -216,10 +221,11 @@ def serialize_dict_state_data(
     Raises:
         ValueError: If serialization fails for a non-known-unserializable key.
     """
+    encode = encode or serializer.serialize
     serialized_data = {}
     for key, value in state.items():
         try:
-            serialized_data[key] = serializer.serialize(value)
+            serialized_data[key] = encode(value)
         except Exception as e:
             if key in known_unserializable_keys:
                 warnings.warn(
@@ -246,6 +252,46 @@ def encode_state(
         state_data = serializer.serialize(state)
 
     return state_data, type(state).__name__, type(state).__module__
+
+
+# StateCheckpoint.to_dict uses this marker to identify the state layout.
+# DictState stores values under ``_data``. Typed models use a
+# ``serialize_value`` wrapper. _PatchLocation builds paths for each layout.
+STATE_TREE_KEY = "_tree"
+
+
+def _tree_value(serializer: JsonSerializer, value: Any) -> Any:
+    tree = serializer.serialize_value(value)
+    # Reject unknown objects that serialize_value leaves unencoded.
+    json.dumps(tree)
+    return tree
+
+
+def encode_state_tree(state: BaseModel, serializer: JsonSerializer) -> dict[str, Any]:
+    """Encode state as a JSON tree with paths that patches can address."""
+    if isinstance(state, DictState):
+        encode = functools.partial(_tree_value, serializer)
+        data = serialize_dict_state_data(state, serializer, encode=encode)
+        return {STATE_TREE_KEY: "dict", **data}
+    return {STATE_TREE_KEY: "model", **_tree_value(serializer, state)}
+
+
+def decode_state_tree(
+    state_data: dict[str, Any], serializer: BaseSerializer
+) -> BaseModel:
+    """Restore state from the JSON tree produced by ``encode_state_tree``."""
+
+    def decode(tree: Any) -> Any:
+        if isinstance(serializer, JsonSerializer):
+            return serializer.deserialize_value(tree)
+        return serializer.deserialize(json.dumps(tree))
+
+    if state_data[STATE_TREE_KEY] == "dict":
+        return DictState(_data={k: decode(v) for k, v in state_data["_data"].items()})
+    value = decode({k: v for k, v in state_data.items() if k != STATE_TREE_KEY})
+    if not isinstance(value, BaseModel):
+        raise ValueError(f"State tree decoded to {type(value).__name__}, not a model")
+    return value
 
 
 def decode_state(
@@ -291,6 +337,8 @@ def decode_state(
         )
 
     if isinstance(state_data, dict):
+        if STATE_TREE_KEY in state_data:
+            return decode_state_tree(state_data, serializer)
         if "_data" in state_data:
             return deserialize_dict_state_data(state_data, serializer)
         # Legacy JSON objects still pass through the selected string decoder.
@@ -1215,6 +1263,14 @@ class InMemoryStateStore(StateStoreFacade[MODEL_T]):
         state = cast(MODEL_T, record.data) if record is not None else self.state_type()
         return create_in_memory_payload(state, serializer).model_dump()
 
+    def checkpoint(self) -> StateCheckpoint:
+        """Reference the committed state without copying it."""
+        record = self._memory_storage.load_sync()
+        state = record.data if record is not None else self.state_type()
+        if not isinstance(self._serializer, JsonSerializer):
+            raise TypeError("State checkpoints require a JsonSerializer")
+        return StateCheckpoint(state, self._serializer)
+
     async def _write_state(
         self, state: BaseModel, storage: _StateStorage | None = None
     ) -> None:
@@ -1389,3 +1445,238 @@ def _find_most_derived_state_type(state_types: set[type[BaseModel]]) -> type[Bas
         )
 
     return most_derived
+
+
+class _PatchLocation(NamedTuple):
+    """The patch path and encoding for a state value.
+
+    Outside models, ``serialize_value`` preserves dict keys and list indexes.
+    Model fields sit under a ``value`` wrapper. Inside models, encode fields
+    with ``to_jsonable_python`` to match ``model_dump(mode="json")``.
+    """
+
+    pointer: tuple[str, ...]
+    in_model: bool = False
+
+    @property
+    def path(self) -> str:
+        return "".join(
+            "/" + s.replace("~", "~0").replace("/", "~1") for s in self.pointer
+        )
+
+    def child(self, key: Any) -> _PatchLocation:
+        return _PatchLocation((*self.pointer, str(key)), self.in_model)
+
+    def field(self, name: str) -> _PatchLocation:
+        if self.in_model:
+            return self.child(name)
+        return _PatchLocation((*self.pointer, "value", name), True)
+
+    def encode(self, serializer: JsonSerializer, value: Any) -> Any:
+        if self.in_model:
+            return to_jsonable_python(value)
+        return serializer.serialize_value(value)
+
+
+def _diffable_model(model: BaseModel, in_model: bool) -> bool:
+    """Check whether fields can be patched separately in the encoded model."""
+    cls = type(model)
+    if isinstance(model, (DictLikeModel, RootModel)):
+        return False
+    if not in_model and hasattr(model, "class_name"):
+        # Components use their own to_dict layout, so replace them whole.
+        return False
+    decorators = cls.__pydantic_decorators__
+    return not (
+        decorators.model_serializers
+        or decorators.field_serializers
+        or cls.model_computed_fields
+        or cls.model_config.get("extra") == "allow"
+        or cls.model_config.get("serialize_by_alias")
+    )
+
+
+def _safe_eq(a: Any, b: Any) -> bool:
+    try:
+        return bool(a == b)
+    except Exception:
+        return False
+
+
+class _StateDiff:
+    """Build JSON Patch operations between two state trees."""
+
+    def __init__(self, serializer: JsonSerializer) -> None:
+        self.serializer = serializer
+        self.ops: list[dict[str, Any]] = []
+        # Cache equality results so list trimming and recursion share comparisons.
+        self._eq_memo: dict[tuple[int, int], bool] = {}
+
+    def emit(self, op: str, loc: _PatchLocation, value: Any = None) -> None:
+        if op == "remove":
+            self.ops.append({"op": op, "path": loc.path})
+        else:
+            value = loc.encode(self.serializer, value)
+            self.ops.append({"op": op, "path": loc.path, "value": value})
+
+    def same(self, a: Any, b: Any) -> bool:
+        if a is b:
+            return True
+        if type(a) is not type(b):
+            return False
+        if not isinstance(a, (BaseModel, dict, list)):
+            return _safe_eq(a, b)
+        key = (id(a), id(b))
+        hit = self._eq_memo.get(key)
+        if hit is None:
+            hit = self._eq_memo[key] = _safe_eq(a, b)
+        return hit
+
+    def node(self, a: Any, b: Any, loc: _PatchLocation) -> None:
+        if a is b:
+            return
+        if type(a) is not type(b):
+            self.emit("replace", loc, b)
+        elif isinstance(b, BaseModel) and _diffable_model(b, loc.in_model):
+            if self.same(a, b):
+                return
+            old, new = a.__dict__, b.__dict__
+            for name, info in type(b).model_fields.items():
+                if not info.exclude:
+                    self.node(old.get(name), new.get(name), loc.field(name))
+        elif isinstance(b, dict):
+            if not self.same(a, b):
+                self.diff_dict(a, b, loc)
+        elif isinstance(b, list):
+            if not self.same(a, b):
+                self.diff_list(a, b, loc)
+        elif not self.same(a, b):
+            self.emit("replace", loc, b)
+
+    def diff_dict(
+        self, a: dict[Any, Any], b: dict[Any, Any], loc: _PatchLocation
+    ) -> None:
+        for key, value in b.items():
+            if key in a:
+                self.node(a[key], value, loc.child(key))
+            else:
+                self.emit("add", loc.child(key), value)
+        for key in a:
+            if key not in b:
+                self.emit("remove", loc.child(key))
+
+    def diff_list(self, a: list[Any], b: list[Any], loc: _PatchLocation) -> None:
+        len_a, len_b = len(a), len(b)
+        shorter = min(len_a, len_b)
+        prefix = 0
+        while prefix < shorter and self.same(a[prefix], b[prefix]):
+            prefix += 1
+        suffix = 0
+        while suffix < shorter - prefix and self.same(
+            a[len_a - 1 - suffix], b[len_b - 1 - suffix]
+        ):
+            suffix += 1
+        middle_a, middle_b = len_a - prefix - suffix, len_b - prefix - suffix
+        if middle_a == middle_b:
+            for i in range(prefix, prefix + middle_b):
+                self.node(a[i], b[i], loc.child(i))
+            return
+        # Remove the old span before inserting values at the new indexes.
+        for _ in range(middle_a):
+            self.emit("remove", loc.child(prefix))
+        for i in range(prefix, prefix + middle_b):
+            self.emit("add", loc.child(i), b[i])
+
+
+class StateCheckpoint:
+    """A reference to committed workflow state at one point in time.
+
+    Store writes create a new model, so the checkpoint keeps the old state
+    without copying it. Mutating a value from ``store.get`` changes every
+    checkpoint sharing that value. The diff cannot detect those edits.
+    """
+
+    def __init__(self, state: BaseModel, serializer: JsonSerializer) -> None:
+        self._state = state
+        self._serializer = serializer
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the checkpoint for a context snapshot's ``state`` field."""
+        return {
+            "store_type": "in_memory",
+            "state_type": type(self._state).__name__,
+            "state_module": type(self._state).__module__,
+            "state_data": encode_state_tree(self._state, self._serializer),
+        }
+
+    def diff(self, since: StateCheckpoint) -> list[dict[str, Any]]:
+        """Build a JSON Patch from ``since.to_dict()`` to ``self.to_dict()``.
+
+        Skip values shared by reference to avoid traversing unchanged subtrees.
+        """
+        old, new = since._state, self._state
+        walk = _StateDiff(self._serializer)
+        root = _PatchLocation(("state_data",))
+        if old is new:
+            return []
+        if type(old) is type(new) and isinstance(new, DictState):
+            walk.diff_dict(
+                self._encodable(cast(DictState, old)._data),
+                self._encodable(new._data),
+                root.child("_data"),
+            )
+        elif type(old) is type(new) and _diffable_model(new, in_model=False):
+            walk.node(old, new, root)
+        elif not walk.same(old, new):
+            walk.ops.append({"op": "replace", "path": "", "value": self.to_dict()})
+        return walk.ops
+
+    def _encodable(self, data: dict[str, Any]) -> dict[str, Any]:
+        # Skip the same unserializable keys as to_dict so patch paths match.
+        view = data
+        for key in KNOWN_UNSERIALIZABLE_KEYS:
+            if key in data:
+                try:
+                    _tree_value(self._serializer, data[key])
+                except Exception:
+                    view = {k: v for k, v in view.items() if k != key}
+        return view
+
+
+def apply_state_patch(
+    state: dict[str, Any], patch: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Apply JSON Patch ``add``, ``remove`` and ``replace`` operations.
+
+    Copy each container on a patched path once to preserve the input.
+    Share all other values with the returned payload.
+    """
+    root: Any = cast(Any, copy(state))
+    copied = {id(root)}
+    for op in patch:
+        kind = op["op"]
+        segments = [
+            s.replace("~1", "/").replace("~0", "~") for s in op["path"].split("/")[1:]
+        ]
+        if not segments:
+            root = copy(op["value"])
+            copied = {id(root)}
+            continue
+        parent: Any = root
+        for segment in segments[:-1]:
+            key: Any = int(segment) if isinstance(parent, list) else segment
+            child = parent[key]
+            if id(child) not in copied:
+                child = parent[key] = copy(child)
+                copied.add(id(child))
+            parent = child
+        last: Any = int(segments[-1]) if isinstance(parent, list) else segments[-1]
+        if kind == "remove":
+            del parent[last]
+        elif kind == "add" and isinstance(parent, list):
+            parent.insert(last, op["value"])
+        elif kind in ("add", "replace"):
+            parent[last] = op["value"]
+        else:
+            raise ValueError(f"Unsupported state patch op {kind!r}")
+    return root
