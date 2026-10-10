@@ -111,6 +111,22 @@ class PreContext(Generic[MODEL_T]):
             return self._store.to_dict(self._serializer)
         return self._init_snapshot.state
 
+    def to_dict(
+        self, serializer: BaseSerializer | None = None, *, include_state: bool = True
+    ) -> dict[str, Any]:
+        """Serialize the initial snapshot for the next run."""
+        active_serializer = serializer or self._serializer
+        context = BrokerState.from_serialized(
+            self._init_snapshot, self._workflow, self._serializer
+        ).to_serialized(active_serializer)
+        if include_state:
+            context.state = (
+                (self.serialized_state or {})
+                if serializer is None
+                else self.store.to_dict(active_serializer)
+            )
+        return context.model_dump(mode="python")
+
     @property
     def is_running(self) -> bool:
         """Whether the workflow is currently running.

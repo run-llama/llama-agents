@@ -2,4 +2,4 @@
 "llama-index-workflows": patch
 ---
 
-Rewind in-progress work at every session start and stop replaying tick journals written before the session marker
+Rewind in-progress work when replaying a tick journal that spans a resume

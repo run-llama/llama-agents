@@ -160,6 +160,7 @@ class BrokerState:
         invocation_seq: Counter incremented for each step dispatch.
         deliveries: Pending events keyed by emission, in insertion order.
             The reducer re-emits them at TickSessionStart.
+        journal_seq: Count of reduced ticks and the next record's sequence number.
     """
 
     is_running: bool
@@ -176,6 +177,7 @@ class BrokerState:
     elapsed_alive: float = 0.0
     last_alive_stamp: float | None = None
     deliveries: dict[EmissionKey, Delivery] = field(default_factory=dict)
+    journal_seq: int = 0
 
     def __post_init__(self) -> None:
         self._normalize_worker_keys()
@@ -192,6 +194,8 @@ class BrokerState:
             self.invocation_seq = 0
         if "deliveries" not in state:
             self.deliveries = {}
+        if "journal_seq" not in state:
+            self.journal_seq = 0
         self._normalize_worker_keys()
 
     def _normalize_worker_keys(self) -> None:
@@ -220,6 +224,7 @@ class BrokerState:
             elapsed_alive=self.elapsed_alive,
             last_alive_stamp=self.last_alive_stamp,
             deliveries={key: d._copy() for key, d in self.deliveries.items()},
+            journal_seq=self.journal_seq,
         )
 
     @staticmethod
@@ -488,6 +493,7 @@ def _broker_to_serialized(
             )
             for key, delivery in state.deliveries.items()
         ],
+        journal_seq=state.journal_seq,
     )
 
 
@@ -512,6 +518,7 @@ def _load_broker_from_serialized(
         )
     base_state.elapsed_alive = serialized.elapsed_alive
     base_state.last_alive_stamp = serialized.last_alive_stamp
+    base_state.journal_seq = serialized.journal_seq
     base_state.streams = {
         sid: CollectionStreamInstance(
             stream_id=stream.stream_id,

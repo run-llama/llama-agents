@@ -1016,11 +1016,11 @@ async def test_store_continuation_with_pre_run_seeding() -> None:
 
 
 @pytest.mark.asyncio
-async def test_to_dict_before_run_raises(workflow: Workflow) -> None:
-    """Calling to_dict() before workflow.run() should raise ContextStateError."""
-    ctx = Context(workflow)
-    with pytest.raises(ContextStateError, match="requires a running workflow"):
-        ctx.to_dict()
+async def test_to_dict_before_run_returns_start_snapshot(workflow: Workflow) -> None:
+    data = Context(workflow).to_dict()
+    assert data["journal_seq"] == 0
+    assert data["is_running"] is False
+    assert Context.from_dict(workflow, data).to_dict() == data
 
 
 @pytest.mark.asyncio
