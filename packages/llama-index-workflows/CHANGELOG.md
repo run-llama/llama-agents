@@ -1,5 +1,17 @@
 # llama-index-workflows
 
+## 2.26.0
+
+### Minor Changes
+
+- 0811964: Add a journal and restore API to BasicRuntime
+- f183c77: Add BasicRuntime.state_checkpoint, which returns a cheap state checkpoint that can diff against an earlier one as a JSON Patch.
+
+### Patch Changes
+
+- 27e31c3: Deliver every event a step returns or sends exactly once when a run resumes from any snapshot or journal position
+- 1943734: Rewind in-progress work when replaying a tick journal that spans a resume
+
 ## 2.25.0
 
 ### Minor Changes
