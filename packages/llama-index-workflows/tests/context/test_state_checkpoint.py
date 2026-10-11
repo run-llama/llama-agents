@@ -190,6 +190,86 @@ async def test_nested_model_values_in_dict_state_use_serialize_value_form() -> N
     assert op["value"] == JsonSerializer().serialize_value(Message(text="new"))
 
 
+class Counters(BaseModel):
+    counts: dict[str, int] = Field(default_factory=dict)
+    items: list[int] = Field(default_factory=list)
+    nested: dict[str, Any] = Field(default_factory=dict)
+
+
+def counters(kind: str, **fields: Any) -> BaseModel:
+    if kind == "typed":
+        return Counters(**fields)
+    return DictState(_data=fields)
+
+
+def counter_path(kind: str, *keys: str) -> str:
+    root = "/state_data/_data" if kind == "dict" else "/state_data/value"
+    return "/".join([root, *keys])
+
+
+def counter_diff(kind: str, before: dict[str, Any], after: dict[str, Any]) -> Any:
+    serializer = JsonSerializer()
+    base = StateCheckpoint(counters(kind, **before), serializer)
+    current = StateCheckpoint(counters(kind, **after), serializer)
+    return assert_patch_round_trips(base, current)
+
+
+COUNTS = {f"k{i}": i for i in range(5000)}
+
+
+@pytest.mark.parametrize("kind", ["dict", "typed"])
+def test_fully_changed_dict_collapses_to_one_replace(kind: str) -> None:
+    changed = {k: v + 1 for k, v in COUNTS.items()}
+    patch = counter_diff(kind, {"counts": COUNTS}, {"counts": changed})
+    assert [(op["op"], op["path"]) for op in patch] == [
+        ("replace", counter_path(kind, "counts"))
+    ]
+    assert len(json.dumps(patch)) <= len(json.dumps(changed)) + 100
+
+
+@pytest.mark.parametrize("kind", ["dict", "typed"])
+def test_one_changed_leaf_stays_one_leaf_op(kind: str) -> None:
+    changed = {**COUNTS, "k7": -1}
+    patch = counter_diff(kind, {"counts": COUNTS}, {"counts": changed})
+    assert [(op["op"], op["path"]) for op in patch] == [
+        ("replace", counter_path(kind, "counts", "k7"))
+    ]
+
+
+@pytest.mark.parametrize("kind", ["dict", "typed"])
+def test_few_changed_leaves_keep_leaf_ops(kind: str) -> None:
+    changed = {**COUNTS, **{f"k{i}": -1 for i in range(20)}}
+    patch = counter_diff(kind, {"counts": COUNTS}, {"counts": changed})
+    assert [op["path"] for op in patch] == [
+        counter_path(kind, "counts", f"k{i}") for i in range(20)
+    ]
+
+
+@pytest.mark.parametrize("kind", ["dict", "typed"])
+def test_churned_inner_dict_collapses_without_touching_sibling(kind: str) -> None:
+    sibling = {"a": 1, "b": [1, 2]}
+    before = {"nested": {"inner": COUNTS, "sibling": sibling}}
+    after = {
+        "nested": {
+            "inner": {k: v + 1 for k, v in COUNTS.items()},
+            "sibling": {"a": 1, "b": [1, 2]},
+        }
+    }
+    patch = counter_diff(kind, before, after)
+    assert [(op["op"], op["path"]) for op in patch] == [
+        ("replace", counter_path(kind, "nested", "inner"))
+    ]
+
+
+@pytest.mark.parametrize("kind", ["dict", "typed"])
+def test_fully_changed_list_collapses_to_one_replace(kind: str) -> None:
+    items = list(range(1000))
+    patch = counter_diff(kind, {"items": items}, {"items": [i + 1 for i in items]})
+    assert [(op["op"], op["path"]) for op in patch] == [
+        ("replace", counter_path(kind, "items"))
+    ]
+
+
 def test_tree_payload_decodes_for_both_state_kinds() -> None:
     serializer = JsonSerializer()
     for kind in ("dict", "typed"):

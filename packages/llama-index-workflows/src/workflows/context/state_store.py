@@ -1503,6 +1503,10 @@ def _safe_eq(a: Any, b: Any) -> bool:
         return False
 
 
+# A subtree with at most this many ops keeps them without comparing sizes.
+_COLLAPSE_MIN_OPS = 8
+
+
 class _StateDiff:
     """Build JSON Patch operations between two state trees."""
 
@@ -1537,13 +1541,10 @@ class _StateDiff:
             return
         if type(a) is not type(b):
             self.emit("replace", loc, b)
-        elif isinstance(b, BaseModel) and _diffable_model(b, loc.in_model):
-            if self.same(a, b):
-                return
-            old, new = a.__dict__, b.__dict__
-            for name, info in type(b).model_fields.items():
-                if not info.exclude:
-                    self.node(old.get(name), new.get(name), loc.field(name))
+            return
+        start = len(self.ops)
+        if isinstance(b, BaseModel) and _diffable_model(b, loc.in_model):
+            self.diff_model(a, b, loc)
         elif isinstance(b, dict):
             if not self.same(a, b):
                 self.diff_dict(a, b, loc)
@@ -1552,6 +1553,26 @@ class _StateDiff:
                 self.diff_list(a, b, loc)
         elif not self.same(a, b):
             self.emit("replace", loc, b)
+            return
+        self.collapse(start, loc, b)
+
+    def collapse(self, start: int, loc: _PatchLocation, b: Any) -> None:
+        """Replace the ops under ``loc`` with one replace when that is smaller."""
+        if len(self.ops) - start <= _COLLAPSE_MIN_OPS:
+            return
+        replace = {"op": "replace", "path": loc.path}
+        replace["value"] = loc.encode(self.serializer, b)
+        if len(json.dumps(self.ops[start:])) > len(json.dumps(replace)):
+            del self.ops[start:]
+            self.ops.append(replace)
+
+    def diff_model(self, a: BaseModel, b: BaseModel, loc: _PatchLocation) -> None:
+        if self.same(a, b):
+            return
+        old, new = a.__dict__, b.__dict__
+        for name, info in type(b).model_fields.items():
+            if not info.exclude:
+                self.node(old.get(name), new.get(name), loc.field(name))
 
     def diff_dict(
         self, a: dict[Any, Any], b: dict[Any, Any], loc: _PatchLocation
@@ -1613,6 +1634,8 @@ class StateCheckpoint:
         """Build a JSON Patch from ``since.to_dict()`` to ``self.to_dict()``.
 
         Skip values shared by reference to avoid traversing unchanged subtrees.
+        A changed container below the root becomes one ``replace`` when its
+        ops would encode to more bytes than that ``replace``.
         """
         old, new = since._state, self._state
         walk = _StateDiff(self._serializer)
@@ -1626,7 +1649,8 @@ class StateCheckpoint:
                 root.child("_data"),
             )
         elif type(old) is type(new) and _diffable_model(new, in_model=False):
-            walk.node(old, new, root)
+            # The root carries the tree marker, so never collapse it.
+            walk.diff_model(old, new, root)
         elif not walk.same(old, new):
             walk.ops.append({"op": "replace", "path": "", "value": self.to_dict()})
         return walk.ops
