@@ -115,6 +115,27 @@ jobs:
           python-version: "3.14"
           enable-cache: true
 
+      # Docker Hub limits anonymous pulls per runner IP, so a busy day of CI
+      # fails on "No such image" before any test runs. Keep the two images
+      # the docker tests need in the Actions cache and load them from there.
+      - name: Restore docker images
+        id: docker-images
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/docker-images
+          key: docker-images-${{ hashFiles('.github/docker-images.txt') }}
+
+      - name: Pull docker images
+        if: steps.docker-images.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.cache/docker-images
+          xargs -a .github/docker-images.txt -n1 docker pull
+          docker save $(cat .github/docker-images.txt) -o ~/.cache/docker-images/images.tar
+
+      - name: Load docker images
+        if: steps.docker-images.outputs.cache-hit == 'true'
+        run: docker load -i ~/.cache/docker-images/images.tar
+
       - name: Run Docker tests with coverage (append)
         # Use longer timeout for Docker tests since container startup can take 30-60s in CI
         run: uv run --all-extras --all-packages dev --timeout=120 -m docker --cov --cov-append --cov-report=xml
