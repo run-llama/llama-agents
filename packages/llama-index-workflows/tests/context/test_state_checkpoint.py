@@ -305,3 +305,14 @@ def _journal_so_far(run_id: str) -> list[JournalRecord]:
 def test_state_checkpoint_rejects_unknown_run() -> None:
     with pytest.raises(RuntimeError, match="No active workflow"):
         basic_runtime.state_checkpoint("missing-run")
+
+
+@pytest.mark.parametrize("kind", ["dict", "typed"])
+async def test_checkpoint_state_identity_changes_only_on_write(kind: str) -> None:
+    store = InMemoryStateStore(seed(kind))
+    first = store.checkpoint()
+    second = store.checkpoint()
+    assert first.state is second.state
+
+    await store.set("title", "changed")
+    assert store.checkpoint().state is not first.state
