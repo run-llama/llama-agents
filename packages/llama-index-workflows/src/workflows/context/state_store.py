@@ -1600,6 +1600,15 @@ class StateCheckpoint:
         self._state = state
         self._serializer = serializer
 
+    @property
+    def state(self) -> BaseModel:
+        """The committed state model this checkpoint references.
+
+        Compare it by identity (``is``) across checkpoints to tell whether any
+        store write happened in between. Callers must not mutate it.
+        """
+        return self._state
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize the checkpoint for a context snapshot's ``state`` field."""
         return {
