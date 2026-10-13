@@ -1,4 +1,7 @@
 # ty: ignore[invalid-argument-type, not-iterable]
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 LlamaIndex Inc.
+
 from __future__ import annotations
 
 import asyncio
@@ -748,6 +751,30 @@ async def test_5xx_error_body_truncated_at_200_chars() -> None:
     msg = str(exc_info.value)
     assert expected_prefix in msg
     assert "Y" not in msg
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 429, 503])
+@pytest.mark.parametrize(
+    "body", ["upstream failed", "X" * 200 + "TAIL_SENTINEL"], ids=["short", "truncated"]
+)
+async def test_event_stream_http_error_includes_body(status: int, body: str) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Unlike text=, stream= leaves the body unread until the client consumes it.
+        return httpx.Response(status, stream=httpx.ByteStream(body.encode()))
+
+    async with _mock_client(handler) as http_client:
+        wf_client = WorkflowClient(httpx_client=http_client)
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            async for _ in wf_client.get_workflow_events(handler_id="h"):
+                pass
+
+    error = exc_info.value
+    assert error.response.status_code == status
+    assert error.response.text == body
+    assert error.response.is_closed
+    assert "GET http://test/events/h" in str(error)
+    assert str(error).endswith(f"Response: {body[:200]}")
 
 
 @pytest.mark.asyncio
