@@ -162,6 +162,9 @@ exclude = ["**/uv.lock", "**/.gitignore", "**/llama_agents/workflows/**", "**/te
 # When llama-agents-agentcore is installed standalone the override does not
 # apply, so it will pull the newer boto3 it needs.
 override-dependencies = ["boto3>=1.40.46,<1.40.62"]
+# LlamaIndex Core passes SerializationInfo as a wrap serializer handler's
+# index_key, which Pydantic 2.14 rejects when serializing chat memory.
+constraint-dependencies = ["pydantic<2.14"]
 
 [tool.uv.sources]
 llama-agents-integration-tests = {workspace = true}
