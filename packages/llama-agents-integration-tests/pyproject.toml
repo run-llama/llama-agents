@@ -27,7 +27,8 @@ dependencies = [
   "llama-index-workflows",
   "llama-agents-dbos",
   "llama-agents-server",
-  "llama-agents-client"
+  "llama-agents-client",
+  "mlflow>=3.14.0"
 ]
 
 [tool.basedpyright]
