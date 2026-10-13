@@ -2,6 +2,8 @@
 # Copyright (c) 2026 LlamaIndex Inc.
 
 import random
+from datetime import datetime
+from uuid import UUID
 
 from workflows import Context, Workflow, step
 from workflows.events import Event, StartEvent, StopEvent
@@ -39,3 +41,14 @@ class CrashingWorkflow(Workflow):
     @step
     async def crashing_step(self, ev: StartEvent) -> StopEvent:
         raise ValueError("Workflow crashed intentionally")
+
+
+class TypedInputEvent(StartEvent):
+    timestamp: datetime
+    request_id: UUID
+
+
+class TypedInputWorkflow(Workflow):
+    @step
+    async def echo(self, ev: TypedInputEvent) -> StopEvent:
+        return StopEvent(result=ev.model_dump(mode="json"))
