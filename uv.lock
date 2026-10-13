@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.10, <4"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -3031,7 +3031,7 @@ dev = [
 
 [[package]]
 name = "llama-index-workflows"
-version = "2.26.0"
+version = "2.26.1"
 source = { editable = "packages/llama-index-workflows" }
 dependencies = [
     { name = "llama-index-instrumentation" },
@@ -5690,7 +5690,6 @@ name = "testcontainers"
 version = "4.14.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "boto3" },
     { name = "docker" },
     { name = "python-dotenv" },
     { name = "typing-extensions", version = "4.15.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },

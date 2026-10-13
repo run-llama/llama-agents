@@ -1,5 +1,12 @@
 # llama-index-workflows
 
+## 2.26.1
+
+### Patch Changes
+
+- f4412c5: Collapse a state diff to one replace when its ops would be larger than the value they describe
+- 9c09621: Expose the committed state model on StateCheckpoint
+
 ## 2.26.0
 
 ### Minor Changes
