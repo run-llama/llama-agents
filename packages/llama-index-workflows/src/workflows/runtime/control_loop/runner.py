@@ -491,6 +491,33 @@ class _ControlLoopRunner:
                         if self.tick_buffer:
                             self.tick_buffer.append(tick)
                             continue
+                        # Broker state alone cannot see an external tick
+                        # the pull task has already fetched: workers
+                        # outrank the pull, so a fetched tick can sit
+                        # uncollected across several iterations while the
+                        # broker drains to quiescent. Publishing idle then
+                        # would let a snapshot taken at the idle point
+                        # lose that tick (it is not journaled yet), and a
+                        # restore from the snapshot would never see the
+                        # event. Harvest a completed pull first and let
+                        # its tick reduce before the idle check runs.
+                        if pull_task is not None and not pull_task.done():
+                            # Give a pull whose tick is already queued a
+                            # turn to fetch it before declaring idle.
+                            await asyncio.sleep(0)
+                        if pull_task is not None and pull_task.done():
+                            harvested: WorkflowTick | None = None
+                            try:
+                                harvested = pull_task.result()
+                            except asyncio.CancelledError:
+                                pass
+                            except Exception:
+                                logger.exception("Pull task failed", exc_info=True)
+                            pull_task = None
+                            if harvested is not None:
+                                self.tick_buffer.append(harvested)
+                            self.tick_buffer.append(tick)
+                            continue
                         self._idle_check_pending = False
                     result = await self._process_tick(tick)
                     if result is not None:
