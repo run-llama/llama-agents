@@ -172,7 +172,10 @@ def _handler_payload(status: str) -> dict[str, Any]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["completed", "failed", "cancelled"])
-async def test_wait_for_handler_returns_terminal_status(status: str) -> None:
+@pytest.mark.parametrize("timeout", [None, 0, 1])
+async def test_wait_for_handler_returns_terminal_status(
+    status: str, timeout: float | None
+) -> None:
     requests = 0
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -182,7 +185,7 @@ async def test_wait_for_handler_returns_terminal_status(status: str) -> None:
 
     async with _mock_client(respond) as http_client:
         wf_client = WorkflowClient(httpx_client=http_client)
-        handler = await wf_client.wait_for_handler("handler-1")
+        handler = await wf_client.wait_for_handler("handler-1", timeout=timeout)
 
     assert handler.status == status
     assert requests == 1
@@ -298,6 +301,78 @@ async def test_wait_for_handler_caps_sleep_at_timeout() -> None:
 
 
 @pytest.mark.asyncio
+async def test_wait_for_handler_cancels_pending_status_request() -> None:
+    request_cancelled = asyncio.Event()
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            request_cancelled.set()
+        return httpx.Response(200, json=_handler_payload("running"))
+
+    async with AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="http://test"
+    ) as http_client:
+        wf_client = WorkflowClient(httpx_client=http_client)
+        with pytest.raises(TimeoutError, match="handler-1.*0.02"):
+            await asyncio.wait_for(
+                wf_client.wait_for_handler("handler-1", timeout=0.02), timeout=0.5
+            )
+
+    assert request_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeout", [None, 10])
+async def test_wait_for_handler_preserves_caller_cancellation(
+    timeout: float | None,
+) -> None:
+    request_started = asyncio.Event()
+    request_cancelled = asyncio.Event()
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        request_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            request_cancelled.set()
+        return httpx.Response(200, json=_handler_payload("running"))
+
+    async with AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="http://test"
+    ) as http_client:
+        wf_client = WorkflowClient(httpx_client=http_client)
+        task = asyncio.create_task(
+            wf_client.wait_for_handler("handler-1", timeout=timeout)
+        )
+        await asyncio.wait_for(request_started.wait(), timeout=0.5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert request_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_handler_does_not_poll_after_deadline() -> None:
+    requests = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        status = "running" if requests == 1 else "completed"
+        return httpx.Response(200, json=_handler_payload(status))
+
+    async with _mock_client(respond) as http_client:
+        wf_client = WorkflowClient(httpx_client=http_client)
+        with pytest.raises(TimeoutError, match="handler-1.*0.02"):
+            await wf_client.wait_for_handler("handler-1", timeout=0.02, poll_interval=1)
+
+    assert requests == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
@@ -330,14 +405,15 @@ async def test_wait_for_handler_validates_before_request(
 
 
 @pytest.mark.asyncio
-async def test_wait_for_handler_unknown_handler_raises() -> None:
+@pytest.mark.parametrize("timeout", [None, 1])
+async def test_wait_for_handler_unknown_handler_raises(timeout: float | None) -> None:
     def respond(request: httpx.Request) -> httpx.Response:
         return httpx.Response(404, json={"detail": "Handler not found"})
 
     async with _mock_client(respond) as http_client:
         wf_client = WorkflowClient(httpx_client=http_client)
         with pytest.raises(httpx.HTTPStatusError, match="404 Not Found"):
-            await wf_client.wait_for_handler("missing")
+            await wf_client.wait_for_handler("missing", timeout=timeout)
 
 
 @pytest.mark.asyncio
