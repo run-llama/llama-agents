@@ -40,6 +40,11 @@ class AgentDataStore(AbstractWorkflowStore):
     - Terminal events gather all pending writes before cleanup.
     - HTTP connections are reused across operations.
 
+    Each journal barrier observes a snapshot of registered writes. Cancelling
+    a waiter does not cancel those writes or hide them from other barriers.
+    Completed failures remain registered until a barrier observes them; observed
+    outcomes are then retired, without automatically retrying HTTP writes.
+
     State stores are in-memory (``InMemoryStateStore``) — workflow state
     is reconstructed from ticks on reload, so cloud persistence of the
     mutable state object is unnecessary.
@@ -133,17 +138,36 @@ class AgentDataStore(AbstractWorkflowStore):
         tasks = pending.setdefault(run_id, [])
         tasks.append(task)
         if len(tasks) > 50:
-            pending[run_id] = [t for t in tasks if not t.done()]
+            # Successful writes can be retired early, but a barrier must still
+            # observe failed or cancelled writes before their outcomes are lost.
+            pending[run_id] = [
+                t
+                for t in tasks
+                if not t.done() or t.cancelled() or t.exception() is not None
+            ]
 
     @staticmethod
     async def _regroup(
         pending: dict[str, list[asyncio.Task[Any]]], run_id: str
     ) -> None:
-        """Await all in-flight tasks for a run. Raises the first error."""
-        tasks = pending.pop(run_id, [])
+        """Observe a snapshot of writes without taking ownership from other waiters.
+
+        A cancelled waiter leaves its writes registered and running. Concurrent
+        barriers can wait on the same snapshot, and writes added during the wait
+        remain registered for a later barrier. Raises the first observed error.
+        """
+        tasks = list(pending.get(run_id, []))
         if not tasks:
             return
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(
+            *(asyncio.shield(task) for task in tasks), return_exceptions=True
+        )
+        observed = set(tasks)
+        remaining = [task for task in pending.get(run_id, []) if task not in observed]
+        if remaining:
+            pending[run_id] = remaining
+        else:
+            pending.pop(run_id, None)
         errors = [r for r in results if isinstance(r, BaseException)]
         if errors:
             raise errors[0]
