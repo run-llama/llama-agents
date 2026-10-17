@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import builtins
 from _collections_abc import dict_items, dict_keys, dict_values
+from collections.abc import Mapping
 from datetime import datetime
 from enum import Enum
 from typing import Annotated, Any
@@ -18,6 +19,7 @@ from pydantic import (
     PrivateAttr,
     model_serializer,
 )
+from typing_extensions import Self
 
 from workflows.context.serializers import (
     JsonSerializer,
@@ -118,6 +120,24 @@ class DictLikeModel(BaseModel):
     def __bool__(self) -> bool:
         """Make test `if event:` pass on Event instances."""
         return True
+
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> Self:
+        """Copy declared fields and dynamic payload updates consistently."""
+        updates = update or {}
+        model_updates = {
+            key: value
+            for key, value in updates.items()
+            if key in self.__class__.model_fields or key in self.__private_attributes__
+        }
+        dynamic_updates = {
+            key: value for key, value in updates.items() if key not in model_updates
+        }
+        copied = super().model_copy(update=model_updates, deep=deep)
+        if dynamic_updates:
+            copied._data = {**copied._data, **dynamic_updates}
+        return copied
 
     @model_serializer(mode="wrap")
     def custom_model_dump(self, handler: Any) -> dict[str, Any]:
