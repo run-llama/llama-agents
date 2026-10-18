@@ -20,7 +20,7 @@ if TYPE_CHECKING:  # pragma: no cover
 from workflows.context.serializers import BaseSerializer
 
 from ._event_matching import step_accepts_event
-from .decorators import CatchErrorHandler, StepConfig, StepFunction, WorkflowGraphCheck
+from .decorators import StepConfig, StepFunction, WorkflowGraphCheck
 from .errors import (
     WorkflowRuntimeError,
     WorkflowValidationError,
@@ -145,6 +145,7 @@ class Workflow(metaclass=WorkflowMeta):
         from workflows.runtime.verbose import VerboseDecorator
 
         from .representation.validate import (
+            _collect_catch_error_handlers,
             _collect_events,
             _ensure_start_event_class,
             _ensure_stop_event_class,
@@ -172,9 +173,11 @@ class Workflow(metaclass=WorkflowMeta):
         # Detect StartEvent issues before StopEvent for clearer guidance
         self._start_event_class = _ensure_start_event_class(step_configs, cls_name)
         self._stop_event_class = _ensure_stop_event_class(step_configs, cls_name)
-        # Populated by _validate(); empty until a successful validation runs.
-        self._catch_error_handlers: dict[str, CatchErrorHandler] = {}
-        self._handler_for_step: dict[str, str] = {}
+        # Wired at construction, not in _validate(), so @catch_error handlers
+        # are collected even when pre-run validation is disabled (#23601).
+        self._catch_error_handlers, self._handler_for_step = (
+            _collect_catch_error_handlers(step_configs)
+        )
         self._events = _collect_events(step_configs)
         # Resource management
         self._resource_manager = resource_manager or ResourceManager()
