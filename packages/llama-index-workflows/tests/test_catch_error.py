@@ -174,6 +174,59 @@ async def test_catch_error_returning_stop_completes_workflow() -> None:
     assert not any(isinstance(ev, WorkflowFailedEvent) for ev in events)
 
 
+@pytest.mark.parametrize("disable_validation", [True, False])
+def test_invalid_catch_error_config_raises_at_construction(
+    disable_validation: bool,
+) -> None:
+    class Flow(Workflow):
+        @step
+        async def work(self, ev: StartEvent) -> StopEvent:
+            return StopEvent(result="done")
+
+        @catch_error
+        async def handler_a(self, ev: StepFailedEvent) -> StopEvent:
+            return StopEvent(result="a")
+
+        @catch_error
+        async def handler_b(self, ev: StepFailedEvent) -> StopEvent:
+            return StopEvent(result="b")
+
+    with pytest.raises(WorkflowValidationError, match="Only one wildcard"):
+        Flow(disable_validation=disable_validation)
+
+
+@pytest.mark.asyncio
+async def test_scoped_catch_error_runs_with_disable_validation() -> None:
+    # Mirrors the repro in run-llama/llama_index#23601: scoped for_steps
+    # handler with no ctx parameter.
+    class Recovering(Workflow):
+        @step
+        async def work(self, ev: StartEvent) -> StopEvent:
+            raise RuntimeError("the service is down")
+
+        @catch_error(for_steps=["work"])
+        async def fallback(self, ev: StepFailedEvent) -> StopEvent:
+            return StopEvent(result="recovered")
+
+    result = await Recovering(disable_validation=True, timeout=5).run()
+    assert result == "recovered"
+
+
+@pytest.mark.asyncio
+async def test_catch_error_runs_with_disable_validation() -> None:
+    class Flow(Workflow):
+        @step(retry_policy=_retry(1))
+        async def flaky(self, ev: StartEvent) -> StopEvent:
+            raise RuntimeError("transient")
+
+        @catch_error
+        async def handler(self, ctx: Context, ev: StepFailedEvent) -> StopEvent:
+            return StopEvent(result={"recovered_from": ev.step_name})
+
+    result = await Flow(disable_validation=True, timeout=5).run()
+    assert result == {"recovered_from": "flaky"}
+
+
 @pytest.mark.asyncio
 async def test_catch_error_raising_fails_workflow() -> None:
     class Flow(Workflow):
