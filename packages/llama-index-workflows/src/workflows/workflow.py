@@ -478,6 +478,8 @@ class Workflow(metaclass=WorkflowMeta):
             # the handler table even when validation is off — the structural
             # event-graph checks below stay skipped, per the documented flag
             # behavior ("skip pre-run validation of the event graph").
+            from .representation.validate import _collect_catch_error_handlers  # noqa: PLC0415
+
             self._catch_error_handlers, self._handler_for_step = (
                 _collect_catch_error_handlers(self._step_configs())
             )
@@ -488,7 +490,6 @@ class Workflow(metaclass=WorkflowMeta):
 
         # Inline import: ``representation`` transitively imports ``Workflow``.
         from .representation.validate import (
-            _collect_catch_error_handlers,
             _validate_resource_configs,
             _validate_resources,
             _validate_workflow,
