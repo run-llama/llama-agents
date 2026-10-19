@@ -1236,6 +1236,93 @@ async def test_control_loop_emits_idle_event_with_wait_for_event(
 
 
 @pytest.mark.asyncio
+async def test_control_loop_idle_event_waits_for_sent_events(
+    test_plugin: MockRunAdapter,
+) -> None:
+    """WorkflowIdleEvent is not emitted while events sent with ctx.send_event()
+    are still waiting to be delivered.
+
+    The fork step sends one event to each of two steps that wait for input.
+    The workflow becomes idle only once both of them are waiting.
+    """
+
+    class Left(Event):
+        pass
+
+    class Right(Event):
+        pass
+
+    class Answer(HumanResponseEvent):
+        name: str
+
+    class LeftDone(Event):
+        pass
+
+    class RightDone(Event):
+        pass
+
+    class FanOutWorkflow(Workflow):
+        @step
+        async def fork(self, ev: StartEvent, ctx: Context) -> Left | Right | None:
+            ctx.send_event(Left())
+            ctx.send_event(Right())
+            return None
+
+        @step
+        async def left(self, ev: Left, ctx: Context) -> LeftDone:
+            await ctx.wait_for_event(
+                Answer,
+                waiter_event=InputRequiredEvent(),
+                waiter_id="left",
+                requirements={"name": "left"},
+            )
+            return LeftDone()
+
+        @step
+        async def right(self, ev: Right, ctx: Context) -> RightDone:
+            await ctx.wait_for_event(
+                Answer,
+                waiter_event=InputRequiredEvent(),
+                waiter_id="right",
+                requirements={"name": "right"},
+            )
+            return RightDone()
+
+        @step
+        async def join(
+            self, ev: LeftDone | RightDone, ctx: Context
+        ) -> StopEvent | None:
+            events = ctx.collect_events(ev, [LeftDone, RightDone])
+            return None if events is None else StopEvent(result="done")
+
+    wf = FanOutWorkflow(timeout=2.0)
+    task = asyncio.create_task(
+        run_control_loop(
+            workflow=wf,
+            start_event=StartEvent(),
+            test_runtime=test_plugin,
+        )
+    )
+
+    input_requests = 0
+    while True:
+        ev = await test_plugin.get_stream_event(timeout=1.0)
+        if isinstance(ev, InputRequiredEvent):
+            input_requests += 1
+        if isinstance(ev, WorkflowIdleEvent):
+            break
+
+    assert input_requests == 2, "WorkflowIdleEvent was emitted before both requests"
+
+    await test_plugin.send_event(TickAddEvent(event=Answer(name="left")))
+    await test_plugin.send_event(TickAddEvent(event=Answer(name="right")))
+
+    result = await asyncio.wait_for(task, timeout=1.0)
+    assert isinstance(result, StopEvent)
+    assert result.result == "done"
+
+
+@pytest.mark.asyncio
 async def test_control_loop_idle_event_not_emitted_on_completion(
     test_plugin: MockRunAdapter,
 ) -> None:

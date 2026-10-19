@@ -62,6 +62,7 @@ from workflows.runtime.types.commands import (
 from workflows.runtime.types.internal_state import (
     BrokerConfig,
     BrokerState,
+    Delivery,
     EventAttempt,
     InProgressState,
     InternalStepConfig,
@@ -72,6 +73,7 @@ from workflows.runtime.types.results import (
     AddWaiter,
     DeleteCollectedEvent,
     DeleteWaiter,
+    EmissionKey,
     RetryDecision,
     StepFunctionResult,
     StepWorkerFailed,
@@ -1348,6 +1350,21 @@ def test_check_idle_state_delayed_retry_is_pending_work(
     """
     base_state.workers[TEST_STEP_ID].queue.append(
         EventAttempt(event=MyTestEvent(value=1), attempts=1, not_before=10_000.0)
+    )
+    assert _check_idle_state(base_state) is False
+
+
+def test_check_idle_state_pending_delivery_is_pending_work(
+    base_state: BrokerState,
+) -> None:
+    """An event recorded for delivery but not yet delivered keeps the workflow non-idle."""
+    key = EmissionKey(invocation_id="invocation-1", index=0)
+    base_state.deliveries[key] = Delivery(
+        key=key,
+        event=MyTestEvent(value=1),
+        step_id=None,
+        recovery_counts={},
+        scope_path=(),
     )
     assert _check_idle_state(base_state) is False
 
