@@ -473,6 +473,14 @@ class Workflow(metaclass=WorkflowMeta):
         force: bool = False,
     ) -> bool:
         if self._disable_validation and not force:
+            # @catch_error routing is built by the validation pass; skipping it
+            # wholesale would leave a run without any recovery handler. Collect
+            # the handler table even when validation is off — the structural
+            # event-graph checks below stay skipped, per the documented flag
+            # behavior ("skip pre-run validation of the event graph").
+            self._catch_error_handlers, self._handler_for_step = (
+                _collect_catch_error_handlers(self._step_configs())
+            )
             return False
         stale = self._validated_version != self.__class__._step_functions_version
         if not force and not stale and self._validation_result is not None:
@@ -480,6 +488,7 @@ class Workflow(metaclass=WorkflowMeta):
 
         # Inline import: ``representation`` transitively imports ``Workflow``.
         from .representation.validate import (
+            _collect_catch_error_handlers,
             _validate_resource_configs,
             _validate_resources,
             _validate_workflow,

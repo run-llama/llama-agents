@@ -530,3 +530,29 @@ def test_recovery_counts_serialization_roundtrip() -> None:
     restored = BrokerState.from_serialized(serialized, wf, JsonSerializer())
     restored_attempt = restored.workers[StepId.root("a")].queue[0]
     assert restored_attempt.recovery_counts == {"handler": 1}
+
+
+@pytest.mark.asyncio
+async def test_disable_validation_keeps_catch_error_recovery() -> None:
+    """disable_validation=True skips structural checks, not @catch_error recovery."""
+    attempts: list[int] = []
+
+    class Flow(Workflow):
+        @step(retry_policy=_retry(1))
+        async def flaky(self, ev: StartEvent) -> StopEvent:
+            attempts.append(1)
+            raise RuntimeError("the service is down")
+
+        @catch_error
+        async def handler(self, ctx: Context, ev: StepFailedEvent) -> StopEvent:
+            return StopEvent(result={"recovered_from": ev.step_name})
+
+    workflow = Flow(timeout=5, disable_validation=True)
+    events: list[Event] = []
+    run = workflow.run()
+    async for ev in run.stream_events():
+        events.append(ev)
+    result = await run
+
+    assert result == {"recovered_from": "flaky"}
+    assert not any(isinstance(ev, WorkflowFailedEvent) for ev in events)
