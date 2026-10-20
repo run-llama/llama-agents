@@ -530,3 +530,110 @@ def test_recovery_counts_serialization_roundtrip() -> None:
     restored = BrokerState.from_serialized(serialized, wf, JsonSerializer())
     restored_attempt = restored.workers[StepId.root("a")].queue[0]
     assert restored_attempt.recovery_counts == {"handler": 1}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disable_validation", [False, True])
+@pytest.mark.parametrize("scoped", [False, True])
+async def test_recovery_independent_of_validation(
+    disable_validation: bool, scoped: bool
+) -> None:
+    class Flow(Workflow):
+        @step
+        async def work(self, ev: StartEvent) -> StopEvent:
+            raise ValueError("step failed")
+
+        @catch_error(for_steps=["work"] if scoped else None)
+        async def recover(self, ev: StepFailedEvent) -> StopEvent:
+            return StopEvent(result=ev.step_name)
+
+    handler = Flow(disable_validation=disable_validation).run()
+    events = [event async for event in handler.stream_events()]
+    assert await handler == "work"
+    assert not any(isinstance(event, WorkflowFailedEvent) for event in events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disable_validation", [False, True])
+async def test_recovery_handler_registered_after_first_run(
+    disable_validation: bool,
+) -> None:
+    class Flow(Workflow):
+        @step
+        async def work(self, ev: StartEvent) -> StopEvent:
+            if ev.get("fail", False):
+                raise ValueError("step failed")
+            return StopEvent(result="ok")
+
+    flow = Flow(disable_validation=disable_validation)
+    assert await flow.run() == "ok"
+
+    @catch_error(for_steps=["work"])
+    async def recover(ev: StepFailedEvent) -> StopEvent:
+        return StopEvent(result=ev.step_name)
+
+    Flow.add_step(recover)
+    assert await flow.run(fail=True) == "work"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disable_validation", [False, True])
+async def test_scoped_recovery_target_registered_after_construction(
+    disable_validation: bool,
+) -> None:
+    class Flow(Workflow):
+        @step
+        async def work(self, ev: StartEvent) -> Event:
+            return Event()
+
+        @catch_error(for_steps=["late"])
+        async def recover(self, ev: StepFailedEvent) -> StopEvent:
+            return StopEvent(result=ev.step_name)
+
+    flow = Flow(disable_validation=disable_validation)
+
+    @step(workflow=Flow)
+    async def late(ev: Event) -> StopEvent:
+        raise ValueError("step failed")
+
+    assert await flow.run() == "late"
+
+
+def test_broker_builds_recovery_routes_without_validation() -> None:
+    class Flow(Workflow):
+        @step
+        async def work(self, ev: StartEvent) -> StopEvent:
+            raise ValueError("step failed")
+
+        @catch_error
+        async def recover(self, ev: StepFailedEvent) -> StopEvent:
+            return StopEvent(result=ev.step_name)
+
+    original = BrokerState.from_workflow(Flow())
+    serialized = original.to_serialized(JsonSerializer())
+    restored = BrokerState.from_serialized(serialized, Flow(), JsonSerializer())
+    for state in (original, restored):
+        assert state.config.handler_for_step == {
+            StepId.root("work"): StepId.root("recover")
+        }
+        assert set(state.config.catch_error_handlers) == {StepId.root("recover")}
+
+
+@pytest.mark.asyncio
+async def test_disabled_validation_rejects_ambiguous_recovery_routes() -> None:
+    class Flow(Workflow):
+        @step
+        async def work(self, ev: StartEvent) -> StopEvent:
+            return StopEvent()
+
+        @catch_error
+        async def first(self, ev: StepFailedEvent) -> StopEvent:
+            return StopEvent()
+
+        @catch_error
+        async def second(self, ev: StepFailedEvent) -> StopEvent:
+            return StopEvent()
+
+    flow = Flow(disable_validation=True)
+    with pytest.raises(WorkflowValidationError, match="wildcard @catch_error"):
+        await flow.run()

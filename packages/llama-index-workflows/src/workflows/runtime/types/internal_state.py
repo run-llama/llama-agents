@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Mapping, TypeVar
 
 from pydantic import TypeAdapter
+from workflows._catch_error import _collect_catch_error_handlers
 from workflows._event_matching import step_accepts_type
 from workflows._stream_levels import event_types, stream_level_types_by_producer
 from workflows.collect import Collect, Take
@@ -287,27 +288,27 @@ class BrokerState:
 
 
 def _config_from_instance(workflow: Workflow) -> BrokerConfig:
-    steps_by_name = workflow._get_steps()
+    step_configs = workflow._step_configs()
+    # Runtime routing must use the same step declarations as the workers,
+    # even when graph validation was skipped or steps were registered later.
+    handlers, routes = _collect_catch_error_handlers(step_configs)
     steps: dict[StepId, InternalStepConfig] = {
-        StepId((), name): _internal_step_config(func._step_config)
-        for name, func in steps_by_name.items()
+        StepId((), name): _internal_step_config(config)
+        for name, config in step_configs.items()
     }
     catch_error_handlers: dict[StepId, CatchErrorHandler] = {
-        StepId((), name): handler
-        for name, handler in workflow._catch_error_handlers.items()
+        StepId((), name): handler for name, handler in handlers.items()
     }
     handler_for_step: dict[StepId, StepId] = {
         StepId((), step_name): StepId((), handler_name)
-        for step_name, handler_name in workflow._handler_for_step.items()
+        for step_name, handler_name in routes.items()
     }
     return BrokerConfig(
         steps=steps,
         timeout=workflow._timeout,
         catch_error_handlers=catch_error_handlers,
         handler_for_step=handler_for_step,
-        collection_bindings=_compute_collection_bindings(
-            {name: func._step_config for name, func in steps_by_name.items()}
-        ),
+        collection_bindings=_compute_collection_bindings(step_configs),
     )
 
 

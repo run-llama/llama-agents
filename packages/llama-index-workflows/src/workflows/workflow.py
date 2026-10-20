@@ -20,7 +20,7 @@ if TYPE_CHECKING:  # pragma: no cover
 from workflows.context.serializers import BaseSerializer
 
 from ._event_matching import step_accepts_event
-from .decorators import CatchErrorHandler, StepConfig, StepFunction, WorkflowGraphCheck
+from .decorators import StepConfig, StepFunction, WorkflowGraphCheck
 from .errors import (
     WorkflowRuntimeError,
     WorkflowValidationError,
@@ -117,7 +117,8 @@ class Workflow(metaclass=WorkflowMeta):
                 the interval after the last processed tick before a crash do
                 not count. `None` disables the timeout.
             disable_validation (bool): Skip pre-run validation of the event graph
-                (not recommended).
+                (not recommended). Runtime configuration, including unambiguous
+                error-handler routing, is still required.
             verbose (bool): If True, print step activity.
             resource_manager (ResourceManager | None): Custom resource manager
                 for dependency injection.
@@ -172,9 +173,6 @@ class Workflow(metaclass=WorkflowMeta):
         # Detect StartEvent issues before StopEvent for clearer guidance
         self._start_event_class = _ensure_start_event_class(step_configs, cls_name)
         self._stop_event_class = _ensure_stop_event_class(step_configs, cls_name)
-        # Populated by _validate(); empty until a successful validation runs.
-        self._catch_error_handlers: dict[str, CatchErrorHandler] = {}
-        self._handler_for_step: dict[str, str] = {}
         self._events = _collect_events(step_configs)
         # Resource management
         self._resource_manager = resource_manager or ResourceManager()
@@ -491,8 +489,6 @@ class Workflow(metaclass=WorkflowMeta):
         )
         self._start_event_class = result.start_event_class
         self._stop_event_class = result.stop_event_class
-        self._catch_error_handlers = result.catch_error_handlers
-        self._handler_for_step = result.handler_for_step
 
         if validate_resource_configs:
             if errors := _validate_resource_configs(step_configs):
