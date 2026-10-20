@@ -638,7 +638,7 @@ def _serialize_event(
     if isinstance(event, dict):
         return event  # assumes you know what you are doing. In many cases this needs to be a dict that contains type metadata and the value
     return (
-        event.model_dump()
+        event.model_dump(mode="json")
         if bare
         else EventEnvelope.from_event(event=event).model_dump()
     )

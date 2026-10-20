@@ -158,14 +158,16 @@ class ExternalContext(Generic[MODEL_T, RunResultT]):
         """Stream events published by the workflow."""
         return self._external_adapter.stream_published_events()
 
-    def to_dict(self, serializer: BaseSerializer | None = None) -> dict[str, Any]:
+    def to_dict(
+        self, serializer: BaseSerializer | None = None, *, include_state: bool = True
+    ) -> dict[str, Any]:
         """Serialize context state for persistence."""
         active_serializer = serializer or self._serializer
 
         # Fetch state store from adapter and serialize
         state_data = {}
         state_store = self._external_adapter.get_state_store(())
-        if state_store is not None:
+        if include_state and state_store is not None:
             state_data = state_store.to_dict(active_serializer)
 
         # Get the broker state

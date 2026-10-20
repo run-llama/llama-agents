@@ -27,7 +27,6 @@ from workflows.runtime.types.internal_state import (
     CollectionBinding,
     CollectionReleaseState,
     EventAttempt,
-    InternalStepWorkerState,
 )
 from workflows.runtime.types.results import (
     AddCollectedEvent,
@@ -225,7 +224,7 @@ def _close_collection_stream(
             _fire_collection_release(
                 binding,
                 stream_id,
-                worker_state,
+                state,
                 release,
                 tuple(stream.scope_path),
                 path,
@@ -358,7 +357,7 @@ def _release_on_close(
 def _fire_collection_release(
     binding: CollectionBinding,
     stream_id: str,
-    worker_state: InternalStepWorkerState,
+    broker: BrokerState,
     events: list[Event],
     output_stack: tuple[str, ...],
     path: tuple[str, ...],
@@ -383,7 +382,7 @@ def _fire_collection_release(
             work_item_id=payload.work_item_id(),
         ),
         binding.target_step,
-        worker_state,
+        broker,
         path,
         now_seconds,
     )

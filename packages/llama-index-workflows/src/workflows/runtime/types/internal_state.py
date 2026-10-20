@@ -17,7 +17,9 @@ from workflows.context.context_types import (
     SerializedCollectionReleaseState,
     SerializedCollectionStreamInstance,
     SerializedContext,
+    SerializedDelivery,
     SerializedEventAttempt,
+    SerializedInProgressAttempt,
     SerializedStepWorkerState,
     SerializedWaiter,
 )
@@ -25,8 +27,10 @@ from workflows.context.serializers import JsonSerializer
 from workflows.decorators import CatchErrorHandler, StepConfig
 from workflows.events import Event, SerializableEventType
 from workflows.retry_policy import RetryPolicy
+from workflows.runtime.types.commands import CommandQueueEvent
 from workflows.runtime.types.results import (
     CollectionReleasePayload,
+    EmissionKey,
     StepWorkerState,
     StepWorkerWaiter,
 )
@@ -105,6 +109,36 @@ class CollectionReleaseState:
         return dataclasses.replace(self, buffer=list(self.buffer))
 
 
+@dataclass
+class Delivery:
+    """An event awaiting delivery.
+
+    The reducer records the event until it reduces the keyed ``TickAddEvent``.
+    Older results have no invocation ID. Their events use ``key=None`` and
+    are emitted without recording a delivery.
+    """
+
+    key: EmissionKey | None
+    event: Event
+    step_id: StepId | None
+    recovery_counts: dict[str, int]
+    scope_path: tuple[str, ...]
+
+    def to_command(self, origin_namespace: tuple[str, ...]) -> CommandQueueEvent:
+        """Build a queue command with the event's delivery key and routing details."""
+        return CommandQueueEvent(
+            event=self.event,
+            step_id=self.step_id,
+            origin_namespace=origin_namespace,
+            recovery_counts=dict(self.recovery_counts),
+            scope_path=self.scope_path,
+            emission=self.key,
+        )
+
+    def _copy(self) -> Delivery:
+        return dataclasses.replace(self, recovery_counts=dict(self.recovery_counts))
+
+
 @dataclass()
 class BrokerState:
     """
@@ -123,6 +157,10 @@ class BrokerState:
             timeout budget.
         last_alive_stamp: Accrual reference point (the last stamp seen), reset by
             session-start markers without accruing downtime.
+        invocation_seq: Counter incremented for each step dispatch.
+        deliveries: Pending events keyed by emission, in insertion order.
+            The reducer re-emits them at TickSessionStart.
+        journal_seq: Count of reduced ticks and the next record's sequence number.
     """
 
     is_running: bool
@@ -130,6 +168,7 @@ class BrokerState:
     workers: dict[Any, InternalStepWorkerState]
     stream_seq: int = 0
     work_item_seq: int = 0
+    invocation_seq: int = 0
     streams: dict[str, CollectionStreamInstance] = field(default_factory=dict)
     collection_release_states: dict[str, CollectionReleaseState] = field(
         default_factory=dict
@@ -137,6 +176,8 @@ class BrokerState:
     children: dict[str, BrokerState] = field(default_factory=dict)
     elapsed_alive: float = 0.0
     last_alive_stamp: float | None = None
+    deliveries: dict[EmissionKey, Delivery] = field(default_factory=dict)
+    journal_seq: int = 0
 
     def __post_init__(self) -> None:
         self._normalize_worker_keys()
@@ -149,6 +190,12 @@ class BrokerState:
             self.elapsed_alive = 0.0
         if "last_alive_stamp" not in state:
             self.last_alive_stamp = None
+        if "invocation_seq" not in state:
+            self.invocation_seq = 0
+        if "deliveries" not in state:
+            self.deliveries = {}
+        if "journal_seq" not in state:
+            self.journal_seq = 0
         self._normalize_worker_keys()
 
     def _normalize_worker_keys(self) -> None:
@@ -167,6 +214,7 @@ class BrokerState:
             },
             stream_seq=self.stream_seq,
             work_item_seq=self.work_item_seq,
+            invocation_seq=self.invocation_seq,
             streams={sid: stream._copy() for sid, stream in self.streams.items()},
             collection_release_states={
                 key: state._copy()
@@ -175,6 +223,8 @@ class BrokerState:
             children={key: child.deepcopy() for key, child in self.children.items()},
             elapsed_alive=self.elapsed_alive,
             last_alive_stamp=self.last_alive_stamp,
+            deliveries={key: d._copy() for key, d in self.deliveries.items()},
+            journal_seq=self.journal_seq,
         )
 
     @staticmethod
@@ -211,7 +261,15 @@ class BrokerState:
         return commands
 
     def to_serialized(self, serializer: BaseSerializer) -> SerializedContext:
-        """Serialize the broker state to a SerializedContext."""
+        """Serialize the broker state to a SerializedContext.
+
+        Raise if child brokers exist. Saving only the root would lose their work.
+        """
+        if self.children:
+            raise ValueError(
+                f"Cannot serialize child broker {min(self.children)!r}: child "
+                "brokers are not serialized."
+            )
         return _broker_to_serialized(self, serializer)
 
     @staticmethod
@@ -319,9 +377,10 @@ def _broker_to_serialized(
             )
             for attempt in worker_state.queue
         ]
-        # Serialize in-progress attempts so they can be re-queued on resume.
+        # Keep attempts in progress so replay can apply later ticks.
+        # TickSessionStart queues them again when the next session starts.
         in_progress = [
-            SerializedEventAttempt(
+            SerializedInProgressAttempt(
                 event=serializer.serialize(ip.event),
                 bound_events={
                     name: serializer.serialize(event)
@@ -339,6 +398,14 @@ def _broker_to_serialized(
                     ip.shared_state.collection_release_payload, serializer
                 ),
                 work_item_id=ip.work_item_id,
+                worker_id=ip.worker_id,
+                invocation_id=ip.invocation_id,
+                received=sorted(ip.received),
+                collected_events={
+                    buffer_id: [serializer.serialize(ev) for ev in events]
+                    for buffer_id, events in ip.shared_state.collected_events.items()
+                },
+                collect_generations=dict(ip.collect_generations),
             )
             for ip in worker_state.in_progress
         ]
@@ -379,6 +446,7 @@ def _broker_to_serialized(
             queue=queue,
             in_progress=in_progress,
             collected_events=collected_events,
+            collect_generations=dict(worker_state.collect_generations),
             static_collect_events=[
                 serializer.serialize(ev) for ev in worker_state.static_collect_events
             ],
@@ -392,6 +460,7 @@ def _broker_to_serialized(
         workers=workers_dict,
         stream_seq=state.stream_seq,
         work_item_seq=state.work_item_seq,
+        invocation_seq=state.invocation_seq,
         streams={
             sid: SerializedCollectionStreamInstance(
                 stream_id=stream.stream_id,
@@ -413,6 +482,18 @@ def _broker_to_serialized(
         },
         elapsed_alive=state.elapsed_alive,
         last_alive_stamp=state.last_alive_stamp,
+        deliveries=[
+            SerializedDelivery(
+                invocation_id=key.invocation_id,
+                index=key.index,
+                event=serializer.serialize(delivery.event),
+                step_id=str(delivery.step_id) if delivery.step_id is not None else None,
+                recovery_counts=dict(delivery.recovery_counts),
+                scope_path=list(delivery.scope_path),
+            )
+            for key, delivery in state.deliveries.items()
+        ],
+        journal_seq=state.journal_seq,
     )
 
 
@@ -424,8 +505,20 @@ def _load_broker_from_serialized(
     base_state.is_running = serialized.is_running
     base_state.stream_seq = serialized.stream_seq
     base_state.work_item_seq = serialized.work_item_seq
+    base_state.invocation_seq = serialized.invocation_seq
+    base_state.deliveries = {}
+    for data in serialized.deliveries:
+        key = EmissionKey(invocation_id=data.invocation_id, index=data.index)
+        base_state.deliveries[key] = Delivery(
+            key=key,
+            event=serializer.deserialize(data.event),
+            step_id=StepId.from_str(data.step_id) if data.step_id is not None else None,
+            recovery_counts=dict(data.recovery_counts),
+            scope_path=tuple(data.scope_path),
+        )
     base_state.elapsed_alive = serialized.elapsed_alive
     base_state.last_alive_stamp = serialized.last_alive_stamp
+    base_state.journal_seq = serialized.journal_seq
     base_state.streams = {
         sid: CollectionStreamInstance(
             stream_id=stream.stream_id,
@@ -455,12 +548,14 @@ def _load_broker_from_serialized(
 
         worker = base_state.workers[step_id]
 
-        # Restore queue with retry and stream scope info.
-        # in_progress events are moved to the queue on deserialization;
-        # they will be restarted when the workflow runs.
+        # Queue older entries again because they have no invocation ID.
+        # Entries with IDs stay in progress so replay can apply later ticks.
+        legacy_in_progress = [
+            ip for ip in worker_data.in_progress if ip.invocation_id is None
+        ]
         worker.queue = [
             _deserialize_event_attempt(attempt, serializer)
-            for attempt in [*worker_data.queue, *worker_data.in_progress]
+            for attempt in [*worker_data.queue, *legacy_in_progress]
         ]
 
         # Restore collected events
@@ -468,6 +563,7 @@ def _load_broker_from_serialized(
             buffer_id: [serializer.deserialize(ev) for ev in events]
             for buffer_id, events in worker_data.collected_events.items()
         }
+        worker.collect_generations = dict(worker_data.collect_generations)
         worker.static_collect_events = [
             serializer.deserialize(ev) for ev in worker_data.static_collect_events
         ]
@@ -506,6 +602,51 @@ def _load_broker_from_serialized(
                     work_item_id=waiter_data.work_item_id,
                 )
             )
+
+        worker.in_progress = [
+            _deserialize_in_progress(ip, step_id, worker, serializer)
+            for ip in worker_data.in_progress
+            if ip.invocation_id is not None
+        ]
+
+
+def _deserialize_in_progress(
+    data: SerializedInProgressAttempt,
+    step_id: StepId,
+    worker: InternalStepWorkerState,
+    serializer: BaseSerializer,
+) -> InProgressState:
+    """Restore the invocation and its buffers from dispatch time."""
+    attempt = _deserialize_event_attempt(data, serializer)
+    return InProgressState(
+        event=attempt.event,
+        bound_events=attempt.bound_events,
+        worker_id=data.worker_id or 0,
+        shared_state=StepWorkerState(
+            step_name=str(step_id),
+            collected_events={
+                buffer_id: [serializer.deserialize(ev) for ev in events]
+                for buffer_id, events in data.collected_events.items()
+            },
+            collected_waiters=[
+                dataclasses.replace(w) for w in worker.collected_waiters
+            ],
+            collection_release_payload=attempt.collection_release_payload,
+            scope_path=attempt.scope_path,
+            work_item_id=attempt.work_item_id,
+            invocation_id=data.invocation_id,
+        ),
+        attempts=attempt.attempts or 0,
+        first_attempt_at=attempt.first_attempt_at or 0.0,
+        last_exception=attempt.last_exception,
+        last_failed_at=attempt.last_failed_at,
+        recovery_counts=dict(attempt.recovery_counts),
+        scope_path=attempt.scope_path,
+        work_item_id=attempt.work_item_id,
+        invocation_id=data.invocation_id,
+        received=set(data.received),
+        collect_generations=dict(data.collect_generations),
+    )
 
 
 def _deserialize_event_attempt(
@@ -774,6 +915,8 @@ class InternalStepWorkerState:
         in_progress: Currently executing workers for this step
         collected_events: Events being collected via ctx.collect_events(), keyed by buffer_id
         collected_waiters: Active waiters created by ctx.wait_for_event()
+        collect_generations: Buffer counters bumped on each append or clear.
+            A changed counter means the invocation used a stale buffer.
     """
 
     queue: list[EventAttempt]
@@ -782,6 +925,12 @@ class InternalStepWorkerState:
     collected_events: dict[str, list[Event]]
     collected_waiters: list[StepWorkerWaiter]
     static_collect_events: list[Event] = field(default_factory=list)
+    collect_generations: dict[str, int] = field(default_factory=dict)
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        if "collect_generations" not in state:
+            self.collect_generations = {}
 
     def _deepcopy(self) -> InternalStepWorkerState:
         return InternalStepWorkerState(
@@ -791,6 +940,13 @@ class InternalStepWorkerState:
             collected_events={k: list(v) for k, v in self.collected_events.items()},
             static_collect_events=list(self.static_collect_events),
             collected_waiters=[dataclasses.replace(x) for x in self.collected_waiters],
+            collect_generations=dict(self.collect_generations),
+        )
+
+    def bump_collect_generation(self, buffer_id: str) -> None:
+        """Bump the buffer counter after an append or clear."""
+        self.collect_generations[buffer_id] = (
+            self.collect_generations.get(buffer_id, 0) + 1
         )
 
 
@@ -814,6 +970,10 @@ class InProgressState:
         last_failed_at: Unix timestamp of the most recent failure, or None.
         recovery_counts: Per-handler recovery counts on this event's lineage.
         scope_path: Collection stream scope path for the worker's current event.
+        invocation_id: Dispatch ID assigned by the reducer. Older state and
+            tests may omit it.
+        received: Indexes of sends already routed for this invocation.
+        collect_generations: Buffer counters at dispatch time.
     """
 
     event: Event
@@ -827,6 +987,15 @@ class InProgressState:
     bound_events: dict[str, Event] | None = None
     scope_path: tuple[str, ...] = field(default_factory=tuple)
     work_item_id: str | None = None
+    invocation_id: str | None = None
+    received: set[int] = field(default_factory=set)
+    collect_generations: dict[str, int] = field(default_factory=dict)
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self.__dict__.setdefault("invocation_id", None)
+        self.__dict__.setdefault("received", set())
+        self.__dict__.setdefault("collect_generations", {})
 
     def _deepcopy(self) -> InProgressState:
         return InProgressState(
@@ -841,6 +1010,9 @@ class InProgressState:
             recovery_counts=dict(self.recovery_counts),
             scope_path=self.scope_path,
             work_item_id=self.work_item_id,
+            invocation_id=self.invocation_id,
+            received=set(self.received),
+            collect_generations=dict(self.collect_generations),
         )
 
 

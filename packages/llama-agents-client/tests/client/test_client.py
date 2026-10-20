@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Callable, Literal
 from unittest.mock import AsyncMock, call, patch
+from uuid import UUID
 
 import httpx
 import pytest
@@ -17,6 +19,8 @@ from client_test_workflows import (
     GreetingWorkflow,
     InputEvent,
     OutputEvent,
+    TypedInputEvent,
+    TypedInputWorkflow,
 )
 from httpx import ASGITransport, AsyncClient
 from llama_agents.client import WorkflowClient
@@ -102,6 +106,27 @@ async def test_workflow_introspection_unknown_workflow_raises(
 
     with pytest.raises(httpx.HTTPStatusError, match="404 Not Found"):
         await method("missing")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nowait", [False, True])
+async def test_run_workflow_with_json_encoded_start_event(
+    server: WorkflowServer, client: WorkflowClient, nowait: bool
+) -> None:
+    server.add_workflow(name="typed-input", workflow=TypedInputWorkflow())
+    event = TypedInputEvent(
+        timestamp=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
+        request_id=UUID("12345678-1234-5678-1234-567812345678"),
+    )
+    if nowait:
+        handler = await client.run_workflow_nowait("typed-input", start_event=event)
+        handler = await client.wait_for_handler(handler.handler_id, poll_interval=0)
+    else:
+        handler = await client.run_workflow("typed-input", start_event=event)
+
+    assert handler.status == "completed"
+    assert handler.result is not None
+    assert handler.result.value["result"] == event.model_dump(mode="json")
 
 
 @pytest.mark.asyncio

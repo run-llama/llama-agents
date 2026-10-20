@@ -242,6 +242,7 @@ async def test_verbose_tick_step_result_logs_stop_event(
     tick = TickStepResult(
         step_id=StepId.root("my_step"),
         worker_id=0,
+        invocation_id="worker-0",
         event=StartEvent(),
         result=[StepWorkerResult(result=StopEvent(result="done"))],
     )
@@ -260,6 +261,7 @@ async def test_verbose_tick_step_result_silent_for_non_stop(
     tick = TickStepResult(
         step_id=StepId.root("my_step"),
         worker_id=0,
+        invocation_id="worker-0",
         event=StartEvent(),
         result=[StepWorkerResult(result=StartEvent())],
     )
