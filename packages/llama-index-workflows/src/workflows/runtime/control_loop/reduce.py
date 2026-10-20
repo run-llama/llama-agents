@@ -593,6 +593,7 @@ def _check_idle_state(state: BrokerState) -> bool:
     1. The workflow is running (hasn't completed/failed/cancelled)
     2. All steps have no pending events in their queues
     3. All steps have no workers currently executing
+    4. No sent or returned event is still waiting to be delivered
 
     A queued attempt with a future not_before (a delayed retry) is pending
     work: the workflow is not idle during a retry-delay window, so idle
@@ -605,6 +606,8 @@ def _check_idle_state(state: BrokerState) -> bool:
 
 
 def _broker_busy(state: BrokerState) -> bool:
+    if state.deliveries:
+        return True
     for worker_state in state.workers.values():
         if worker_state.queue or worker_state.in_progress:
             return True
