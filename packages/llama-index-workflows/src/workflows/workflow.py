@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 if TYPE_CHECKING:  # pragma: no cover
     from .context import Context
+    from .runtime.types.internal_state import BrokerConfig
     from .runtime.types.plugin import Runtime
 from workflows.context.serializers import BaseSerializer
 
@@ -183,6 +184,8 @@ class Workflow(metaclass=WorkflowMeta):
         # _validated_version tracks which _step_functions_version was validated so add_step() invalidates the cache.
         self._validation_result: bool | None = None
         self._validated_version: int = -1
+        self._broker_config: BrokerConfig | None = None
+        self._broker_config_version: int = -1
         checks = skip_graph_checks or set()
         valid_checks = set(get_args(WorkflowGraphCheck))
         unknown = checks - valid_checks
@@ -269,6 +272,19 @@ class Workflow(metaclass=WorkflowMeta):
     def _step_configs(self) -> dict[str, StepConfig]:
         """Return ``{step_name: StepConfig}`` for every registered step."""
         return {name: func._step_config for name, func in self._get_steps().items()}
+
+    def _get_broker_config(self) -> BrokerConfig:
+        """Cache runtime configuration per step version, without running validation."""
+        # Inline import: internal_state imports Workflow for broker restoration.
+        from .runtime.types.internal_state import BrokerConfig
+
+        version = self.__class__._step_functions_version
+        if self._broker_config is None or self._broker_config_version != version:
+            self._broker_config = BrokerConfig.from_steps(
+                self._step_configs(), self._timeout
+            )
+            self._broker_config_version = version
+        return self._broker_config
 
     @property
     def start_event_class(self) -> type[StartEvent]:

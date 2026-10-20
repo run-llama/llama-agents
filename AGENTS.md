@@ -159,4 +159,4 @@ We use **pytest** with idiomatic pytest patterns. Follow these guidelines:
   - Do not wrap deferred-only types in string annotations. Use `from __future__ import annotations` instead.
 - Only add `__init__.py` `__all__` exports when a file is legitimately needed for public library consumption. Module level imports should not be used internally. For the most part you should never do this unless explicitly requested to do so
 
-Runtime configuration must derive routing from current step declarations without depending on `Workflow._validate()` having run; graph validation can be disabled.
+Runtime configuration is cached on each workflow by step version, independently of `Workflow._validate()`; graph validation can be disabled and `add_step()` must invalidate the configuration.

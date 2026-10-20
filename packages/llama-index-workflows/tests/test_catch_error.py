@@ -519,7 +519,10 @@ def test_recovery_state_serialization_roundtrip_without_validation() -> None:
         async def handler(self, ctx: Context, ev: StepFailedEvent) -> StopEvent:
             return StopEvent(result="caught")
 
-    state = BrokerState.from_workflow(Flow())
+    flow = Flow()
+    state = BrokerState.from_workflow(flow)
+    second = BrokerState.from_workflow(flow)
+    assert second.config is state.config
     state.workers[StepId.root("a")].queue.append(
         EventAttempt(
             event=StartEvent(),
@@ -528,6 +531,7 @@ def test_recovery_state_serialization_roundtrip_without_validation() -> None:
             recovery_counts={"handler": 1},
         )
     )
+    assert not second.workers[StepId.root("a")].queue
     serialized = state.to_serialized(JsonSerializer())
     restored = BrokerState.from_serialized(serialized, Flow(), JsonSerializer())
     restored_attempt = restored.workers[StepId.root("a")].queue[0]
@@ -553,6 +557,10 @@ async def test_recovery_handler_registered_after_first_run(
 
     flow = Flow(disable_validation=disable_validation)
     assert await flow.run() == "ok"
+    original = BrokerState.from_workflow(flow).config
+    other = Flow(disable_validation=disable_validation)
+    other_original = BrokerState.from_workflow(other).config
+    assert other_original is not original
 
     @catch_error(for_steps=["work"])
     async def recover(ev: StepFailedEvent) -> StopEvent:
@@ -560,6 +568,12 @@ async def test_recovery_handler_registered_after_first_run(
 
     Flow.add_step(recover)
     assert await flow.run(fail=True) == "work"
+    assert await other.run(fail=True) == "work"
+    for workflow, previous in ((flow, original), (other, other_original)):
+        current = BrokerState.from_workflow(workflow).config
+        assert current is not previous
+        assert current.handler_for_step == {StepId.root("work"): StepId.root("recover")}
+        assert previous.handler_for_step == {}
 
 
 @pytest.mark.asyncio

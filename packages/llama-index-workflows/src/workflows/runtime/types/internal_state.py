@@ -230,8 +230,7 @@ class BrokerState:
 
     @staticmethod
     def from_workflow(workflow: Workflow) -> BrokerState:
-        config = _config_from_instance(workflow)
-        state = BrokerState.from_config(config)
+        state = BrokerState.from_config(workflow._get_broker_config())
         state.is_running = False
         return state
 
@@ -285,31 +284,6 @@ class BrokerState:
         base_state = BrokerState.from_workflow(workflow)
         _load_broker_from_serialized(base_state, serialized, serializer)
         return base_state
-
-
-def _config_from_instance(workflow: Workflow) -> BrokerConfig:
-    step_configs = workflow._step_configs()
-    # Runtime routing must use the same step declarations as the workers,
-    # even when graph validation was skipped or steps were registered later.
-    handlers, routes = _collect_catch_error_handlers(step_configs)
-    steps: dict[StepId, InternalStepConfig] = {
-        StepId((), name): _internal_step_config(config)
-        for name, config in step_configs.items()
-    }
-    catch_error_handlers: dict[StepId, CatchErrorHandler] = {
-        StepId((), name): handler for name, handler in handlers.items()
-    }
-    handler_for_step: dict[StepId, StepId] = {
-        StepId((), step_name): StepId((), handler_name)
-        for step_name, handler_name in routes.items()
-    }
-    return BrokerConfig(
-        steps=steps,
-        timeout=workflow._timeout,
-        catch_error_handlers=catch_error_handlers,
-        handler_for_step=handler_for_step,
-        collection_bindings=_compute_collection_bindings(step_configs),
-    )
 
 
 def _internal_step_config(step_config: StepConfig) -> InternalStepConfig:
@@ -772,6 +746,28 @@ class BrokerConfig:
     catch_error_handlers: dict[Any, CatchErrorHandler] = field(default_factory=dict)
     handler_for_step: dict[Any, StepId] = field(default_factory=dict)
     collection_bindings: dict[str, CollectionBinding] = field(default_factory=dict)
+
+    @classmethod
+    def from_steps(
+        cls, step_configs: dict[str, StepConfig], timeout: float | None
+    ) -> BrokerConfig:
+        """Build worker configuration and routing from the same step declarations."""
+        handlers, routes = _collect_catch_error_handlers(step_configs)
+        return cls(
+            steps={
+                StepId.root(name): _internal_step_config(config)
+                for name, config in step_configs.items()
+            },
+            timeout=timeout,
+            catch_error_handlers={
+                StepId.root(name): handler for name, handler in handlers.items()
+            },
+            handler_for_step={
+                StepId.root(step_name): StepId.root(handler_name)
+                for step_name, handler_name in routes.items()
+            },
+            collection_bindings=_compute_collection_bindings(step_configs),
+        )
 
     def __post_init__(self) -> None:
         self._normalize_step_id_maps()
