@@ -530,3 +530,42 @@ def test_recovery_counts_serialization_roundtrip() -> None:
     restored = BrokerState.from_serialized(serialized, wf, JsonSerializer())
     restored_attempt = restored.workers[StepId.root("a")].queue[0]
     assert restored_attempt.recovery_counts == {"handler": 1}
+
+
+async def test_catch_error_runs_with_validation_disabled() -> None:
+    """`disable_validation` must skip validation, not the handler wiring.
+
+    The `@catch_error` routing tables are assigned inside `_validate`, after
+    its early return for `_disable_validation`, so the run used to start with
+    no handlers at all and a covered failure escaped.
+    """
+
+    class Recovering(Workflow):
+        @step
+        async def work(self, ev: StartEvent) -> StopEvent:
+            raise RuntimeError("the service is down")
+
+        @catch_error(for_steps=["work"])
+        async def fallback(self, ev: StepFailedEvent) -> StopEvent:
+            return StopEvent(result="recovered")
+
+    with_validation = await Recovering(timeout=10).run()
+    without_validation = await Recovering(timeout=10, disable_validation=True).run()
+
+    assert with_validation == "recovered"
+    assert without_validation == "recovered"
+
+
+async def test_catch_error_wildcard_routing_with_validation_disabled() -> None:
+    """A wildcard handler is routed too, not just scoped `for_steps` claims."""
+
+    class Recovering(Workflow):
+        @step
+        async def work(self, ev: StartEvent) -> StopEvent:
+            raise RuntimeError("boom")
+
+        @catch_error
+        async def fallback(self, ev: StepFailedEvent) -> StopEvent:
+            return StopEvent(result="caught")
+
+    assert await Recovering(timeout=10, disable_validation=True).run() == "caught"

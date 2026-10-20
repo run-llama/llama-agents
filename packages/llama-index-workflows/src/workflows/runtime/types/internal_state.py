@@ -287,6 +287,8 @@ class BrokerState:
 
 
 def _config_from_instance(workflow: Workflow) -> BrokerConfig:
+    # `disable_validation` skips the pass that normally fills these in.
+    workflow._ensure_catch_error_wiring()
     steps_by_name = workflow._get_steps()
     steps: dict[StepId, InternalStepConfig] = {
         StepId((), name): _internal_step_config(func._step_config)

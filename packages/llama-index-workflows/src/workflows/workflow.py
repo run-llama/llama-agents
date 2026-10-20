@@ -465,6 +465,26 @@ class Workflow(metaclass=WorkflowMeta):
             force=True,  # Explicit validate() call should always run
         )
 
+    def _ensure_catch_error_wiring(self) -> None:
+        """Populate the `@catch_error` routing tables if they are still empty.
+
+        The tables are normally filled by `_validate`, but `disable_validation`
+        returns before that. `disable_validation` is documented as skipping
+        pre-run validation of the event graph, and the wiring is not
+        validation: without it a run has no handlers at all, so a step failure
+        the workflow recovers from with validation on would escape instead.
+        """
+        if self._catch_error_handlers or self._handler_for_step:
+            return
+
+        # Inline import: ``representation`` transitively imports ``Workflow``.
+        from .representation.validate import _collect_catch_error_handlers
+
+        (
+            self._catch_error_handlers,
+            self._handler_for_step,
+        ) = _collect_catch_error_handlers(self._step_configs())
+
     def _validate(
         self,
         *,
