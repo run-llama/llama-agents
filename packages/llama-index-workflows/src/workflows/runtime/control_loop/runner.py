@@ -318,20 +318,36 @@ class _ControlLoopRunner:
         out: list[StepFunctionResult] = []
         for result in results:
             if isinstance(result, StepWorkerFailed) and result.retry_decision is None:
-                delay = _decide_retry_delay(
-                    policy,
-                    elapsed_time=result.failed_at - worker.first_attempt_at,
-                    failures=worker.attempts + 1,
-                    exception=result.exception,
-                    run_id=self.adapter.run_id,
-                    step_name=step_name,
-                )
-                result = result.model_copy(
-                    update={
-                        "retry_decision": RetryDecision(delay=delay),
-                        "first_attempt_at": worker.first_attempt_at,
-                    }
-                )
+                try:
+                    delay = _decide_retry_delay(
+                        policy,
+                        elapsed_time=result.failed_at - worker.first_attempt_at,
+                        failures=worker.attempts + 1,
+                        exception=result.exception,
+                        run_id=self.adapter.run_id,
+                        step_name=step_name,
+                    )
+                except Exception as policy_error:
+                    # A policy that raises cannot decide. Journal a stop
+                    # decision carrying the policy's own error so the tick is
+                    # written and the run fails the way an exhausted policy
+                    # fails it, instead of the worker task dying unobserved
+                    # and the step staying in progress until the timeout.
+                    policy_error.__cause__ = result.exception
+                    result = result.model_copy(
+                        update={
+                            "retry_decision": RetryDecision(delay=None),
+                            "first_attempt_at": worker.first_attempt_at,
+                            "exception": policy_error,
+                        }
+                    )
+                else:
+                    result = result.model_copy(
+                        update={
+                            "retry_decision": RetryDecision(delay=delay),
+                            "first_attempt_at": worker.first_attempt_at,
+                        }
+                    )
             out.append(result)
         return out
 
