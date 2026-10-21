@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import logging
 import shutil
 import sys
@@ -10,10 +11,18 @@ import tempfile
 from pathlib import Path
 
 from botocore.exceptions import ClientError
+from dulwich import porcelain
 from dulwich.objects import ObjectID
 from dulwich.porcelain import gc as dulwich_gc
 from dulwich.repo import Repo
+from llama_agents.core.config import DEFAULT_DEPLOYMENT_FILE_PATH
+from llama_agents.core.deployment_config import (
+    read_deployment_config,
+    resolve_config_parent,
+)
 from llama_agents.core.git.git_util import GitAccessError, resolve_ref_in_repo
+from llama_agents.core.path_util import validate_path_traversal
+from llama_agents.core.ui_build import ui_build_output_path
 from starlette.concurrency import run_in_threadpool
 
 from ..storage import S3ObjectStorage
@@ -146,6 +155,44 @@ class CodeRepoStorage(S3ObjectStorage):
                 return target_sha.decode()
         finally:
             shutil.rmtree(repo_path.parent, ignore_errors=True)
+
+    async def get_ui_build_output_path(
+        self,
+        deployment_id: str,
+        git_sha: str,
+        deployment_file_path: str | None,
+    ) -> Path | None:
+        """Discover UI assets from the exact pushed commit being deployed."""
+        repo_path = await self.download_repo(deployment_id)
+        if repo_path is None:
+            raise GitAccessError(f"No code repository for deployment {deployment_id}")
+        try:
+            return await run_in_threadpool(
+                self._read_ui_build_output_path,
+                repo_path,
+                git_sha,
+                deployment_file_path,
+            )
+        finally:
+            shutil.rmtree(repo_path.parent, ignore_errors=True)
+
+    @staticmethod
+    def _read_ui_build_output_path(
+        repo_path: Path, git_sha: str, deployment_file_path: str | None
+    ) -> Path | None:
+        with tempfile.TemporaryDirectory(prefix="code-repo-ui-") as temp_dir:
+            root = Path(temp_dir)
+            # This is a trusted local download, not a user-supplied clone URL.
+            with porcelain.clone(
+                str(repo_path), str(root), checkout=False, errstream=io.BytesIO()
+            ) as repo:
+                porcelain.reset(repo, "hard", git_sha.encode())
+            config_path = root / (deployment_file_path or DEFAULT_DEPLOYMENT_FILE_PATH)
+            validate_path_traversal(config_path, root, "deployment_file_path")
+            config = read_deployment_config(root, config_path)
+            config_parent = resolve_config_parent(root, config_path)
+            output = ui_build_output_path(config_parent, config)
+            return (config_parent / output).relative_to(root) if output else None
 
     @staticmethod
     def init_bare_repo(deployment_id: str) -> Path:

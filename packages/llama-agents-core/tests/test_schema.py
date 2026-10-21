@@ -828,7 +828,8 @@ def test_apply_deployment_update_static_assets_path_not_cleared() -> None:
         displayName="n",
         staticAssetsPath="/existing/path",
     )
-    update = DeploymentUpdate(suspended=True)
+    # Older clients serialize unset fields as null, which must remain a no-op.
+    update = DeploymentUpdate(suspended=True, static_assets_path=None)
     result = apply_deployment_update(update, spec)
     assert result.updated_spec.staticAssetsPath == "/existing/path"
 
@@ -844,3 +845,11 @@ def test_apply_deployment_update_version_sets_image_tag() -> None:
     update = DeploymentUpdate(appserver_version="0.3.1")
     result = apply_deployment_update(update, existing_spec)
     assert result.updated_spec.imageTag == "0.3.1"
+
+
+def test_apply_deployment_update_clears_explicitly_removed_static_assets() -> None:
+    spec = LlamaDeploymentSpec(
+        projectId="p", repoUrl="internal://", staticAssetsPath="ui/dist"
+    )
+    result = apply_deployment_update(DeploymentUpdate(static_assets_path=""), spec)
+    assert result.updated_spec.staticAssetsPath is None

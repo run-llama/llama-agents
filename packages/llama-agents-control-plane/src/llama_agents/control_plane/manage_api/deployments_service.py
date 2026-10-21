@@ -85,6 +85,12 @@ async def _on_push_complete(
         git_sha=new_sha,
         git_ref=git_ref,
     )
+    if current is not None and code_repo_storage is not None:
+        update.static_assets_path = (
+            await code_repo_storage.get_ui_build_output_path(
+                deployment_id, new_sha, current.deployment_file_path
+            )
+        ) or ""
     result = await k8s_client.update_deployment(
         deployment_id=deployment_id,
         update=update,
@@ -256,7 +262,7 @@ class DeploymentService(AbstractDeploymentsService):
         self, project_id: str, deployment_id: str, request: RollbackRequest
     ) -> DeploymentResponse:
         """Rollback by updating the CRD's git_ref/git_sha to a previous sha."""
-        await self._get_deployment_or_raise(project_id, deployment_id)
+        current = await self._get_deployment_or_raise(project_id, deployment_id)
         # Determine imageTag to restore: use explicit override, or look up from history
         if not settings.should_stamp_image_tag:
             # Defer to operator's LLAMA_DEPLOY_IMAGE_TAG env var
@@ -277,6 +283,17 @@ class DeploymentService(AbstractDeploymentsService):
             git_sha=request.git_sha,
             image_tag=image_tag,
         )
+        if current.repo_url == INTERNAL_CODE_REPO_SCHEME:
+            if code_repo_storage is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Code repo storage not configured (S3_BUCKET not set).",
+                )
+            update.static_assets_path = (
+                await code_repo_storage.get_ui_build_output_path(
+                    deployment_id, request.git_sha, current.deployment_file_path
+                )
+            ) or ""
         updated = await k8s_client.update_deployment(
             deployment_id=deployment_id, update=update
         )
@@ -382,7 +399,31 @@ class DeploymentService(AbstractDeploymentsService):
                 deployment_id=deployment_id,
             )
             update_data.git_sha = validated.git_sha
-            update_data.static_assets_path = validated.ui_build_output_path
+            if validated.is_valid:
+                update_data.static_assets_path = validated.ui_build_output_path or ""
+
+        # Keep nginx's asset path in sync with the selected commit and config,
+        # including path-only updates that must not advance the deployed SHA.
+        if (
+            not clearing_repo_url
+            and resolved_repo_url == INTERNAL_CODE_REPO_SCHEME
+            and (update_data.has_git_fields() or update_data.git_sha is not None)
+        ):
+            target_sha = update_data.git_sha or current_deployment.git_sha
+            if target_sha:
+                if code_repo_storage is None:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Code repo storage not configured (S3_BUCKET not set).",
+                    )
+                update_data.static_assets_path = (
+                    await code_repo_storage.get_ui_build_output_path(
+                        deployment_id,
+                        target_sha,
+                        update_data.deployment_file_path
+                        or current_deployment.deployment_file_path,
+                    )
+                ) or ""
 
         updated_deployment = await k8s_client.update_deployment(
             deployment_id=deployment_id,
