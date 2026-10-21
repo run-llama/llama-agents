@@ -89,9 +89,8 @@ class StepConfig:
 class CatchErrorHandler:
     """Runtime descriptor for a ``@catch_error`` handler.
 
-    Precomputed by ``Workflow._validate()`` from the handler's ``StepConfig``;
-    consumed by the control loop's failure-routing branch and by
-    ``BrokerState.from_workflow``.
+    Derived from the handler's ``StepConfig`` when building ``BrokerConfig``;
+    consumed by the control loop's failure-routing branch.
     """
 
     step_name: str

@@ -158,3 +158,5 @@ We use **pytest** with idiomatic pytest patterns. Follow these guidelines:
   - `if TYPE_CHECKING` imports may only be used alongside one of the accepted inline-import patterns above, so the runtime import stays deferred while annotations remain typed.
   - Do not wrap deferred-only types in string annotations. Use `from __future__ import annotations` instead.
 - Only add `__init__.py` `__all__` exports when a file is legitimately needed for public library consumption. Module level imports should not be used internally. For the most part you should never do this unless explicitly requested to do so
+
+Runtime configuration is cached on each workflow by step version, independently of `Workflow._validate()`; graph validation can be disabled and `add_step()` must invalidate the configuration.
