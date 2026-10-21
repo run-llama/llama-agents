@@ -3,16 +3,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import dataclass, field
 
+from workflows._catch_error import _collect_catch_error_handlers
 from workflows._event_matching import is_subclass, step_accepts_type, type_matches
 from workflows._stream_levels import (
     event_types,
     same_level_types,
     stream_level_types_by_producer,
 )
-from workflows.decorators import CatchErrorHandler, StepConfig, WorkflowGraphCheck
+from workflows.decorators import StepConfig, WorkflowGraphCheck
 from workflows.errors import WorkflowConfigurationError, WorkflowValidationError
 from workflows.events import (
     Event,
@@ -262,55 +262,6 @@ def validate_graph(
     return errors
 
 
-def validate_catch_error_handlers(
-    handlers: Iterable[CatchErrorHandler],
-    step_names: set[str],
-) -> list[str]:
-    """Validate structural invariants of ``@catch_error`` handlers.
-
-    Returns a list of error messages; empty when the handler set is valid.
-    Callers are responsible for raising.
-    """
-    errors: list[str] = []
-
-    handlers = list(handlers)
-    wildcard_handlers = [h for h in handlers if h.for_steps is None]
-    if len(wildcard_handlers) > 1:
-        names = ", ".join(sorted(h.step_name for h in wildcard_handlers))
-        errors.append(
-            f"Only one wildcard @catch_error handler is allowed per workflow, "
-            f"found {len(wildcard_handlers)}: {names}"
-        )
-
-    handler_step_names = {h.step_name for h in handlers}
-    claim_owner: dict[str, str] = {}
-    for handler in handlers:
-        if handler.for_steps is None:
-            continue
-        for target in handler.for_steps:
-            if target not in step_names:
-                errors.append(
-                    f"@catch_error handler '{handler.step_name}' lists "
-                    f"unknown step '{target}' in for_steps."
-                )
-                continue
-            if target == handler.step_name or target in handler_step_names:
-                errors.append(
-                    f"@catch_error handler '{handler.step_name}' cannot "
-                    f"cover another handler step '{target}'."
-                )
-                continue
-            if target in claim_owner:
-                errors.append(
-                    f"Step '{target}' is claimed by two @catch_error "
-                    f"handlers: '{claim_owner[target]}' and '{handler.step_name}'."
-                )
-                continue
-            claim_owner[target] = handler.step_name
-
-    return errors
-
-
 def _ensure_start_event_class(
     steps: dict[str, StepConfig], workflow_cls_name: str
 ) -> type[StartEvent]:
@@ -384,68 +335,6 @@ def _collect_events(steps: dict[str, StepConfig]) -> list[type[Event]]:
             if is_subclass(event_type, Event):
                 events_found.add(event_type)
     return list(events_found)
-
-
-def _collect_catch_error_handlers(
-    steps: dict[str, StepConfig],
-) -> tuple[dict[str, CatchErrorHandler], dict[str, str]]:
-    """Discover ``@catch_error`` handlers and build the step->handler routing table.
-
-    Validates the handler set (via :func:`validate_catch_error_handlers`) and
-    each handler's ``max_recoveries``; raises ``WorkflowValidationError`` on
-    any problem.
-
-    Returns ``(catch_error_handlers, handler_for_step)`` where
-    ``catch_error_handlers`` maps handler step name to its descriptor and
-    ``handler_for_step`` maps each covered step name to the handler that owns
-    it (scoped claims first, then the wildcard fills).
-    """
-    all_step_names = set(steps.keys())
-    handlers: list[CatchErrorHandler] = []
-    for name, cfg in steps.items():
-        if cfg.role != "catch_error":
-            continue
-        max_recoveries = cfg.catch_error_max_recoveries
-        if not isinstance(max_recoveries, int) or max_recoveries < 1:
-            raise WorkflowValidationError(
-                f"@catch_error handler '{name}' has max_recoveries="
-                f"{max_recoveries!r}; must be an integer >= 1."
-            )
-        handlers.append(
-            CatchErrorHandler(
-                step_name=name,
-                for_steps=(
-                    list(cfg.catch_error_for_steps)
-                    if cfg.catch_error_for_steps is not None
-                    else None
-                ),
-                max_recoveries=max_recoveries,
-            )
-        )
-
-    handler_errors = validate_catch_error_handlers(handlers, all_step_names)
-    if handler_errors:
-        raise WorkflowValidationError("\n".join(handler_errors))
-
-    handler_step_names = {h.step_name for h in handlers}
-    handler_for_step: dict[str, str] = {}
-    for handler in handlers:
-        if handler.for_steps is None:
-            continue
-        for target in handler.for_steps:
-            handler_for_step[target] = handler.step_name
-
-    wildcards = [h for h in handlers if h.for_steps is None]
-    wildcard = wildcards[0] if wildcards else None
-    if wildcard is not None:
-        for step_name in all_step_names:
-            if step_name in handler_step_names:
-                continue
-            if step_name in handler_for_step:
-                continue
-            handler_for_step[step_name] = wildcard.step_name
-
-    return {h.step_name: h for h in handlers}, handler_for_step
 
 
 def _validate_event_connectivity(
@@ -634,8 +523,6 @@ class _WorkflowValidationResult:
 
     start_event_class: type[StartEvent]
     stop_event_class: type[StopEvent]
-    catch_error_handlers: dict[str, CatchErrorHandler]
-    handler_for_step: dict[str, str]
     uses_hitl: bool
 
 
@@ -775,7 +662,7 @@ def _validate_workflow(
 
     uses_hitl = _validate_event_connectivity(steps, start_event_class)
 
-    catch_error_handlers, handler_for_step = _collect_catch_error_handlers(steps)
+    catch_error_handlers, _ = _collect_catch_error_handlers(steps)
 
     graph_errors = validate_graph(
         steps=steps,
@@ -792,7 +679,5 @@ def _validate_workflow(
     return _WorkflowValidationResult(
         start_event_class=start_event_class,
         stop_event_class=stop_event_class,
-        catch_error_handlers=catch_error_handlers,
-        handler_for_step=handler_for_step,
         uses_hitl=uses_hitl,
     )
