@@ -36,6 +36,11 @@ from llama_agents.core.git.git_util import clone_repo_sync as clone_repo
 
 logger = logging.getLogger(__name__)
 
+# Symlink at the app root pointing at the built UI directory. nginx serves it
+# for deployments that have no spec.staticAssetsPath, so the artifact itself
+# records where its UI lives.
+UI_LINK_NAME = ".llama-ui"
+
 
 def _extract_filter(member: tarfile.TarInfo, dest_path: str) -> tarfile.TarInfo:
     """Extraction filter like ``data`` but permits symlinks with absolute targets.
@@ -204,7 +209,8 @@ def _upload_artifact(
 
 def bootstrap_app_from_repo(
     target_dir: str = "/opt/app",
-) -> None:
+) -> Path | None:
+    """Prepare the app in target_dir. Returns the built UI directory, if any."""
     bootstrap_settings = BootstrapSettings()
 
     # Download mode: if BUILD_ID is set, download pre-built artifact instead of building
@@ -231,7 +237,7 @@ def bootstrap_app_from_repo(
             auth_token=bootstrap_settings.auth_token,
             target_dir=target_dir,
         )
-        return
+        return None
 
     # Full bootstrap: clone and build in-place
     repo_url = bootstrap_settings.repo_url
@@ -294,7 +300,18 @@ def bootstrap_app_from_repo(
         auto_upgrade=False,
     )
     install_ui(config, settings.resolved_config_parent)
-    build_ui(settings.resolved_config_parent, config, settings)
+    return build_ui(settings.resolved_config_parent, config, settings)
+
+
+def link_ui_output(ui_output: Path | None, target_dir: str) -> None:
+    """Point target_dir/.llama-ui at the built UI directory, if one exists under target_dir."""
+    root = Path(target_dir).resolve()
+    output = ui_output.resolve() if ui_output else None
+    if output is None or not output.is_dir() or not output.is_relative_to(root):
+        return
+    link = root / UI_LINK_NAME
+    link.unlink(missing_ok=True)
+    link.symlink_to(output.relative_to(root), target_is_directory=True)
 
 
 def run_build(target_dir: str = "/opt/app") -> None:
@@ -328,10 +345,11 @@ def run_build(target_dir: str = "/opt/app") -> None:
     # clone-and-build path instead of the download-artifact shortcut.
     saved_build_id = os.environ.pop("LLAMA_DEPLOY_BUILD_ID", None)
     try:
-        bootstrap_app_from_repo(target_dir)
+        ui_output = bootstrap_app_from_repo(target_dir)
     finally:
         if saved_build_id is not None:
             os.environ["LLAMA_DEPLOY_BUILD_ID"] = saved_build_id
+    link_ui_output(ui_output, target_dir)
 
     # Step 2: Package into tarball
     tarball_path = "/tmp/build-artifact.tar.gz"

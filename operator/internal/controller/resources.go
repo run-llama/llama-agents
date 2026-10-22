@@ -57,6 +57,10 @@ const (
 	ContainerNameApp   = "app"
 	ContainerNameBuild = "build"
 
+	// UILinkName is the symlink the build writes at the app root pointing at
+	// the built UI directory. Must match UI_LINK_NAME in the appserver bootstrap.
+	UILinkName = ".llama-ui"
+
 	// Container user/group IDs
 	AppServerUID int64 = 1001
 	AppServerGID int64 = 1001
@@ -1202,18 +1206,17 @@ func (r *LlamaDeploymentReconciler) createDeploymentForLlama(llamaDeploy *llamad
 // generateNginxConfig builds the nginx.conf content for the deployment
 func (r *LlamaDeploymentReconciler) generateNginxConfig(llamaDeploy *llamadeployv1.LlamaDeployment) string {
 	basePath := fmt.Sprintf("/deployments/%s/ui", llamaDeploy.GetObjectMeta().GetName())
+	// Serve static files from /opt/app/<assetsPath>. Without a spec path, the
+	// build's own UI link is used. When it is absent (no UI, or an artifact built
+	// before the link existed), every lookup misses and python serves the UI.
 	assetsPath := llamaDeploy.Spec.StaticAssetsPath
-	var staticLocation string
-	if assetsPath != "" {
-		// Serve static files from /opt/app/<assetsPath>, fallback to python for misses
-		staticLocation = fmt.Sprintf("location %s { alias /opt/app/%s/; try_files $uri $uri/ /index.html @python_upstream; }", basePath, assetsPath)
-	} else {
-		// If not provided, proxy UI base to python
-		staticLocation = fmt.Sprintf("location %s { proxy_pass http://127.0.0.1:8080; proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection 'upgrade'; proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto $scheme; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; }", basePath)
+	if assetsPath == "" {
+		assetsPath = UILinkName
 	}
+	staticLocation := fmt.Sprintf("location %s { alias /opt/app/%s/; try_files $uri $uri/ /index.html @python_upstream; }", basePath, assetsPath)
 
-	// Everything else proxies to python on 8081; also define named upstream for try_files fallback
-	proxyLocation := "location / { proxy_pass http://127.0.0.1:8080; proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection 'upgrade'; proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto $scheme; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; }\nlocation @python_upstream { proxy_pass http://127.0.0.1:8081; proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection 'upgrade'; proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto $scheme; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; }"
+	// Everything else proxies to python on 8080; also define named upstream for try_files fallback
+	proxyLocation := "location / { proxy_pass http://127.0.0.1:8080; proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection 'upgrade'; proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto $scheme; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; }\nlocation @python_upstream { proxy_pass http://127.0.0.1:8080; proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection 'upgrade'; proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto $scheme; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; }"
 
 	return fmt.Sprintf(`pid /tmp/nginx.pid;
 worker_processes  1;

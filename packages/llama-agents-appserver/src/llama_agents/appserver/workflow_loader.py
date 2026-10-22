@@ -575,18 +575,18 @@ def _ui_env(config: DeploymentConfig, settings: ApiserverSettings) -> dict[str, 
 
 def build_ui(
     config_parent: Path, config: DeploymentConfig, settings: ApiserverSettings
-) -> bool:
+) -> Path | None:
     """
-    Returns True if the UI was built (and supports building), otherwise False if there's no build command
+    Returns the build output directory if the UI was built, otherwise None if there's no build command
     """
     if config.ui is None:
-        return False
+        return None
     path = Path(config.ui.directory)
     env = _ui_env(config, settings)
 
-    has_build = ui_build_output_path(config_parent, config)
-    if has_build is None:
-        return False
+    output = ui_build_output_path(config_parent, config)
+    if output is None:
+        return None
 
     run_process(
         ["npm", "run", "build"],
@@ -595,7 +595,7 @@ def build_ui(
         prefix="[npm run build]",
         color_code="34",
     )
-    return True
+    return config_parent / output
 
 
 def start_dev_ui_process(

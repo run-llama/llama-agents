@@ -1,12 +1,17 @@
+import os
+import tarfile
 from pathlib import Path
 from unittest import mock
 
 import pytest
 from llama_agents.appserver.bootstrap import (
+    UI_LINK_NAME,
     _artifact_exists,
+    _create_tarball,
     _download_and_extract_artifact,
     _upload_artifact,
     bootstrap_app_from_repo,
+    link_ui_output,
 )
 
 
@@ -440,3 +445,56 @@ def test_download_artifact_raises_on_503() -> None:
             _download_and_extract_artifact(
                 "host:8000", "dep1", "build1", "tok", "/tmp/test-target"
             )
+
+
+def test_link_ui_output_creates_relative_symlink(tmp_path: Path) -> None:
+    output = tmp_path / "ui" / "dist"
+    output.mkdir(parents=True)
+
+    link_ui_output(output, str(tmp_path))
+
+    link = tmp_path / UI_LINK_NAME
+    assert link.is_symlink()
+    assert os.readlink(link) == "ui/dist"
+    assert link.resolve() == output.resolve()
+
+
+def test_link_ui_output_replaces_existing_link(tmp_path: Path) -> None:
+    old = tmp_path / "old"
+    old.mkdir()
+    new = tmp_path / "new"
+    new.mkdir()
+    (tmp_path / UI_LINK_NAME).symlink_to("old")
+
+    link_ui_output(new, str(tmp_path))
+
+    assert os.readlink(tmp_path / UI_LINK_NAME) == "new"
+
+
+@pytest.mark.parametrize("output", [None, "missing", "../outside"])
+def test_link_ui_output_skips_absent_or_outside_dirs(
+    tmp_path: Path, output: str | None
+) -> None:
+    root = tmp_path / "app"
+    root.mkdir()
+    (tmp_path / "outside").mkdir()
+    ui_output = (root / output) if output else None
+
+    link_ui_output(ui_output, str(root))
+
+    assert not (root / UI_LINK_NAME).exists()
+    assert not (root / UI_LINK_NAME).is_symlink()
+
+
+def test_tarball_keeps_ui_link(tmp_path: Path) -> None:
+    src = tmp_path / "app"
+    (src / "ui" / "dist").mkdir(parents=True)
+    link_ui_output(src / "ui" / "dist", str(src))
+    tarball = tmp_path / "artifact.tar"
+
+    _create_tarball(str(src), str(tarball))
+
+    with tarfile.open(tarball) as tf:
+        member = tf.getmember(f"./{UI_LINK_NAME}")
+    assert member.issym()
+    assert member.linkname == "ui/dist"
