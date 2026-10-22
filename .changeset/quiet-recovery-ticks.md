@@ -2,4 +2,4 @@
 "llama-agents-dbos": patch
 ---
 
-Avoid repeating completed tick writes during DBOS recovery so workflows can resume after idle release.
+Keep idle-release background operations out of workflow replay and avoid repeating completed tick writes during DBOS recovery.

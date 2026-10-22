@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Coroutine
+from contextvars import copy_context
 from datetime import datetime, timezone
 from typing import Any
 
@@ -53,6 +54,7 @@ from workflows.runtime.types.ticks import (
 from workflows.workflow import Workflow
 
 from dbos import DBOS
+from dbos._context import _clear_local_dbos_context
 from dbos._error import DBOSNonExistentWorkflowError
 
 logger = logging.getLogger(__name__)
@@ -209,7 +211,11 @@ class DBOSIdleReleaseDecorator(BaseRuntimeDecorator):
         super().untrack_workflow(workflow)
 
     def _spawn_task(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
-        task = asyncio.create_task(coro)
+        # Timers and completion observers are not workflow operations. Inheriting
+        # DBOS context would let their API calls mutate the replay sequence.
+        context = copy_context()
+        context.run(_clear_local_dbos_context)
+        task = context.run(lambda: asyncio.create_task(coro))
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
         return task

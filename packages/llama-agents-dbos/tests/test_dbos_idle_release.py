@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from dbos._context import DBOSContext, _set_local_dbos_context, get_local_dbos_context
 from llama_agents.dbos.idle_release import (
     CRASH_TIMEOUT_SECONDS,
     DBOSIdleReleaseDecorator,
@@ -1256,3 +1258,28 @@ async def test_deferred_release_fires_after_timeout(
     assert state is not None
     # After deferred release fires, the handler goes through releasing -> released
     assert state[0] in (RunLifecycleState.releasing, RunLifecycleState.released)
+
+
+@pytest.mark.asyncio
+async def test_background_release_does_not_inherit_workflow_context(
+    decorator: DBOSIdleReleaseDecorator,
+) -> None:
+    request_tag: ContextVar[str] = ContextVar("request_tag")
+    tag_token = request_tag.set("keep-tracing")
+    previous = get_local_dbos_context()
+    workflow_context = DBOSContext()
+    workflow_context.workflow_id = "recovering-workflow"
+    _set_local_dbos_context(workflow_context)
+
+    async def background() -> None:
+        # Release timers call DBOS APIs, but must not consume the parent
+        # workflow's function IDs or add operations to its replay history.
+        assert get_local_dbos_context() is None
+        assert request_tag.get() == "keep-tracing"
+
+    try:
+        await decorator._spawn_task(background())
+        assert get_local_dbos_context() is workflow_context
+    finally:
+        _set_local_dbos_context(previous)
+        request_tag.reset(tag_token)
