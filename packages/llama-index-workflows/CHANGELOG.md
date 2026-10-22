@@ -1,5 +1,27 @@
 # llama-index-workflows
 
+## 2.26.1
+
+### Patch Changes
+
+- f4412c5: Collapse a state diff to one replace when its ops would be larger than the value they describe
+- 656b3fc: Fail the run when a retry policy raises instead of waiting for the step timeout
+- cdc529f: Don't emit WorkflowIdleEvent while events sent with ctx.send_event() are still waiting to be delivered
+- f3528e8: Build error-handler routing from current steps even when graph validation is disabled.
+- 9c09621: Expose the committed state model on StateCheckpoint
+
+## 2.26.0
+
+### Minor Changes
+
+- 0811964: Add a journal and restore API to BasicRuntime
+- f183c77: Add BasicRuntime.state_checkpoint, which returns a cheap state checkpoint that can diff against an earlier one as a JSON Patch.
+
+### Patch Changes
+
+- 27e31c3: Deliver every event a step returns or sends exactly once when a run resumes from any snapshot or journal position
+- 1943734: Rewind in-progress work when replaying a tick journal that spans a resume
+
 ## 2.25.0
 
 ### Minor Changes

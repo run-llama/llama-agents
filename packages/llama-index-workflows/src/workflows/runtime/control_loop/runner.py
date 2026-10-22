@@ -47,6 +47,7 @@ from workflows.runtime.types.plugin import (
 from workflows.runtime.types.results import (
     RetryAttempt,
     RetryDecision,
+    SentEvent,
     StepFunctionResult,
     StepWorkerFailed,
     StepWorkerResult,
@@ -72,7 +73,6 @@ if TYPE_CHECKING:
 from workflows.runtime.control_loop.reduce import (
     _decide_retry_delay,
     _reduce_tick,
-    rewind_in_progress,
 )
 
 logger = logging.getLogger("workflows.runtime.control_loop")
@@ -213,7 +213,7 @@ class _ControlLoopRunner:
                     (
                         w
                         for w in broker.workers[command.step_id].in_progress
-                        if w.worker_id == command.id
+                        if w.invocation_id == command.invocation_id
                     ),
                     None,
                 )
@@ -224,7 +224,7 @@ class _ControlLoopRunner:
                 snapshot = worker.shared_state
                 step_fn: StepWorkerFunction = self.step_workers[step_name]
 
-                result = await step_fn(
+                output = await step_fn(
                     state=snapshot,
                     step_name=step_name,
                     event=command.event,
@@ -238,6 +238,13 @@ class _ControlLoopRunner:
                         recovery_counts=dict(worker.recovery_counts),
                     ),
                 )
+                result: list[StepFunctionResult] = []
+                sends: list[SentEvent] = []
+                for item in output:
+                    if isinstance(item, SentEvent):
+                        sends.append(item)
+                    else:
+                        result.append(item)
                 # Return result for main loop to process
                 return TickStepResult(
                     step_id=command.step_id,
@@ -250,6 +257,8 @@ class _ControlLoopRunner:
                         worker,
                         result,
                     ),
+                    invocation_id=command.invocation_id,
+                    sends=sends,
                 )
             except Exception as e:
                 if _is_shutdown_error(e):
@@ -272,6 +281,7 @@ class _ControlLoopRunner:
                         worker,
                         [failed],
                     ),
+                    invocation_id=command.invocation_id,
                 )
 
         self._pending_workers.append(
@@ -308,20 +318,36 @@ class _ControlLoopRunner:
         out: list[StepFunctionResult] = []
         for result in results:
             if isinstance(result, StepWorkerFailed) and result.retry_decision is None:
-                delay = _decide_retry_delay(
-                    policy,
-                    elapsed_time=result.failed_at - worker.first_attempt_at,
-                    failures=worker.attempts + 1,
-                    exception=result.exception,
-                    run_id=self.adapter.run_id,
-                    step_name=step_name,
-                )
-                result = result.model_copy(
-                    update={
-                        "retry_decision": RetryDecision(delay=delay),
-                        "first_attempt_at": worker.first_attempt_at,
-                    }
-                )
+                try:
+                    delay = _decide_retry_delay(
+                        policy,
+                        elapsed_time=result.failed_at - worker.first_attempt_at,
+                        failures=worker.attempts + 1,
+                        exception=result.exception,
+                        run_id=self.adapter.run_id,
+                        step_name=step_name,
+                    )
+                except Exception as policy_error:
+                    # A policy that raises cannot decide. Journal a stop
+                    # decision carrying the policy's own error so the tick is
+                    # written and the run fails the way an exhausted policy
+                    # fails it, instead of the worker task dying unobserved
+                    # and the step staying in progress until the timeout.
+                    policy_error.__cause__ = result.exception
+                    result = result.model_copy(
+                        update={
+                            "retry_decision": RetryDecision(delay=None),
+                            "first_attempt_at": worker.first_attempt_at,
+                            "exception": policy_error,
+                        }
+                    )
+                else:
+                    result = result.model_copy(
+                        update={
+                            "retry_decision": RetryDecision(delay=delay),
+                            "first_attempt_at": worker.first_attempt_at,
+                        }
+                    )
             out.append(result)
         return out
 
@@ -335,6 +361,7 @@ class _ControlLoopRunner:
                     origin_namespace=command.origin_namespace,
                     recovery_counts=dict(command.recovery_counts),
                     scope_path=command.scope_path,
+                    emission=command.emission,
                 )
             )
             return None
@@ -430,8 +457,10 @@ class _ControlLoopRunner:
 
         start = await self.adapter.get_now()
         # Journal a session-start marker at every run()/resume. It marks the
-        # alive-session boundary so downtime never accrues. It leads the journal
-        # so replay sees the boundary before any work of this session.
+        # alive-session boundary so downtime never accrues, and the reducer
+        # rewinds in-progress work from the previous session when it sees it. It
+        # leads the journal so replay sees the boundary before any work of this
+        # session.
         self.tick_buffer.insert(0, TickSessionStart(stamped_at=start))
 
         # Queue initial event
@@ -450,15 +479,6 @@ class _ControlLoopRunner:
                 self.tick_buffer.insert(1, timeout_tick)
             else:
                 self.schedule_tick(timeout_tick, at_time=start + remaining)
-
-        # Resume any in-progress work
-        self.state, commands = rewind_in_progress(self.state, start)
-        for command in commands:
-            try:
-                await self.process_command(command)
-            except Exception:
-                await self.cleanup_tasks()
-                raise
 
         # Initialize pull task (single-iteration)
         pull_task: asyncio.Task[list[WorkflowTick]] | None = None

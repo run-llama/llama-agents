@@ -16,11 +16,12 @@ from pydantic import ValidationError
 
 if TYPE_CHECKING:  # pragma: no cover
     from .context import Context
+    from .runtime.types.internal_state import BrokerConfig
     from .runtime.types.plugin import Runtime
 from workflows.context.serializers import BaseSerializer
 
 from ._event_matching import step_accepts_event
-from .decorators import CatchErrorHandler, StepConfig, StepFunction, WorkflowGraphCheck
+from .decorators import StepConfig, StepFunction, WorkflowGraphCheck
 from .errors import (
     WorkflowRuntimeError,
     WorkflowValidationError,
@@ -117,7 +118,8 @@ class Workflow(metaclass=WorkflowMeta):
                 the interval after the last processed tick before a crash do
                 not count. `None` disables the timeout.
             disable_validation (bool): Skip pre-run validation of the event graph
-                (not recommended).
+                (not recommended). Runtime configuration, including unambiguous
+                error-handler routing, is still required.
             verbose (bool): If True, print step activity.
             resource_manager (ResourceManager | None): Custom resource manager
                 for dependency injection.
@@ -172,9 +174,6 @@ class Workflow(metaclass=WorkflowMeta):
         # Detect StartEvent issues before StopEvent for clearer guidance
         self._start_event_class = _ensure_start_event_class(step_configs, cls_name)
         self._stop_event_class = _ensure_stop_event_class(step_configs, cls_name)
-        # Populated by _validate(); empty until a successful validation runs.
-        self._catch_error_handlers: dict[str, CatchErrorHandler] = {}
-        self._handler_for_step: dict[str, str] = {}
         self._events = _collect_events(step_configs)
         # Resource management
         self._resource_manager = resource_manager or ResourceManager()
@@ -185,6 +184,8 @@ class Workflow(metaclass=WorkflowMeta):
         # _validated_version tracks which _step_functions_version was validated so add_step() invalidates the cache.
         self._validation_result: bool | None = None
         self._validated_version: int = -1
+        self._broker_config: BrokerConfig | None = None
+        self._broker_config_version: int = -1
         checks = skip_graph_checks or set()
         valid_checks = set(get_args(WorkflowGraphCheck))
         unknown = checks - valid_checks
@@ -271,6 +272,19 @@ class Workflow(metaclass=WorkflowMeta):
     def _step_configs(self) -> dict[str, StepConfig]:
         """Return ``{step_name: StepConfig}`` for every registered step."""
         return {name: func._step_config for name, func in self._get_steps().items()}
+
+    def _get_broker_config(self) -> BrokerConfig:
+        """Cache runtime configuration per step version, without running validation."""
+        # Inline import: internal_state imports Workflow for broker restoration.
+        from .runtime.types.internal_state import BrokerConfig
+
+        version = self.__class__._step_functions_version
+        if self._broker_config is None or self._broker_config_version != version:
+            self._broker_config = BrokerConfig.from_steps(
+                self._step_configs(), self._timeout
+            )
+            self._broker_config_version = version
+        return self._broker_config
 
     @property
     def start_event_class(self) -> type[StartEvent]:
@@ -491,8 +505,6 @@ class Workflow(metaclass=WorkflowMeta):
         )
         self._start_event_class = result.start_event_class
         self._stop_event_class = result.stop_event_class
-        self._catch_error_handlers = result.catch_error_handlers
-        self._handler_for_step = result.handler_for_step
 
         if validate_resource_configs:
             if errors := _validate_resource_configs(step_configs):

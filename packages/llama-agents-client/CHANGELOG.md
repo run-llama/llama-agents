@@ -1,5 +1,17 @@
 # llama-agents-client
 
+## 0.4.1
+
+### Patch Changes
+
+- 2496c67: Serialize typed start events as JSON when running workflows synchronously
+- Updated dependencies [f4412c5]
+- Updated dependencies [656b3fc]
+- Updated dependencies [cdc529f]
+- Updated dependencies [f3528e8]
+- Updated dependencies [9c09621]
+  - llama-index-workflows@2.26.1
+
 ## 0.4.0
 
 ### Minor Changes

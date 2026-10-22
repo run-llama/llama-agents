@@ -106,6 +106,25 @@ class SerializedEventAttempt(BaseModel):
     work_item_id: str | None = None
 
 
+class SerializedInProgressAttempt(SerializedEventAttempt):
+    """A saved invocation that stays in progress when loaded.
+
+    Keeping its ``invocation_id`` lets the reducer apply sends and results
+    recorded after the snapshot. Older entries have no ID and are queued
+    again on load.
+    """
+
+    worker_id: int | None = None
+    # Older snapshots have no invocation ID.
+    invocation_id: str | None = None
+    # Indexes of sends already routed for this invocation.
+    received: list[int] = Field(default_factory=list)
+    # Collect buffers at dispatch time.
+    collected_events: dict[str, list[str]] = Field(default_factory=dict)
+    # Buffer counters at dispatch time.
+    collect_generations: dict[str, int] = Field(default_factory=dict)
+
+
 class SerializedCollectionReleasePayload(BaseModel):
     """Serialized list-collect invocation payload."""
 
@@ -156,16 +175,29 @@ class SerializedStepWorkerState(BaseModel):
 
     # Queue of events waiting to be processed (with retry info)
     queue: list[SerializedEventAttempt] = Field(default_factory=list)
-    # Events currently being processed. Serialized with full retry + stream scope
-    # so a resumed run re-queues them without losing collection liveness.
-    in_progress: list[SerializedEventAttempt] = Field(default_factory=list)
+    # Keep invocation IDs so replay can apply later sends and results.
+    # Entries without IDs are queued again on load.
+    in_progress: list[SerializedInProgressAttempt] = Field(default_factory=list)
     # Collected events for ctx.collect_events(), keyed by buffer_id -> [event, ...]
     # Events are serialized strings
     collected_events: dict[str, list[str]] = Field(default_factory=dict)
+    # Each append or clear bumps the buffer counter.
+    collect_generations: dict[str, int] = Field(default_factory=dict)
     # Pending static multi-parameter fan-in events.
     static_collect_events: list[str] = Field(default_factory=list)
     # Active waiters created by ctx.wait_for_event()
     collected_waiters: list[SerializedWaiter] = Field(default_factory=list)
+
+
+class SerializedDelivery(BaseModel):
+    """A saved event awaiting delivery, identified by its emission key."""
+
+    invocation_id: str
+    index: int
+    event: str
+    step_id: str | None = None
+    recovery_counts: dict[str, int] = Field(default_factory=dict)
+    scope_path: list[str] = Field(default_factory=list)
 
 
 class SerializedCollectionStreamInstance(BaseModel):
@@ -212,6 +244,10 @@ class SerializedContext(BaseModel):
     # Monotonic work-item counter. Persisted so implicit waiter ids remain
     # stable and unique across serialize/resume boundaries.
     work_item_seq: int = Field(default=0)
+    # Save the counter so replay assigns the same invocation IDs.
+    invocation_seq: int = Field(default=0)
+    # Resume re-emits pending deliveries in insertion order.
+    deliveries: list[SerializedDelivery] = Field(default_factory=list)
     streams: dict[str, SerializedCollectionStreamInstance] = Field(default_factory=dict)
     collection_release_states: dict[str, SerializedCollectionReleaseState] = Field(
         default_factory=dict
@@ -224,6 +260,8 @@ class SerializedContext(BaseModel):
     # persisted value is informational.
     elapsed_alive: float = Field(default=0.0)
     last_alive_stamp: float | None = Field(default=None)
+    # Count of reduced ticks. The next journal record uses this sequence number.
+    journal_seq: int = Field(default=0)
 
     @staticmethod
     def from_v0(v0: SerializedContextV0) -> "SerializedContext":
