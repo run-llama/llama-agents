@@ -1,5 +1,7 @@
 ---
+"llama-agents-appserver": patch
 "llama-agents-control-plane": patch
-"llama-agents-core": patch
+"llama-agents-operator": patch
+"llama-agents-crds": patch
 ---
-Discover built UI asset paths for pushed code so nginx can serve deployment UIs directly.
+Record the built UI path with each build artifact so nginx serves the UI for pushed deployments.

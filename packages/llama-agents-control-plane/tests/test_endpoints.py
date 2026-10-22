@@ -5,7 +5,7 @@ from collections.abc import AsyncGenerator
 from datetime import datetime
 from importlib.metadata import version as pkg_version
 from typing import Generator
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -510,15 +510,12 @@ def test_update_deployment_suspend_skips_git_validation(
 @patch(
     "llama_agents.control_plane.manage_api.deployments_service.git_service.validate_git_application"
 )
-@patch("llama_agents.control_plane.manage_api.deployments_service.code_repo_storage")
 def test_update_deployment_internal_repo_skips_git_validation(
-    mock_storage: MagicMock,
     mock_validate: MagicMock,
     mock_get_deployment: MagicMock,
     mock_update_deployment: MagicMock,
 ) -> None:
     """Test that updating a deployment with internal:// repo skips git validation."""
-    mock_storage.get_ui_build_output_path = AsyncMock(return_value=None)
     mock_get_deployment.return_value = DeploymentResponse(
         id="test-deploy",
         display_name="test-deploy",
@@ -562,15 +559,12 @@ def test_update_deployment_internal_repo_skips_git_validation(
 @patch(
     "llama_agents.control_plane.manage_api.deployments_service.git_service.validate_git_application"
 )
-@patch("llama_agents.control_plane.manage_api.deployments_service.code_repo_storage")
 def test_update_deployment_empty_repo_url_preserves_internal(
-    mock_storage: MagicMock,
     mock_validate: MagicMock,
     mock_get_deployment: MagicMock,
     mock_update_deployment: MagicMock,
 ) -> None:
     """Empty repo_url in update should not overwrite an existing internal:// value."""
-    mock_storage.get_ui_build_output_path = AsyncMock(return_value=None)
     mock_get_deployment.return_value = DeploymentResponse(
         id="test-deploy",
         display_name="test-deploy",

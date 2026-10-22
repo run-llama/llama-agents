@@ -25,7 +25,7 @@ func TestGenerateNginxConfig_StaticAndProxy(t *testing.T) {
 		Spec:       llamadeployv1.LlamaDeploymentSpec{StaticAssetsPath: "frontend/dist"},
 	}
 
-	conf := (&LlamaDeploymentReconciler{}).generateNginxConfig(ld)
+	conf := (&LlamaDeploymentReconciler{}).generateNginxConfig(ld, "")
 	if !strings.Contains(conf, "location /deployments/demo/ui {") {
 		t.Fatalf("expected UI base location, got: %s", conf)
 	}

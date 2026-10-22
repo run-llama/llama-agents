@@ -10,6 +10,7 @@ Supports two modes of operation:
   and uploads it to the Build API for S3 storage.
 """
 
+import json
 import logging
 import os
 import tarfile
@@ -35,6 +36,12 @@ from llama_agents.appserver.workflow_loader import (
 from llama_agents.core.git.git_util import clone_repo_sync as clone_repo
 
 logger = logging.getLogger(__name__)
+
+# The build reports where its UI output landed, as a JSON string relative to the
+# app root ("" when nothing was built). The Build API stores it with the artifact,
+# and the operator reads it from the build pod's termination message.
+STATIC_ASSETS_PATH_HEADER = "X-Static-Assets-Path"
+TERMINATION_LOG = Path("/dev/termination-log")
 
 
 def _extract_filter(member: tarfile.TarInfo, dest_path: str) -> tarfile.TarInfo:
@@ -135,13 +142,13 @@ def _create_tarball(source_dir: str, output_path: str) -> None:
         tf.add(source_dir, arcname=".", filter=_tar_filter)
 
 
-def _artifact_exists(
+def _find_artifact(
     build_api_host: str,
     deployment_name: str,
     build_id: str,
     auth_token: str,
-) -> bool:
-    """Check if a build artifact already exists in S3 via the Build API."""
+) -> httpx.Headers | None:
+    """Return the artifact's headers if it already exists in S3, else None."""
     url = f"http://{build_api_host}/deployments/{deployment_name}/builds/{build_id}"
     try:
         response = httpx.head(
@@ -155,16 +162,16 @@ def _artifact_exists(
                 "Ensure S3_BUCKET is set."
             )
         if response.status_code == 404:
-            return False
+            return None
         if response.status_code == 200:
-            return True
+            return response.headers
         # Unexpected status — treat as an error
         raise RuntimeError(
             f"Unexpected status {response.status_code} checking artifact existence"
         )
     except httpx.HTTPError:
         logger.debug("Artifact existence check failed, will proceed with build")
-        return False
+        return None
 
 
 def _upload_artifact(
@@ -173,6 +180,7 @@ def _upload_artifact(
     build_id: str,
     auth_token: str,
     tarball_path: str,
+    static_assets_path: str,
 ) -> None:
     """Upload a build artifact tarball to the Build API (streamed from disk)."""
     url = f"http://{build_api_host}/deployments/{deployment_name}/builds/{build_id}"
@@ -190,6 +198,7 @@ def _upload_artifact(
                 "Authorization": f"Bearer {auth_token}",
                 "Content-Type": "application/x-tar",
                 "Content-Length": str(size_bytes),
+                STATIC_ASSETS_PATH_HEADER: static_assets_path,
             },
             timeout=600.0,  # 10 minute timeout for large artifacts
         )
@@ -204,7 +213,8 @@ def _upload_artifact(
 
 def bootstrap_app_from_repo(
     target_dir: str = "/opt/app",
-) -> None:
+) -> Path | None:
+    """Prepare the app in target_dir. Returns the built UI directory, if any."""
     bootstrap_settings = BootstrapSettings()
 
     # Download mode: if BUILD_ID is set, download pre-built artifact instead of building
@@ -231,7 +241,7 @@ def bootstrap_app_from_repo(
             auth_token=bootstrap_settings.auth_token,
             target_dir=target_dir,
         )
-        return
+        return None
 
     # Full bootstrap: clone and build in-place
     repo_url = bootstrap_settings.repo_url
@@ -294,7 +304,16 @@ def bootstrap_app_from_repo(
         auto_upgrade=False,
     )
     install_ui(config, settings.resolved_config_parent)
-    build_ui(settings.resolved_config_parent, config, settings)
+    return build_ui(settings.resolved_config_parent, config, settings)
+
+
+def _static_assets_path(ui_output: Path | None, target_dir: str) -> str:
+    """JSON-encode the built UI directory relative to target_dir, or "" if none."""
+    root = Path(target_dir).resolve()
+    output = ui_output.resolve() if ui_output else None
+    if output is None or not output.is_dir() or not output.is_relative_to(root):
+        return json.dumps("")
+    return json.dumps(output.relative_to(root).as_posix())
 
 
 def run_build(target_dir: str = "/opt/app") -> None:
@@ -319,8 +338,12 @@ def run_build(target_dir: str = "/opt/app") -> None:
     logger.info("Starting build: deployment=%s build_id=%s", deployment_name, build_id)
 
     # Step 0: Check if the artifact already exists in S3 — skip the build if so
-    if _artifact_exists(build_api_host, deployment_name, build_id, auth_token):
+    existing = _find_artifact(build_api_host, deployment_name, build_id, auth_token)
+    if existing is not None:
         logger.info("Artifact already exists, skipping build: build_id=%s", build_id)
+        # Artifacts uploaded before this metadata existed report nothing.
+        if STATIC_ASSETS_PATH_HEADER in existing:
+            TERMINATION_LOG.write_text(existing[STATIC_ASSETS_PATH_HEADER])
         return
 
     # Step 1: Run the standard bootstrap (clone, install deps, build UI).
@@ -328,10 +351,12 @@ def run_build(target_dir: str = "/opt/app") -> None:
     # clone-and-build path instead of the download-artifact shortcut.
     saved_build_id = os.environ.pop("LLAMA_DEPLOY_BUILD_ID", None)
     try:
-        bootstrap_app_from_repo(target_dir)
+        ui_output = bootstrap_app_from_repo(target_dir)
     finally:
         if saved_build_id is not None:
             os.environ["LLAMA_DEPLOY_BUILD_ID"] = saved_build_id
+
+    static_assets_path = _static_assets_path(ui_output, target_dir)
 
     # Step 2: Package into tarball
     tarball_path = "/tmp/build-artifact.tar.gz"
@@ -344,7 +369,9 @@ def run_build(target_dir: str = "/opt/app") -> None:
         build_id=build_id,
         auth_token=auth_token,
         tarball_path=tarball_path,
+        static_assets_path=static_assets_path,
     )
+    TERMINATION_LOG.write_text(static_assets_path)
 
     logger.info("Build completed successfully: build_id=%s", build_id)
 

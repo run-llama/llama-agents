@@ -346,9 +346,8 @@ class DeploymentUpdate(Base):
         default=None,
         description="Secret updates: string values add/update, null values remove",
     )
-    static_assets_path: Path | Literal[""] | None = Field(
-        default=None,
-        description="Path to prebuilt UI assets (set by service layer). Empty string clears it.",
+    static_assets_path: Path | None = Field(
+        default=None, description="Path to prebuilt UI assets (set by service layer)"
     )
     appserver_version: AppserverVersionField = Field(
         default=None, description="Updated appserver version selector"
@@ -468,7 +467,7 @@ def apply_deployment_update(
         updated_spec.gitSha = None if update.git_sha == "" else update.git_sha
 
     if update.static_assets_path is not None:
-        updated_spec.staticAssetsPath = str(update.static_assets_path) or None
+        updated_spec.staticAssetsPath = str(update.static_assets_path)
 
     # Track secret changes
     secret_adds: dict[str, str] = {}

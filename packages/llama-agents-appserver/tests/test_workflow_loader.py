@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 LlamaIndex Inc.
 from __future__ import annotations
 
 import os
@@ -60,7 +62,7 @@ def test_build_ui_sets_env_and_calls_pnpm(
         mock.patch("llama_agents.appserver.workflow_loader.run_process") as run,
     ):
         run.side_effect = lambda *a, **k: None
-        build_ui(tmp_path, cfg, api_settings)
+        assert build_ui(tmp_path, cfg, api_settings) == ui_root / "dist"
 
         # Validate call
         call = run.call_args
