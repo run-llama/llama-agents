@@ -3252,8 +3252,8 @@ var _ = Describe("LlamaDeployment Controller", func() {
 				Expect(nginxConf).To(ContainSubstring("try_files $uri $uri/ /index.html @python_upstream;"))
 				// Everything else proxies to python app
 				Expect(nginxConf).To(ContainSubstring("location / { proxy_pass http://127.0.0.1:8080;"))
-				// Named upstream for fallback proxies to 8081
-				Expect(nginxConf).To(ContainSubstring("location @python_upstream { proxy_pass http://127.0.0.1:8081;"))
+				// Named upstream for fallback proxies to the python app
+				Expect(nginxConf).To(ContainSubstring("location @python_upstream { proxy_pass http://127.0.0.1:8080;"))
 
 				// Verify deployment uses ConfigMap mount
 				deployment := GetDeploymentEventually(ctx, testName, testNamespace)
@@ -3284,7 +3284,7 @@ var _ = Describe("LlamaDeployment Controller", func() {
 				Expect(nginxConfigVolumeFound).To(BeTrue(), "nginx-config volume should be present")
 			})
 
-			It("should proxy UI base when StaticAssetsPath is not set", func() {
+			It("should serve the build UI link when StaticAssetsPath is not set", func() {
 				testName := "test-nginx-proxy-ui"
 
 				ld := &llamadeployv1.LlamaDeployment{
@@ -3310,13 +3310,10 @@ var _ = Describe("LlamaDeployment Controller", func() {
 				configMap := GetConfigMapEventually(ctx, testName+"-nginx-config", testNamespace)
 				Expect(configMap.Data).To(HaveKey("nginx.conf"))
 				nginxConf := configMap.Data["nginx.conf"]
-				// Should not include an alias when assets path is unset
-				Expect(strings.Contains(nginxConf, "alias /opt/app/")).To(BeFalse())
-				// UI base should proxy directly to python app
-				Expect(nginxConf).To(ContainSubstring("location /deployments/" + testName + "/ui { proxy_pass http://127.0.0.1:8080;"))
-				// Everything else proxies to python app, and named upstream to 8081 exists
+				// UI base serves the build's UI link, falling back to the python app
+				Expect(nginxConf).To(ContainSubstring("location /deployments/" + testName + "/ui { alias /opt/app/.llama-ui/;"))
 				Expect(nginxConf).To(ContainSubstring("location / { proxy_pass http://127.0.0.1:8080;"))
-				Expect(nginxConf).To(ContainSubstring("location @python_upstream { proxy_pass http://127.0.0.1:8081;"))
+				Expect(nginxConf).To(ContainSubstring("location @python_upstream { proxy_pass http://127.0.0.1:8080;"))
 
 				// Verify deployment uses ConfigMap mount
 				deployment := GetDeploymentEventually(ctx, testName, testNamespace)

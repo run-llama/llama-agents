@@ -1,19 +1,17 @@
-# SPDX-License-Identifier: MIT
-# Copyright (c) 2026 LlamaIndex Inc.
-from __future__ import annotations
-
+import os
+import tarfile
 from pathlib import Path
 from unittest import mock
 
-import httpx
 import pytest
-from llama_agents.appserver import bootstrap
 from llama_agents.appserver.bootstrap import (
+    UI_LINK_NAME,
+    _artifact_exists,
+    _create_tarball,
     _download_and_extract_artifact,
-    _find_artifact,
     _upload_artifact,
     bootstrap_app_from_repo,
-    run_build,
+    link_ui_output,
 )
 
 
@@ -294,105 +292,23 @@ def _write_minimal_deployment_config(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_find_artifact_raises_on_503() -> None:
+def test_artifact_exists_raises_on_503() -> None:
     resp = mock.Mock(status_code=503)
     with mock.patch("llama_agents.appserver.bootstrap.httpx.head", return_value=resp):
         with pytest.raises(RuntimeError, match="Build artifact storage not configured"):
-            _find_artifact("host:8000", "dep1", "build1", "tok")
+            _artifact_exists("host:8000", "dep1", "build1", "tok")
 
 
-def test_find_artifact_returns_none_on_404() -> None:
+def test_artifact_exists_returns_false_on_404() -> None:
     resp = mock.Mock(status_code=404)
     with mock.patch("llama_agents.appserver.bootstrap.httpx.head", return_value=resp):
-        assert _find_artifact("host:8000", "dep1", "build1", "tok") is None
+        assert _artifact_exists("host:8000", "dep1", "build1", "tok") is False
 
 
-def test_find_artifact_returns_headers_on_200() -> None:
-    headers = httpx.Headers({"X-Static-Assets-Path": '"ui/dist"'})
-    resp = mock.Mock(status_code=200, headers=headers)
+def test_artifact_exists_returns_true_on_200() -> None:
+    resp = mock.Mock(status_code=200)
     with mock.patch("llama_agents.appserver.bootstrap.httpx.head", return_value=resp):
-        assert _find_artifact("host:8000", "dep1", "build1", "tok") is headers
-
-
-@pytest.fixture
-def build_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, mock.Mock]:
-    """Run run_build against tmp_path with network and tarball steps stubbed."""
-    monkeypatch.setenv("LLAMA_DEPLOY_BUILD_ID", "build1")
-    monkeypatch.setenv("LLAMA_DEPLOY_BUILD_API_HOST", "host:8000")
-    monkeypatch.setenv("LLAMA_DEPLOY_AUTH_TOKEN", "tok")
-    monkeypatch.setenv("LLAMA_DEPLOY_DEPLOYMENT_NAME", "dep1")
-    monkeypatch.setattr(bootstrap, "TERMINATION_LOG", tmp_path / "termination-log")
-    mocks: dict[str, mock.Mock] = {}
-    for name in [
-        "setup_logging",
-        "_find_artifact",
-        "bootstrap_app_from_repo",
-        "_create_tarball",
-        "_upload_artifact",
-    ]:
-        mocks[name] = mock.Mock(return_value=None)
-        monkeypatch.setattr(bootstrap, name, mocks[name])
-    return mocks
-
-
-def _termination_message(tmp_path: Path) -> str | None:
-    log = tmp_path / "termination-log"
-    return log.read_text() if log.exists() else None
-
-
-def test_run_build_reports_built_ui_path(
-    build_env: dict[str, mock.Mock], tmp_path: Path
-) -> None:
-    app_dir = tmp_path / "app"
-    (app_dir / "src" / "ui" / "dist").mkdir(parents=True)
-    build_env["bootstrap_app_from_repo"].return_value = app_dir / "src/ui/dist"
-
-    run_build(str(app_dir))
-
-    upload = build_env["_upload_artifact"].call_args.kwargs
-    assert upload["static_assets_path"] == '"src/ui/dist"'
-    assert _termination_message(tmp_path) == '"src/ui/dist"'
-
-
-@pytest.mark.parametrize("ui_output", [None, "missing/dist"])
-def test_run_build_reports_empty_path_without_built_ui(
-    build_env: dict[str, mock.Mock], tmp_path: Path, ui_output: str | None
-) -> None:
-    app_dir = tmp_path / "app"
-    app_dir.mkdir()
-    build_env["bootstrap_app_from_repo"].return_value = (
-        app_dir / ui_output if ui_output else None
-    )
-
-    run_build(str(app_dir))
-
-    assert build_env["_upload_artifact"].call_args.kwargs["static_assets_path"] == '""'
-    assert _termination_message(tmp_path) == '""'
-
-
-def test_run_build_cache_hit_reports_stored_path(
-    build_env: dict[str, mock.Mock], tmp_path: Path
-) -> None:
-    build_env["_find_artifact"].return_value = httpx.Headers(
-        {"X-Static-Assets-Path": '"ui/dist"'}
-    )
-
-    run_build(str(tmp_path / "app"))
-
-    build_env["bootstrap_app_from_repo"].assert_not_called()
-    build_env["_upload_artifact"].assert_not_called()
-    assert _termination_message(tmp_path) == '"ui/dist"'
-
-
-def test_run_build_cache_hit_without_metadata_reports_nothing(
-    build_env: dict[str, mock.Mock], tmp_path: Path
-) -> None:
-    build_env["_find_artifact"].return_value = httpx.Headers()
-
-    run_build(str(tmp_path / "app"))
-
-    build_env["bootstrap_app_from_repo"].assert_not_called()
-    assert _termination_message(tmp_path) is None
+        assert _artifact_exists("host:8000", "dep1", "build1", "tok") is True
 
 
 def test_upload_artifact_raises_on_503(tmp_path: Path) -> None:
@@ -401,7 +317,7 @@ def test_upload_artifact_raises_on_503(tmp_path: Path) -> None:
     resp = mock.Mock(status_code=503)
     with mock.patch("llama_agents.appserver.bootstrap.httpx.put", return_value=resp):
         with pytest.raises(RuntimeError, match="Build artifact storage not configured"):
-            _upload_artifact("host:8000", "dep1", "build1", "tok", str(tarball), '""')
+            _upload_artifact("host:8000", "dep1", "build1", "tok", str(tarball))
 
 
 def test_bootstrap_discards_sdists_when_version_mismatch(
@@ -529,3 +445,56 @@ def test_download_artifact_raises_on_503() -> None:
             _download_and_extract_artifact(
                 "host:8000", "dep1", "build1", "tok", "/tmp/test-target"
             )
+
+
+def test_link_ui_output_creates_relative_symlink(tmp_path: Path) -> None:
+    output = tmp_path / "ui" / "dist"
+    output.mkdir(parents=True)
+
+    link_ui_output(output, str(tmp_path))
+
+    link = tmp_path / UI_LINK_NAME
+    assert link.is_symlink()
+    assert os.readlink(link) == "ui/dist"
+    assert link.resolve() == output.resolve()
+
+
+def test_link_ui_output_replaces_existing_link(tmp_path: Path) -> None:
+    old = tmp_path / "old"
+    old.mkdir()
+    new = tmp_path / "new"
+    new.mkdir()
+    (tmp_path / UI_LINK_NAME).symlink_to("old")
+
+    link_ui_output(new, str(tmp_path))
+
+    assert os.readlink(tmp_path / UI_LINK_NAME) == "new"
+
+
+@pytest.mark.parametrize("output", [None, "missing", "../outside"])
+def test_link_ui_output_skips_absent_or_outside_dirs(
+    tmp_path: Path, output: str | None
+) -> None:
+    root = tmp_path / "app"
+    root.mkdir()
+    (tmp_path / "outside").mkdir()
+    ui_output = (root / output) if output else None
+
+    link_ui_output(ui_output, str(root))
+
+    assert not (root / UI_LINK_NAME).exists()
+    assert not (root / UI_LINK_NAME).is_symlink()
+
+
+def test_tarball_keeps_ui_link(tmp_path: Path) -> None:
+    src = tmp_path / "app"
+    (src / "ui" / "dist").mkdir(parents=True)
+    link_ui_output(src / "ui" / "dist", str(src))
+    tarball = tmp_path / "artifact.tar"
+
+    _create_tarball(str(src), str(tarball))
+
+    with tarfile.open(tarball) as tf:
+        member = tf.getmember(f"./{UI_LINK_NAME}")
+    assert member.issym()
+    assert member.linkname == "ui/dist"

@@ -13,9 +13,6 @@ from llama_agents.control_plane.storage import S3ObjectStorage
 
 logger = logging.getLogger(__name__)
 
-# S3 user metadata key holding the builder's JSON-encoded UI output path.
-STATIC_ASSETS_PATH_KEY = "static-assets-path"
-
 
 @dataclass
 class ArtifactInfo:
@@ -68,24 +65,14 @@ class BuildArtifactStorage(S3ObjectStorage):
             )
 
     async def upload_artifact_fileobj(
-        self,
-        deployment_name: str,
-        build_id: str,
-        fileobj: IO[Any],
-        static_assets_path: str | None = None,
+        self, deployment_name: str, build_id: str, fileobj: IO[Any]
     ) -> None:
         """Upload a build artifact to S3 from a file-like object."""
-        metadata = (
-            {}
-            if static_assets_path is None
-            else {STATIC_ASSETS_PATH_KEY: static_assets_path}
-        )
         async with self._client() as client:
             await client.upload_fileobj(
                 fileobj,
                 self._bucket,
                 self._key(deployment_name, build_id),
-                ExtraArgs={"Metadata": metadata},
             )
 
     async def download_artifact_streaming(
@@ -126,20 +113,18 @@ class BuildArtifactStorage(S3ObjectStorage):
 
         return content_length, _stream()
 
-    async def artifact_metadata(
-        self, deployment_name: str, build_id: str
-    ) -> dict[str, str] | None:
-        """Return a build artifact's S3 user metadata, or None if it does not exist."""
+    async def artifact_exists(self, deployment_name: str, build_id: str) -> bool:
+        """Check if a build artifact exists in S3."""
         async with self._client() as client:
             try:
-                response = await client.head_object(
+                await client.head_object(
                     Bucket=self._bucket,
                     Key=self._key(deployment_name, build_id),
                 )
-                return response.get("Metadata", {})
+                return True
             except ClientError as e:
                 if e.response.get("Error", {}).get("Code") == "404":
-                    return None
+                    return False
                 raise
 
     async def delete_artifact(self, deployment_name: str, build_id: str) -> None:

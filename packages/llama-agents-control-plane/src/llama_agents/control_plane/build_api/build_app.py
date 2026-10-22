@@ -19,7 +19,6 @@ from llama_agents.control_plane.build_api.build_auth import (
 )
 from llama_agents.control_plane.build_api.build_gc import gc_build_artifacts
 from llama_agents.control_plane.build_api.build_service import build_artifact_storage
-from llama_agents.control_plane.build_api.build_storage import STATIC_ASSETS_PATH_KEY
 from llama_agents.control_plane.code_repo.git_server import handle_git_request_readonly
 from llama_agents.control_plane.code_repo.service import code_repo_storage
 from llama_agents.control_plane.git import git_service
@@ -37,9 +36,6 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
-
-# Sent by the builder on upload and returned on HEAD. See STATIC_ASSETS_PATH_KEY.
-STATIC_ASSETS_PATH_HEADER = "X-Static-Assets-Path"
 
 
 @asynccontextmanager
@@ -121,20 +117,17 @@ async def artifact_exists(
     deployment: Annotated[LlamaDeploymentCRD, Depends(authenticate_deployment)],
     build_id: str,
 ) -> Response:
-    """Check if a build artifact exists and return its UI output path, if recorded."""
+    """Check if a build artifact exists."""
     if build_artifact_storage is None:
         raise HTTPException(
             status_code=503, detail="Build artifact storage not configured"
         )
-    metadata = await build_artifact_storage.artifact_metadata(
+    exists = await build_artifact_storage.artifact_exists(
         deployment.metadata.name, build_id
     )
-    if metadata is None:
+    if not exists:
         raise HTTPException(status_code=404, detail="Artifact not found")
-    headers = {}
-    if STATIC_ASSETS_PATH_KEY in metadata:
-        headers[STATIC_ASSETS_PATH_HEADER] = metadata[STATIC_ASSETS_PATH_KEY]
-    return Response(status_code=200, headers=headers)
+    return Response(status_code=200)
 
 
 @build_app.get("/deployments/{deployment_id}/builds/{build_id}")
@@ -190,10 +183,7 @@ async def upload_artifact(
 
         with open(tmp.name, "rb") as f:
             await build_artifact_storage.upload_artifact_fileobj(
-                deployment.metadata.name,
-                build_id,
-                f,
-                static_assets_path=request.headers.get(STATIC_ASSETS_PATH_HEADER),
+                deployment.metadata.name, build_id, f
             )
     finally:
         Path(tmp.name).unlink(missing_ok=True)

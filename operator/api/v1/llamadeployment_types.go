@@ -104,11 +104,6 @@ type LlamaDeploymentStatus struct {
 	// +kubebuilder:validation:Enum=Pending;Running;Succeeded;Failed
 	BuildStatus string `json:"buildStatus,omitempty"`
 
-	// StaticAssetsPath is the UI output path that the build for BuildId reported,
-	// relative to /opt/app. Empty means the build produced no UI. Unset means the
-	// build reported nothing, and spec.staticAssetsPath is used instead.
-	StaticAssetsPath *string `json:"staticAssetsPath,omitempty"`
-
 	// LastBuiltGeneration is the spec.buildGeneration value that was last
 	// successfully built. When spec.buildGeneration differs from this value,
 	// a new build is triggered even if the deployment is suspended.

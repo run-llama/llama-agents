@@ -57,6 +57,10 @@ const (
 	ContainerNameApp   = "app"
 	ContainerNameBuild = "build"
 
+	// UILinkName is the symlink the build writes at the app root pointing at
+	// the built UI directory. Must match UI_LINK_NAME in the appserver bootstrap.
+	UILinkName = ".llama-ui"
+
 	// Container user/group IDs
 	AppServerUID int64 = 1001
 	AppServerGID int64 = 1001
@@ -491,7 +495,6 @@ func (r *LlamaDeploymentReconciler) reconcileBuild(ctx context.Context, llamaDep
 		// Update CRD status to Building
 		llamaDeploy.Status.BuildId = buildId
 		llamaDeploy.Status.BuildStatus = BuildStatusPending
-		llamaDeploy.Status.StaticAssetsPath = nil
 		llamaDeploy.Status.Phase = PhaseBuilding
 		llamaDeploy.Status.Message = fmt.Sprintf("Build job created: %s", jobName)
 		now := metav1.Now()
@@ -512,15 +515,9 @@ func (r *LlamaDeploymentReconciler) reconcileBuild(ctx context.Context, llamaDep
 	if existingJob.Status.Succeeded > 0 {
 		logger.Info("Build job succeeded", "buildId", buildId, "jobName", jobName)
 
-		assetsPath, err := r.buildStaticAssetsPath(ctx, llamaDeploy, buildId)
-		if err != nil {
-			return "", nil, err
-		}
-
 		// Update CRD status
 		llamaDeploy.Status.BuildId = buildId
 		llamaDeploy.Status.BuildStatus = BuildStatusSucceeded
-		llamaDeploy.Status.StaticAssetsPath = assetsPath
 		llamaDeploy.Status.LastBuiltGeneration = llamaDeploy.Spec.BuildGeneration
 		now := metav1.Now()
 		llamaDeploy.Status.LastUpdated = &now
@@ -561,7 +558,6 @@ func (r *LlamaDeploymentReconciler) reconcileBuild(ctx context.Context, llamaDep
 
 		llamaDeploy.Status.BuildId = buildId
 		llamaDeploy.Status.BuildStatus = BuildStatusFailed
-		llamaDeploy.Status.StaticAssetsPath = nil
 		llamaDeploy.Status.Phase = PhaseBuildFailed
 		llamaDeploy.Status.Message = fmt.Sprintf("Build job failed: %s", jobName)
 		now := metav1.Now()
@@ -594,46 +590,6 @@ func (r *LlamaDeploymentReconciler) reconcileBuild(ctx context.Context, llamaDep
 
 	result := ctrl.Result{RequeueAfter: 60 * time.Second}
 	return "", &result, nil
-}
-
-// buildStaticAssetsPath returns the UI output path that the build container
-// reported in its termination message as a JSON string. It returns nil when no
-// pod reported a string, e.g. builds from images that predate this message.
-func (r *LlamaDeploymentReconciler) buildStaticAssetsPath(ctx context.Context, llamaDeploy *llamadeployv1.LlamaDeployment, buildId string) (*string, error) {
-	pods := &corev1.PodList{}
-	if err := r.directClient().List(ctx, pods,
-		client.InNamespace(llamaDeploy.Namespace),
-		client.MatchingLabels{
-			"deploy.llamaindex.ai/deployment": llamaDeploy.Name,
-			"deploy.llamaindex.ai/build-id":   buildId,
-		},
-	); err != nil {
-		return nil, fmt.Errorf("failed to list build pods: %w", err)
-	}
-	for _, pod := range pods.Items {
-		for _, cs := range pod.Status.ContainerStatuses {
-			terminated := cs.State.Terminated
-			if cs.Name != ContainerNameBuild || terminated == nil || terminated.ExitCode != 0 {
-				continue
-			}
-			// A JSON null leaves assetsPath nil, so it reads as unknown, not "".
-			var assetsPath *string
-			if json.Unmarshal([]byte(terminated.Message), &assetsPath) == nil && assetsPath != nil {
-				return assetsPath, nil
-			}
-		}
-	}
-	return nil, nil
-}
-
-// staticAssetsPath picks the UI path nginx serves for buildId. The path the
-// build reported wins. Otherwise spec.staticAssetsPath is used.
-func staticAssetsPath(llamaDeploy *llamadeployv1.LlamaDeployment, buildId string) string {
-	status := llamaDeploy.Status
-	if buildId != "" && status.BuildId == buildId && status.StaticAssetsPath != nil {
-		return *status.StaticAssetsPath
-	}
-	return llamaDeploy.Spec.StaticAssetsPath
 }
 
 // createBuildJob creates a Job that runs the build process and uploads artifacts to S3.
@@ -877,7 +833,7 @@ func (r *LlamaDeploymentReconciler) reconcileResources(ctx context.Context, llam
 	}
 
 	// CreateOrUpdate ConfigMap for nginx configuration
-	if err := r.reconcileNginxConfigMap(ctx, llamaDeploy, buildId); err != nil {
+	if err := r.reconcileNginxConfigMap(ctx, llamaDeploy); err != nil {
 		return err
 	}
 
@@ -963,11 +919,11 @@ func (r *LlamaDeploymentReconciler) reconcileDeployment(ctx context.Context, lla
 }
 
 // reconcileNginxConfigMap creates or updates the ConfigMap containing nginx configuration
-func (r *LlamaDeploymentReconciler) reconcileNginxConfigMap(ctx context.Context, llamaDeploy *llamadeployv1.LlamaDeployment, buildId string) error {
+func (r *LlamaDeploymentReconciler) reconcileNginxConfigMap(ctx context.Context, llamaDeploy *llamadeployv1.LlamaDeployment) error {
 	cm := &corev1.ConfigMap{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
 		ObjectMeta: metav1.ObjectMeta{Name: llamaDeploy.Name + "-nginx-config", Namespace: llamaDeploy.Namespace},
-		Data:       map[string]string{"nginx.conf": r.generateNginxConfig(llamaDeploy, buildId)},
+		Data:       map[string]string{"nginx.conf": r.generateNginxConfig(llamaDeploy)},
 	}
 	if err := controllerutil.SetControllerReference(llamaDeploy, cm, r.Scheme); err != nil {
 		return err
@@ -1248,20 +1204,19 @@ func (r *LlamaDeploymentReconciler) createDeploymentForLlama(llamaDeploy *llamad
 }
 
 // generateNginxConfig builds the nginx.conf content for the deployment
-func (r *LlamaDeploymentReconciler) generateNginxConfig(llamaDeploy *llamadeployv1.LlamaDeployment, buildId string) string {
+func (r *LlamaDeploymentReconciler) generateNginxConfig(llamaDeploy *llamadeployv1.LlamaDeployment) string {
 	basePath := fmt.Sprintf("/deployments/%s/ui", llamaDeploy.GetObjectMeta().GetName())
-	assetsPath := staticAssetsPath(llamaDeploy, buildId)
-	var staticLocation string
-	if assetsPath != "" {
-		// Serve static files from /opt/app/<assetsPath>, fallback to python for misses
-		staticLocation = fmt.Sprintf("location %s { alias /opt/app/%s/; try_files $uri $uri/ /index.html @python_upstream; }", basePath, assetsPath)
-	} else {
-		// If not provided, proxy UI base to python
-		staticLocation = fmt.Sprintf("location %s { proxy_pass http://127.0.0.1:8080; proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection 'upgrade'; proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto $scheme; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; }", basePath)
+	// Serve static files from /opt/app/<assetsPath>. Without a spec path, the
+	// build's own UI link is used. When it is absent (no UI, or an artifact built
+	// before the link existed), every lookup misses and python serves the UI.
+	assetsPath := llamaDeploy.Spec.StaticAssetsPath
+	if assetsPath == "" {
+		assetsPath = UILinkName
 	}
+	staticLocation := fmt.Sprintf("location %s { alias /opt/app/%s/; try_files $uri $uri/ /index.html @python_upstream; }", basePath, assetsPath)
 
-	// Everything else proxies to python on 8081; also define named upstream for try_files fallback
-	proxyLocation := "location / { proxy_pass http://127.0.0.1:8080; proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection 'upgrade'; proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto $scheme; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; }\nlocation @python_upstream { proxy_pass http://127.0.0.1:8081; proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection 'upgrade'; proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto $scheme; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; }"
+	// Everything else proxies to python on 8080; also define named upstream for try_files fallback
+	proxyLocation := "location / { proxy_pass http://127.0.0.1:8080; proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection 'upgrade'; proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto $scheme; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; }\nlocation @python_upstream { proxy_pass http://127.0.0.1:8080; proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection 'upgrade'; proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto $scheme; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; }"
 
 	return fmt.Sprintf(`pid /tmp/nginx.pid;
 worker_processes  1;

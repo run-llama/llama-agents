@@ -218,12 +218,6 @@ spec:
                   This handles informer cache lag when the Secret is created just before the CR.
                 format: int32
                 type: integer
-              staticAssetsPath:
-                description: |-
-                  StaticAssetsPath is the UI output path that the build for BuildId reported,
-                  relative to /opt/app. Empty means the build produced no UI. Unset means the
-                  build reported nothing, and spec.staticAssetsPath is used instead.
-                type: string
             type: object
         type: object
     served: true

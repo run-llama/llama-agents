@@ -25,18 +25,28 @@ func TestGenerateNginxConfig_StaticAndProxy(t *testing.T) {
 		Spec:       llamadeployv1.LlamaDeploymentSpec{StaticAssetsPath: "frontend/dist"},
 	}
 
-	conf := (&LlamaDeploymentReconciler{}).generateNginxConfig(ld, "")
+	conf := (&LlamaDeploymentReconciler{}).generateNginxConfig(ld)
 	if !strings.Contains(conf, "location /deployments/demo/ui {") {
 		t.Fatalf("expected UI base location, got: %s", conf)
 	}
 	if !strings.Contains(conf, "alias /opt/app/frontend/dist/") {
 		t.Fatalf("expected alias for static assets, got: %s", conf)
 	}
-	if !strings.Contains(conf, "location @python_upstream { proxy_pass http://127.0.0.1:8081;") {
+	if !strings.Contains(conf, "location @python_upstream { proxy_pass http://127.0.0.1:8080;") {
 		t.Fatalf("expected named upstream for fallback, got: %s", conf)
 	}
 	if !strings.Contains(conf, "access_log    off;") {
 		t.Fatalf("expected access_log off, got: %s", conf)
+	}
+}
+
+// Without spec.staticAssetsPath nginx serves the build's own UI link.
+func TestGenerateNginxConfig_DefaultsToUILink(t *testing.T) {
+	ld := &llamadeployv1.LlamaDeployment{ObjectMeta: metav1.ObjectMeta{Name: "demo"}}
+
+	conf := (&LlamaDeploymentReconciler{}).generateNginxConfig(ld)
+	if !strings.Contains(conf, "location /deployments/demo/ui { alias /opt/app/.llama-ui/; try_files $uri $uri/ /index.html @python_upstream; }") {
+		t.Fatalf("expected alias for UI link, got: %s", conf)
 	}
 }
 

@@ -367,7 +367,7 @@ func TestGenerateNginxConfig_NonRootDirectives(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "my-app", Namespace: "default"},
 		Spec:       llamadeployv1.LlamaDeploymentSpec{},
 	}
-	config := r.generateNginxConfig(ld, "")
+	config := r.generateNginxConfig(ld)
 
 	required := []string{
 		"pid /tmp/nginx.pid",
