@@ -1,5 +1,11 @@
 # llama-agents-operator
 
+## 0.11.4
+
+### Patch Changes
+
+- 64fbd6c: Builds link the UI output at /opt/app/.llama-ui so nginx serves the UI for pushed deployments.
+
 ## 0.11.3
 
 ### Patch Changes

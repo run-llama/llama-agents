@@ -1,5 +1,12 @@
 # llama-agents-appserver
 
+## 0.12.2
+
+### Patch Changes
+
+- 64fbd6c: Builds link the UI output at /opt/app/.llama-ui so nginx serves the UI for pushed deployments.
+- 3ac8112: Keep UI directory redirects on the public host when serving built files behind a proxy.
+
 ## 0.12.1
 
 ### Patch Changes
