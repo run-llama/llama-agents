@@ -969,7 +969,9 @@ async def test_multistep_hitl_broker_state_survives_restart(
         await server1._service.start_workflow(wf1, handler_id)
 
         # Wait for handler to become idle (waiting for HumanInput1)
-        await wait_handler_idle(sqlite_store, handler_id)
+        handler = await wait_handler_idle(sqlite_store, handler_id)
+        assert handler.run_id is not None
+        await wait_run_released(_get_idle_release(server1), handler.run_id)
 
     # Verify state was persisted at first wait point
     run_id = (await sqlite_store.query(HandlerQuery(handler_id_in=[handler_id])))[
@@ -995,6 +997,7 @@ async def test_multistep_hitl_broker_state_survives_restart(
             assert await ss.get("step") == "waiting_for_human_2"
 
         await wait_for_passing(handler_idle_2, max_duration=5.0, interval=0.05)
+        await wait_run_released(_get_idle_release(server2), run_id)
 
     # Verify state after second wait
     state_store2 = sqlite_store.create_state_store(run_id)

@@ -6,7 +6,7 @@ These tests verify:
 1. Event interceptor prevents published events from reaching dbos.streams
 2. Events are stored as clean JSON in our wf_events table
 3. subscribe_events works across the full server chain
-4. Interrupt/resume produces no duplicate events (replay safety)
+4. Interrupt/resume preserves the original run and its stored events
 
 All tests require Docker (testcontainers) and use subprocess isolation for
 DBOS global state safety.
@@ -33,6 +33,7 @@ def run_server_scenario(
     check_streams: bool = False,
     check_events: bool = False,
     interrupt_after: str | None = None,
+    send_event: str | None = None,
     timeout: float = 60.0,
 ) -> subprocess.CompletedProcess[str]:
     """Run a workflow scenario through the WorkflowServer + DBOS chain."""
@@ -52,6 +53,8 @@ def run_server_scenario(
         cmd.append("--check-events")
     if interrupt_after:
         cmd.extend(["--interrupt-after", interrupt_after])
+    if send_event is not None:
+        cmd.extend(["--send-event", send_event])
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
@@ -146,26 +149,28 @@ def test_subscribe_events_receives_all_events(postgres_dsn: str) -> None:
     )
 
 
-def test_no_duplicate_events_after_replay(postgres_dsn: str) -> None:
-    """Interrupt a workflow, resume it, and verify no duplicate events."""
-    run_id = "test-replay-dedup-001"
+def test_replay_resumes_original_run(postgres_dsn: str) -> None:
+    """Resume the interrupted run and retain its events in the server store."""
+    run_id = "test-replay-resume-001"
 
-    # Run 1: interrupt after step_two produces StepTwoEvent
+    # The workflow cannot finish before the crash because it needs user input.
     result1 = run_server_scenario(
-        workflow="tests.fixtures.sample_workflows.chained:ChainedWorkflow",
+        workflow="tests.fixtures.sample_workflows.hitl:TestWorkflow",
         db_url=postgres_dsn,
         run_id=run_id,
-        interrupt_after="StepTwoEvent",
+        interrupt_after="AskInputEvent",
     )
+    assert_no_errors(result1)
     assert "INTERRUPTING" in result1.stdout, (
         f"Should have interrupted.\nstdout: {result1.stdout}\nstderr: {result1.stderr}"
     )
 
     # Run 2: resume to completion with same run_id, check events
     result2 = run_server_scenario(
-        workflow="tests.fixtures.sample_workflows.chained:ChainedWorkflow",
+        workflow="tests.fixtures.sample_workflows.hitl:TestWorkflow",
         db_url=postgres_dsn,
         run_id=run_id,
+        send_event=json.dumps({"type": "UserInput", "fields": {"response": "world"}}),
         check_events=True,
         check_streams=True,
     )
@@ -174,9 +179,24 @@ def test_no_duplicate_events_after_replay(postgres_dsn: str) -> None:
         f"Resume should succeed.\nstdout: {result2.stdout}\nstderr: {result2.stderr}"
     )
 
+    original_run_id = extract_line(result1.stdout, "RUN_ID:")
+    assert original_run_id is not None
+    assert extract_line(result2.stdout, "RUN_ID:") == original_run_id
+
+    event_names = extract_all_lines(result2.stdout, "EVENT:")
+    assert "AskInputEvent" in event_names, event_names
+    assert event_names.count("StopEvent") == 1, event_names
+
+    stored_events = [
+        json.loads(value) for value in extract_all_lines(result2.stdout, "EVENT_JSON:")
+    ]
+    stop_events = [event for event in stored_events if event["type"] == "StopEvent"]
+    assert len(stop_events) == 1, stored_events
+    assert stop_events[0]["value"]["result"] == {"response": "world"}
+
     # Verify no events in dbos.streams
     streams_count = extract_line(result2.stdout, "STREAMS_COUNT:")
-    if streams_count is not None:
-        assert int(streams_count) == 0, (
-            f"Expected 0 events in dbos.streams after replay, got {streams_count}"
-        )
+    assert streams_count is not None
+    assert int(streams_count) == 0, (
+        f"Expected 0 events in dbos.streams after replay, got {streams_count}"
+    )

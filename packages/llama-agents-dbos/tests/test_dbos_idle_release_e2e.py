@@ -59,7 +59,8 @@ def _start_idle_server(
     return subprocess.Popen(
         cmd,
         text=True,
-        stdout=subprocess.PIPE,
+        # Let pytest capture output. An unread PIPE can block the server.
+        stdout=None,
         stderr=subprocess.STDOUT,
         start_new_session=True,
     )
@@ -82,10 +83,8 @@ def _wait_for_server(
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if proc.poll() is not None:
-            stdout = proc.stdout.read() if proc.stdout else ""
             raise RuntimeError(
-                f"Server on port {port} exited with code {proc.returncode}\n"
-                f"output: {stdout}"
+                f"Server on port {port} exited with code {proc.returncode}"
             )
         try:
             resp = httpx.get(f"http://localhost:{port}/workflows", timeout=2.0)
@@ -94,11 +93,8 @@ def _wait_for_server(
         except httpx.ConnectError:
             pass
         time.sleep(0.5)
-    proc.kill()
-    stdout = proc.stdout.read() if proc.stdout else ""
-    raise RuntimeError(
-        f"Server on port {port} did not start in {timeout}s\noutput: {stdout}"
-    )
+    _stop_server(proc)
+    raise RuntimeError(f"Server on port {port} did not start in {timeout}s")
 
 
 def _sqlite_db_path(db_url: str) -> str | None:
@@ -263,27 +259,39 @@ async def _wait_for_handler_status(
 
 
 @pytest.mark.timeout(45)
-async def test_idle_release_e2e_sqlite(tmp_path: Path) -> None:
+async def test_idle_release_e2e_sqlite(tmp_path: Path, unused_tcp_port: int) -> None:
     """Full idle release cycle over HTTP with SQLite backend."""
     db_path = tmp_path / "idle_e2e.sqlite3"
     db_url = f"sqlite+pysqlite:///{db_path}?check_same_thread=false"
-    await _run_idle_release_test(18010, db_url)
+    await _run_idle_release_test(unused_tcp_port, db_url)
 
 
 @pytest.mark.docker
 @pytest.mark.timeout(45)
-async def test_idle_release_e2e_postgres(postgres_dsn: str) -> None:
+async def test_idle_release_e2e_postgres(
+    postgres_dsn: str, unused_tcp_port: int
+) -> None:
     """Full idle release cycle over HTTP with PostgreSQL backend."""
     db_url = postgres_dsn.replace("postgresql://", "postgresql+psycopg://", 1)
-    await _run_idle_release_test(18011, db_url)
+    await _run_idle_release_test(unused_tcp_port, db_url)
 
 
 @pytest.mark.timeout(60)
-async def test_restart_and_recover_http_workflow(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "backend", ["sqlite", pytest.param("postgres", marks=pytest.mark.docker)]
+)
+async def test_restart_and_recover_http_workflow(
+    tmp_path: Path, unused_tcp_port: int, backend: str, request: pytest.FixtureRequest
+) -> None:
     """Recovered startup workflow survives a restart and accepts input."""
-    port = 18012
-    db_path = tmp_path / "restart_recovery.sqlite3"
-    db_url = f"sqlite+pysqlite:///{db_path}?check_same_thread=false"
+    port = unused_tcp_port
+    if backend == "postgres":
+        db_url = request.getfixturevalue("postgres_dsn").replace(
+            "postgresql://", "postgresql+psycopg://", 1
+        )
+    else:
+        db_path = tmp_path / "restart_recovery.sqlite3"
+        db_url = f"sqlite+pysqlite:///{db_path}?check_same_thread=false"
 
     proc = _start_idle_server(
         port,
@@ -324,6 +332,11 @@ async def test_restart_and_recover_http_workflow(tmp_path: Path) -> None:
         assert recovered.status == "running"
         assert recovered.run_id == run_id
 
+        # Exercise idle resume after startup recovery. Replayed ticks must not
+        # be appended again or rebuilding the broker state will fail.
+        await _wait_for_table_value(
+            db_url, "run_lifecycle", "state", "run_id", run_id, "released"
+        )
         send_resp = await client.send_event(handler_id, UserInput(response="world"))
         assert send_resp.status == "sent"
 

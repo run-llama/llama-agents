@@ -246,14 +246,10 @@ async def test_streaming_and_interactive(
     sent = await client.send_event(handler_id, ExternalEvent(response="pong"))
     assert sent.status == "sent"
 
-    async def check_completed() -> str:
-        handler = await client.get_handler(handler_id)
-        assert handler.status == "completed"
-        assert handler.result is not None
-        return handler.result.value["result"]
-
-    result = await wait_for_passing(check_completed, max_duration=5.0)
-    assert result == "received: pong"
+    handler = await client.wait_for_handler(handler_id)
+    assert handler.status == "completed"
+    assert handler.result is not None
+    assert handler.result.value["result"] == "received: pong"
 
 
 @pytest.mark.asyncio

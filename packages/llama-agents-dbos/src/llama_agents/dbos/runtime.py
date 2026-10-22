@@ -216,7 +216,11 @@ class DBOSWorkflowStore(AbstractWorkflowStore):
         return await self._resolve().query_events(run_id, after_sequence, limit)
 
     async def append_tick(self, run_id: str, tick_data: dict[str, Any]) -> None:
-        await self._resolve().append_tick(run_id, tick_data)
+        context = get_local_dbos_context()
+        if context is not None and context.is_workflow():
+            await _append_workflow_tick(self._resolve(), run_id, tick_data)
+        else:
+            await self._resolve().append_tick(run_id, tick_data)
 
     async def get_ticks(self, run_id: str) -> list[StoredTick]:
         return await self._resolve().get_ticks(run_id)
@@ -300,6 +304,15 @@ def _sqlalchemy_url_to_asyncpg_dsn(url: SaURL) -> str:
 # Very long timeout for unbounded waits - encourages workflow to sleep.
 # DBOS's default 60s is too short and gets recorded to event logs.
 _UNBOUNDED_WAIT_TIMEOUT_SECONDS = 60 * 60 * 24  # 1 day
+
+
+@DBOS.step()
+async def _append_workflow_tick(
+    store: AbstractWorkflowStore, run_id: str, tick_data: dict[str, Any]
+) -> None:
+    # Startup recovery replays the control loop. Journal completed tick writes
+    # so it does not append a second copy and corrupt later idle-resume replay.
+    await store.append_tick(run_id, tick_data)
 
 
 @DBOS.step()

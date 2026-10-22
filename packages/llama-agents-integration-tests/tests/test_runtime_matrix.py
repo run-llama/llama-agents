@@ -499,7 +499,9 @@ async def test_workflow_num_workers(runtime: Runtime) -> None:
                 return None
             return StopEvent(result=[e.another_test_param for e in events])
 
-    workflow = NumWorkersWorkflow(timeout=10, runtime=runtime)
+    # Concurrency is asserted by the barrier, not by database throughput.
+    # The pytest timeout still bounds a stalled workflow.
+    workflow = NumWorkersWorkflow(timeout=None, runtime=runtime)
     await runtime.launch()
     r = await WorkflowTestRunner(workflow).run()
 

@@ -296,12 +296,10 @@ async def test_concurrent_workflows(
     started = await asyncio.gather(*tasks)
     handler_ids = [s.handler_id for s in started]
 
-    async def all_completed() -> None:
-        for hid in handler_ids:
-            data = await client.get_handler(hid)
-            assert data.status == "completed"
-
-    await wait_for_passing(all_completed)
+    completed = await asyncio.gather(
+        *(client.wait_for_handler(handler_id) for handler_id in handler_ids)
+    )
+    assert all(handler.status == "completed" for handler in completed)
 
 
 # -- Durability tests (parameterized across durable stores) --

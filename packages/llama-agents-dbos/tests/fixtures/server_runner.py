@@ -25,14 +25,16 @@ Flags:
     --check-events:  After workflow completes, query wf_events table
                      and print EVENTS_COUNT:<N> and EVENT_JSON:<json>
     --interrupt-after EVENT_NAME: Kill the process (os._exit) after seeing
-                     a StepStateChanged with output_event_name matching
-                     EVENT_NAME. Simulates a crash for resume testing.
+                     EVENT_NAME or a StepStateChanged with matching output.
+                     Simulates a crash for resume testing.
+    --send-event JSON: Send an event with the given type and fields after startup.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -45,6 +47,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from llama_agents.server import WorkflowServer  # noqa: E402
 from runner_common import (  # noqa: E402  # ty: ignore[unresolved-import]
+    get_event_class_by_name,
     import_workflow,
     setup_dbos,
 )
@@ -103,6 +106,7 @@ async def run_workflow_with_server(
     do_check_streams: bool,
     do_check_events: bool,
     interrupt_after: str | None = None,
+    send_event: str | None = None,
 ) -> None:
     """Run workflow through the full WorkflowServer + DBOS decorator chain."""
     workflow_class, _module = import_workflow(workflow_path)
@@ -110,7 +114,6 @@ async def run_workflow_with_server(
     dbos_runtime = setup_dbos(db_url, app_name="test-server-workflow")
 
     wf = workflow_class(runtime=dbos_runtime)
-    await dbos_runtime.launch()
 
     store = dbos_runtime.create_workflow_store()
 
@@ -123,16 +126,27 @@ async def run_workflow_with_server(
     )
     server.add_workflow("test", wf)
 
-    schema = dbos_runtime._schema
-
     try:
         async with server.contextmanager():
             wf_ref = server._service._runtime.get_workflow("test")
             assert wf_ref is not None
 
-            handler_data = await server._service.start_workflow(wf_ref, run_id)
+            # DBOS recovers pending runs at startup. Reattach to the original
+            # handler instead of racing recovery by starting another run.
+            handler_data = await server._service.load_handler(run_id)
+            if handler_data is None:
+                handler_data = await server._service.start_workflow(wf_ref, run_id)
             actual_run_id = handler_data.run_id
             assert actual_run_id is not None
+            print(f"RUN_ID:{actual_run_id}", flush=True)
+
+            if send_event is not None:
+                event_config = json.loads(send_event)
+                event_class = get_event_class_by_name(_module, event_config["type"])
+                assert event_class is not None
+                await server._service.send_event(
+                    run_id, event_class(**event_config["fields"])
+                )
 
             async for stored_event in store.subscribe_events(actual_run_id):
                 event_type = stored_event.event.type
@@ -143,7 +157,7 @@ async def run_workflow_with_server(
                 if interrupt_after is not None:
                     data = stored_event.event.value or {}
                     output_name = data.get("output_event_name") or ""
-                    if interrupt_after in output_name:
+                    if event_type == interrupt_after or interrupt_after in output_name:
                         print("INTERRUPTING", flush=True)
                         os._exit(0)
 
@@ -153,7 +167,7 @@ async def run_workflow_with_server(
                 await check_streams_count(db_url, actual_run_id)
 
             if do_check_events:
-                await check_events(db_url, actual_run_id, schema)
+                await check_events(db_url, actual_run_id, dbos_runtime._schema)
 
     except Exception as e:
         print(f"ERROR:{type(e).__name__}:{e}", flush=True)
@@ -172,6 +186,7 @@ def main() -> None:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--check-streams", action="store_true")
     parser.add_argument("--check-events", action="store_true")
+    parser.add_argument("--send-event", help="JSON object with event type and fields")
     parser.add_argument(
         "--interrupt-after",
         default=None,
@@ -188,6 +203,7 @@ def main() -> None:
             do_check_streams=args.check_streams,
             do_check_events=args.check_events,
             interrupt_after=args.interrupt_after,
+            send_event=args.send_event,
         )
     )
 

@@ -48,7 +48,6 @@ async def main() -> None:
     )
 
     wf = workflow_class(runtime=dbos_runtime)
-    await dbos_runtime.launch()
 
     store = dbos_runtime.create_workflow_store()
     idle_kwargs = (
@@ -67,6 +66,7 @@ async def main() -> None:
     ]
     server.add_workflow("test", wf, additional_events=additional_events)
 
+    # Bind the server runtime before DBOS launch can recover pending workflows.
     await server.start()
     try:
         print(f"READY:{args.port}", flush=True)
