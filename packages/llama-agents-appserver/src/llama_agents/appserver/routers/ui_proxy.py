@@ -2,6 +2,7 @@ import asyncio
 import logging
 from collections.abc import AsyncGenerator, Sequence
 from contextlib import suppress
+from urllib.parse import urlsplit
 
 import httpx
 import websockets
@@ -12,7 +13,7 @@ from fastapi import (
     Request,
     WebSocket,
 )
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from llama_agents.appserver.configure_logging import suppress_httpx_logs
 from llama_agents.appserver.interrupts import (
@@ -23,6 +24,7 @@ from llama_agents.appserver.interrupts import (
 from llama_agents.appserver.settings import ApiserverSettings
 from llama_agents.core.client.ssl_util import get_httpx_verify_param
 from llama_agents.core.deployment_config import DeploymentConfig
+from starlette.types import Scope
 from websockets.typing import Subprotocol
 
 logger = logging.getLogger(__name__)
@@ -239,6 +241,18 @@ def create_ui_proxy_router(name: str, port: int) -> APIRouter:
     return deployment_router
 
 
+class UIStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        response = await super().get_response(path, scope)
+        if isinstance(response, RedirectResponse):
+            # Directory redirects stay on the browser's origin, as they do in nginx.
+            location = urlsplit(response.headers["location"])
+            response.headers["location"] = location._replace(
+                scheme="", netloc=""
+            ).geturl()
+        return response
+
+
 def mount_static_files(
     app: FastAPI, config: DeploymentConfig, settings: ApiserverSettings
 ) -> None:
@@ -253,7 +267,7 @@ def mount_static_files(
     # Serve index.html when accessing the directory path
     app.mount(
         f"/deployments/{config.name}/ui",
-        StaticFiles(directory=str(path), html=True),
+        UIStaticFiles(directory=str(path), html=True),
         name=f"ui-static-{config.name}",
     )
     return None
