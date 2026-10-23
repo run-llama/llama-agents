@@ -414,9 +414,12 @@ class AddWaiter(BaseModel, Generic[EventType]):
     @classmethod
     def _validate(cls, data: Any, handler: Any) -> AddWaiter:
         if isinstance(data, dict):
-            # Strip has_requirements before validation (it's computed)
+            # has_requirements is computed from requirements, but serialized
+            # data carries requirements as {}, so keep the recorded flag.
             data = dict(data)
-            data.pop("has_requirements", None)
+            data["has_requirements"] = bool(data.get("requirements")) or bool(
+                data.get("has_requirements", False)
+            )
         return handler(data)
 
 
