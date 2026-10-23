@@ -2,9 +2,9 @@
   "name": "llama-agents",
   "version": "0.12.7",
   "dependencies": {
-    "llama-agents-appserver": "workspace:^",
-    "llama-agents-control-plane": "workspace:^",
-    "llama-agents-operator": "workspace:^"
+    "llama-agents-appserver": "workspace:*",
+    "llama-agents-control-plane": "workspace:*",
+    "llama-agents-operator": "workspace:*"
   },
   "helm": {
     "registry": "oci://docker.io/llamaindex"

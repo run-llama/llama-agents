@@ -15,13 +15,13 @@ importers:
   charts/llama-agents:
     dependencies:
       llama-agents-appserver:
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../../packages/llama-agents-appserver
       llama-agents-control-plane:
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../../packages/llama-agents-control-plane
       llama-agents-operator:
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../../operator
 
   charts/llama-agents-crds: {}
