@@ -1,5 +1,11 @@
 # llama-agents
 
+## 0.12.8
+
+### Patch Changes
+
+- 9bf7f4a: Release the chart whenever the operator, appserver, or control plane image it ships is bumped.
+
 ## 0.12.7
 
 ### Patch Changes
