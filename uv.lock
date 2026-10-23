@@ -2474,7 +2474,7 @@ dev = [
 
 [[package]]
 name = "llama-agents-appserver"
-version = "0.12.1"
+version = "0.12.2"
 source = { editable = "packages/llama-agents-appserver" }
 dependencies = [
     { name = "fastapi" },

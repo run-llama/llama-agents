@@ -29,7 +29,7 @@ images:
     repository: llamaindex/llama-agents-operator
     # -- Operator image tag
     # @section -- Images
-    tag: "0.11.3"
+    tag: "0.11.4"
     # -- Operator image pull policy
     # @section -- Images
     pullPolicy: IfNotPresent
@@ -39,7 +39,7 @@ images:
     repository: llamaindex/llama-agents-appserver
     # -- Appserver image tag
     # @section -- Images
-    tag: "0.12.1"
+    tag: "0.12.2"
     # -- Appserver image pull policy
     # @section -- Images
     pullPolicy: IfNotPresent
