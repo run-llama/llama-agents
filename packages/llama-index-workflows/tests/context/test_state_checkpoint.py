@@ -10,7 +10,7 @@ import json
 from typing import Any, Awaitable, Callable
 
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from workflows.context import Context
 from workflows.context.serializers import JsonSerializer
 from workflows.context.state_store import (
@@ -188,6 +188,59 @@ async def test_nested_model_values_in_dict_state_use_serialize_value_form() -> N
     await append_message(store)
     (op,) = store.checkpoint().diff(base)
     assert op["value"] == JsonSerializer().serialize_value(Message(text="new"))
+
+
+class Base64State(BaseModel):
+    model_config = ConfigDict(ser_json_bytes="base64", val_json_bytes="base64")
+
+    payload: bytes
+
+
+class HexState(BaseModel):
+    model_config = ConfigDict(ser_json_bytes="hex", val_json_bytes="hex")
+
+    payload: bytes
+
+
+class Base64Container(BaseModel):
+    data: Base64State
+
+
+class HexContainer(BaseModel):
+    data: HexState
+
+
+@pytest.mark.parametrize(
+    ("model_type", "container_type"),
+    [(Base64State, Base64Container), (HexState, HexContainer)],
+    ids=["base64", "hex"],
+)
+@pytest.mark.parametrize("kind", ["root", "dict", "nested"])
+@pytest.mark.parametrize("payload", [b"next", b"\xff\x00"], ids=["ascii", "binary"])
+async def test_checkpoint_diff_preserves_bytes_encoding(
+    model_type: type[Base64State] | type[HexState],
+    container_type: type[BaseModel],
+    kind: str,
+    payload: bytes,
+) -> None:
+    data = model_type(payload=b"old")
+    state: BaseModel
+    if kind == "root":
+        state = data
+    elif kind == "dict":
+        state = DictState(_data={"data": data})
+    else:
+        state = container_type(data=data)
+    store = InMemoryStateStore(state)
+    base = store.checkpoint()
+    path = "payload" if kind == "root" else "data.payload"
+    await store.set(path, payload)
+    current = store.checkpoint()
+
+    patch = assert_patch_round_trips(base, current)
+    patched = apply_state_patch(json.loads(json.dumps(base.to_dict())), patch)
+    restored = InMemoryStateStore.from_dict(patched, JsonSerializer())
+    assert await restored.get(path) == payload
 
 
 class Counters(BaseModel):

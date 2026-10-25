@@ -1493,6 +1493,7 @@ def _diffable_model(model: BaseModel, in_model: bool) -> bool:
         or cls.model_computed_fields
         or cls.model_config.get("extra") == "allow"
         or cls.model_config.get("serialize_by_alias")
+        or cls.model_config.get("ser_json_bytes", "utf8") != "utf8"
     )
 
 
