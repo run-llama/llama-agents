@@ -9,7 +9,14 @@ from typing import Any
 
 import pytest
 from workflows import Context, Workflow, step
-from workflows.events import Event, StartEvent, StopEvent
+from workflows.events import (
+    Event,
+    HumanResponseEvent,
+    InputRequiredEvent,
+    StartEvent,
+    StopEvent,
+    WorkflowIdleEvent,
+)
 from workflows.plugins.basic import BasicRuntime, JournalRecord
 
 
@@ -222,3 +229,106 @@ async def test_journal_reads_through_a_verbose_wrapper(runtime: BasicRuntime) ->
     records = await asyncio.wait_for(_collect(runtime, handler.run_id), timeout=5)
     assert records[0].seq == 0
     assert runtime.restore(wf, None, records).to_dict()["journal_seq"] == len(records)
+
+
+class Answer(HumanResponseEvent):
+    name: str
+    value: int
+
+
+class GoA(Event):
+    pass
+
+
+class GoB(Event):
+    pass
+
+
+class Got(Event):
+    name: str
+    value: int
+
+
+class TwoWaiters(Workflow):
+    """Two waiters on the same event type, each with its own requirements."""
+
+    @step
+    async def start(self, ctx: Context, ev: StartEvent) -> GoA | GoB:
+        ctx.send_event(GoA())
+        ctx.send_event(GoB())
+
+    @step
+    async def a(self, ctx: Context, ev: GoA) -> Got:
+        answer = await ctx.wait_for_event(
+            Answer,
+            waiter_event=InputRequiredEvent(),
+            waiter_id="a",
+            requirements={"name": "a"},
+            timeout=None,
+        )
+        return Got(name="a", value=answer.value)
+
+    @step
+    async def b(self, ctx: Context, ev: GoB) -> Got:
+        answer = await ctx.wait_for_event(
+            Answer,
+            waiter_event=InputRequiredEvent(),
+            waiter_id="b",
+            requirements={"name": "b"},
+            timeout=None,
+        )
+        return Got(name="b", value=answer.value)
+
+    @step
+    async def join(self, ctx: Context, ev: Got) -> StopEvent | None:
+        events = ctx.collect_events(ev, [Got, Got])
+        if events is None:
+            return None
+        return StopEvent(result=sorted((item.name, item.value) for item in events))
+
+
+async def _pause_and_journal(
+    runtime: BasicRuntime,
+) -> tuple[dict[str, Any], list[JournalRecord]]:
+    workflow = TwoWaiters(runtime=runtime, timeout=None)
+    handler = workflow.run()
+    records_task = asyncio.create_task(_collect(runtime, handler.run_id))
+    async for event in handler.stream_events(expose_internal=True):
+        if isinstance(event, WorkflowIdleEvent):
+            break
+    assert handler.ctx is not None
+    snapshot = handler.ctx.to_dict()
+    await handler.cancel_run()
+    records = await records_task
+    return snapshot, records
+
+
+async def test_restore_from_journal_keeps_waiter_requirements(
+    runtime: BasicRuntime,
+) -> None:
+    """A run resumed from the journal filters waiters by their requirements,
+    exactly like one resumed from ctx.to_dict()."""
+
+    async def resume(source: str) -> tuple[Any, list[str]]:
+        snapshot, records = await _pause_and_journal(runtime)
+        workflow = TwoWaiters(runtime=runtime, timeout=None)
+        restored = (
+            runtime.restore(workflow, None, records)
+            if source == "journal"
+            else Context.from_dict(workflow, snapshot)
+        )
+        handler = workflow.run(ctx=restored)
+        await handler.send_event(Answer(name="b", value=2))
+        await handler.send_event(Answer(name="a", value=1))
+        events = [
+            type(event).__name__
+            async for event in handler.stream_events(expose_internal=True)
+        ]
+        return await handler, events
+
+    journal_result, journal_events = await resume("journal")
+    snapshot_result, snapshot_events = await resume("snapshot")
+    assert journal_result == [("a", 1), ("b", 2)]
+    assert journal_result == snapshot_result
+    assert "WorkflowIdleEvent" in journal_events
+    assert "WorkflowIdleEvent" in snapshot_events
