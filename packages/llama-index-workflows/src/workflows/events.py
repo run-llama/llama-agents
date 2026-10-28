@@ -82,7 +82,12 @@ class DictLikeModel(BaseModel):
             return self._data[__name]
 
     def __setattr__(self, name: str, value: Any) -> None:
-        if name in self.__private_attributes__ or name in self.__class__.model_fields:
+        # Keep pydantic private state out of dynamic _data (needed on pydantic>=2.14).
+        if (
+            name in self.__private_attributes__
+            or name in self.__class__.model_fields
+            or name == "__pydantic_private__"
+        ):
             super().__setattr__(name, value)
         else:
             self._data.__setitem__(name, value)
