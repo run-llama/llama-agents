@@ -2,6 +2,7 @@
 # Copyright (c) 2026 LlamaIndex Inc.
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -217,3 +218,27 @@ def test_snapshot_validation_does_not_decode_metadata_with_the_serializer() -> N
     parsed = SerializedContext.from_dict_auto({"version": 2}, ScopedSerializer())
     assert parsed.version == 2
     assert calls == ["scope"]
+
+
+def test_pickle_serializer_preserves_tuple_types() -> None:
+    serializer = PickleSerializer()
+
+    payload = serializer.serialize({"coords": (1, 2)})
+
+    assert serializer.deserialize(payload) == {"coords": (1, 2)}
+
+
+def test_pickle_serializer_preserves_non_string_dict_keys() -> None:
+    serializer = PickleSerializer()
+
+    payload = serializer.serialize({1: "one"})
+
+    assert serializer.deserialize(payload) == {1: "one"}
+
+
+def test_pickle_serializer_keeps_json_for_json_native_values() -> None:
+    serializer = PickleSerializer()
+
+    payload = serializer.serialize({"a": [1, 2], "b": None})
+
+    assert json.loads(payload) == {"a": [1, 2], "b": None}
