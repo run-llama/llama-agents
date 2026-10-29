@@ -2487,6 +2487,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "pyyaml" },
     { name = "rich" },
+    { name = "starlette" },
     { name = "structlog" },
     { name = "typing-extensions", version = "4.15.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "uvicorn" },
@@ -2518,6 +2519,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.10.1" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "rich", specifier = ">=14.1.0" },
+    { name = "starlette", specifier = ">=1.0.1" },
     { name = "structlog", specifier = ">=25.4.0" },
     { name = "typing-extensions", marker = "python_full_version < '3.12'", specifier = ">=4.15.0" },
     { name = "uvicorn", specifier = ">=0.35.0" },
@@ -2900,7 +2902,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "llama-agents-client", editable = "packages/llama-agents-client" },
     { name = "llama-index-workflows", editable = "packages/llama-index-workflows" },
-    { name = "starlette", specifier = ">=0.39.0" },
+    { name = "starlette", specifier = ">=1.0.1" },
     { name = "uvicorn", specifier = ">=0.32.0" },
 ]
 provides-extras = ["asyncpg"]
