@@ -110,7 +110,6 @@ async def test_function_resource_init() -> None:
     assert isinstance(retval, _Resource)
     assert "get_string" in retval.name
     assert retval.cache
-    assert not retval._is_async
 
     resource_manager = ResourceManager()
     result = await retval.call(resource_manager)

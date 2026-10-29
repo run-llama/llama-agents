@@ -58,13 +58,13 @@ To inject a resource, add a parameter to the step signature, wrap the type in `A
 memory: Annotated[Memory, Resource(get_memory)]
 ```
 
-The factory return type should match the annotated parameter type. By default, the resource is cached for the workflow run, so both steps receive the same `Memory` object and the factory is called once. If a step needs a fresh object each time, pass `cache=False`:
+The resolved resource should match the annotated parameter type. By default, the resource is cached for the workflow run, so both steps receive the same `Memory` object and the factory is called once. If a step needs a fresh object each time, pass `cache=False`:
 
 ```python
 memory: Annotated[Memory, Resource(get_memory, cache=False)]
 ```
 
-Factories can be synchronous or async.
+Factories can be synchronous or async. If a factory returns an awaitable, including a coroutine or `asyncio.Future`, it is awaited before the resource is injected or cached. This also applies to async factories wrapped by synchronous decorators.
 
 ## Config-backed Resources
 
