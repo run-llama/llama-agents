@@ -224,7 +224,7 @@ def as_step_worker_function(
             # error spans.
             captured_waiting: WaitingForEvent | None = None
             captured_cancelled: BaseException | None = None
-            if asyncio.iscoroutinefunction(call_func):
+            if inspect.iscoroutinefunction(call_func):
 
                 @functools.wraps(call_func)
                 async def span_safe_call(*args: Any, **kwargs: Any) -> Any:
@@ -283,7 +283,7 @@ def as_step_worker_function(
 
             try:
                 # coerce to coroutine function
-                if not asyncio.iscoroutinefunction(call_func):
+                if not inspect.iscoroutinefunction(call_func):
                     # run_in_executor doesn't accept **kwargs, so we need to use partial
                     copy = copy_context()
 
