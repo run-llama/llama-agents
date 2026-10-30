@@ -8,6 +8,12 @@ COPY --from=ghcr.io/astral-sh/uv:0.7.20 /uv /uvx /bin/
 # and that venv has no pip.
 RUN /usr/local/bin/python3.12 -m pip install --no-cache-dir --upgrade pip
 
+# Take Debian security updates the base image doesn't carry yet, e.g. libbrotli1
+# for CVE-2026-111497 (CISA KEV), which is fixed in 1.1.0-2+deb13u1.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
 # Create a non-root user
 RUN groupadd --gid 1001 appgroup && \
     useradd --uid 1001 --gid appgroup --shell /bin/bash --create-home appuser
