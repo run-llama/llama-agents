@@ -291,7 +291,10 @@ class PickleSerializer(JsonSerializer):
 
     This serializer attempts JSON first for readability and portability, and
     transparently falls back to Pickle for objects that cannot be represented in
-    JSON. Deserialization prioritizes Pickle and falls back to JSON.
+    JSON. Deserialization prefers Pickle only when the payload is valid base64
+    (``validate=True``), otherwise it falls back to JSON. Without validation,
+    JSON strings such as ``"SwEu"`` can be misread as pickle after alphabet
+    characters are silently stripped.
 
     Warning:
         Pickle can execute arbitrary code during deserialization. Only
@@ -338,7 +341,9 @@ class PickleSerializer(JsonSerializer):
             Use only with trusted payloads due to Pickle security implications.
         """
         try:
-            return pickle.loads(base64.b64decode(value))
+            # validate=True rejects JSON payloads (quotes, braces, etc.) so they
+            # are never base64-decoded into accidental pickle bytes.
+            return pickle.loads(base64.b64decode(value, validate=True))
         except Exception:
             return super().deserialize(value)
 
