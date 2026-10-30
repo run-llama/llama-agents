@@ -71,6 +71,13 @@ class SerializedContextV0(BaseModel):
     # as keys in `queues` (they are used as queue names for waiter-specific queues).
     waiting_ids: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def require_context_field(cls, data: Any) -> Any:
+        if isinstance(data, dict) and not (cls.model_fields.keys() & data.keys()):
+            raise ValueError("Legacy context payload has no recognized fields")
+        return data
+
 
 class SerializedEventAttempt(BaseModel):
     """Serialized representation of an EventAttempt with retry information."""
