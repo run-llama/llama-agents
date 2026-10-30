@@ -593,7 +593,18 @@ class WorkflowClient:
         current_interval = poll_interval
 
         while True:
-            handler = await self.get_handler(handler_id)
+            if deadline is None or timeout == 0:
+                # A zero timeout preserves the single immediate status check.
+                handler = await self.get_handler(handler_id)
+            else:
+                try:
+                    handler = await asyncio.wait_for(
+                        self.get_handler(handler_id), max(0.0, deadline - loop.time())
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise TimeoutError(
+                        f"Handler {handler_id!r} did not complete within {timeout} seconds"
+                    ) from exc
             if is_status_completed(handler.status):
                 return handler
 
