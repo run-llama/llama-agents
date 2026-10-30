@@ -2474,7 +2474,7 @@ dev = [
 
 [[package]]
 name = "llama-agents-appserver"
-version = "0.12.2"
+version = "0.12.3"
 source = { editable = "packages/llama-agents-appserver" }
 dependencies = [
     { name = "fastapi" },
@@ -2576,7 +2576,7 @@ dev = [
 
 [[package]]
 name = "llama-agents-control-plane"
-version = "0.12.5"
+version = "0.12.6"
 source = { editable = "packages/llama-agents-control-plane" }
 dependencies = [
     { name = "a2wsgi" },
@@ -2866,7 +2866,7 @@ dev = [
 
 [[package]]
 name = "llama-agents-server"
-version = "0.8.0"
+version = "0.8.1"
 source = { editable = "packages/llama-agents-server" }
 dependencies = [
     { name = "httpx" },

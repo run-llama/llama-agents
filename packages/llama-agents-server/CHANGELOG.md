@@ -1,5 +1,11 @@
 # llama-agents-server
 
+## 0.8.1
+
+### Patch Changes
+
+- 96400ea: Require starlette 1.0.1 or newer so deployments cannot resolve a starlette affected by CVE-2026-48710.
+
 ## 0.8.0
 
 ### Minor Changes
