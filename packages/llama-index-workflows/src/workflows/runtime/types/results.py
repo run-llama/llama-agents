@@ -414,9 +414,13 @@ class AddWaiter(BaseModel, Generic[EventType]):
     @classmethod
     def _validate(cls, data: Any, handler: Any) -> AddWaiter:
         if isinstance(data, dict):
-            # Strip has_requirements before validation (it's computed)
             data = dict(data)
-            data.pop("has_requirements", None)
+            # Requirements are not serialized, so `has_requirements` is the only
+            # surviving signal that the waiter must be re-registered by re-running
+            # its step. Recomputing it from the (empty) requirements here would drop
+            # that signal on every journal replay and leave the waiter matching any
+            # event of its type.
+            data["has_requirements"] = bool(data.get("has_requirements", False))
         return handler(data)
 
 
