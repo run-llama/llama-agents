@@ -145,6 +145,18 @@ def test_from_dict_auto_rejects_non_int_version() -> None:
         SerializedContext.from_dict_auto(payload)
 
 
+@pytest.mark.parametrize("payload", [{}, {"foo": "bar"}])
+def test_from_dict_auto_rejects_payload_without_v0_fields(payload: dict) -> None:
+    """A dict that is not a snapshot must not become an empty legacy context."""
+    with pytest.raises(ValueError, match="not a serialized context"):
+        SerializedContext.from_dict_auto(payload)
+
+
+def test_from_dict_auto_rejects_explicit_v0_without_v0_fields() -> None:
+    with pytest.raises(ValueError, match="not a serialized context"):
+        SerializedContext.from_dict_auto({"version": 0})
+
+
 def test_from_dict_auto_missing_version_routes_to_v0() -> None:
     """No version marker still parses as the legacy V0 format."""
     result = SerializedContext.from_dict_auto({"state": {}, "is_running": False})
