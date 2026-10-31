@@ -366,11 +366,20 @@ class SerializedContext(BaseModel):
         dropping state (workers, streams).
         """
         selected = serializer if serializer is not None else JsonSerializer()
+
+        def parse_v0() -> "SerializedContext":
+            if not any(field in data for field in SerializedContextV0.model_fields):
+                raise ValueError(
+                    "Cannot load serialized workflow context: the payload has no "
+                    "'version' and none of the legacy V0 fields, so it is not a "
+                    "serialized context."
+                )
+            return SerializedContext.from_v0(SerializedContextV0.model_validate(data))
+
         with selected.validation_context():
             version = data.get("version")
             if version is None:
-                v0 = SerializedContextV0.model_validate(data)
-                return SerializedContext.from_v0(v0)
+                return parse_v0()
             if not isinstance(version, int) or version > CURRENT_SERIALIZED_VERSION:
                 raise ValueError(
                     f"Cannot load serialized workflow context with "
@@ -383,5 +392,4 @@ class SerializedContext(BaseModel):
             if version == 1:
                 return SerializedContext.from_v1(data)
             # Older int version markers (e.g. an explicit 0): legacy V0 format.
-            v0 = SerializedContextV0.model_validate(data)
-            return SerializedContext.from_v0(v0)
+            return parse_v0()
