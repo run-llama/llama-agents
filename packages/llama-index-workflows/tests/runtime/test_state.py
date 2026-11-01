@@ -145,6 +145,17 @@ def test_from_dict_auto_rejects_non_int_version() -> None:
         SerializedContext.from_dict_auto(payload)
 
 
+@pytest.mark.parametrize("version", [True, False, -1])
+def test_from_dict_auto_rejects_invalid_version(version: object) -> None:
+    with pytest.raises(ValueError, match="non-negative integer"):
+        SerializedContext.from_dict_auto({"version": version, "state": {}})
+
+
+def test_from_dict_auto_accepts_explicit_zero_version() -> None:
+    result = SerializedContext.from_dict_auto({"version": 0, "state": {}})
+    assert result.version == CURRENT_SERIALIZED_VERSION
+
+
 def test_from_dict_auto_missing_version_routes_to_v0() -> None:
     """No version marker still parses as the legacy V0 format."""
     result = SerializedContext.from_dict_auto({"state": {}, "is_running": False})

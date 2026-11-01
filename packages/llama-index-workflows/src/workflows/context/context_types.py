@@ -371,12 +371,17 @@ class SerializedContext(BaseModel):
             if version is None:
                 v0 = SerializedContextV0.model_validate(data)
                 return SerializedContext.from_v0(v0)
-            if not isinstance(version, int) or version > CURRENT_SERIALIZED_VERSION:
+            if isinstance(version, bool) or not isinstance(version, int) or version < 0:
                 raise ValueError(
                     f"Cannot load serialized workflow context with "
-                    f"version={version!r}; this library supports up to version "
-                    f"{CURRENT_SERIALIZED_VERSION}. The payload was likely written "
-                    "by a newer version of llama-index-workflows."
+                    f"version={version!r}; version must be a non-negative integer."
+                )
+            if version > CURRENT_SERIALIZED_VERSION:
+                raise ValueError(
+                    f"Cannot load serialized workflow context with version={version!r}; "
+                    f"this library supports up to version {CURRENT_SERIALIZED_VERSION}. "
+                    "The payload was likely written by a newer version of "
+                    "llama-index-workflows."
                 )
             if version == CURRENT_SERIALIZED_VERSION:
                 return SerializedContext.model_validate(data)
