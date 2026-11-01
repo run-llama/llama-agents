@@ -556,6 +556,40 @@ async def test_human_in_the_loop_waiter_with_nonserializable_requirements_pickle
     assert final_result == "Done"
 
 
+class AskPrompt(InputRequiredEvent):
+    prompt: str
+
+
+class AskAnswer(HumanResponseEvent):
+    reply: str
+
+
+class SequentialWaitWorkflow(Workflow):
+    @step
+    async def interview(self, ctx: Context, ev: StartEvent) -> StopEvent:
+        first = await ctx.wait_for_event(
+            AskAnswer, waiter_event=AskPrompt(prompt="first?"), waiter_id="first"
+        )
+        second = await ctx.wait_for_event(
+            AskAnswer, waiter_event=AskPrompt(prompt="second?"), waiter_id="second"
+        )
+        return StopEvent(result=(first.reply, second.reply))
+
+
+@pytest.mark.asyncio
+async def test_sequential_waits_for_same_event_type_keep_their_own_answer() -> None:
+    """Two waits for the same event type must each resolve to its own answer."""
+    workflow = SequentialWaitWorkflow(timeout=30)
+    ctx = Context(workflow)
+    handler = workflow.run(ctx=ctx)
+    answers = iter(["A", "B"])
+    async for event in ctx.stream_events():
+        if isinstance(event, AskPrompt):
+            ctx.send_event(AskAnswer(reply=next(answers)))
+    result = await handler
+    assert result == ("A", "B")
+
+
 def test__get_start_event_instance(caplog: Any) -> None:
     class CustomEvent(StartEvent):
         field: str
