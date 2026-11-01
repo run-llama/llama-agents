@@ -963,6 +963,9 @@ def _apply_step_result(
             ),
             None,
         )
+        prior = (
+            worker_state.collected_waiters[existing] if existing is not None else None
+        )
         # The deadline is state, not just a scheduled tick: a waiter that
         # survives a snapshot/resume re-arms its timeout from this value. Derive
         # it from the journaled tick stamp so replay rebuilds the same deadline;
@@ -972,11 +975,6 @@ def _apply_step_result(
         if result.timeout is not None:
             stamp = _tick_stamp(tick)
             deadline_base = stamp if stamp is not None else now_seconds
-            prior = (
-                worker_state.collected_waiters[existing]
-                if existing is not None
-                else None
-            )
             timeout_at = (
                 prior.timeout_at
                 if prior is not None
@@ -991,6 +989,10 @@ def _apply_step_result(
             requirements=result.requirements,
             has_requirements=bool(len(result.requirements)),
             resolved_event=None,
+            # A worker dispatched before the waiter timed out re-registers it
+            # from its stale dispatch snapshot. Keep the live timed-out flag,
+            # or the queued retry sees a live waiter and waits forever.
+            timed_out=prior.timed_out if prior is not None else False,
             timeout_at=timeout_at,
             # Store the suspended work item's record so resume re-delivers
             # it whole: same stream scope, same collect batch.
