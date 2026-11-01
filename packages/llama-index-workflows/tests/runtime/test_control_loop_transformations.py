@@ -57,6 +57,7 @@ from workflows.runtime.types.commands import (
     CommandPublishEvent,
     CommandQueueEvent,
     CommandRunWorker,
+    CommandScheduleWaiterTimeout,
     CommandScheduleWakeup,
 )
 from workflows.runtime.types.internal_state import (
@@ -90,6 +91,7 @@ from workflows.runtime.types.ticks import (
     TickSessionStart,
     TickStepResult,
     TickTimeout,
+    TickWaiterTimeout,
     TickWakeup,
     WorkflowTick,
 )
@@ -437,6 +439,94 @@ def test_waiters(base_state: BrokerState) -> None:
     )
     new_state, _ = _process_step_result_tick(tick, new_state, now_seconds=110.0)
     assert len(new_state.workers[TEST_STEP_ID].collected_waiters) == 0
+
+
+def test_stale_add_waiter_after_parallel_timeout_is_ignored(
+    base_state: BrokerState,
+) -> None:
+    """A late AddWaiter from a pre-timeout invocation must not resurrect a
+    consumed waiter after a parallel timeout retry deleted it (num_workers > 1).
+    """
+    step_state = base_state.workers[TEST_STEP_ID]
+    step_state.config.num_workers = 2
+    event = MyTestEvent(value=42)
+    # Restored waiter, registered before the invocation A that is in flight.
+    step_state.collected_waiters.append(
+        StepWorkerWaiter(
+            waiter_id="w1",
+            event=event,
+            waiting_for_event=OtherEvent,
+            requirements={},
+            has_requirements=False,
+            resolved_event=None,
+            timed_out=False,
+            timeout_at=150.0,
+        )
+    )
+    add_worker(base_state, event)  # invocation A ("worker-0") is pre-timeout
+
+    # Timeout fires while A is still doing I/O: marks the waiter timed out and
+    # dispatches retry B concurrently because num_workers=2.
+    state, commands = _reduce_tick(
+        TickWaiterTimeout(step_id=TEST_STEP_ID, waiter_id="w1", stamped_at=160.0),
+        base_state,
+        now_seconds=160.0,
+    )
+    b_runs = [c for c in commands if isinstance(c, CommandRunWorker)]
+    assert len(b_runs) == 1
+    b_run = b_runs[0]
+    assert len(state.workers[TEST_STEP_ID].in_progress) == 2
+
+    # B observed timed_out, emits DeleteWaiter and a nonterminal result; the
+    # completed step consumes and removes the waiter.
+    state, _ = _reduce_tick(
+        TickStepResult(
+            step_id=TEST_STEP_ID,
+            worker_id=b_run.id,
+            invocation_id=b_run.invocation_id,
+            event=b_run.event,
+            result=[
+                cast(
+                    StepFunctionResult,
+                    StepWorkerResult(result=OtherEvent(data="timeout")),
+                ),
+                cast(StepFunctionResult, DeleteWaiter(waiter_id="w1")),
+            ],
+        ),
+        state,
+        now_seconds=160.0,
+    )
+    assert state.workers[TEST_STEP_ID].collected_waiters == []
+
+    # A finally reaches wait_for_event() with its pre-timeout snapshot and
+    # re-registers the same waiter. It must be ignored, not re-added with a
+    # fresh timeout.
+    a_exec = state.workers[TEST_STEP_ID].in_progress[0]
+    state, commands = _reduce_tick(
+        TickStepResult(
+            step_id=TEST_STEP_ID,
+            worker_id=a_exec.worker_id,
+            invocation_id=a_exec.invocation_id,
+            event=event,
+            result=[
+                cast(
+                    StepFunctionResult,
+                    AddWaiter(
+                        waiter_id="w1",
+                        requirements={},
+                        timeout=5.0,
+                        event_type=OtherEvent,
+                        waiter_epoch=0,
+                    ),
+                )
+            ],
+        ),
+        state,
+        now_seconds=160.0,
+    )
+    assert state.workers[TEST_STEP_ID].collected_waiters == []
+    assert not any(isinstance(c, CommandScheduleWaiterTimeout) for c in commands)
+    assert state.workers[TEST_STEP_ID].waiter_epochs == {"w1": 1}
 
 
 def test_start_event_sets_running(base_state: BrokerState) -> None:

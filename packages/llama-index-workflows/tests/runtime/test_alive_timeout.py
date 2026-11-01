@@ -14,7 +14,11 @@ from workflows.events import StartEvent, StopEvent
 from workflows.runtime.control_loop.reduce import _reduce_tick
 from workflows.runtime.control_loop.runner import _ControlLoopRunner
 from workflows.runtime.types.commands import CommandHalt, CommandScheduleTimeout
-from workflows.runtime.types.internal_state import BrokerState
+from workflows.runtime.types.internal_state import (
+    BrokerState,
+    InProgressState,
+    StepWorkerState,
+)
 from workflows.runtime.types.results import StepWorkerWaiter
 from workflows.runtime.types.step_function import as_step_worker_functions
 from workflows.runtime.types.step_id import StepId
@@ -285,3 +289,41 @@ async def test_rewound_waiter_timeout_schedules_at_persisted_deadline() -> None:
             ),
         )
     ]
+
+
+def test_waiter_epochs_survive_state_round_trip() -> None:
+    """Waiter registration generations must survive serialize/resume.
+
+    A restored invocation keeps the generation it snapshotted at dispatch, so
+    the reducer can still recognize its late AddWaiter as stale after the
+    broker is resumed from a snapshot.
+    """
+    workflow = _AliveBudgetWorkflow()
+    state = BrokerState.from_workflow(workflow)
+    step_id = StepId.root("start")
+    state.workers[step_id].waiter_epochs["restored-waiter"] = 2
+    state.workers[step_id].in_progress.append(
+        InProgressState(
+            event=StartEvent(),
+            worker_id=0,
+            shared_state=StepWorkerState(
+                step_name="start",
+                collected_events={},
+                collected_waiters=[],
+                waiter_epochs={"restored-waiter": 1},
+            ),
+            attempts=0,
+            first_attempt_at=10.0,
+            invocation_id="invocation_1",
+        )
+    )
+
+    serializer = JsonSerializer()
+    restored = BrokerState.from_serialized(
+        state.to_serialized(serializer), workflow, serializer
+    )
+
+    assert restored.workers[step_id].waiter_epochs == {"restored-waiter": 2}
+    assert restored.workers[step_id].in_progress[0].shared_state.waiter_epochs == {
+        "restored-waiter": 1
+    }

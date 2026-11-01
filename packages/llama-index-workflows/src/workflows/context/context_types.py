@@ -123,6 +123,8 @@ class SerializedInProgressAttempt(SerializedEventAttempt):
     collected_events: dict[str, list[str]] = Field(default_factory=dict)
     # Buffer counters at dispatch time.
     collect_generations: dict[str, int] = Field(default_factory=dict)
+    # Waiter registration generations at dispatch time.
+    waiter_epochs: dict[str, int] = Field(default_factory=dict)
 
 
 class SerializedCollectionReleasePayload(BaseModel):
@@ -190,6 +192,8 @@ class SerializedStepWorkerState(BaseModel):
     static_collect_events: list[str] = Field(default_factory=list)
     # Active waiters created by ctx.wait_for_event()
     collected_waiters: list[SerializedWaiter] = Field(default_factory=list)
+    # Per-waiter registration generations, including consumed waiters.
+    waiter_epochs: dict[str, int] = Field(default_factory=dict)
 
 
 class SerializedDelivery(BaseModel):

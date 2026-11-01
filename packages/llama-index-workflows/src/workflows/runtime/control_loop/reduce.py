@@ -956,6 +956,10 @@ def _apply_step_result(
                 state.workers[step_id].bump_collect_generation(result.event_id)
     elif isinstance(result, AddWaiter):
         # indicates that a run has added a waiter to the collected waiters state
+        if result.waiter_epoch < worker_state.waiter_epochs.get(result.waiter_id, 0):
+            # This dispatch snapshotted the waiter before a timeout consumed
+            # it; re-registering now would resurrect it and re-arm a timeout.
+            return
         existing = next(
             (
                 (i)
@@ -1434,6 +1438,7 @@ def _add_or_enqueue_event(
             scope_path=event.scope_path,
             work_item_id=event.work_item_id,
             invocation_id=invocation_id,
+            waiter_epochs=dict(state.waiter_epochs),
         )
         state.in_progress.append(
             InProgressState(
@@ -1981,6 +1986,11 @@ def _process_waiter_timeout_tick(
     if waiter is None or waiter.resolved_event is not None or waiter.timed_out:
         return state, commands
     waiter.timed_out = True
+    # Bump the registration generation so any invocation dispatched before
+    # this timeout cannot re-register the consumed waiter later.
+    worker_state.waiter_epochs[waiter.waiter_id] = (
+        worker_state.waiter_epochs.get(waiter.waiter_id, 0) + 1
+    )
     # Timeout resumes the suspended work item whole, like waiter resolution.
     subcommands = _add_or_enqueue_event(
         EventAttempt(
