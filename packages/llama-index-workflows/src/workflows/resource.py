@@ -60,12 +60,12 @@ class ResourceDescriptor(Protocol):
     """Common interface for resource descriptors.
 
     Both _Resource and _ResourceConfig implement this protocol, allowing
-    unified resolution through ResourceManager without isinstance checks.
+    unified resolution through ResourceManager.
     """
 
     @property
     def name(self) -> str:
-        """Unique identifier for caching and cycle detection."""
+        """Readable name for manual overrides and non-factory resource identity."""
         ...
 
     @property
@@ -90,6 +90,32 @@ class ResourceDescriptor(Protocol):
         ...
 
 
+class _FactoryKey:
+    """Retain callable identity independently of its display name."""
+
+    def __init__(self, factory: Callable[..., Any], name: str) -> None:
+        self.name = name
+        if inspect.ismethod(factory):
+            self._function: object = factory.__func__
+            self._instance: object | None = factory.__self__
+        else:
+            self._function = factory
+            self._instance = None
+
+    def __hash__(self) -> int:
+        return hash((id(self._function), id(self._instance)))
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, _FactoryKey)
+            and self._function is other._function
+            and self._instance is other._instance
+        )
+
+    def __str__(self) -> str:
+        return self.name
+
+
 class _Resource(Generic[T]):
     """Internal wrapper for resource factories.
 
@@ -101,6 +127,7 @@ class _Resource(Generic[T]):
         self._factory = factory
         self._is_async = inspect.iscoroutinefunction(factory)
         self.name = getattr(factory, "__qualname__", type(factory).__name__)
+        self._cache_key = _FactoryKey(factory, self.name)
         self.cache = cache
         self._localns: dict[str, Any] | None = None
 
@@ -157,6 +184,12 @@ class _Resource(Generic[T]):
                         type_annotation = args[0]
                         deps.append((param.name, descriptor, type_annotation))
         return deps
+
+
+def _resource_key(resource: ResourceDescriptor) -> str | _FactoryKey:
+    if isinstance(resource, _Resource):
+        return resource._cache_key
+    return resource.name
 
 
 def _get_resource_config_data(
@@ -398,8 +431,10 @@ class ResourceManager:
 
     def __init__(self) -> None:
         self.resources: dict[str, Any] = {}
-        self._resolving: list[str] = []  # Track resources being resolved in order
-        self._resolution_cache: dict[str, Any] = {}
+        self._factory_resources: dict[_FactoryKey, Any] = {}
+        self._manual_resource_names: set[str] = set()
+        self._resolving: list[str | _FactoryKey] = []
+        self._resolution_cache: dict[str | _FactoryKey, Any] = {}
         self._resolution_depth = 0
 
     @contextmanager
@@ -415,7 +450,8 @@ class ResourceManager:
 
     async def set(self, name: str, val: Any) -> None:
         """Register a resource instance under a name."""
-        self.resources.update({name: val})
+        self.resources[name] = val
+        self._manual_resource_names.add(name)
 
     async def get(self, resource: ResourceDescriptor) -> Any:
         if self._resolution_depth == 0:
@@ -428,28 +464,37 @@ class ResourceManager:
 
         Works with any ResourceDescriptor implementation (_Resource or _ResourceConfig).
         """
-        # Cycle detection
-        if resource.name in self._resolving:
-            chain = " -> ".join(self._resolving) + f" -> {resource.name}"
-            raise ValueError(f"Circular resource dependency detected: {chain}")
+        key = _resource_key(resource)
+        if key in self._resolving:
+            chain = " -> ".join(str(item) for item in self._resolving)
+            raise ValueError(
+                f"Circular resource dependency detected: {chain} -> {resource.name}"
+            )
 
-        # Check cache first (before marking as resolving)
-        if resource.cache and resource.name in self.resources:
-            return self.resources[resource.name]
-        if resource.name in self._resolution_cache:
-            return self._resolution_cache[resource.name]
+        if resource.cache:
+            if resource.name in self._manual_resource_names or isinstance(key, str):
+                if resource.name in self.resources:
+                    return self.resources[resource.name]
+            elif key in self._factory_resources:
+                return self._factory_resources[key]
+        if key in self._resolution_cache:
+            return self._resolution_cache[key]
 
-        # Mark as resolving for cycle detection
-        self._resolving.append(resource.name)
+        self._resolving.append(key)
         try:
             val = await resource.resolve(self)
             if resource.cache:
-                await self.set(resource.name, val)
-            self._resolution_cache[resource.name] = val
+                if isinstance(key, _FactoryKey):
+                    self._factory_resources[key] = val
+                    # Keep the legacy name-indexed view's first materialized value.
+                    self.resources.setdefault(resource.name, val)
+                else:
+                    self.resources[resource.name] = val
+            self._resolution_cache[key] = val
             return val
         finally:
-            if resource.name in self._resolving:
-                self._resolving.remove(resource.name)
+            if key in self._resolving:
+                self._resolving.remove(key)
 
     def get_all(self) -> dict[str, Any]:
         """Return all materialized resources."""

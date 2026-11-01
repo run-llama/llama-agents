@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Callable
 from unittest import mock
 
 import pytest
@@ -16,6 +16,7 @@ from workflows.events import Event, StartEvent, StopEvent
 from workflows.resource import (
     Resource,
     ResourceConfig,
+    ResourceDescriptor,
     ResourceManager,
     _Resource,
     _ResourceConfig,
@@ -1046,3 +1047,193 @@ async def test_resource_config_deferred_in_workflow(
 
     # Now it should work
     await wf.run()
+
+
+class _IdentityProvider:
+    def __init__(self, value: str) -> None:
+        self.value = value
+        self.calls = 0
+
+    def build(self) -> str:
+        self.calls += 1
+        return self.value
+
+
+def _identity_factory(value: str) -> Callable[[], str]:
+    def factory() -> str:
+        return value
+
+    return factory
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cache", [True, False])
+@pytest.mark.parametrize("kind", ["closure", "bound_method", "lambda"])
+async def test_distinct_factory_identity_in_public_workflow(
+    cache: bool, kind: str
+) -> None:
+    if kind == "closure":
+        factories = [_identity_factory("retriever"), _identity_factory("judge")]
+    elif kind == "bound_method":
+        factories = [
+            _IdentityProvider("retriever").build,
+            _IdentityProvider("judge").build,
+        ]
+    else:
+        factories = [lambda: "retriever", lambda: "judge"]
+    first, second = [Resource(factory, cache=cache) for factory in factories]
+
+    class Pipeline(Workflow):
+        @step
+        async def start(
+            self, ev: StartEvent, a: Annotated[str, first], b: Annotated[str, second]
+        ) -> StopEvent:
+            return StopEvent(result=[a, b])
+
+    assert await Pipeline(timeout=2).run() == ["retriever", "judge"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cache", [True, False])
+async def test_same_factory_references_share_within_graph(cache: bool) -> None:
+    calls = 0
+
+    def factory() -> object:
+        nonlocal calls
+        calls += 1
+        return object()
+
+    manager = ResourceManager()
+    with manager.resolution_scope():
+        first = await manager.get(Resource(factory, cache=cache))
+        second = await manager.get(Resource(factory, cache=cache))
+    assert first is second
+    assert calls == 1
+    again = await manager.get(Resource(factory, cache=cache))
+    assert (again is first) == cache
+    assert calls == (1 if cache else 2)
+
+
+@pytest.mark.asyncio
+async def test_same_bound_method_references_share_and_manual_override_wins() -> None:
+    provider = _IdentityProvider("retriever")
+    first, second = Resource(provider.build), Resource(provider.build)
+    manager = ResourceManager()
+    assert first.name == provider.build.__qualname__
+    assert await manager.get(first) == "retriever"
+    assert await manager.get(second) == "retriever"
+    assert provider.calls == 1
+    assert manager.get_all() is manager.resources
+    assert manager.get_all() == {first.name: "retriever"}
+    await manager.set(first.name, "manual")
+    assert await manager.get(first) == "manual"
+    assert await manager.get(second) == "manual"
+
+
+@pytest.mark.asyncio
+async def test_distinct_factories_preserve_first_name_projection_and_manual_override() -> (
+    None
+):
+    first, second = (
+        Resource(_identity_factory("retriever")),
+        Resource(_identity_factory("judge")),
+    )
+    manager = ResourceManager()
+    assert first.name == second.name
+    assert await manager.get(first) == "retriever"
+    assert await manager.get(second) == "judge"
+    assert await manager.get(first) == "retriever"
+    assert manager.get_all() == {first.name: "retriever"}
+    await manager.set(first.name, "manual")
+    assert await manager.get(first) == "manual"
+    assert await manager.get(second) == "manual"
+
+
+def _dependent_identity_factory(
+    value: str, dependency: _Resource | None = None
+) -> Callable[..., str]:
+    def factory(dep: str = "") -> str:
+        return value + dep
+
+    if dependency is not None:
+        factory.__annotations__["dep"] = Annotated[str, dependency]
+    return factory
+
+
+@pytest.mark.asyncio
+async def test_same_named_dependency_is_not_a_false_cycle() -> None:
+    inner = Resource(_dependent_identity_factory("retriever"))
+    outer = Resource(_dependent_identity_factory("judge:", inner))
+    assert inner.name == outer.name
+    assert await ResourceManager().get(outer) == "judge:retriever"
+
+
+def _config_identity_factory(
+    config_resource: _ResourceConfig,
+) -> Callable[..., FileData]:
+    def factory(config: FileData) -> FileData:
+        return config
+
+    factory.__annotations__["config"] = Annotated[FileData, config_resource]
+    return factory
+
+
+def test_config_validation_visits_distinct_same_named_factories(tmp_path: Path) -> None:
+    paths = [tmp_path / "first.json", tmp_path / "second.json"]
+    for path in paths:
+        path.write_text(json.dumps({"file": "missing-permission"}))
+    first, second = [
+        Resource(_config_identity_factory(ResourceConfig(config_file=str(path))))
+        for path in paths
+    ]
+
+    class Pipeline(Workflow):
+        @step
+        async def start(
+            self,
+            ev: StartEvent,
+            a: Annotated[FileData, first],
+            b: Annotated[FileData, second],
+        ) -> StopEvent:
+            return StopEvent()
+
+    with pytest.raises(Exception) as error:
+        Pipeline(disable_validation=True).validate(validate_resource_configs=True)
+    assert "first.json" in str(error.value)
+    assert "second.json" in str(error.value)
+
+
+class _NamedResource:
+    name = "custom"
+    cache = True
+
+    async def resolve(self, manager: ResourceManager) -> str:
+        return "custom-value"
+
+    def set_type_annotation(self, type_annotation: object) -> None:
+        pass
+
+    def set_localns(self, localns: dict[str, object] | None) -> None:
+        pass
+
+    def get_dependencies(self) -> list[tuple[str, ResourceDescriptor, type | None]]:
+        return []
+
+
+@pytest.mark.asyncio
+async def test_custom_resource_descriptor_keeps_name_based_contract() -> None:
+    descriptor = _NamedResource()
+    assert isinstance(descriptor, ResourceDescriptor)
+    manager = ResourceManager()
+    assert await manager.get(descriptor) == "custom-value"
+    assert manager.get_all() == {"custom": "custom-value"}
+    await manager.set("custom", "manual")
+    assert await manager.get(descriptor) == "manual"
+
+
+@pytest.mark.asyncio
+async def test_uncached_factory_still_ignores_manual_cached_value() -> None:
+    resource = Resource(_identity_factory("factory"), cache=False)
+    manager = ResourceManager()
+    await manager.set(resource.name, "manual")
+    assert await manager.get(resource) == "factory"
