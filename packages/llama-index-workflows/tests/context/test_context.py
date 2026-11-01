@@ -782,6 +782,45 @@ async def test_parallel_implicit_waiters_survive_snapshot_resume() -> None:
 
 
 @pytest.mark.asyncio
+async def test_waiter_timeout_survives_snapshot_resume() -> None:
+    """A wait_for_event timeout must still fire after a snapshot/resume.
+
+    The pending timeout lives in the previous session's wakeup heap, so without
+    re-arming it from the restored waiter the run waits forever instead of
+    raising asyncio.TimeoutError.
+    """
+
+    class WaiterTimeoutWorkflow(Workflow):
+        @step
+        async def ask(self, ctx: Context, ev: StartEvent) -> StopEvent:
+            try:
+                await ctx.wait_for_event(
+                    HumanResponseEvent,
+                    waiter_event=InputRequiredEvent(),
+                    timeout=1.0,
+                )
+            except asyncio.TimeoutError:
+                return StopEvent(result="timed_out")
+            return StopEvent(result="answered")
+
+    workflow = WaiterTimeoutWorkflow(timeout=30.0)
+    handler = workflow.run()
+    async for ev in handler.stream_events():
+        if isinstance(ev, InputRequiredEvent):
+            break
+
+    ctx_dict = handler.ctx.to_dict()
+    await handler.cancel_run()
+
+    resumed = workflow.run(ctx=Context.from_dict(workflow, ctx_dict))
+    try:
+        result = await asyncio.wait_for(resumed, 5)
+    finally:
+        await resumed.cancel_run()
+    assert result == "timed_out"
+
+
+@pytest.mark.asyncio
 async def test_implicit_waiter_survives_retry() -> None:
     """A retry is the same invocation, a new attempt. After a step acquires its
     waiter response then fails once, the replay must re-acquire the same resolved

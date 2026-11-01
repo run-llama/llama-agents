@@ -269,6 +269,10 @@ class StepWorkerWaiter(Generic[EventType]):
     bound_events: dict[str, Event] | None = None
     # set to true when the waiter has timed out, such that the step raises asyncio.TimeoutError
     timed_out: bool = False
+    # Absolute adapter-time deadline for the wait, persisted so a restored run
+    # can re-arm the pending timeout. None for waits without a timeout (and for
+    # snapshots written before the deadline was recorded).
+    timeout_at: float | None = None
     # Originating work record: stream scope of the suspended work item, restored
     # whole on resume so the resumed attempt still closes its stream.
     scope_path: tuple[str, ...] = ()

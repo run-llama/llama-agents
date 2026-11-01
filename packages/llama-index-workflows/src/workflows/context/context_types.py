@@ -149,6 +149,9 @@ class SerializedWaiter(BaseModel):
     has_requirements: bool = Field(default=False)
     # Resolved event if available (serialized), None otherwise
     resolved_event: str | None = None
+    # Absolute adapter-time deadline for the wait, so a restored run can
+    # re-arm the pending timeout. None when the wait has no timeout.
+    timeout_at: float | None = None
     # Originating work record: collection stream scope of the suspended work
     # item (innermost stream id last).
     scope_path: list[str] = Field(default_factory=list)

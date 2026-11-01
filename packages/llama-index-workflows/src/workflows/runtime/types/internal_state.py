@@ -408,6 +408,7 @@ def _broker_to_serialized(
                 resolved_event=serializer.serialize(waiter.resolved_event)
                 if waiter.resolved_event
                 else None,
+                timeout_at=waiter.timeout_at,
                 scope_path=list(waiter.scope_path),
                 collection_release_payload=_serialize_release_payload(
                     waiter.collection_release_payload, serializer
@@ -572,6 +573,7 @@ def _load_broker_from_serialized(
                     resolved_event=serializer.deserialize(waiter_data.resolved_event)
                     if waiter_data.resolved_event
                     else None,
+                    timeout_at=waiter_data.timeout_at,
                     scope_path=tuple(waiter_data.scope_path),
                     collection_release_payload=waiter_payload,
                     work_item_id=waiter_data.work_item_id,
