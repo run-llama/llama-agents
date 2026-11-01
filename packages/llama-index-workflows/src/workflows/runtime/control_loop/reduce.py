@@ -597,6 +597,7 @@ def _rewind_broker(
                         waiter_id=waiter.waiter_id,
                         timeout=max(0.0, waiter.timeout_at - now_seconds),
                         invocation_namespace=path,
+                        deadline_at=waiter.timeout_at,
                     )
                 )
     for key, child in sorted(state.children.items()):
@@ -1013,6 +1014,7 @@ def _apply_step_result(
                     waiter_id=result.waiter_id,
                     timeout=result.timeout or 0.0,
                     invocation_namespace=path,
+                    deadline_at=timeout_at,
                 )
             )
     elif isinstance(result, DeleteWaiter):

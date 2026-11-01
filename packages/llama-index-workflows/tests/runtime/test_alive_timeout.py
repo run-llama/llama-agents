@@ -24,6 +24,7 @@ from workflows.runtime.types.ticks import (
     TickTimeout,
     TickWaiterTimeout,
     TickWakeup,
+    WorkflowTick,
 )
 
 from .conftest import MockRunAdapter
@@ -223,3 +224,64 @@ def test_wakeup_and_waiter_timeout_ticks_accrue_alive_budget() -> None:
 
     assert state.elapsed_alive == 2.0
     assert state.last_alive_stamp == 12.0
+
+
+@pytest.mark.asyncio
+async def test_rewound_waiter_timeout_schedules_at_persisted_deadline() -> None:
+    """A restored waiter must be re-armed at its persisted absolute deadline.
+
+    Commands are executed only after adapter.on_tick(), and a persistence
+    adapter appends to the database there. Scheduling at fresh_now + remaining
+    adds that latency to the saved deadline; a waiter due at 105, rewound at
+    100 and scheduled after persistence finishes at 110 must fire immediately
+    rather than at 115.
+    """
+
+    class PersistenceLatencyAdapter(MockRunAdapter):
+        async def on_tick(self, tick: WorkflowTick) -> None:
+            await super().on_tick(tick)
+            if isinstance(tick, TickSessionStart):
+                # Persisting the session-start tick moves the clock past the
+                # restored waiter's deadline.
+                self.advance_time(10.0)
+
+    workflow = _AliveBudgetWorkflow(timeout=30.0)
+    state = BrokerState.from_workflow(workflow)
+    state.is_running = True
+    state.workers[StepId.root("start")].collected_waiters.append(
+        StepWorkerWaiter(
+            waiter_id="restored-waiter",
+            event=StartEvent(),
+            waiting_for_event=StopEvent,
+            requirements={},
+            has_requirements=False,
+            resolved_event=None,
+            timeout_at=105.0,
+        )
+    )
+    adapter = PersistenceLatencyAdapter(run_id="restored-waiter-deadline")
+    adapter._current_time = 100.0
+    runner = _ControlLoopRunner(
+        workflow,
+        adapter,
+        cast(Context, object()),
+        as_step_worker_functions(workflow),
+        state,
+    )
+
+    await runner._process_tick(TickSessionStart(stamped_at=100.0))
+
+    waiter_timeouts = [
+        (wakeup_at, tick)
+        for wakeup_at, _, tick in runner.scheduled_wakeups
+        if isinstance(tick, TickWaiterTimeout)
+    ]
+    assert waiter_timeouts == [
+        (
+            110.0,
+            TickWaiterTimeout(
+                step_id=StepId.root("start"),
+                waiter_id="restored-waiter",
+            ),
+        )
+    ]
