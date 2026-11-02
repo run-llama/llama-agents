@@ -190,6 +190,42 @@ async def test_nested_model_values_in_dict_state_use_serialize_value_form() -> N
     assert op["value"] == JsonSerializer().serialize_value(Message(text="new"))
 
 
+class ToolResults(BaseModel):
+    tool_results: dict[Any, str]
+
+
+@pytest.mark.parametrize("kind", ["dict", "typed"])
+@pytest.mark.parametrize(
+    "key", [1, 1.5, True, None], ids=["integer", "float", "boolean", "null"]
+)
+async def test_checkpoint_diff_preserves_keys_after_json_restore(
+    kind: str, key: int | float | bool | None
+) -> None:
+    serializer = JsonSerializer()
+    results = {key: "first result"}
+    state = (
+        DictState(_data={"tool_results": results})
+        if kind == "dict"
+        else ToolResults(tool_results=results)
+    )
+    original = InMemoryStateStore(state)
+    payload = json.loads(json.dumps(original.checkpoint().to_dict()))
+    restored = InMemoryStateStore.from_dict(payload, serializer)
+    base = restored.checkpoint()
+
+    # JSON persistence converted the original key to a string. The next step
+    # supplies the Python key again when it updates the tool's result.
+    await restored.set("tool_results", {key: "updated result"})
+    current = restored.checkpoint()
+    patch = assert_patch_round_trips(base, current)
+    replayed = apply_state_patch(payload, patch)
+    recovered = InMemoryStateStore.from_dict(replayed, serializer)
+    expected = InMemoryStateStore.from_dict(
+        json.loads(json.dumps(current.to_dict())), serializer
+    )
+    assert await recovered.get("tool_results") == await expected.get("tool_results")
+
+
 class Counters(BaseModel):
     counts: dict[str, int] = Field(default_factory=dict)
     items: list[int] = Field(default_factory=list)
