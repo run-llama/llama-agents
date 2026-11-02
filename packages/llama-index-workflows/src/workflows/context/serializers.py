@@ -262,7 +262,9 @@ class JsonSerializer(BaseSerializer):
             if data.get("__is_pydantic") and data.get("qualified_name"):
                 module_class = self.resolve_class(data["qualified_name"])
                 with self.validation_context():
-                    return module_class.model_validate(data["value"])
+                    # Values were dumped in JSON mode, so validation must also
+                    # accept JSON representations of strict dates, UUIDs, etc.
+                    return module_class.model_validate_json(json.dumps(data["value"]))
             elif data.get("__is_component") and data.get("qualified_name"):
                 module_class = self.resolve_class(data["qualified_name"])
                 with self.validation_context():
