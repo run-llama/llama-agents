@@ -1029,6 +1029,13 @@ def _apply_step_result(
             item = next(filter(lambda w: w.waiter_id == to_remove, waiters), None)
             if item is not None:
                 waiters.remove(item)
+                # A waiter deleted after its event was consumed must not be
+                # resurrected by a registration from a worker snapshot taken
+                # before the answer; bump the epoch so such ticks are ignored.
+                worker_state = state.workers[step_id]
+                worker_state.waiter_epochs[to_remove] = (
+                    worker_state.waiter_epochs.get(to_remove, 0) + 1
+                )
     else:
         raise ValueError(f"Unknown result type: {type(result)}")
 
