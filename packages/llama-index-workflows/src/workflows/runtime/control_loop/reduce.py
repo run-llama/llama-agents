@@ -857,6 +857,7 @@ def _apply_step_result(
                 worker.collected_events.clear()
                 worker.static_collect_events.clear()
                 worker.collected_waiters.clear()
+                worker.waiter_generations.clear()
             # Drop open collection state; no release can fire after the run ends.
             _clear_collection_state(state)
             acc.commands.append(CommandCompleteRun(result=result.result))
@@ -936,6 +937,12 @@ def _apply_step_result(
             ):
                 state.workers[step_id].bump_collect_generation(result.event_id)
     elif isinstance(result, AddWaiter):
+        # A parallel continuation may have consumed and deleted this waiter
+        # while this invocation was still rebuilding its requirements.
+        if worker_state.waiter_generations.get(
+            result.waiter_id, 0
+        ) != this_execution.waiter_generations.get(result.waiter_id, 0):
+            return
         # indicates that a run has added a waiter to the collected waiters state
         existing = next(
             (
@@ -960,6 +967,9 @@ def _apply_step_result(
             work_item_id=this_execution.work_item_id,
         )
         if existing is not None:
+            current = worker_state.collected_waiters[existing]
+            if current.timed_out or current.resolved_event is not None:
+                return
             worker_state.collected_waiters[existing] = new_waiter
         else:
             worker_state.collected_waiters.append(new_waiter)
@@ -982,6 +992,9 @@ def _apply_step_result(
             item = next(filter(lambda w: w.waiter_id == to_remove, waiters), None)
             if item is not None:
                 waiters.remove(item)
+                worker_state.waiter_generations[to_remove] = (
+                    worker_state.waiter_generations.get(to_remove, 0) + 1
+                )
     else:
         raise ValueError(f"Unknown result type: {type(result)}")
 
@@ -1285,6 +1298,9 @@ def _process_step_result_tick(
         )
         if this_execution in worker_state.in_progress:
             worker_state.in_progress.remove(this_execution)
+        if not worker_state.in_progress:
+            # Only already-dispatched workers can hold stale registrations.
+            worker_state.waiter_generations.clear()
     # enqueue next events if there are any
     if not is_completed:
         acc.commands.extend(_drain_eligible_queue(step_id, broker, path, now_seconds))
@@ -1405,6 +1421,7 @@ def _add_or_enqueue_event(
                 scope_path=event.scope_path,
                 work_item_id=event.work_item_id,
                 collect_generations=dict(state.collect_generations),
+                waiter_generations=dict(state.waiter_generations),
                 invocation_id=invocation_id,
             )
         )

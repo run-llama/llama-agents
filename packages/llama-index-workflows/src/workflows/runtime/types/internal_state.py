@@ -381,6 +381,7 @@ def _broker_to_serialized(
                     for buffer_id, events in ip.shared_state.collected_events.items()
                 },
                 collect_generations=dict(ip.collect_generations),
+                waiter_generations=dict(ip.waiter_generations),
             )
             for ip in worker_state.in_progress
         ]
@@ -422,6 +423,7 @@ def _broker_to_serialized(
             in_progress=in_progress,
             collected_events=collected_events,
             collect_generations=dict(worker_state.collect_generations),
+            waiter_generations=dict(worker_state.waiter_generations),
             static_collect_events=[
                 serializer.serialize(ev) for ev in worker_state.static_collect_events
             ],
@@ -539,6 +541,7 @@ def _load_broker_from_serialized(
             for buffer_id, events in worker_data.collected_events.items()
         }
         worker.collect_generations = dict(worker_data.collect_generations)
+        worker.waiter_generations = dict(worker_data.waiter_generations)
         worker.static_collect_events = [
             serializer.deserialize(ev) for ev in worker_data.static_collect_events
         ]
@@ -621,6 +624,7 @@ def _deserialize_in_progress(
         invocation_id=data.invocation_id,
         received=set(data.received),
         collect_generations=dict(data.collect_generations),
+        waiter_generations=dict(data.waiter_generations),
     )
 
 
@@ -914,6 +918,8 @@ class InternalStepWorkerState:
         collected_waiters: Active waiters created by ctx.wait_for_event()
         collect_generations: Buffer counters bumped on each append or clear.
             A changed counter means the invocation used a stale buffer.
+        waiter_generations: Deletion counters retained while workers may still
+            return registrations from an older waiter snapshot.
     """
 
     queue: list[EventAttempt]
@@ -923,11 +929,13 @@ class InternalStepWorkerState:
     collected_waiters: list[StepWorkerWaiter]
     static_collect_events: list[Event] = field(default_factory=list)
     collect_generations: dict[str, int] = field(default_factory=dict)
+    waiter_generations: dict[str, int] = field(default_factory=dict)
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         self.__dict__.update(state)
         if "collect_generations" not in state:
             self.collect_generations = {}
+        self.__dict__.setdefault("waiter_generations", {})
 
     def _deepcopy(self) -> InternalStepWorkerState:
         return InternalStepWorkerState(
@@ -938,6 +946,7 @@ class InternalStepWorkerState:
             static_collect_events=list(self.static_collect_events),
             collected_waiters=[dataclasses.replace(x) for x in self.collected_waiters],
             collect_generations=dict(self.collect_generations),
+            waiter_generations=dict(self.waiter_generations),
         )
 
     def bump_collect_generation(self, buffer_id: str) -> None:
@@ -971,6 +980,7 @@ class InProgressState:
             tests may omit it.
         received: Indexes of sends already routed for this invocation.
         collect_generations: Buffer counters at dispatch time.
+        waiter_generations: Waiter deletion counters at dispatch time.
     """
 
     event: Event
@@ -987,12 +997,14 @@ class InProgressState:
     invocation_id: str | None = None
     received: set[int] = field(default_factory=set)
     collect_generations: dict[str, int] = field(default_factory=dict)
+    waiter_generations: dict[str, int] = field(default_factory=dict)
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         self.__dict__.update(state)
         self.__dict__.setdefault("invocation_id", None)
         self.__dict__.setdefault("received", set())
         self.__dict__.setdefault("collect_generations", {})
+        self.__dict__.setdefault("waiter_generations", {})
 
     def _deepcopy(self) -> InProgressState:
         return InProgressState(
@@ -1010,6 +1022,7 @@ class InProgressState:
             invocation_id=self.invocation_id,
             received=set(self.received),
             collect_generations=dict(self.collect_generations),
+            waiter_generations=dict(self.waiter_generations),
         )
 
 
