@@ -510,6 +510,32 @@ async def test_migration_failure_inside_caller_transaction_preserves_original_er
         await pg_conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
 
 
+async def test_migration_prelude_failure_rolls_back_savepoint_and_releases_lock(
+    pg_conn: asyncpg.Connection, schema_names: tuple[str, str]
+) -> None:
+    schema, _ = schema_names
+    previous = await pg_conn.fetchval("SHOW search_path")
+    observer = await asyncpg.connect(os.environ["LLAMA_TEST_POSTGRES_DSN"])
+    try:
+        await pg_conn.execute(f'CREATE SCHEMA "{schema}"')
+        await pg_conn.execute(
+            f"CREATE TYPE \"{schema}\".schema_migrations AS ENUM ('legacy')"
+        )
+        async with pg_conn.transaction():
+            with pytest.raises(asyncpg.DuplicateObjectError):
+                await run_migrations(pg_conn, schema=schema)
+            assert await pg_conn.fetchval("SHOW search_path") == previous
+            assert await pg_conn.fetchval("SELECT 1") == 1
+        assert await observer.fetchval(
+            "SELECT pg_try_advisory_lock($1)", 7_201_407_233_458_173
+        )
+        await observer.execute("SELECT pg_advisory_unlock($1)", 7_201_407_233_458_173)
+    finally:
+        await pg_conn.execute("SELECT pg_advisory_unlock_all()")
+        await observer.close()
+        await pg_conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+
+
 @pytest.mark.parametrize("write_then_fail", [False, True])
 async def test_postgres_journal_failure_is_terminal_without_retry(
     pg_conn: asyncpg.Connection,

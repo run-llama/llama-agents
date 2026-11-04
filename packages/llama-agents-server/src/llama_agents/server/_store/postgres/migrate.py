@@ -54,7 +54,15 @@ async def run_migrations(
     try:
         original_search_path = await conn.fetchval("SHOW search_path")
         try:
-            await _run_migrations_locked(conn, schema, sources)
+            if conn.is_in_transaction():
+                # Roll back any setup or version-query failure before restoring
+                # session state and releasing the session-level advisory lock.
+                async with conn.transaction():
+                    await _run_migrations_locked(conn, schema, sources)
+            else:
+                # Preserve the existing per-migration commits without a caller
+                # transaction; a wrapper transaction would make them atomic.
+                await _run_migrations_locked(conn, schema, sources)
         finally:
             await conn.execute(
                 "SELECT set_config('search_path', $1, false)", original_search_path
