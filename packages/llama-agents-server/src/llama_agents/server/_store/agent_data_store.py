@@ -36,7 +36,7 @@ class AgentDataStore(AbstractWorkflowStore):
 
     Optimized for streaming performance:
     - Same-process subscribers receive events via in-memory queues (no HTTP).
-    - Tick and event writes are fire-and-forget, gathered at step boundaries.
+    - Tick writes are acknowledged before commands; event writes are gathered at step boundaries.
     - Terminal events gather all pending writes before cleanup.
     - HTTP connections are reused across operations.
 
@@ -153,6 +153,10 @@ class AgentDataStore(AbstractWorkflowStore):
 
     async def _regroup_events(self, run_id: str) -> None:
         await self._regroup(self._pending_events, run_id)
+
+    async def flush_pending_ticks(self, run_id: str) -> None:
+        """Make buffered journal writes visible before the next command."""
+        await self._regroup_ticks(run_id)
 
     async def after_tick(self, run_id: str, tick_data: dict[str, Any]) -> None:
         """Gather all in-flight tick and event writes for a run."""
@@ -452,8 +456,8 @@ class AgentDataStore(AbstractWorkflowStore):
             tick_data=tick_data,
         )
 
-        # Fire-and-forget: tick creates run in the background so they don't
-        # block the control loop.  Failures surface at _regroup_ticks time.
+        # Queue the write; the runtime acknowledges it through
+        # flush_pending_ticks before applying the tick's commands.
         self._track_pending(
             self._pending_ticks,
             run_id,
