@@ -462,6 +462,20 @@ async def test_max_completed_applies_to_all_terminal_statuses() -> None:
 
 
 @pytest.mark.asyncio
+async def test_max_completed_recompleted_handler_does_not_evict_others() -> None:
+    store = MemoryWorkflowStore(max_completed=2)
+
+    await _insert(store, handler_id="h-a", status="completed", completed_at=_ts(0))
+    await _insert(store, handler_id="h-b", status="completed", completed_at=_ts(1))
+
+    # Restart of a completed handler: back to running, then terminal again.
+    await _insert(store, handler_id="h-a", status="running")
+    await _insert(store, handler_id="h-a", status="completed", completed_at=_ts(2))
+
+    assert await _query_ids(store) == {"h-a", "h-b"}
+
+
+@pytest.mark.asyncio
 async def test_max_completed_cleans_up_events_ticks_and_state() -> None:
     store = MemoryWorkflowStore(max_completed=1)
 
