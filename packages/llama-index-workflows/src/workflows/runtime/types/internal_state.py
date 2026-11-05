@@ -413,6 +413,7 @@ def _broker_to_serialized(
                     waiter.collection_release_payload, serializer
                 ),
                 work_item_id=waiter.work_item_id,
+                registration_id=waiter.registration_id,
             )
             for waiter in worker_state.collected_waiters
         ]
@@ -575,6 +576,7 @@ def _load_broker_from_serialized(
                     scope_path=tuple(waiter_data.scope_path),
                     collection_release_payload=waiter_payload,
                     work_item_id=waiter_data.work_item_id,
+                    registration_id=waiter_data.registration_id,
                 )
             )
 
