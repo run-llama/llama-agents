@@ -418,6 +418,34 @@ def test_context_from_dict_rejects_future_version_as_context_serde_error(
         Context.from_dict(workflow, payload)
 
 
+@pytest.mark.parametrize(
+    "payload_kind", ["empty", "unrelated_keys", "snapshot_nested_one_level_too_deep"]
+)
+def test_context_from_dict_rejects_payload_without_context_fields(
+    workflow: Workflow, payload_kind: str
+) -> None:
+    snapshot = Context(workflow).to_dict()
+    payload = {
+        "empty": {},
+        "unrelated_keys": {"foo": "bar"},
+        "snapshot_nested_one_level_too_deep": {"context": snapshot},
+    }[payload_kind]
+
+    with pytest.raises(ContextSerdeError, match="none of the expected fields"):
+        Context.from_dict(workflow, payload)
+
+
+def test_context_from_dict_still_loads_legacy_v0_snapshot(workflow: Workflow) -> None:
+    legacy = {"state": {}, "streaming_queue": "[]", "queues": {}, "is_running": False}
+    assert Context.from_dict(workflow, legacy).to_dict()["version"] == (
+        CURRENT_SERIALIZED_VERSION
+    )
+    # An explicit older version marker with legacy fields keeps loading too.
+    assert Context.from_dict(workflow, {**legacy, "version": 0}).to_dict()["state"] == {}
+    # A snapshot with only one legacy field is still a legacy snapshot.
+    assert Context.from_dict(workflow, {"is_running": False}).to_dict()["state"] == {}
+
+
 class TwoStepHITLWorkflow(Workflow):
     """The documented two-step HITL shape: emit InputRequiredEvent, consume HumanResponseEvent."""
 

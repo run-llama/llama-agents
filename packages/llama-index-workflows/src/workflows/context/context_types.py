@@ -355,6 +355,22 @@ class SerializedContext(BaseModel):
         return SerializedContext.model_validate(migrated)
 
     @staticmethod
+    def _require_v0_fields(data: dict[str, Any]) -> None:
+        """Reject a legacy payload that has none of the V0 context fields.
+
+        Every V0 field has a default and unknown keys are ignored, so a payload
+        such as ``{}`` or a snapshot nested one level too deep (``{"context":
+        snapshot}``) would otherwise load as an empty context and silently drop
+        the checkpoint.
+        """
+        if not any(name in data for name in SerializedContextV0.model_fields):
+            raise ValueError(
+                "Serialized workflow context has none of the expected fields "
+                f"({', '.join(SerializedContextV0.model_fields)}); got keys "
+                f"{sorted(data)!r}."
+            )
+
+    @staticmethod
     def from_dict_auto(
         data: dict[str, Any], serializer: BaseSerializer | None = None
     ) -> "SerializedContext":
@@ -369,6 +385,7 @@ class SerializedContext(BaseModel):
         with selected.validation_context():
             version = data.get("version")
             if version is None:
+                SerializedContext._require_v0_fields(data)
                 v0 = SerializedContextV0.model_validate(data)
                 return SerializedContext.from_v0(v0)
             if not isinstance(version, int) or version > CURRENT_SERIALIZED_VERSION:
@@ -383,5 +400,6 @@ class SerializedContext(BaseModel):
             if version == 1:
                 return SerializedContext.from_v1(data)
             # Older int version markers (e.g. an explicit 0): legacy V0 format.
+            SerializedContext._require_v0_fields(data)
             v0 = SerializedContextV0.model_validate(data)
             return SerializedContext.from_v0(v0)
