@@ -596,7 +596,14 @@ def _validate_multi_slot_levels(
     ]
     levels: dict[str, set[type[Event]]] = {
         "the top level": same_level_types(
-            steps, [start_event_class, *external_seeds], frozenset()
+            # StepFailedEvent is a runtime-injected top-level event: it enters
+            # @catch_error handlers, so what they and their downstream steps
+            # produce is top-level, the same as StartEvent/HumanResponseEvent
+            # entry points. Without it, a multi-slot join reachable only through
+            # a catch_error handler is judged "produced at no level" (#23971).
+            steps,
+            [start_event_class, StepFailedEvent, *external_seeds],
+            frozenset(),
         )
     }
     for producer, level_types in stream_level_types_by_producer(steps).items():
