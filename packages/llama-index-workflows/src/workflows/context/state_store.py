@@ -1493,6 +1493,10 @@ def _diffable_model(model: BaseModel, in_model: bool) -> bool:
         or cls.model_computed_fields
         or cls.model_config.get("extra") == "allow"
         or cls.model_config.get("serialize_by_alias")
+        or any(
+            getattr(field, "exclude_if", None) is not None
+            for field in cls.model_fields.values()
+        )
     )
 
 

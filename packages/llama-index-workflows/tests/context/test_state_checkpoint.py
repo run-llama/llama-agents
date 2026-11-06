@@ -127,6 +127,40 @@ def assert_patch_round_trips(
     return patch
 
 
+class ConditionalCount(BaseModel):
+    count: int = Field(default=0, exclude_if=lambda value: value == 0)
+
+
+class NestedConditionalCount(BaseModel):
+    value: ConditionalCount
+
+
+@pytest.mark.parametrize("kind", ["root", "dict", "nested"])
+async def test_checkpoint_respects_conditional_field_exclusion(kind: str) -> None:
+    value = ConditionalCount(count=1)
+    if kind == "root":
+        state: BaseModel = value
+        path = "count"
+    elif kind == "dict":
+        state = DictState(_data={"value": value})
+        path = "value.count"
+    else:
+        state = NestedConditionalCount(value=value)
+        path = "value.count"
+    store = InMemoryStateStore(state)
+    baseline = store.checkpoint()
+
+    await store.set(path, 0)
+    excluded = store.checkpoint()
+    patch = assert_patch_round_trips(baseline, excluded)
+    replayed = apply_state_patch(baseline.to_dict(), patch)
+    restored = InMemoryStateStore.from_dict(replayed, JsonSerializer())
+    assert await restored.get(path) == 0
+
+    await store.set(path, 1)
+    assert_patch_round_trips(excluded, store.checkpoint())
+
+
 @pytest.mark.parametrize("kind", ["dict", "typed"])
 @pytest.mark.parametrize("mutation", MUTATIONS, ids=lambda m: m.__name__)
 async def test_diff_round_trips_after_each_write(kind: str, mutation: Mutation) -> None:
