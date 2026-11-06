@@ -1496,6 +1496,61 @@ def _diffable_model(model: BaseModel, in_model: bool) -> bool:
     )
 
 
+def _has_conditional_fields(model: BaseModel) -> bool:
+    return any(
+        getattr(field, "exclude_if", None) is not None
+        for cls in type(model).__mro__
+        for field in getattr(cls, "model_fields", {}).values()
+    )
+
+
+def _contains_conditional_model(value: Any) -> bool:
+    pending = [value]
+    seen: set[int] = set()
+    while pending:
+        value = pending.pop()
+        if not isinstance(value, (BaseModel, dict, list, tuple, set, frozenset)):
+            continue
+        if id(value) in seen:
+            continue
+        seen.add(id(value))
+        if isinstance(value, BaseModel):
+            if _has_conditional_fields(value):
+                return True
+            pending.extend(
+                value.__dict__.get(name)
+                for name, info in type(value).model_fields.items()
+                if not info.exclude
+            )
+        elif isinstance(value, dict):
+            pending.extend(value.values())
+        else:
+            pending.extend(value)
+    return False
+
+
+def _same_json_values(a: Any, b: Any) -> bool:
+    """Compare encoded JSON trees without conflating booleans and numbers."""
+    pending = [(a, b)]
+    while pending:
+        a, b = pending.pop()
+        if a is b:
+            continue
+        if type(a) is not type(b):
+            return False
+        if isinstance(a, dict):
+            if a.keys() != b.keys():
+                return False
+            pending.extend((value, b[key]) for key, value in a.items())
+        elif isinstance(a, list):
+            if len(a) != len(b):
+                return False
+            pending.extend(zip(a, b))
+        elif not _safe_eq(a, b):
+            return False
+    return True
+
+
 def _safe_eq(a: Any, b: Any) -> bool:
     try:
         return bool(a == b)
@@ -1510,17 +1565,27 @@ _COLLAPSE_MIN_OPS = 8
 class _StateDiff:
     """Build JSON Patch operations between two state trees."""
 
-    def __init__(self, serializer: JsonSerializer) -> None:
+    def __init__(
+        self, serializer: JsonSerializer, *, json_values: bool = False
+    ) -> None:
         self.serializer = serializer
+        self.json_values = json_values
         self.ops: list[dict[str, Any]] = []
+        self.needs_serialized_diff = False
         # Cache equality results so list trimming and recursion share comparisons.
         self._eq_memo: dict[tuple[int, int], bool] = {}
 
     def emit(self, op: str, loc: _PatchLocation, value: Any = None) -> None:
+        if self.needs_serialized_diff:
+            return
         if op == "remove":
             self.ops.append({"op": op, "path": loc.path})
         else:
-            value = loc.encode(self.serializer, value)
+            if not self.json_values:
+                if _contains_conditional_model(value):
+                    self.needs_serialized_diff = True
+                    return
+                value = loc.encode(self.serializer, value)
             self.ops.append({"op": op, "path": loc.path, "value": value})
 
     def same(self, a: Any, b: Any) -> bool:
@@ -1533,11 +1598,13 @@ class _StateDiff:
         key = (id(a), id(b))
         hit = self._eq_memo.get(key)
         if hit is None:
-            hit = self._eq_memo[key] = _safe_eq(a, b)
+            hit = self._eq_memo[key] = (
+                _same_json_values(a, b) if self.json_values else _safe_eq(a, b)
+            )
         return hit
 
     def node(self, a: Any, b: Any, loc: _PatchLocation) -> None:
-        if a is b:
+        if self.needs_serialized_diff or a is b:
             return
         if type(a) is not type(b):
             self.emit("replace", loc, b)
@@ -1547,7 +1614,14 @@ class _StateDiff:
             self.diff_model(a, b, loc)
         elif isinstance(b, dict):
             if not self.same(a, b):
-                self.diff_dict(a, b, loc)
+                if (
+                    self.json_values
+                    and b.get("__is_component")
+                    and b.get("qualified_name")
+                ):
+                    self.emit("replace", loc, b)
+                else:
+                    self.diff_dict(a, b, loc)
         elif isinstance(b, list):
             if not self.same(a, b):
                 self.diff_list(a, b, loc)
@@ -1558,15 +1632,21 @@ class _StateDiff:
 
     def collapse(self, start: int, loc: _PatchLocation, b: Any) -> None:
         """Replace the ops under ``loc`` with one replace when that is smaller."""
-        if len(self.ops) - start <= _COLLAPSE_MIN_OPS:
+        if self.needs_serialized_diff or len(self.ops) - start <= _COLLAPSE_MIN_OPS:
+            return
+        if not self.json_values and _contains_conditional_model(b):
+            self.needs_serialized_diff = True
             return
         replace = {"op": "replace", "path": loc.path}
-        replace["value"] = loc.encode(self.serializer, b)
+        replace["value"] = b if self.json_values else loc.encode(self.serializer, b)
         if len(json.dumps(self.ops[start:])) > len(json.dumps(replace)):
             del self.ops[start:]
             self.ops.append(replace)
 
     def diff_model(self, a: BaseModel, b: BaseModel, loc: _PatchLocation) -> None:
+        if _has_conditional_fields(b):
+            self.needs_serialized_diff = True
+            return
         if self.same(a, b):
             return
         old, new = a.__dict__, b.__dict__
@@ -1662,6 +1742,11 @@ class StateCheckpoint:
             walk.diff_model(old, new, root)
         elif not walk.same(old, new):
             walk.ops.append({"op": "replace", "path": "", "value": self.to_dict()})
+        if walk.needs_serialized_diff:
+            # Pydantic's enclosing declared schema decides which fields exist,
+            # including conditions overridden by a runtime subclass.
+            walk = _StateDiff(self._serializer, json_values=True)
+            walk.diff_dict(since.to_dict(), self.to_dict(), _PatchLocation((), True))
         return walk.ops
 
     def _encodable(self, data: dict[str, Any]) -> dict[str, Any]:
