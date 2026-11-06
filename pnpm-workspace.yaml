@@ -3,3 +3,7 @@ packages:
   - "charts/*"
   - "operator"
   - "docs"
+
+overrides:
+  'js-yaml@<3.15.2': '^3.15.2'
+  'picomatch@<2.3.2': '^2.3.2'
