@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+from functools import cached_property
 from typing import Any, Awaitable, Callable
 
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr, RootModel
 from workflows.context import Context
 from workflows.context.serializers import JsonSerializer
 from workflows.context.state_store import (
@@ -396,3 +397,128 @@ async def test_checkpoint_state_identity_changes_only_on_write(kind: str) -> Non
 
     await store.set("title", "changed")
     assert store.checkpoint().state is not first.state
+
+
+class FlexibleValue(BaseModel):
+    value: Any
+
+
+@pytest.mark.parametrize("kind", ["dict", "typed"])
+@pytest.mark.parametrize("container", ["dict", "list", "tuple", "model"])
+@pytest.mark.parametrize("before,after", [(1, True), (0, False), (1, 1.0), (True, 1)])
+async def test_checkpoint_preserves_equal_value_type_changes(
+    kind: str, container: str, before: Any, after: Any
+) -> None:
+    def wrap(value: Any) -> Any:
+        if container == "dict":
+            return {"value": value}
+        if container == "list":
+            return [value]
+        if container == "tuple":
+            return (value,)
+        return FlexibleValue(value=value)
+
+    initial = wrap(before)
+    state = (
+        DictState(_data={"payload": initial})
+        if kind == "dict"
+        else FlexibleValue(value=initial)
+    )
+    store = InMemoryStateStore(state)
+    baseline = store.checkpoint()
+    await store.set("payload" if kind == "dict" else "value", wrap(after))
+    current = store.checkpoint()
+    patch = current.diff(baseline)
+    assert patch
+    # Python container equality conflates True, 1 and 1.0; compare JSON instead.
+    replayed = apply_state_patch(baseline.to_dict(), patch)
+    assert json.dumps(replayed, sort_keys=True) == json.dumps(
+        current.to_dict(), sort_keys=True
+    )
+    restored = InMemoryStateStore.from_dict(
+        json.loads(json.dumps(replayed)), JsonSerializer()
+    )
+    root = "payload" if kind == "dict" else "value"
+    leaf = "value" if container in ("dict", "model") else "0"
+    assert type(await restored.get(f"{root}.{leaf}")) is type(after)
+
+
+class ExtraValue(BaseModel):
+    model_config = {"extra": "allow"}
+
+
+class RootValue(RootModel[Any]):
+    pass
+
+
+@pytest.mark.parametrize("kind", ["extra", "root"])
+async def test_checkpoint_preserves_type_changes_in_whole_model_fallback(
+    kind: str,
+) -> None:
+    initial = (
+        ExtraValue.model_validate({"value": 1}) if kind == "extra" else RootValue(1)
+    )
+    store = InMemoryStateStore(initial)
+    baseline = store.checkpoint()
+    await store.set("value" if kind == "extra" else "root", True)
+    current = store.checkpoint()
+    patch = current.diff(baseline)
+    assert patch
+    assert json.dumps(apply_state_patch(baseline.to_dict(), patch), sort_keys=True) == (
+        json.dumps(current.to_dict(), sort_keys=True)
+    )
+
+
+class CyclicCacheValue(BaseModel):
+    value: Any
+    excluded_cache: dict[str, Any] = Field(default_factory=dict, exclude=True)
+    _private_cache: dict[str, Any] = PrivateAttr(default_factory=dict)
+
+    @cached_property
+    def cached(self) -> dict[str, Any]:
+        return {}
+
+
+def with_cyclic_cache(kind: str) -> CyclicCacheValue:
+    model = CyclicCacheValue(value=1)
+    if kind == "private":
+        cache = model._private_cache
+    elif kind == "excluded":
+        cache = model.excluded_cache
+    else:
+        cache = model.cached
+    cache["self"] = cache
+    return model
+
+
+@pytest.mark.parametrize("kind", ["dict", "typed"])
+@pytest.mark.parametrize("cache_kind", ["private", "excluded", "cached_property"])
+@pytest.mark.parametrize("before,after", [(1, 1), (1, True), (1, 1.0), (True, 1)])
+async def test_checkpoint_handles_nonserialized_cache_cycles(
+    kind: str, cache_kind: str, before: Any, after: Any
+) -> None:
+    initial = {"cache": with_cyclic_cache(cache_kind), "changed": [before]}
+    state = (
+        DictState(_data={"payload": initial})
+        if kind == "dict"
+        else FlexibleValue(value=initial)
+    )
+    store = InMemoryStateStore(state)
+    baseline = store.checkpoint()
+    root = "payload" if kind == "dict" else "value"
+    await store.set(root, {"cache": with_cyclic_cache(cache_kind), "changed": [after]})
+    current = store.checkpoint()
+    # Private, excluded and cached-property cycles do not prevent JSON snapshots.
+    baseline_json = json.dumps(baseline.to_dict(), sort_keys=True)
+    current_json = json.dumps(current.to_dict(), sort_keys=True)
+    patch = current.diff(baseline)
+    if type(before) is type(after):
+        assert not patch
+    else:
+        assert patch
+    replayed = apply_state_patch(json.loads(baseline_json), patch)
+    assert json.dumps(replayed, sort_keys=True) == current_json
+    restored = InMemoryStateStore.from_dict(
+        json.loads(json.dumps(replayed)), JsonSerializer()
+    )
+    assert type(await restored.get(f"{root}.changed.0")) is type(after)
