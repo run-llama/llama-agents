@@ -156,6 +156,7 @@ unresolved-import = "error"
 exclude = ["**/uv.lock", "**/.gitignore", "**/llama_agents/workflows/**", "**/test_llama_agents_alias.py"]
 
 [tool.uv]
+exclude-newer = "3 days"
 # boto3 is constrained to the range aioboto3/aiobotocore supports so that
 # the workspace can resolve both llama-agents-agentcore (which declares
 # boto3>=1.42.75) and llama-agents-control-plane (which uses aioboto3).
