@@ -20,7 +20,7 @@ from llama_index_instrumentation.dispatcher import (
     instrument_tags,
 )
 from pydantic import PrivateAttr
-from workflows.context import Context, PickleSerializer
+from workflows.context import Context, JsonSerializer, PickleSerializer
 from workflows.decorators import catch_error, step
 from workflows.errors import (
     WorkflowConfigurationError,
@@ -588,6 +588,25 @@ async def test_sequential_waits_for_same_event_type_keep_their_own_answer() -> N
             ctx.send_event(AskAnswer(reply=next(answers)))
     result = await handler
     assert result == ("A", "B")
+
+
+@pytest.mark.asyncio
+async def test_sequential_waits_keep_the_first_answer_after_resume() -> None:
+    workflow = SequentialWaitWorkflow(
+        serializer=JsonSerializer(allowed_types=[AskAnswer])
+    )
+    handler = workflow.run()
+    events = handler.stream_events()
+    assert await anext(events) == AskPrompt(prompt="first?")
+    handler.ctx.send_event(AskAnswer(reply="A"))
+    assert await anext(events) == AskPrompt(prompt="second?")
+    snapshot = json.dumps(handler.ctx.to_dict())
+    await events.aclose()
+    await handler.cancel_run()
+
+    resumed = workflow.run(ctx=Context.from_dict(workflow, json.loads(snapshot)))
+    resumed.ctx.send_event(AskAnswer(reply="B"))
+    assert await resumed == ("A", "B")
 
 
 def test__get_start_event_instance(caplog: Any) -> None:
