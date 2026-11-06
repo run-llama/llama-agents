@@ -279,6 +279,38 @@ def test_tree_payload_decodes_for_both_state_kinds() -> None:
         assert restored.checkpoint().to_dict() == payload
 
 
+class SessionState(DictState):
+    """Declared fields plus DictState's dynamic keys."""
+
+    turns: int = 0
+    notes: dict[str, Any] = Field(default_factory=dict)
+
+
+def test_tree_payload_decodes_for_dict_state_subclass() -> None:
+    serializer = JsonSerializer()
+    state = SessionState(turns=2, notes={"last": "hello"}, extra="kept")
+    payload = StateCheckpoint(state, serializer).to_dict()
+    restored = InMemoryStateStore.from_dict(payload, serializer)
+    assert restored.checkpoint().to_dict() == payload
+    back = restored.checkpoint().state
+    assert type(back) is SessionState
+    assert back.turns == 2
+    assert back.notes == {"last": "hello"}
+    assert back["extra"] == "kept"
+
+
+def test_diff_round_trips_after_declared_field_change_on_dict_state_subclass() -> None:
+    before = SessionState(turns=1, notes={"last": "hello"}, extra="kept")
+    after = SessionState(turns=2, notes={"last": "bye"}, extra="kept")
+    serializer = JsonSerializer()
+    base = StateCheckpoint(before, serializer)
+    current = StateCheckpoint(after, serializer)
+    patch = assert_patch_round_trips(base, current)
+    # A declared-field-only change must produce a patch: the old _data-only
+    # diff branch saw no change at all and emitted an empty patch.
+    assert patch
+
+
 def test_apply_state_patch_leaves_input_unchanged() -> None:
     state = {"state_data": {"_data": {"xs": [1, 2]}}}
     patched = apply_state_patch(
