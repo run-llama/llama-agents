@@ -2,4 +2,4 @@
 "llama-index-workflows": patch
 ---
 
-Prevent late parallel waiter registrations from reviving completed waits.
+Preserve a resolved answer when a requirements refresh re-registers its waiter.

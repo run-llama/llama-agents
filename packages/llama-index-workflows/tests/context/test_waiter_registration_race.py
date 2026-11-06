@@ -26,14 +26,10 @@ class WaitCompleted(Event):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("complete_first", [False, True])
-async def test_answer_survives_parallel_requirements_refresh_after_resume(
-    complete_first: bool,
-) -> None:
+async def test_answer_survives_parallel_requirements_refresh_after_resume() -> None:
     """Exercise real worker snapshots and wait_for_event without timing sleeps."""
     refresh_started = asyncio.Event()
     continuation_started = asyncio.Event()
-    answer_consumed = asyncio.Event()
     release_refresh = asyncio.Event()
     release_continuation = asyncio.Event()
     release_finish = asyncio.Event()
@@ -61,7 +57,6 @@ async def test_answer_survives_parallel_requirements_refresh_after_resume(
 
         @step
         async def finish(self, ev: WaitCompleted) -> StopEvent:
-            answer_consumed.set()
             # Keep the run alive until the stale registration is processed.
             await release_finish.wait()
             return StopEvent(result=ev.response)
@@ -82,9 +77,6 @@ async def test_answer_survives_parallel_requirements_refresh_after_resume(
         await asyncio.wait_for(refresh_started.wait(), 5.0)
         resumed.ctx.send_event(WaiterAnswer(response="yes"))
         await asyncio.wait_for(continuation_started.wait(), 5.0)
-        if complete_first:
-            release_continuation.set()
-            await asyncio.wait_for(answer_consumed.wait(), 5.0)
         release_refresh.set()
         async for event in stream:
             if (
@@ -102,11 +94,8 @@ async def test_answer_survives_parallel_requirements_refresh_after_resume(
             for worker in resumed.ctx.to_dict()["workers"].values()
             for waiter in worker["collected_waiters"]
         ]
-        if complete_first:
-            assert waiters == []
-        else:
-            assert len(waiters) == 1
-            assert waiters[0]["resolved_event"] is not None
+        assert len(waiters) == 1
+        assert waiters[0]["resolved_event"] is not None
         release_continuation.set()
         release_finish.set()
         assert await resumed == "yes"

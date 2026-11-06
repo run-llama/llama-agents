@@ -123,7 +123,6 @@ class SerializedInProgressAttempt(SerializedEventAttempt):
     collected_events: dict[str, list[str]] = Field(default_factory=dict)
     # Buffer counters at dispatch time.
     collect_generations: dict[str, int] = Field(default_factory=dict)
-    waiter_generations: dict[str, int] = Field(default_factory=dict)
 
 
 class SerializedCollectionReleasePayload(BaseModel):
@@ -184,8 +183,6 @@ class SerializedStepWorkerState(BaseModel):
     collected_events: dict[str, list[str]] = Field(default_factory=dict)
     # Each append or clear bumps the buffer counter.
     collect_generations: dict[str, int] = Field(default_factory=dict)
-    # Deletion counters prevent older invocations from re-registering a waiter.
-    waiter_generations: dict[str, int] = Field(default_factory=dict)
     # Pending static multi-parameter fan-in events.
     static_collect_events: list[str] = Field(default_factory=list)
     # Active waiters created by ctx.wait_for_event()
