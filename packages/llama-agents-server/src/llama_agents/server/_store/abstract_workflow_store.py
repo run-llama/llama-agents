@@ -222,6 +222,14 @@ class AbstractWorkflowStore(ABC):
         for tick in await self.get_ticks(run_id):
             yield tick
 
+    async def flush_pending_ticks(self, run_id: str) -> None:
+        """Wait until prior tick appends are durable before applying commands.
+
+        Stores whose append_tick waits for persistence need no extra work.
+        Buffered stores must override this to surface pending failures.
+        """
+        pass
+
     async def after_tick(self, run_id: str, tick_data: dict[str, Any]) -> None:
         """Called after a tick's commands have been processed.
 
