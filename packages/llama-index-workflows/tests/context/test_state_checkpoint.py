@@ -508,6 +508,48 @@ async def test_conditional_checkpoint_keeps_deep_json_payloads(
     assert await restored.get("payload.i") == 1
 
 
+class DeepComponent:
+    def __init__(self, data: dict[str, Any]) -> None:
+        self.data = data
+
+    @classmethod
+    def class_name(cls) -> str:
+        return "DeepComponent"
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> DeepComponent:
+        return cls(data)
+
+
+async def test_conditional_checkpoint_keeps_deep_components_opaque() -> None:
+    before: dict[str, Any] = {"leaf": 0}
+    after: dict[str, Any] = {"leaf": 1}
+    for _ in range(499):
+        before, after = {"next": before}, {"next": after}
+    store = InMemoryStateStore(
+        DictState(
+            _data={
+                "marker": ConditionalCount(count=1),
+                "component": DeepComponent(before),
+            }
+        )
+    )
+    baseline = store.checkpoint()
+    await store.set("marker.count", 0)
+    await store.set("component", DeepComponent(after))
+    current = store.checkpoint()
+    expected = current.to_dict()
+    replayed = apply_state_patch(baseline.to_dict(), current.diff(baseline))
+
+    assert json.dumps(replayed) == json.dumps(expected)
+    restored = InMemoryStateStore.from_dict(replayed, JsonSerializer())
+    assert await restored.get("marker.count") == 0
+    assert json.dumps((await restored.get("component")).to_dict()) == json.dumps(after)
+
+
 @pytest.mark.parametrize("kind", ["dict", "typed"])
 @pytest.mark.parametrize("mutation", MUTATIONS, ids=lambda m: m.__name__)
 async def test_diff_round_trips_after_each_write(kind: str, mutation: Mutation) -> None:

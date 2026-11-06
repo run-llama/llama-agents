@@ -1614,7 +1614,14 @@ class _StateDiff:
             self.diff_model(a, b, loc)
         elif isinstance(b, dict):
             if not self.same(a, b):
-                self.diff_dict(a, b, loc)
+                if (
+                    self.json_values
+                    and b.get("__is_component")
+                    and b.get("qualified_name")
+                ):
+                    self.emit("replace", loc, b)
+                else:
+                    self.diff_dict(a, b, loc)
         elif isinstance(b, list):
             if not self.same(a, b):
                 self.diff_list(a, b, loc)
