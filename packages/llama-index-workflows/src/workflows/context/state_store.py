@@ -1493,10 +1493,6 @@ def _diffable_model(model: BaseModel, in_model: bool) -> bool:
         or cls.model_computed_fields
         or cls.model_config.get("extra") == "allow"
         or cls.model_config.get("serialize_by_alias")
-        or any(
-            getattr(field, "exclude_if", None) is not None
-            for field in cls.model_fields.values()
-        )
     )
 
 
@@ -1575,8 +1571,22 @@ class _StateDiff:
             return
         old, new = a.__dict__, b.__dict__
         for name, info in type(b).model_fields.items():
-            if not info.exclude:
-                self.node(old.get(name), new.get(name), loc.field(name))
+            if info.exclude:
+                continue
+            field_loc = loc.field(name)
+            exclude_if = getattr(info, "exclude_if", None)
+            if exclude_if is not None:
+                old_excluded = exclude_if(old.get(name))
+                new_excluded = exclude_if(new.get(name))
+                if new_excluded:
+                    if not old_excluded:
+                        self.emit("remove", field_loc)
+                    continue
+                if old_excluded:
+                    value = b.model_dump(mode="json", include={name})[name]
+                    self.emit("add", field_loc, value)
+                    continue
+            self.node(old.get(name), new.get(name), field_loc)
 
     def diff_dict(
         self, a: dict[Any, Any], b: dict[Any, Any], loc: _PatchLocation

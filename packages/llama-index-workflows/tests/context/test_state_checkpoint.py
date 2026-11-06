@@ -161,6 +161,51 @@ async def test_checkpoint_respects_conditional_field_exclusion(kind: str) -> Non
     assert_patch_round_trips(excluded, store.checkpoint())
 
 
+class StrictConditionalCount(ConditionalCount):
+    model_config = {"extra": "forbid"}
+
+
+class ExtendedConditionalCount(StrictConditionalCount):
+    note: str = "subclass-only"
+
+
+class DeclaredConditionalCount(BaseModel):
+    value: StrictConditionalCount
+
+
+async def test_checkpoint_preserves_declared_schema_for_conditional_subclass() -> None:
+    store = InMemoryStateStore(
+        DeclaredConditionalCount(value=ExtendedConditionalCount(count=1))
+    )
+    baseline = store.checkpoint()
+    await store.set("value.count", 2)
+    current = store.checkpoint()
+    replayed = apply_state_patch(baseline.to_dict(), current.diff(baseline))
+    restored = InMemoryStateStore.from_dict(replayed, JsonSerializer())
+    assert await restored.get("value.count") == 2
+    assert replayed == current.to_dict()
+
+
+class OptionalDeclaredCount(BaseModel):
+    value: StrictConditionalCount | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+
+async def test_checkpoint_preserves_schema_when_conditional_model_appears() -> None:
+    store = InMemoryStateStore(OptionalDeclaredCount())
+    baseline = store.checkpoint()
+    await store.set("value", ExtendedConditionalCount(count=1))
+    included = store.checkpoint()
+    patch = assert_patch_round_trips(baseline, included)
+    replayed = apply_state_patch(baseline.to_dict(), patch)
+    restored = InMemoryStateStore.from_dict(replayed, JsonSerializer())
+    assert await restored.get("value.count") == 1
+
+    await store.set("value", None)
+    assert_patch_round_trips(included, store.checkpoint())
+
+
 @pytest.mark.parametrize("kind", ["dict", "typed"])
 @pytest.mark.parametrize("mutation", MUTATIONS, ids=lambda m: m.__name__)
 async def test_diff_round_trips_after_each_write(kind: str, mutation: Mutation) -> None:
