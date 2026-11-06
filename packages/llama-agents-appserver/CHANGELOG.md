@@ -1,5 +1,12 @@
 # llama-agents-appserver
 
+## 0.12.3
+
+### Patch Changes
+
+- a457071: Apply Debian security updates in the appserver and control plane images, so libbrotli1 carries the fix for CVE-2026-111497 (on the CISA KEV list).
+- 96400ea: Require starlette 1.0.1 or newer so deployments cannot resolve a starlette affected by CVE-2026-48710.
+
 ## 0.12.2
 
 ### Patch Changes

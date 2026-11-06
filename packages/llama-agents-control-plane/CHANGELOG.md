@@ -1,5 +1,11 @@
 # llama-agents-control-plane
 
+## 0.12.6
+
+### Patch Changes
+
+- a457071: Apply Debian security updates in the appserver and control plane images, so libbrotli1 carries the fix for CVE-2026-111497 (on the CISA KEV list).
+
 ## 0.12.5
 
 ### Patch Changes
