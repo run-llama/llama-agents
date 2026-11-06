@@ -10,7 +10,7 @@ import json
 from typing import Any, Awaitable, Callable
 
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 from workflows.context import Context
 from workflows.context.serializers import JsonSerializer
 from workflows.context.state_store import (
@@ -204,6 +204,209 @@ async def test_checkpoint_preserves_schema_when_conditional_model_appears() -> N
 
     await store.set("value", None)
     assert_patch_round_trips(included, store.checkpoint())
+
+
+class RequiredCount(BaseModel):
+    count: int
+
+
+class HidingRequiredCount(RequiredCount):
+    count: int = Field(default=0, exclude_if=lambda value: value == 0)
+
+
+class RequiredCountParent(BaseModel):
+    value: RequiredCount
+
+
+class VisibleConditionalCount(StrictConditionalCount):
+    count: int = 0
+
+
+class DifferentConditionalCount(StrictConditionalCount):
+    count: int = Field(default=0, exclude_if=lambda value: value == 1)
+
+
+class RequiredCountsParent(BaseModel):
+    values: list[RequiredCount]
+
+
+class ConditionalCountsParent(BaseModel):
+    values: list[StrictConditionalCount]
+
+
+@pytest.mark.parametrize("kind", ["root", "dict", "list", "typed"])
+@pytest.mark.parametrize(
+    "case,child_type",
+    [
+        ("added", HidingRequiredCount),
+        ("removed", VisibleConditionalCount),
+        ("changed", DifferentConditionalCount),
+        ("inherited", ExtendedConditionalCount),
+    ],
+)
+async def test_checkpoint_uses_declared_conditional_schema(
+    kind: str, case: str, child_type: type[BaseModel]
+) -> None:
+    value = child_type(count=1)
+    if kind == "root":
+        state: BaseModel = value
+        path = "count"
+    elif kind == "dict":
+        state = DictState(_data={"value": value})
+        path = "value.count"
+    elif kind == "list":
+        parent = RequiredCountsParent if case == "added" else ConditionalCountsParent
+        state = parent.model_validate({"values": [value]})
+        path = "values.0.count"
+    else:
+        parent = RequiredCountParent if case == "added" else DeclaredConditionalCount
+        state = parent.model_validate({"value": value})
+        path = "value.count"
+    store = InMemoryStateStore(state)
+    previous = store.checkpoint()
+    for count in (0, 2, 1):
+        await store.set(path, count)
+        current = store.checkpoint()
+        patch = assert_patch_round_trips(previous, current)
+        replayed = apply_state_patch(previous.to_dict(), patch)
+        restored = InMemoryStateStore.from_dict(replayed, JsonSerializer())
+        expected = InMemoryStateStore.from_dict(current.to_dict(), JsonSerializer())
+        assert await restored.get(path) == await expected.get(path)
+        previous = current
+
+
+class RequiredCountMap(BaseModel):
+    values: dict[str, RequiredCount]
+
+
+class FrozenRequiredCount(RequiredCount):
+    model_config = {"frozen": True}
+
+
+class FrozenHidingRequiredCount(FrozenRequiredCount):
+    count: int = Field(default=0, exclude_if=lambda value: value == 0)
+
+
+class RequiredCountContainers(BaseModel):
+    pair: tuple[FrozenRequiredCount, ...] = ()
+    unique: set[FrozenRequiredCount] = Field(default_factory=set)
+    frozen: frozenset[FrozenRequiredCount] = frozenset()
+
+
+@pytest.mark.parametrize(
+    "field,container", [("pair", tuple), ("unique", set), ("frozen", frozenset)]
+)
+async def test_checkpoint_serializes_conditional_model_containers(
+    field: str,
+    container: type,
+) -> None:
+    store = InMemoryStateStore(RequiredCountContainers())
+    baseline = store.checkpoint()
+    await store.set(field, container([FrozenHidingRequiredCount(count=0)]))
+    current = store.checkpoint()
+    patch = assert_patch_round_trips(baseline, current)
+    restored = InMemoryStateStore.from_dict(
+        apply_state_patch(baseline.to_dict(), patch), JsonSerializer()
+    )
+    assert next(iter(await restored.get(field))).count == 0
+
+
+@pytest.mark.parametrize("kind", ["list", "dict"])
+async def test_checkpoint_serializes_new_conditional_container_values(
+    kind: str,
+) -> None:
+    if kind == "list":
+        state: BaseModel = RequiredCountsParent(values=[])
+        value: Any = [HidingRequiredCount(count=0)]
+        path = "values.0.count"
+    else:
+        state = RequiredCountMap(values={})
+        value = {"first": HidingRequiredCount(count=0)}
+        path = "values.first.count"
+    store = InMemoryStateStore(state)
+    baseline = store.checkpoint()
+    await store.set("values", value)
+    current = store.checkpoint()
+    patch = assert_patch_round_trips(baseline, current)
+    restored = InMemoryStateStore.from_dict(
+        apply_state_patch(baseline.to_dict(), patch), JsonSerializer()
+    )
+    assert await restored.get(path) == 0
+
+
+class ConditionalCounters(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    shared: ConditionalCount = Field(default_factory=ConditionalCount)
+    a: int = 0
+    b: int = 0
+    c: int = 0
+    d: int = 0
+    e: int = 0
+    f: int = 0
+    g: int = 0
+    h: int = 0
+    i: int = 0
+
+
+class ExtendedConditionalCounters(ConditionalCounters):
+    note: str = "subclass-only"
+
+
+class ConditionalCountersParent(BaseModel):
+    value: ConditionalCounters
+
+
+async def test_checkpoint_collapse_preserves_declared_conditional_schema() -> None:
+    value = ExtendedConditionalCounters()
+    store = InMemoryStateStore(ConditionalCountersParent(value=value))
+    baseline = store.checkpoint()
+    await store.set("value", value.model_copy(update=dict.fromkeys("abcdefghi", 1)))
+    current = store.checkpoint()
+    patch = assert_patch_round_trips(baseline, current)
+    restored = InMemoryStateStore.from_dict(
+        apply_state_patch(baseline.to_dict(), patch), JsonSerializer()
+    )
+    assert await restored.get("value.i") == 1
+
+
+async def test_ordinary_leaf_diff_does_not_serialize_snapshots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = InMemoryStateStore(Conversation(title="before"))
+    baseline = store.checkpoint()
+    await store.set("title", "after")
+    current = store.checkpoint()
+    old_payload, new_payload = baseline.to_dict(), current.to_dict()
+
+    def unexpected_snapshot(self: StateCheckpoint) -> dict[str, Any]:
+        pytest.fail("An ordinary leaf diff should not serialize the root state")
+
+    monkeypatch.setattr(StateCheckpoint, "to_dict", unexpected_snapshot)
+    assert apply_state_patch(old_payload, current.diff(baseline)) == new_payload
+
+
+class SerializableCache(BaseModel):
+    cache: dict[str, Any] | None
+    count: int = 1
+
+    @field_serializer("cache")
+    def serialize_cache(self, cache: dict[str, Any] | None) -> None:
+        return None
+
+
+async def test_new_model_with_serialized_cache_can_be_checkpointed() -> None:
+    cycle: dict[str, Any] = {}
+    cycle["self"] = cycle
+    store = InMemoryStateStore(DictState())
+    baseline = store.checkpoint()
+    await store.set("payload", SerializableCache(cache=cycle))
+    current = store.checkpoint()
+    patch = assert_patch_round_trips(baseline, current)
+    restored = InMemoryStateStore.from_dict(
+        apply_state_patch(baseline.to_dict(), patch), JsonSerializer()
+    )
+    assert await restored.get("payload.count") == 1
 
 
 @pytest.mark.parametrize("kind", ["dict", "typed"])
