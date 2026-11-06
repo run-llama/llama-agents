@@ -960,6 +960,9 @@ def _apply_step_result(
             work_item_id=this_execution.work_item_id,
         )
         if existing is not None:
+            current = worker_state.collected_waiters[existing]
+            if current.resolved_event is not None:
+                return
             worker_state.collected_waiters[existing] = new_waiter
         else:
             worker_state.collected_waiters.append(new_waiter)
