@@ -243,8 +243,14 @@ def encode_state(
     serializer: BaseSerializer,
     known_unserializable_keys: tuple[str, ...] = KNOWN_UNSERIALIZABLE_KEYS,
 ) -> tuple[Any, str, str]:
-    """Encode a state model and its self-describing metadata."""
-    if isinstance(state, DictState):
+    """Encode a state model and its self-describing metadata.
+
+    Only a plain ``DictState`` takes the ``{"_data": ...}`` path. A subclass
+    carries declared fields alongside its dynamic keys, so it is encoded as
+    a typed model: the serializer embeds the qualified class name and the
+    dump already includes ``_data``, so the subclass round-trips intact.
+    """
+    if type(state) is DictState:
         state_data = serialize_dict_state_data(
             state, serializer, known_unserializable_keys
         )
@@ -268,8 +274,13 @@ def _tree_value(serializer: JsonSerializer, value: Any) -> Any:
 
 
 def encode_state_tree(state: BaseModel, serializer: JsonSerializer) -> dict[str, Any]:
-    """Encode state as a JSON tree with paths that patches can address."""
-    if isinstance(state, DictState):
+    """Encode state as a JSON tree with paths that patches can address.
+
+    Only a plain ``DictState`` takes the ``"dict"`` tree. A subclass is
+    encoded as a typed model (``"model"`` tree) so its declared fields and
+    its class survive the round trip alongside its dynamic keys.
+    """
+    if type(state) is DictState:
         encode = functools.partial(_tree_value, serializer)
         data = serialize_dict_state_data(state, serializer, encode=encode)
         return {STATE_TREE_KEY: "dict", **data}
@@ -1651,7 +1662,7 @@ class StateCheckpoint:
         root = _PatchLocation(("state_data",))
         if old is new:
             return []
-        if type(old) is type(new) and isinstance(new, DictState):
+        if type(old) is type(new) and type(new) is DictState:
             walk.diff_dict(
                 self._encodable(cast(DictState, old)._data),
                 self._encodable(new._data),
@@ -1661,6 +1672,10 @@ class StateCheckpoint:
             # The root carries the tree marker, so never collapse it.
             walk.diff_model(old, new, root)
         elif not walk.same(old, new):
+            # A DictState subclass is not field-diffable (its declared fields
+            # and dynamic keys live in different tree layouts), so a change
+            # to a declared field alone still ships as one whole replace
+            # instead of the empty patch the _data-only branch produced.
             walk.ops.append({"op": "replace", "path": "", "value": self.to_dict()})
         return walk.ops
 

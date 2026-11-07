@@ -13,9 +13,12 @@ See: thoughts/shared/plans/2026-01-23-context-state-preservation-fix.md
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
+from pydantic import Field
 from workflows.context import Context
+from workflows.context.state_store import DictState
 from workflows.decorators import step
 from workflows.errors import ContextStateError, WorkflowRuntimeError
 from workflows.events import StartEvent, StopEvent
@@ -110,6 +113,45 @@ async def test_from_dict_then_sequential_runs() -> None:
     ctx2 = Context.from_dict(wf, ctx1.to_dict())
     r = await wf.run(ctx=ctx2)  # count -> 2
     assert r == 2
+
+
+class Session(DictState):
+    """Typed state: declared fields plus DictState's dynamic keys."""
+
+    turns: int = 0
+    notes: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatWorkflow(Workflow):
+    """Workflow whose state is a DictState subclass."""
+
+    @step
+    async def turn(self, ctx: Context[Session], ev: StartEvent) -> StopEvent:
+        async with ctx.store.edit_state() as state:
+            state.turns += 1
+            state.notes["last"] = "hello"
+            state["extra"] = "kept"  # A dynamic key.
+        return StopEvent(result=(await ctx.store.get_state()).turns)
+
+
+@pytest.mark.asyncio
+async def test_from_dict_preserves_dict_state_subclass_fields() -> None:
+    """A DictState subclass must survive a context round trip with its fields."""
+    wf = ChatWorkflow()
+    handler = wf.run()
+    assert await handler == 1
+    live = await handler.ctx.store.get_state()
+    assert type(live) is Session
+    assert live.turns == 1
+
+    restored = Context.from_dict(wf, handler.ctx.to_dict())
+    back = await restored.store.get_state()
+    assert type(back) is Session
+    assert back.turns == 1
+    assert back.notes == {"last": "hello"}
+    assert back["extra"] == "kept"
+
+    assert await wf.run(ctx=handler.ctx) == 2
 
 
 @pytest.mark.asyncio
