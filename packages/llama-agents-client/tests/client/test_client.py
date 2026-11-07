@@ -323,6 +323,34 @@ async def test_wait_for_handler_caps_sleep_at_timeout() -> None:
 
 
 @pytest.mark.asyncio
+async def test_wait_for_handler_times_out_during_status_request() -> None:
+    cancelled = asyncio.Event()
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+        raise AssertionError("unreachable")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="http://test"
+    ) as http_client:
+        wf_client = WorkflowClient(httpx_client=http_client)
+        task = asyncio.create_task(
+            wf_client.wait_for_handler("handler-1", timeout=0.01)
+        )
+        done, _ = await asyncio.wait({task}, timeout=0.5)
+        if not done:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            pytest.fail("wait_for_handler exceeded its deadline during an HTTP request")
+        with pytest.raises(TimeoutError, match="handler-1"):
+            await task
+        assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
