@@ -678,6 +678,57 @@ class _CatchErrorMarker(Event):
     pass
 
 
+def test_multi_slot_join_reached_via_catch_error_validates() -> None:
+    # (#23971) A multi-slot join whose slots are produced only on the subgraph
+    # reached through a @catch_error handler must validate: StepFailedEvent is a
+    # top-level entry event, so the handler's outputs are top-level too. Before
+    # the fix this raised "never produced at a common stream level".
+    class _Fork(Event):
+        pass
+
+    class _Left(Event):
+        pass
+
+    class _Right(Event):
+        pass
+
+    class _LeftDone(Event):
+        value: int
+
+    class _RightDone(Event):
+        value: int
+
+    class RecoveredFlow(Workflow):
+        @step
+        async def begin(self, ev: StartEvent) -> StopEvent:
+            raise RuntimeError("fails")
+
+        @catch_error(for_steps=["begin"])
+        async def recover(self, ctx: Context, ev: StepFailedEvent) -> _Fork:
+            return _Fork()
+
+        @step
+        async def fork(self, ctx: Context, ev: _Fork) -> Optional[_Left | _Right]:
+            ctx.send_event(_Left())
+            ctx.send_event(_Right())
+            return None
+
+        @step
+        async def left(self, ev: _Left) -> _LeftDone:
+            return _LeftDone(value=1)
+
+        @step
+        async def right(self, ev: _Right) -> _RightDone:
+            return _RightDone(value=2)
+
+        @step
+        async def join(self, first: _LeftDone, second: _RightDone) -> StopEvent:
+            return StopEvent(result=first.value + second.value)
+
+    # Must not raise WorkflowValidationError.
+    RecoveredFlow().validate()
+
+
 def test_multiple_wildcard_catch_error_handlers_invalid() -> None:
     class MultiHandlerFlow(Workflow):
         @step
