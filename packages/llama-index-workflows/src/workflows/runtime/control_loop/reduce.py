@@ -1525,7 +1525,7 @@ def _resolve_waiters(
                 getattr(tick.event, k, None) == v
                 for k, v in wait_condition.requirements.items()
             )
-            if is_match:
+            if is_match and wait_condition.resolved_event is None:
                 waiter_resolved_steps.add(step_id)
                 wait_condition.resolved_event = tick.event
                 # Resume re-delivers the suspended work item whole from the
