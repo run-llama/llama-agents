@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Annotated, Any, Callable, cast
 
 import pytest
-from workflows import Context, Workflow, step
+from workflows import Context, Workflow, catch_error, step
 from workflows.collect import All, Cardinality, Collect, Take
 from workflows.decorators import StepConfig, StepFunction
 from workflows.decorators import step as free_step
@@ -22,7 +22,13 @@ from workflows.errors import (
     WorkflowRuntimeError,
     WorkflowValidationError,
 )
-from workflows.events import Event, StartEvent, StopEvent, WorkflowIdleEvent
+from workflows.events import (
+    Event,
+    StartEvent,
+    StepFailedEvent,
+    StopEvent,
+    WorkflowIdleEvent,
+)
 
 
 class Task(Event):
@@ -633,3 +639,85 @@ def test_mixed_level_multi_slot_join_rejected_at_init() -> None:
                 return StopEvent(result=(a.n, b.n))
 
         WF()._validate()
+
+
+class _Fork(Event):
+    pass
+
+
+class _Left(Event):
+    pass
+
+
+class _Right(Event):
+    pass
+
+
+class _LeftDone(Event):
+    value: int
+
+
+class _RightDone(Event):
+    value: int
+
+
+class _ForkJoin(Workflow):
+    """A multi-slot join (`join`) reachable only via a fan of send_event calls.
+
+    Subclasses supply the entry: `_Fork` is produced by a @catch_error handler,
+    so the whole fan/join sub-graph lives at the top level.
+    """
+
+    @step
+    async def fork(self, ctx: Context, ev: _Fork) -> _Left | _Right | None:
+        ctx.send_event(_Left())
+        ctx.send_event(_Right())
+        return None
+
+    @step
+    async def left(self, ev: _Left) -> _LeftDone:
+        return _LeftDone(value=1)
+
+    @step
+    async def right(self, ev: _Right) -> _RightDone:
+        return _RightDone(value=2)
+
+    @step
+    async def join(self, first: _LeftDone, second: _RightDone) -> StopEvent:
+        return StopEvent(result=first.value + second.value)
+
+
+def test_multi_slot_join_reached_only_via_catch_error_validates() -> None:
+    """A multi-slot join reachable only through a @catch_error handler is valid.
+
+    The runtime routes StepFailedEvent to the handler, so the events it produces
+    and everything downstream sit at the top level, where the join's slots all
+    fill. Regression for a validator that omitted StepFailedEvent from the
+    top-level seeds and rejected the workflow with "common stream level".
+    """
+
+    class WF(_ForkJoin):
+        @step
+        async def begin(self, ev: StartEvent) -> StopEvent:
+            raise RuntimeError("fails")  # Only the handler produces _Fork.
+
+        @catch_error(for_steps=["begin"])
+        async def recover(self, ev: StepFailedEvent) -> _Fork:
+            return _Fork()
+
+    WF()._validate()
+
+
+async def test_multi_slot_join_reached_only_via_catch_error_runs() -> None:
+    """The recovered workflow runs with validation on and joins correctly."""
+
+    class WF(_ForkJoin):
+        @step
+        async def begin(self, ev: StartEvent) -> StopEvent:
+            raise RuntimeError("fails")  # Only the handler produces _Fork.
+
+        @catch_error(for_steps=["begin"])
+        async def recover(self, ev: StepFailedEvent) -> _Fork:
+            return _Fork()
+
+    assert await _run(WF(timeout=10)) == 3
