@@ -1604,6 +1604,9 @@ class _StateDiff:
         return hit
 
     def node(self, a: Any, b: Any, loc: _PatchLocation) -> None:
+        if self.json_values:
+            self.json_node(a, b, loc)
+            return
         if self.needs_serialized_diff or a is b:
             return
         if type(a) is not type(b):
@@ -1614,14 +1617,7 @@ class _StateDiff:
             self.diff_model(a, b, loc)
         elif isinstance(b, dict):
             if not self.same(a, b):
-                if (
-                    self.json_values
-                    and b.get("__is_component")
-                    and b.get("qualified_name")
-                ):
-                    self.emit("replace", loc, b)
-                else:
-                    self.diff_dict(a, b, loc)
+                self.diff_dict(a, b, loc)
         elif isinstance(b, list):
             if not self.same(a, b):
                 self.diff_list(a, b, loc)
@@ -1629,6 +1625,59 @@ class _StateDiff:
             self.emit("replace", loc, b)
             return
         self.collapse(start, loc, b)
+
+    def json_node(self, a: Any, b: Any, loc: _PatchLocation) -> None:
+        """Walk encoded containers without consuming the Python call stack."""
+        pending = [("node", a, b, loc)]
+        while pending:
+            action, a, b, loc = pending.pop()
+            if action == "collapse":
+                self.collapse(a, loc, b)
+                continue
+            if action != "node":
+                self.emit(action, loc, b)
+                continue
+            if self.same(a, b):
+                continue
+            if (
+                type(a) is not type(b)
+                or not isinstance(b, (dict, list))
+                or (
+                    isinstance(b, dict)
+                    and b.get("__is_component")
+                    and b.get("qualified_name")
+                )
+            ):
+                self.emit("replace", loc, b)
+                continue
+            pending.append(("collapse", len(self.ops), b, loc))
+            children = []
+            if isinstance(b, dict):
+                for key, value in b.items():
+                    if key in a:
+                        children.append(("node", a[key], value, loc.child(key)))
+                    else:
+                        children.append(("add", None, value, loc.child(key)))
+                for key in a:
+                    if key not in b:
+                        children.append(("remove", None, None, loc.child(key)))
+            else:
+                prefix, middle_a, middle_b = self.list_span(a, b)
+                if middle_a == middle_b:
+                    children.extend(
+                        ("node", a[i], b[i], loc.child(i))
+                        for i in range(prefix, prefix + middle_b)
+                    )
+                else:
+                    children.extend(
+                        ("remove", None, None, loc.child(prefix))
+                        for _ in range(middle_a)
+                    )
+                    children.extend(
+                        ("add", None, b[i], loc.child(i))
+                        for i in range(prefix, prefix + middle_b)
+                    )
+            pending.extend(reversed(children))
 
     def collapse(self, start: int, loc: _PatchLocation, b: Any) -> None:
         """Replace the ops under ``loc`` with one replace when that is smaller."""
@@ -1666,7 +1715,7 @@ class _StateDiff:
             if key not in b:
                 self.emit("remove", loc.child(key))
 
-    def diff_list(self, a: list[Any], b: list[Any], loc: _PatchLocation) -> None:
+    def list_span(self, a: list[Any], b: list[Any]) -> tuple[int, int, int]:
         len_a, len_b = len(a), len(b)
         shorter = min(len_a, len_b)
         prefix = 0
@@ -1677,7 +1726,10 @@ class _StateDiff:
             a[len_a - 1 - suffix], b[len_b - 1 - suffix]
         ):
             suffix += 1
-        middle_a, middle_b = len_a - prefix - suffix, len_b - prefix - suffix
+        return prefix, len_a - prefix - suffix, len_b - prefix - suffix
+
+    def diff_list(self, a: list[Any], b: list[Any], loc: _PatchLocation) -> None:
+        prefix, middle_a, middle_b = self.list_span(a, b)
         if middle_a == middle_b:
             for i in range(prefix, prefix + middle_b):
                 self.node(a[i], b[i], loc.child(i))

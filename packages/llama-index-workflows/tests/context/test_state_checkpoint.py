@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import OrderedDict
 from typing import Any, Awaitable, Callable
 
 import pytest
@@ -506,6 +507,51 @@ async def test_conditional_checkpoint_keeps_deep_json_payloads(
     restored = InMemoryStateStore.from_dict(replayed, JsonSerializer())
     assert await restored.get("marker.count") == 0
     assert await restored.get("payload.i") == 1
+
+
+@pytest.mark.parametrize("container", ["dict", "list", "mixed"])
+@pytest.mark.parametrize("ordered", ["before", "after", "neither"])
+@pytest.mark.parametrize(
+    ("before_leaf", "after_leaf"),
+    [
+        pytest.param({"leaf": 0}, {"leaf": 1}, id="replace"),
+        pytest.param(["prefix", "suffix"], ["prefix", 1, 2, "suffix"], id="insert"),
+        pytest.param(["prefix", 1, 2, "suffix"], ["prefix", "suffix"], id="remove"),
+        pytest.param(
+            dict.fromkeys("abcdefghi", 0), dict.fromkeys("abcdefghi", 1), id="collapse"
+        ),
+    ],
+)
+async def test_conditional_checkpoint_diffs_deep_containers(
+    container: str,
+    ordered: str,
+    before_leaf: Any,
+    after_leaf: Any,
+) -> None:
+    before, after = before_leaf, after_leaf
+    for depth in range(499):
+        if container == "list" or (container == "mixed" and depth % 2):
+            before, after = [before], [after]
+        else:
+            before, after = {"next": before}, {"next": after}
+    if ordered == "before":
+        before, after = OrderedDict(payload=before), {"payload": after}
+    elif ordered == "after":
+        before, after = {"payload": before}, OrderedDict(payload=after)
+    store = InMemoryStateStore(
+        DictState(_data={"marker": ConditionalCount(count=1), "payload": before})
+    )
+    baseline = store.checkpoint()
+    await store.set("marker.count", 2)
+    await store.set("payload", after)
+    current = store.checkpoint()
+    expected = current.to_dict()
+    replayed = apply_state_patch(baseline.to_dict(), current.diff(baseline))
+
+    assert json.dumps(replayed) == json.dumps(expected)
+    restored = InMemoryStateStore.from_dict(replayed, JsonSerializer())
+    assert await restored.get("marker.count") == 2
+    assert json.dumps(await restored.get("payload")) == json.dumps(after)
 
 
 class DeepComponent:
