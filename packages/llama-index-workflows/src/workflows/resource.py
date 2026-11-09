@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import inspect
 import json
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
     Annotated,
@@ -387,6 +389,20 @@ def Resource(
     return _Resource(factory, cache)
 
 
+@dataclass
+class _ResourceResolution:
+    depth: int = 0
+    resolving: list[str] = field(default_factory=list)
+    cache: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class _ResourceLock:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    owner: asyncio.Task[Any] | None = None
+    users: int = 0
+
+
 class ResourceManager:
     """Manage resource lifecycles and caching across workflow steps.
 
@@ -398,58 +414,113 @@ class ResourceManager:
 
     def __init__(self) -> None:
         self.resources: dict[str, Any] = {}
-        self._resolving: list[str] = []  # Track resources being resolved in order
-        self._resolution_cache: dict[str, Any] = {}
-        self._resolution_depth = 0
+        self._resolution_scopes: dict[
+            asyncio.Task[Any] | None, _ResourceResolution
+        ] = {}
+        self._resource_locks: dict[str, _ResourceLock] = {}
+        self._waiting: dict[asyncio.Task[Any], str] = {}
 
     @contextmanager
     def resolution_scope(self) -> Iterator[None]:
         """Scope non-cached resolution values to a single dependency graph."""
-        self._resolution_depth += 1
+        try:
+            task = asyncio.current_task()
+        except RuntimeError:
+            task = None
+        scope = self._resolution_scopes.setdefault(task, _ResourceResolution())
+        scope.depth += 1
         try:
             yield
         finally:
-            self._resolution_depth -= 1
-            if self._resolution_depth == 0:
-                self._resolution_cache.clear()
+            scope.depth -= 1
+            if scope.depth == 0:
+                del self._resolution_scopes[task]
 
     async def set(self, name: str, val: Any) -> None:
         """Register a resource instance under a name."""
         self.resources.update({name: val})
 
     async def get(self, resource: ResourceDescriptor) -> Any:
-        if self._resolution_depth == 0:
-            with self.resolution_scope():
-                return await self._get(resource)
-        return await self._get(resource)
+        with self.resolution_scope():
+            return await self._get(
+                resource, self._resolution_scopes[asyncio.current_task()]
+            )
 
-    async def _get(self, resource: ResourceDescriptor) -> Any:
+    async def _get(
+        self, resource: ResourceDescriptor, scope: _ResourceResolution
+    ) -> Any:
         """Return a resource instance, honoring cache settings.
 
         Works with any ResourceDescriptor implementation (_Resource or _ResourceConfig).
         """
         # Cycle detection
-        if resource.name in self._resolving:
-            chain = " -> ".join(self._resolving) + f" -> {resource.name}"
+        if resource.name in scope.resolving:
+            chain = " -> ".join(scope.resolving) + f" -> {resource.name}"
             raise ValueError(f"Circular resource dependency detected: {chain}")
 
         # Check cache first (before marking as resolving)
         if resource.cache and resource.name in self.resources:
             return self.resources[resource.name]
-        if resource.name in self._resolution_cache:
-            return self._resolution_cache[resource.name]
+        if resource.name in scope.cache:
+            return scope.cache[resource.name]
 
-        # Mark as resolving for cycle detection
-        self._resolving.append(resource.name)
+        if resource.cache:
+            return await self._get_cached(resource, scope)
+        return await self._resolve(resource, scope)
+
+    async def _get_cached(
+        self, resource: ResourceDescriptor, scope: _ResourceResolution
+    ) -> Any:
+        task = asyncio.current_task()
+        assert task is not None
+        entry = self._resource_locks.setdefault(resource.name, _ResourceLock())
+        entry.users += 1
+        try:
+            self._waiting[task] = resource.name
+            try:
+                # A cycle can span workers that each own a different resource.
+                chain = [resource.name]
+                owner = entry.owner
+                while owner is not None:
+                    if owner is task:
+                        chain.append(resource.name)
+                        raise ValueError(
+                            f"Circular resource dependency detected: {' -> '.join(chain)}"
+                        )
+                    waiting = self._waiting.get(owner)
+                    if waiting is None:
+                        break
+                    chain.append(waiting)
+                    owner = self._resource_locks[waiting].owner
+                await entry.lock.acquire()
+            finally:
+                self._waiting.pop(task, None)
+
+            entry.owner = task
+            try:
+                if resource.name in self.resources:
+                    return self.resources[resource.name]
+                return await self._resolve(resource, scope)
+            finally:
+                entry.owner = None
+                entry.lock.release()
+        finally:
+            entry.users -= 1
+            if entry.users == 0:
+                del self._resource_locks[resource.name]
+
+    async def _resolve(
+        self, resource: ResourceDescriptor, scope: _ResourceResolution
+    ) -> Any:
+        scope.resolving.append(resource.name)
         try:
             val = await resource.resolve(self)
             if resource.cache:
                 await self.set(resource.name, val)
-            self._resolution_cache[resource.name] = val
+            scope.cache[resource.name] = val
             return val
         finally:
-            if resource.name in self._resolving:
-                self._resolving.remove(resource.name)
+            scope.resolving.pop()
 
     def get_all(self) -> dict[str, Any]:
         """Return all materialized resources."""
