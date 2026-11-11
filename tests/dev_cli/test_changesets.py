@@ -751,6 +751,17 @@ def test_execute_docker_build_action_invokes_buildx() -> None:
     assert "--tag" in cmd and "docker.io/llamaindex/test:1.0.0-amd64" in cmd
 
 
+def test_execute_docker_build_action_passes_security_updates_date() -> None:
+    with (
+        patch("dev_cli.changesets.run_command") as mock_run,
+        patch("dev_cli.changesets._utc_today", return_value="2026-11-09"),
+    ):
+        execute_action(_docker_build_action(), dry_run=False)
+    cmd = mock_run.call_args[0][0]
+    assert cmd[cmd.index("--build-arg") + 1] == "SECURITY_UPDATES_DATE=2026-11-09"
+    assert cmd[-1] == "."
+
+
 def test_execute_docker_build_action_emits_gha_cache_flags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -10,7 +10,13 @@ RUN /usr/local/bin/python3.12 -m pip install --no-cache-dir --upgrade pip
 
 # Take Debian security updates the base image doesn't carry yet, e.g. libbrotli1
 # for CVE-2026-111497 (CISA KEV), which is fixed in 1.1.0-2+deb13u1.
-RUN apt-get update \
+# The release build passes today's UTC date as SECURITY_UPDATES_DATE, so its
+# layer cache can't replay an older run of this step. Each release day re-runs
+# it and every layer after it, which includes the appserver's npm upgrade.
+# Local builds leave it empty and cache as before.
+ARG SECURITY_UPDATES_DATE=
+RUN echo "Debian security updates as of: ${SECURITY_UPDATES_DATE:-not set}" \
+    && apt-get update \
     && apt-get upgrade -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 

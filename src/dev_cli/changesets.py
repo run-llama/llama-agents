@@ -9,6 +9,7 @@ There's 2 things this does:
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import re
@@ -710,6 +711,10 @@ def _execute_pypi(action: PypiAction, dry_run: bool) -> None:
     run_command(["uv", "publish", *[str(f) for f in files]])
 
 
+def _utc_today() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+
+
 def _execute_docker_build(action: DockerBuildAction, dry_run: bool) -> None:
     """Build and push a single-arch docker image for one platform."""
     click.echo(f"Building {action.image} ({action.platform}) -> {action.build_tag}")
@@ -727,6 +732,11 @@ def _execute_docker_build(action: DockerBuildAction, dry_run: bool) -> None:
     ]
     if action.target:
         cmd.extend(["--target", action.target])
+    # A new value each UTC day invalidates the cached ``apt-get upgrade``
+    # layer in docker/Dockerfile (and everything after it), so a release
+    # always ships the Debian security updates published by its build day
+    # instead of whatever the GHA cache recorded at the last release.
+    cmd.extend(["--build-arg", f"SECURITY_UPDATES_DATE={_utc_today()}"])
     # GHA buildx cache. Only emits cache directives under GitHub Actions
     # with the runtime token exposed (see ``crazy-max/ghaction-github-runtime``).
     # ``compression=zstd`` shrinks the exported cache blobs, and
