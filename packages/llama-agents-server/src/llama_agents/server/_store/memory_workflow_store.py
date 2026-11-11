@@ -97,6 +97,13 @@ class MemoryWorkflowStore(AbstractWorkflowStore):
     async def update(self, handler: PersistentHandler) -> None:
         self.handlers[handler.handler_id] = handler
         if is_terminal_status(handler.status):
+            # A handler can go terminal more than once (restart of a completed
+            # run). Eviction treats queue length as the completed count, so a
+            # second entry for the same id would push a live handler out.
+            try:
+                self._terminal_queue.remove(handler.handler_id)
+            except ValueError:
+                pass
             self._terminal_queue.append(handler.handler_id)
             self._evict_oldest_completed()
 
