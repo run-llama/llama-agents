@@ -381,6 +381,7 @@ def _broker_to_serialized(
                     for buffer_id, events in ip.shared_state.collected_events.items()
                 },
                 collect_generations=dict(ip.collect_generations),
+                waiter_epochs=dict(ip.shared_state.waiter_epochs),
             )
             for ip in worker_state.in_progress
         ]
@@ -408,6 +409,7 @@ def _broker_to_serialized(
                 resolved_event=serializer.serialize(waiter.resolved_event)
                 if waiter.resolved_event
                 else None,
+                timeout_at=waiter.timeout_at,
                 scope_path=list(waiter.scope_path),
                 collection_release_payload=_serialize_release_payload(
                     waiter.collection_release_payload, serializer
@@ -426,6 +428,7 @@ def _broker_to_serialized(
                 serializer.serialize(ev) for ev in worker_state.static_collect_events
             ],
             collected_waiters=waiters,
+            waiter_epochs=dict(worker_state.waiter_epochs),
         )
 
     return SerializedContext(
@@ -539,6 +542,7 @@ def _load_broker_from_serialized(
             for buffer_id, events in worker_data.collected_events.items()
         }
         worker.collect_generations = dict(worker_data.collect_generations)
+        worker.waiter_epochs = dict(worker_data.waiter_epochs)
         worker.static_collect_events = [
             serializer.deserialize(ev) for ev in worker_data.static_collect_events
         ]
@@ -572,6 +576,7 @@ def _load_broker_from_serialized(
                     resolved_event=serializer.deserialize(waiter_data.resolved_event)
                     if waiter_data.resolved_event
                     else None,
+                    timeout_at=waiter_data.timeout_at,
                     scope_path=tuple(waiter_data.scope_path),
                     collection_release_payload=waiter_payload,
                     work_item_id=waiter_data.work_item_id,
@@ -610,6 +615,7 @@ def _deserialize_in_progress(
             scope_path=attempt.scope_path,
             work_item_id=attempt.work_item_id,
             invocation_id=data.invocation_id,
+            waiter_epochs=dict(data.waiter_epochs),
         ),
         attempts=attempt.attempts or 0,
         first_attempt_at=attempt.first_attempt_at or 0.0,
@@ -923,11 +929,14 @@ class InternalStepWorkerState:
     collected_waiters: list[StepWorkerWaiter]
     static_collect_events: list[Event] = field(default_factory=list)
     collect_generations: dict[str, int] = field(default_factory=dict)
+    waiter_epochs: dict[str, int] = field(default_factory=dict)
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         self.__dict__.update(state)
         if "collect_generations" not in state:
             self.collect_generations = {}
+        if "waiter_epochs" not in state:
+            self.waiter_epochs = {}
 
     def _deepcopy(self) -> InternalStepWorkerState:
         return InternalStepWorkerState(
@@ -938,6 +947,7 @@ class InternalStepWorkerState:
             static_collect_events=list(self.static_collect_events),
             collected_waiters=[dataclasses.replace(x) for x in self.collected_waiters],
             collect_generations=dict(self.collect_generations),
+            waiter_epochs=dict(self.waiter_epochs),
         )
 
     def bump_collect_generation(self, buffer_id: str) -> None:
