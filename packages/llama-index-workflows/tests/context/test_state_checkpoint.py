@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import OrderedDict
 from typing import Any, Awaitable, Callable
 
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool, StrictInt, field_serializer
 from workflows.context import Context
 from workflows.context.serializers import JsonSerializer
 from workflows.context.state_store import (
@@ -125,6 +126,474 @@ def assert_patch_round_trips(
     expected = json.loads(json.dumps(current.to_dict()))
     assert apply_state_patch(json.loads(json.dumps(base.to_dict())), patch) == expected
     return patch
+
+
+class ConditionalCount(BaseModel):
+    count: int = Field(default=0, exclude_if=lambda value: value == 0)
+
+
+class NestedConditionalCount(BaseModel):
+    value: ConditionalCount
+
+
+class IntBox(BaseModel):
+    value: StrictInt | list[StrictInt] | dict[str, StrictInt]
+
+
+class BoolBox(BaseModel):
+    value: StrictBool | list[StrictBool] | dict[str, StrictBool]
+
+
+class ConditionalBoxState(ConditionalCount):
+    box: IntBox | BoolBox
+
+
+@pytest.mark.parametrize("container", ["scalar", "list", "dict"])
+@pytest.mark.parametrize("boolean_first", [False, True])
+async def test_conditional_checkpoint_preserves_nested_json_value_types(
+    container: str, boolean_first: bool
+) -> None:
+    int_value: Any = 1
+    bool_value: Any = True
+    if container == "list":
+        int_value, bool_value = [int_value], [bool_value]
+    elif container == "dict":
+        int_value, bool_value = {"value": int_value}, {"value": bool_value}
+    before: IntBox | BoolBox = IntBox(value=int_value)
+    after: IntBox | BoolBox = BoolBox(value=bool_value)
+    if boolean_first:
+        before, after = after, before
+    store = InMemoryStateStore(ConditionalBoxState(count=1, box=before))
+    baseline = store.checkpoint()
+    await store.set("box", after)
+    current = store.checkpoint()
+    replayed = apply_state_patch(baseline.to_dict(), current.diff(baseline))
+
+    assert json.dumps(replayed, sort_keys=True) == json.dumps(
+        current.to_dict(), sort_keys=True
+    )
+    restored = InMemoryStateStore.from_dict(replayed, JsonSerializer())
+    assert type(await restored.get("box")) is type(after)
+
+
+class ConditionalScalarState(BaseModel):
+    value: StrictInt | StrictBool = Field(
+        default=0, exclude_if=lambda value: isinstance(value, bool)
+    )
+
+
+@pytest.mark.parametrize("before,after", [(1, True), (True, 1)])
+async def test_conditional_checkpoint_compares_serialized_field_presence(
+    before: int | bool, after: int | bool
+) -> None:
+    store = InMemoryStateStore(ConditionalScalarState(value=before))
+    baseline = store.checkpoint()
+    await store.set("value", after)
+    assert_patch_round_trips(baseline, store.checkpoint())
+
+
+@pytest.mark.parametrize("kind", ["root", "dict", "nested"])
+async def test_checkpoint_respects_conditional_field_exclusion(kind: str) -> None:
+    value = ConditionalCount(count=1)
+    if kind == "root":
+        state: BaseModel = value
+        path = "count"
+    elif kind == "dict":
+        state = DictState(_data={"value": value})
+        path = "value.count"
+    else:
+        state = NestedConditionalCount(value=value)
+        path = "value.count"
+    store = InMemoryStateStore(state)
+    baseline = store.checkpoint()
+
+    await store.set(path, 0)
+    excluded = store.checkpoint()
+    patch = assert_patch_round_trips(baseline, excluded)
+    replayed = apply_state_patch(baseline.to_dict(), patch)
+    restored = InMemoryStateStore.from_dict(replayed, JsonSerializer())
+    assert await restored.get(path) == 0
+
+    await store.set(path, 1)
+    assert_patch_round_trips(excluded, store.checkpoint())
+
+
+class StrictConditionalCount(ConditionalCount):
+    model_config = {"extra": "forbid"}
+
+
+class ExtendedConditionalCount(StrictConditionalCount):
+    note: str = "subclass-only"
+
+
+class DeclaredConditionalCount(BaseModel):
+    value: StrictConditionalCount
+
+
+async def test_checkpoint_preserves_declared_schema_for_conditional_subclass() -> None:
+    store = InMemoryStateStore(
+        DeclaredConditionalCount(value=ExtendedConditionalCount(count=1))
+    )
+    baseline = store.checkpoint()
+    await store.set("value.count", 2)
+    current = store.checkpoint()
+    replayed = apply_state_patch(baseline.to_dict(), current.diff(baseline))
+    restored = InMemoryStateStore.from_dict(replayed, JsonSerializer())
+    assert await restored.get("value.count") == 2
+    assert replayed == current.to_dict()
+
+
+class OptionalDeclaredCount(BaseModel):
+    value: StrictConditionalCount | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+
+async def test_checkpoint_preserves_schema_when_conditional_model_appears() -> None:
+    store = InMemoryStateStore(OptionalDeclaredCount())
+    baseline = store.checkpoint()
+    await store.set("value", ExtendedConditionalCount(count=1))
+    included = store.checkpoint()
+    patch = assert_patch_round_trips(baseline, included)
+    replayed = apply_state_patch(baseline.to_dict(), patch)
+    restored = InMemoryStateStore.from_dict(replayed, JsonSerializer())
+    assert await restored.get("value.count") == 1
+
+    await store.set("value", None)
+    assert_patch_round_trips(included, store.checkpoint())
+
+
+class RequiredCount(BaseModel):
+    count: int
+
+
+class HidingRequiredCount(RequiredCount):
+    count: int = Field(default=0, exclude_if=lambda value: value == 0)
+
+
+class RequiredCountParent(BaseModel):
+    value: RequiredCount
+
+
+class VisibleConditionalCount(StrictConditionalCount):
+    count: int = 0
+
+
+class DifferentConditionalCount(StrictConditionalCount):
+    count: int = Field(default=0, exclude_if=lambda value: value == 1)
+
+
+class RequiredCountsParent(BaseModel):
+    values: list[RequiredCount]
+
+
+class ConditionalCountsParent(BaseModel):
+    values: list[StrictConditionalCount]
+
+
+@pytest.mark.parametrize("kind", ["root", "dict", "list", "typed"])
+@pytest.mark.parametrize(
+    "case,child_type",
+    [
+        ("added", HidingRequiredCount),
+        ("removed", VisibleConditionalCount),
+        ("changed", DifferentConditionalCount),
+        ("inherited", ExtendedConditionalCount),
+    ],
+)
+async def test_checkpoint_uses_declared_conditional_schema(
+    kind: str, case: str, child_type: type[BaseModel]
+) -> None:
+    value = child_type(count=1)
+    if kind == "root":
+        state: BaseModel = value
+        path = "count"
+    elif kind == "dict":
+        state = DictState(_data={"value": value})
+        path = "value.count"
+    elif kind == "list":
+        parent = RequiredCountsParent if case == "added" else ConditionalCountsParent
+        state = parent.model_validate({"values": [value]})
+        path = "values.0.count"
+    else:
+        parent = RequiredCountParent if case == "added" else DeclaredConditionalCount
+        state = parent.model_validate({"value": value})
+        path = "value.count"
+    store = InMemoryStateStore(state)
+    previous = store.checkpoint()
+    for count in (0, 2, 1):
+        await store.set(path, count)
+        current = store.checkpoint()
+        patch = assert_patch_round_trips(previous, current)
+        replayed = apply_state_patch(previous.to_dict(), patch)
+        restored = InMemoryStateStore.from_dict(replayed, JsonSerializer())
+        expected = InMemoryStateStore.from_dict(current.to_dict(), JsonSerializer())
+        assert await restored.get(path) == await expected.get(path)
+        previous = current
+
+
+class RequiredCountMap(BaseModel):
+    values: dict[str, RequiredCount]
+
+
+class FrozenRequiredCount(RequiredCount):
+    model_config = {"frozen": True}
+
+
+class FrozenHidingRequiredCount(FrozenRequiredCount):
+    count: int = Field(default=0, exclude_if=lambda value: value == 0)
+
+
+class RequiredCountContainers(BaseModel):
+    pair: tuple[FrozenRequiredCount, ...] = ()
+    unique: set[FrozenRequiredCount] = Field(default_factory=set)
+    frozen: frozenset[FrozenRequiredCount] = frozenset()
+
+
+@pytest.mark.parametrize(
+    "field,container", [("pair", tuple), ("unique", set), ("frozen", frozenset)]
+)
+async def test_checkpoint_serializes_conditional_model_containers(
+    field: str,
+    container: type,
+) -> None:
+    store = InMemoryStateStore(RequiredCountContainers())
+    baseline = store.checkpoint()
+    await store.set(field, container([FrozenHidingRequiredCount(count=0)]))
+    current = store.checkpoint()
+    patch = assert_patch_round_trips(baseline, current)
+    restored = InMemoryStateStore.from_dict(
+        apply_state_patch(baseline.to_dict(), patch), JsonSerializer()
+    )
+    assert next(iter(await restored.get(field))).count == 0
+
+
+@pytest.mark.parametrize("kind", ["list", "dict"])
+async def test_checkpoint_serializes_new_conditional_container_values(
+    kind: str,
+) -> None:
+    if kind == "list":
+        state: BaseModel = RequiredCountsParent(values=[])
+        value: Any = [HidingRequiredCount(count=0)]
+        path = "values.0.count"
+    else:
+        state = RequiredCountMap(values={})
+        value = {"first": HidingRequiredCount(count=0)}
+        path = "values.first.count"
+    store = InMemoryStateStore(state)
+    baseline = store.checkpoint()
+    await store.set("values", value)
+    current = store.checkpoint()
+    patch = assert_patch_round_trips(baseline, current)
+    restored = InMemoryStateStore.from_dict(
+        apply_state_patch(baseline.to_dict(), patch), JsonSerializer()
+    )
+    assert await restored.get(path) == 0
+
+
+class ConditionalCounters(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    shared: ConditionalCount = Field(default_factory=ConditionalCount)
+    a: int = 0
+    b: int = 0
+    c: int = 0
+    d: int = 0
+    e: int = 0
+    f: int = 0
+    g: int = 0
+    h: int = 0
+    i: int = 0
+
+
+class ExtendedConditionalCounters(ConditionalCounters):
+    note: str = "subclass-only"
+
+
+class ConditionalCountersParent(BaseModel):
+    value: ConditionalCounters
+
+
+async def test_checkpoint_collapse_preserves_declared_conditional_schema() -> None:
+    value = ExtendedConditionalCounters()
+    store = InMemoryStateStore(ConditionalCountersParent(value=value))
+    baseline = store.checkpoint()
+    await store.set("value", value.model_copy(update=dict.fromkeys("abcdefghi", 1)))
+    current = store.checkpoint()
+    patch = assert_patch_round_trips(baseline, current)
+    restored = InMemoryStateStore.from_dict(
+        apply_state_patch(baseline.to_dict(), patch), JsonSerializer()
+    )
+    assert await restored.get("value.i") == 1
+
+
+async def test_ordinary_leaf_diff_does_not_serialize_snapshots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = InMemoryStateStore(Conversation(title="before"))
+    baseline = store.checkpoint()
+    await store.set("title", "after")
+    current = store.checkpoint()
+    old_payload, new_payload = baseline.to_dict(), current.to_dict()
+
+    def unexpected_snapshot(self: StateCheckpoint) -> dict[str, Any]:
+        pytest.fail("An ordinary leaf diff should not serialize the root state")
+
+    monkeypatch.setattr(StateCheckpoint, "to_dict", unexpected_snapshot)
+    assert apply_state_patch(old_payload, current.diff(baseline)) == new_payload
+
+
+class SerializableCache(BaseModel):
+    cache: dict[str, Any] | None
+    count: int = 1
+
+    @field_serializer("cache")
+    def serialize_cache(self, cache: dict[str, Any] | None) -> None:
+        return None
+
+
+async def test_new_model_with_serialized_cache_can_be_checkpointed() -> None:
+    cycle: dict[str, Any] = {}
+    cycle["self"] = cycle
+    store = InMemoryStateStore(DictState())
+    baseline = store.checkpoint()
+    await store.set("payload", SerializableCache(cache=cycle))
+    current = store.checkpoint()
+    patch = assert_patch_round_trips(baseline, current)
+    restored = InMemoryStateStore.from_dict(
+        apply_state_patch(baseline.to_dict(), patch), JsonSerializer()
+    )
+    assert await restored.get("payload.count") == 1
+
+
+@pytest.mark.parametrize("with_serialized_cache", [False, True])
+async def test_new_deep_payload_can_be_checkpointed(
+    with_serialized_cache: bool,
+) -> None:
+    value: Any = "end"
+    for _ in range(500):
+        value = {"next": value}
+    if with_serialized_cache:
+        value = SerializableCache.model_validate({"cache": value})
+    store = InMemoryStateStore(DictState())
+    baseline = store.checkpoint()
+    await store.set("payload", value)
+    current = store.checkpoint()
+    expected = current.to_dict()
+    replayed = apply_state_patch(baseline.to_dict(), current.diff(baseline))
+    assert json.dumps(replayed) == json.dumps(expected)
+
+
+@pytest.mark.parametrize("mutation", ["add", "update"])
+async def test_conditional_checkpoint_keeps_deep_json_payloads(
+    mutation: str,
+) -> None:
+    value: Any = "end"
+    for _ in range(500):
+        value = {"next": value}
+    payload = {"deep": value, **dict.fromkeys("abcdefghi", 0)}
+    state = DictState(_data={"marker": ConditionalCount(count=1)})
+    if mutation == "update":
+        state["payload"] = payload
+    store = InMemoryStateStore(state)
+    baseline = store.checkpoint()
+    await store.set("marker.count", 0)
+    await store.set("payload", {**payload, **dict.fromkeys("abcdefghi", 1)})
+    current = store.checkpoint()
+    expected = current.to_dict()
+    replayed = apply_state_patch(baseline.to_dict(), current.diff(baseline))
+
+    assert json.dumps(replayed) == json.dumps(expected)
+    restored = InMemoryStateStore.from_dict(replayed, JsonSerializer())
+    assert await restored.get("marker.count") == 0
+    assert await restored.get("payload.i") == 1
+
+
+@pytest.mark.parametrize("container", ["dict", "list", "mixed"])
+@pytest.mark.parametrize("ordered", ["before", "after", "neither"])
+@pytest.mark.parametrize(
+    ("before_leaf", "after_leaf"),
+    [
+        pytest.param({"leaf": 0}, {"leaf": 1}, id="replace"),
+        pytest.param(["prefix", "suffix"], ["prefix", 1, 2, "suffix"], id="insert"),
+        pytest.param(["prefix", 1, 2, "suffix"], ["prefix", "suffix"], id="remove"),
+        pytest.param(
+            dict.fromkeys("abcdefghi", 0), dict.fromkeys("abcdefghi", 1), id="collapse"
+        ),
+    ],
+)
+async def test_conditional_checkpoint_diffs_deep_containers(
+    container: str,
+    ordered: str,
+    before_leaf: Any,
+    after_leaf: Any,
+) -> None:
+    before, after = before_leaf, after_leaf
+    for depth in range(499):
+        if container == "list" or (container == "mixed" and depth % 2):
+            before, after = [before], [after]
+        else:
+            before, after = {"next": before}, {"next": after}
+    if ordered == "before":
+        before, after = OrderedDict(payload=before), {"payload": after}
+    elif ordered == "after":
+        before, after = {"payload": before}, OrderedDict(payload=after)
+    store = InMemoryStateStore(
+        DictState(_data={"marker": ConditionalCount(count=1), "payload": before})
+    )
+    baseline = store.checkpoint()
+    await store.set("marker.count", 2)
+    await store.set("payload", after)
+    current = store.checkpoint()
+    expected = current.to_dict()
+    replayed = apply_state_patch(baseline.to_dict(), current.diff(baseline))
+
+    assert json.dumps(replayed) == json.dumps(expected)
+    restored = InMemoryStateStore.from_dict(replayed, JsonSerializer())
+    assert await restored.get("marker.count") == 2
+    assert json.dumps(await restored.get("payload")) == json.dumps(after)
+
+
+class DeepComponent:
+    def __init__(self, data: dict[str, Any]) -> None:
+        self.data = data
+
+    @classmethod
+    def class_name(cls) -> str:
+        return "DeepComponent"
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> DeepComponent:
+        return cls(data)
+
+
+async def test_conditional_checkpoint_keeps_deep_components_opaque() -> None:
+    before: dict[str, Any] = {"leaf": 0}
+    after: dict[str, Any] = {"leaf": 1}
+    for _ in range(499):
+        before, after = {"next": before}, {"next": after}
+    store = InMemoryStateStore(
+        DictState(
+            _data={
+                "marker": ConditionalCount(count=1),
+                "component": DeepComponent(before),
+            }
+        )
+    )
+    baseline = store.checkpoint()
+    await store.set("marker.count", 0)
+    await store.set("component", DeepComponent(after))
+    current = store.checkpoint()
+    expected = current.to_dict()
+    replayed = apply_state_patch(baseline.to_dict(), current.diff(baseline))
+
+    assert json.dumps(replayed) == json.dumps(expected)
+    restored = InMemoryStateStore.from_dict(replayed, JsonSerializer())
+    assert await restored.get("marker.count") == 0
+    assert json.dumps((await restored.get("component")).to_dict()) == json.dumps(after)
 
 
 @pytest.mark.parametrize("kind", ["dict", "typed"])
