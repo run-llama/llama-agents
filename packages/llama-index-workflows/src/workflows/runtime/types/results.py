@@ -406,7 +406,7 @@ class AddWaiter(BaseModel, Generic[EventType]):
     def _serialize(self, handler: Any) -> dict[str, Any]:
         data = handler(self)
         # Always serialize requirements as {} and record whether they existed
-        data["has_requirements"] = bool(self.requirements)
+        data["has_requirements"] = bool(self.requirements) or self.has_requirements
         data["requirements"] = {}
         return data
 
@@ -414,10 +414,14 @@ class AddWaiter(BaseModel, Generic[EventType]):
     @classmethod
     def _validate(cls, data: Any, handler: Any) -> AddWaiter:
         if isinstance(data, dict):
-            # Strip has_requirements before validation (it's computed)
             data = dict(data)
-            data.pop("has_requirements", None)
-        return handler(data)
+            data["has_requirements"] = bool(data.get("requirements")) or bool(
+                data.get("has_requirements", False)
+            )
+        result: AddWaiter = handler(data)
+        if result.requirements and not result.has_requirements:
+            object.__setattr__(result, "has_requirements", True)
+        return result
 
 
 # A step function result "command" communicates back to the workflow how the step function was resolved
