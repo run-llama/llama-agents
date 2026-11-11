@@ -21,7 +21,7 @@ version = "0.7.0"
 description = "DBOS durable runtime plugin for LlamaIndex Workflows"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
   "dbos>=2.18.0",
   "llama-agents-server[asyncpg]>=0.5.1",
