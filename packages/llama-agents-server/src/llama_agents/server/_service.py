@@ -10,7 +10,6 @@ runtime for persistence and adapter wiring, and to the store for queries.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Literal
@@ -371,10 +370,7 @@ class _WorkflowService:
                 await run.cancel_run()
             except Exception:
                 pass
-            try:
-                await run
-            except (asyncio.CancelledError, Exception):
-                pass
+        # Force-kill any run still pending after the bounded graceful wait.
         await self._kill_run(run)
 
     async def _kill_run(self, run: WorkflowHandler) -> None:
