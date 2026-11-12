@@ -74,6 +74,7 @@ class CommandScheduleWaiterTimeout:
     waiter_id: str
     timeout: float
     invocation_namespace: tuple[str, ...] = ()
+    registration_id: str | None = None
 
 
 @dataclass(frozen=True)

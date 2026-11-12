@@ -393,6 +393,7 @@ class _ControlLoopRunner:
                     step_id=command.step_id,
                     waiter_id=command.waiter_id,
                     invocation_namespace=command.invocation_namespace,
+                    registration_id=command.registration_id,
                 ),
                 at_time=now + command.timeout,
             )
