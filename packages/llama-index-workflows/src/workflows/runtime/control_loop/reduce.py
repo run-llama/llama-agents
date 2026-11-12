@@ -1516,6 +1516,11 @@ def _resolve_waiters(
     for step_id, step_config in state.config.steps.items():
         wait_conditions = state.workers[step_id].collected_waiters
         for wait_condition in wait_conditions:
+            if wait_condition.resolved_event is not None:
+                # Already resolved by an earlier event. The re-run consumes
+                # the stored event, so a later matching event must neither
+                # replace it nor resume the work item a second time.
+                continue
             is_match = event_matches(
                 tick.event,
                 wait_condition.waiting_for_event,
