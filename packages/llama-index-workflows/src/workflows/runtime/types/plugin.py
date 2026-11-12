@@ -7,6 +7,7 @@ A runtime interface to switch out a broker runtime (external library or service 
 from __future__ import annotations
 
 import asyncio
+import logging
 import weakref
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
@@ -66,6 +67,37 @@ WaitResult = WaitResultTick | WaitResultTimeout
 SerializerCacheEntry = tuple[tuple[type[Any], ...], BaseSerializer]
 _K = TypeVar("_K")
 _V = TypeVar("_V")
+logger = logging.getLogger(__name__)
+
+
+def _log_cancelled_task_error(task: asyncio.Task[Any]) -> None:
+    if not task.cancelled():
+        error = task.exception()
+        if error is not None:
+            logger.warning("Task raised during cancellation cleanup", exc_info=error)
+
+
+async def _cancel_unclaimed_tasks(tasks: set[asyncio.Task[Any]]) -> None:
+    for task in tasks:
+        task.add_done_callback(_log_cancelled_task_error)
+        task.cancel()
+    if not tasks:
+        return
+
+    # Match the control loop's bounded cleanup window. Shield only cleanup, not
+    # workflow execution, so another cancellation cannot interrupt ownership cleanup.
+    cleanup = asyncio.create_task(asyncio.wait(tasks, timeout=0.5))
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            continue
+    _, remaining = cleanup.result()
+    if remaining:
+        logger.warning(
+            "%d newly started task(s) outlived the cancellation cleanup window",
+            len(remaining),
+        )
 
 
 @dataclass
@@ -263,9 +295,15 @@ class InternalRunAdapter(ABC):
         tasks = all_tasks(all_named)
         if not tasks:
             return WaitForNextTaskResult(None, started)
-        done, _ = await asyncio.wait(
-            tasks, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
-        )
+        try:
+            done, _ = await asyncio.wait(
+                tasks, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+            )
+        except asyncio.CancelledError:
+            # The runner cannot track these until we return `started`. Tasks in
+            # `running` are already owned by the runner and must be left alone.
+            await _cancel_unclaimed_tasks(all_tasks(started))
+            raise
         completed = pick_highest_priority(all_named, done) if done else None
         return WaitForNextTaskResult(completed, started)
 

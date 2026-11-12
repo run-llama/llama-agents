@@ -23,6 +23,7 @@ from pydantic import PrivateAttr
 from workflows.context import Context, PickleSerializer
 from workflows.decorators import catch_error, step
 from workflows.errors import (
+    WorkflowCancelledByUser,
     WorkflowConfigurationError,
     WorkflowRuntimeError,
     WorkflowValidationError,
@@ -1224,3 +1225,73 @@ async def test_validation_cache_invalidated_on_add_step() -> None:
     # Next run() must re-validate (cache is stale due to version bump)
     await WorkflowTestRunner(wf).run()
     assert wf._validated_version == AddStepCacheWorkflow._step_functions_version
+
+
+@pytest.mark.parametrize("mode", ["normal", "graceful", "cancel_waiter", "shielded"])
+async def test_handler_cancellation_during_step_start(mode: str) -> None:
+    ready, release, finished, waiting = (
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+    )
+    effects: list[str] = []
+    step_task: asyncio.Task | None = None
+
+    class WaitingWorkflow(Workflow):
+        @step
+        async def work(self, ev: StartEvent) -> StopEvent:
+            nonlocal step_task
+            step_task = asyncio.current_task()
+            ready.set()
+            try:
+                await release.wait()
+                effects.append("completed")
+                return StopEvent(result="notebook")
+            except asyncio.CancelledError:
+                effects.append("cancelled")
+                raise
+            finally:
+                finished.set()
+
+    handler = WaitingWorkflow(timeout=3).run()
+
+    async def wait_for_result() -> str:
+        waiting.set()
+        if mode == "shielded":
+            return await asyncio.shield(handler)
+        return await handler
+
+    waiter = asyncio.create_task(wait_for_result())
+    try:
+        await ready.wait()
+        await waiting.wait()
+        if mode == "normal":
+            release.set()
+            assert await waiter == "notebook"
+        elif mode == "graceful":
+            await handler.cancel_run()
+            with pytest.raises(WorkflowCancelledByUser):
+                await waiter
+        else:
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+            if mode == "shielded":
+                assert not handler.is_done()
+                assert not finished.is_set()
+                release.set()
+                assert await handler == "notebook"
+            else:
+                assert handler.is_done()
+        assert finished.is_set()
+        assert effects == (
+            ["completed"] if mode in ("normal", "shielded") else ["cancelled"]
+        )
+    finally:
+        release.set()
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+        await handler.cancel_run()
+        if step_task is not None:
+            await asyncio.gather(step_task, return_exceptions=True)
