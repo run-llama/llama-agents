@@ -50,19 +50,30 @@ class PoolProvider:
         async with self._lock:
             self._raise_if_shutdown()
             if self._pool is None:
-                self._pool = await self._factory()
+                pool = await self._factory()
+                if self._closed or self._terminated:
+                    # Shutdown may have begun while the factory was suspended.
+                    # Do not publish a late pool, even if close() was cancelled.
+                    pool.terminate()
+                    self._raise_if_shutdown()
+                self._pool = pool
             return self._pool
 
     async def close(self) -> None:
         if not self._owns_pool:
             return
-        if self._closed:
-            return
         self._closed = True
-        if self._terminated:
-            return
-        if self._pool is not None:
-            await self._pool.close()
+        # Serialize drain with initialization and other close callers. The flag
+        # above rejects new gets before we wait for either operation to finish.
+        async with self._lock:
+            if self._terminated or self._pool is None:
+                return
+            try:
+                await self._pool.close()
+            except BaseException:
+                self.terminate()
+                raise
+            self._pool = None
 
     def terminate(self) -> None:
         if not self._owns_pool:
@@ -70,10 +81,9 @@ class PoolProvider:
         if self._terminated:
             return
         self._terminated = True
-        if self._closed:
-            return
         if self._pool is not None:
             self._pool.terminate()
+            self._pool = None
 
     def _raise_if_shutdown(self) -> None:
         if self._terminated:
