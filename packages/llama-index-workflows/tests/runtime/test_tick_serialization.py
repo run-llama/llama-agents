@@ -338,10 +338,36 @@ def test_tick_step_result_with_add_waiter() -> None:
     assert r.waiter_id == "w-1"
     assert isinstance(r.waiter_event, MyEvent)
     assert r.waiter_event.value == "waiting"
-    # Requirements are always {} after deserialization
+    # Requirements are always {} after deserialization, but the flag must
+    # survive so journal restore can re-ping the step for real requirements.
     assert r.requirements == {}
+    assert r.has_requirements is True
     assert r.timeout == 60.0
     assert r.event_type is MyEvent
+
+
+def test_add_waiter_roundtrip_preserves_has_requirements_without_payload() -> None:
+    """Journal strips requirements; has_requirements must still round-trip."""
+    original = AddWaiter(
+        waiter_id="w-req",
+        waiter_event=None,
+        requirements={"name": "a"},
+        timeout=None,
+        event_type=MyEvent,
+    )
+    dumped = original.model_dump(mode="json")
+    assert dumped["requirements"] == {}
+    assert dumped["has_requirements"] is True
+
+    restored = AddWaiter.model_validate(dumped)
+    assert restored.requirements == {}
+    assert restored.has_requirements is True
+
+    # A second dump/load must not lose the flag (as journal replay can)
+    again = AddWaiter.model_validate(restored.model_dump(mode="json"))
+    assert again.has_requirements is True
+
+
 
 
 # -- WorkflowTick discriminated union tests --
