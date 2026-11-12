@@ -228,13 +228,14 @@ async def test_send_event_step_is_none() -> None:
         assert isinstance(external_face, ExternalContext)
         ext = external_face  # narrowed for use inside the closure below
 
-        # Wait for event to appear in tick log (up to 1 second). stamped_at is
-        # the journaled live-run clock; normalize it away for the comparison.
+        # Wait for event to appear in tick log (up to 1 second). stamped_at and
+        # resolved_waiters are live-run annotations; normalize them away for
+        # comparison.
         expected_tick = TickAddEvent(event=ev, step_id=None)
 
         def _add_events() -> list[TickAddEvent]:
             return [
-                t.model_copy(update={"stamped_at": None})
+                t.model_copy(update={"stamped_at": None, "resolved_waiters": None})
                 for t in ext._tick_log
                 if isinstance(t, TickAddEvent)
             ]

@@ -87,6 +87,7 @@ from workflows.runtime.types.results import (
 from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import (
     STAMPED_TICK_TYPES,
+    ResolvedWaiter,
     TickAddEvent,
     TickCancelRun,
     TickIdleCheck,
@@ -266,6 +267,27 @@ def _reduce_tick(
         state = replace(init)
     state.journal_seq = init.journal_seq + 1
     return state, commands
+
+
+def _reduce_live_tick(
+    tick: WorkflowTick,
+    init: BrokerState,
+    now_seconds: float,
+    run_id: str | None = None,
+) -> tuple[WorkflowTick, BrokerState, list[WorkflowCommand]]:
+    if isinstance(tick, TickAddEvent):
+        effective_now = _effective_now(tick, now_seconds)
+        state, commands, matched_waiters = _process_add_event_tick_with_waiters(
+            tick, init, effective_now
+        )
+        if matched_waiters is not None:
+            tick = tick.model_copy(update={"resolved_waiters": matched_waiters})
+        if state is init:
+            state = replace(init)
+        state.journal_seq = init.journal_seq + 1
+        return tick, state, commands
+    state, commands = _reduce_tick(tick, init, now_seconds, run_id)
+    return tick, state, commands
 
 
 def _reduce_tick_body(
@@ -951,7 +973,7 @@ def _apply_step_result(
             bound_events=this_execution.bound_events,
             waiting_for_event=result.event_type,
             requirements=result.requirements,
-            has_requirements=bool(len(result.requirements)),
+            has_requirements=bool(result.requirements) or result.has_requirements,
             resolved_event=None,
             # Store the suspended work item's record so resume re-delivers
             # it whole: same stream scope, same collect batch.
@@ -1499,34 +1521,54 @@ def _redeliver_collection_payload(
     )
 
 
+def _has_requirement_waiters(broker: BrokerState) -> bool:
+    return any(
+        w.has_requirements or bool(w.requirements)
+        for worker in broker.workers.values()
+        for w in worker.collected_waiters
+    )
+
+
 def _resolve_waiters(
     tick: TickAddEvent,
     state: BrokerState,
     path: tuple[str, ...],
     now_seconds: float,
-) -> tuple[list[WorkflowCommand], set[StepId]]:
+) -> tuple[list[WorkflowCommand], set[StepId], list[ResolvedWaiter]]:
     """Resolve any waiters the event satisfies, resuming their work items.
 
-    Returns the emitted commands plus the set of steps woken via waiter
-    resolution, so the routing pass can skip them and avoid double-processing
-    the same delivery as a normally-accepted event.
+    Returns the emitted commands, the set of steps woken via waiter resolution
+    (so the routing pass can skip them and avoid double-processing the same
+    delivery as a normally-accepted event), and the resolved waiter identities.
     """
     commands: list[WorkflowCommand] = []
     waiter_resolved_steps: set[StepId] = set()
+    matched_waiters: list[ResolvedWaiter] = []
+    resolved_keys = (
+        {(w.step_id, w.waiter_id) for w in tick.resolved_waiters}
+        if tick.resolved_waiters is not None
+        else None
+    )
     for step_id, step_config in state.config.steps.items():
         wait_conditions = state.workers[step_id].collected_waiters
         for wait_condition in wait_conditions:
-            is_match = event_matches(
-                tick.event,
-                wait_condition.waiting_for_event,
-                allow_subclasses=step_config.accept_event_subclasses,
-            )
-            is_match = is_match and all(
-                getattr(tick.event, k, None) == v
-                for k, v in wait_condition.requirements.items()
-            )
+            if resolved_keys is not None:
+                is_match = (step_id, wait_condition.waiter_id) in resolved_keys
+            else:
+                is_match = event_matches(
+                    tick.event,
+                    wait_condition.waiting_for_event,
+                    allow_subclasses=step_config.accept_event_subclasses,
+                )
+                is_match = is_match and all(
+                    getattr(tick.event, k, None) == v
+                    for k, v in wait_condition.requirements.items()
+                )
             if is_match:
                 waiter_resolved_steps.add(step_id)
+                matched_waiters.append(
+                    ResolvedWaiter(step_id=step_id, waiter_id=wait_condition.waiter_id)
+                )
                 wait_condition.resolved_event = tick.event
                 # Resume re-delivers the suspended work item whole from the
                 # waiter record: original trigger, stream scope, collect batch.
@@ -1545,7 +1587,7 @@ def _resolve_waiters(
                         now_seconds,
                     )
                 )
-    return commands, waiter_resolved_steps
+    return commands, waiter_resolved_steps, matched_waiters
 
 
 def _route_member_to_collect_step(
@@ -1753,13 +1795,20 @@ def _process_add_event_tick(
     route it to every accepting step. An event nothing handled is published as
     an UnhandledEvent.
     """
+    state, commands, _ = _process_add_event_tick_with_waiters(tick, init, now_seconds)
+    return state, commands
+
+
+def _process_add_event_tick_with_waiters(
+    tick: TickAddEvent, init: BrokerState, now_seconds: float
+) -> tuple[BrokerState, list[WorkflowCommand], list[ResolvedWaiter] | None]:
     state = init.deepcopy()
     descent = _descend(state, tick.origin_namespace)
     if descent is None:
-        return state, _unhandled_event_commands(tick, state)
+        return state, _unhandled_event_commands(tick, state), None
     _accrue_descent(descent, _tick_stamp(tick))
     if tick.emission is not None and not _claim_emission(state, tick.emission):
-        return state, []
+        return state, [], None
     broker = descent.broker
     path = descent.path
     if tick.work_item_id is None:
@@ -1778,21 +1827,24 @@ def _process_add_event_tick(
 
     payload_commands = _redeliver_collection_payload(tick, broker, path, now_seconds)
     if payload_commands is not None:
-        return state, payload_commands
+        return state, payload_commands, None
 
-    commands, waiter_resolved_steps = _resolve_waiters(tick, broker, path, now_seconds)
+    has_req_waiters = _has_requirement_waiters(broker)
+    commands, waiter_resolved_steps, matched_waiters = _resolve_waiters(
+        tick, broker, path, now_seconds
+    )
 
     routed = _route_to_accepting_steps(
         tick, state, broker, path, waiter_resolved_steps, now_seconds
     )
     commands.extend(routed.commands)
     if routed.failed:
-        return state, commands
+        return state, commands, (matched_waiters if has_req_waiters else None)
 
     handled = bool(waiter_resolved_steps) or routed.handled
     if not handled:
         commands.extend(_unhandled_event_commands(tick, broker))
-    return state, commands
+    return state, commands, (matched_waiters if has_req_waiters else None)
 
 
 def _consume_superseded_delayed_attempt(

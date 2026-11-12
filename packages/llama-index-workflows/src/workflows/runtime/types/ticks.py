@@ -15,6 +15,7 @@ events that can occur during workflow execution:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Annotated, Literal
 
 from pydantic import (
@@ -62,6 +63,14 @@ class TickStepResult(BaseModel):
     sends: list[SentEvent] = Field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class ResolvedWaiter:
+    """Identity of a requirement-bearing waiter resolved by a live TickAddEvent."""
+
+    step_id: StepId
+    waiter_id: str
+
+
 class TickAddEvent(BaseModel):
     """When sent, adds an event to the workflow's event queue"""
 
@@ -90,6 +99,10 @@ class TickAddEvent(BaseModel):
     # Step sends and queue commands use emission keys to reject duplicates.
     # Start events, external sends and rehydration ticks have no key.
     emission: EmissionKey | None = None
+    # Live reducer records which waiters resolved when any active waiter had
+    # requirements (which are stripped on serialization and cannot be
+    # re-evaluated during replay). None means replay falls back to requirements.
+    resolved_waiters: list[ResolvedWaiter] | None = None
 
 
 class TickCancelRun(BaseModel):
