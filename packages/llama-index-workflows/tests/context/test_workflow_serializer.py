@@ -2,8 +2,13 @@
 # Copyright (c) 2026 LlamaIndex Inc.
 from __future__ import annotations
 
+import base64
+import binascii
+import json
+import pickle
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -52,6 +57,81 @@ class UnhashableWorkflow(Workflow):
         return StopEvent(result="ok")
 
 
+@dataclass
+class PickleOnlyValue:
+    value: str
+
+
+class RememberWorkflow(Workflow):
+    @step
+    async def remember(self, ctx: Context, ev: StartEvent) -> StopEvent:
+        before = await ctx.store.get("cell", default=None)
+        await ctx.store.set("cell", ev.text)
+        return StopEvent(result=before)
+
+
+# Base64 text of a real pickle, stored as an ordinary string.
+PICKLE_LOOKALIKE_STRING = base64.b64encode(
+    pickle.dumps(PickleOnlyValue(value="hidden"))
+).decode("utf-8")
+
+# Each of these JSON-encodes to text that base64-decodes into a valid pickle,
+# e.g. '"SwEu"' -> b"K\x01." (the int 1) and '"Ti4="' -> b"N." (None).
+PICKLE_LOOKALIKE_JSON_VALUES: list[Any] = [
+    "SwEu",
+    "SwIu",
+    "Ti4=",
+    "iC4=",
+    "iS4=",
+    "XS4=",
+    "fS4=",
+    PICKLE_LOOKALIKE_STRING,
+    ["SwEu"],
+    {"cell": "SwEu"},
+    {"cells": ["SwEu", "Ti4="]},
+]
+
+JSON_VALUES: list[Any] = [
+    0,
+    1234,
+    -7,
+    3.5,
+    True,
+    False,
+    None,
+    "",
+    "hello",
+    "ünïcödé ✓",
+    [],
+    {},
+    [None, True, 1.5, "x"],
+    {"name": "SwEu", "items": [1, 2, 3]},
+    UserValue(value="SwEu"),
+]
+
+PICKLE_ONLY_VALUES: list[Any] = [
+    PickleOnlyValue(value="SwEu"),
+    {1, 2, 3},
+    b"SwEu",
+    {"nested": {1, 2}},
+]
+
+LARGE_JSON_VALUE = {"records": [{"id": i, "text": "SwEu"} for i in range(10_000)]}
+
+
+@pytest.fixture
+def pickle_serializer() -> PickleSerializer:
+    return PickleSerializer()
+
+
+@pytest.fixture
+def forbid_pickle_loads(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_on_pickle_loads(data: bytes) -> Any:
+        pytest.fail("JSON payloads must not be decoded with pickle")
+
+    monkeypatch.setattr(pickle, "loads", fail_on_pickle_loads)
+
+
 async def test_workflow_serializer_is_read_only_and_used_for_context() -> None:
     serializer = PickleSerializer()
     workflow = ExampleWorkflow(serializer=serializer)
@@ -69,6 +149,115 @@ async def test_unhashable_workflow_runs() -> None:
     workflow = UnhashableWorkflow()
 
     assert await workflow.run() == "ok"
+
+
+@pytest.mark.parametrize("value", PICKLE_LOOKALIKE_JSON_VALUES)
+def test_pickle_serializer_round_trips_json_values_that_decode_as_pickle(
+    pickle_serializer: PickleSerializer, value: Any
+) -> None:
+    assert pickle_serializer.deserialize(pickle_serializer.serialize(value)) == value
+
+
+@pytest.mark.parametrize("value", JSON_VALUES)
+def test_pickle_serializer_round_trips_json_values(
+    pickle_serializer: PickleSerializer, value: Any
+) -> None:
+    assert pickle_serializer.deserialize(pickle_serializer.serialize(value)) == value
+
+
+@pytest.mark.parametrize("value", PICKLE_ONLY_VALUES)
+def test_pickle_serializer_round_trips_non_json_values_through_pickle(
+    pickle_serializer: PickleSerializer, value: Any
+) -> None:
+    payload = pickle_serializer.serialize(value)
+
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(payload)
+    assert pickle_serializer.deserialize(payload) == value
+
+
+@pytest.mark.parametrize("protocol", range(pickle.HIGHEST_PROTOCOL + 1))
+def test_pickle_serializer_reads_pickle_payloads_from_every_protocol(
+    pickle_serializer: PickleSerializer, protocol: int
+) -> None:
+    value = PickleOnlyValue(value="SwEu")
+    payload = base64.b64encode(pickle.dumps(value, protocol=protocol)).decode("utf-8")
+
+    assert pickle_serializer.deserialize(payload) == value
+
+
+@pytest.mark.usefixtures("forbid_pickle_loads")
+@pytest.mark.parametrize(
+    "value", [*PICKLE_LOOKALIKE_JSON_VALUES, *JSON_VALUES, LARGE_JSON_VALUE]
+)
+def test_pickle_serializer_never_unpickles_json_payloads(
+    pickle_serializer: PickleSerializer, value: Any
+) -> None:
+    assert pickle_serializer.deserialize(pickle_serializer.serialize(value)) == value
+
+
+@pytest.mark.usefixtures("forbid_pickle_loads")
+def test_pickle_serializer_raises_json_reconstruction_errors_without_pickle_fallback(
+    pickle_serializer: PickleSerializer,
+) -> None:
+    payload = json.dumps(
+        {
+            "__is_pydantic": True,
+            "value": {},
+            "qualified_name": "missing_module.Missing",
+        }
+    )
+
+    with pytest.raises(ImportError, match="missing_module"):
+        pickle_serializer.deserialize(payload)
+
+
+@pytest.mark.parametrize(
+    ("payload", "error"),
+    [("not json", binascii.Error), ("gAAA", pickle.UnpicklingError)],
+)
+def test_pickle_serializer_rejects_payload_that_is_neither_json_nor_pickle(
+    pickle_serializer: PickleSerializer, payload: str, error: type[Exception]
+) -> None:
+    with pytest.raises(error):
+        pickle_serializer.deserialize(payload)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "value", [*PICKLE_LOOKALIKE_JSON_VALUES, *PICKLE_ONLY_VALUES, UserValue(value="x")]
+)
+async def test_pickle_serializer_context_restore_round_trips_store_values(
+    value: Any,
+) -> None:
+    workflow = ExampleWorkflow(serializer=PickleSerializer())
+    context = Context(workflow)
+    await workflow.run(ctx=context)
+    await context.store.set("value", value)
+
+    restored = Context.from_dict(workflow, context.to_dict())
+
+    assert await restored.store.get("value") == value
+
+
+@pytest.mark.asyncio
+async def test_pickle_serializer_context_restore_keeps_json_string() -> None:
+    workflow = RememberWorkflow(serializer=PickleSerializer())
+    context = Context(workflow)
+    await workflow.run(ctx=context, text="SwEu")
+
+    restored = Context.from_dict(workflow, context.to_dict())
+
+    assert await restored.store.get("cell") == "SwEu"
+
+
+@pytest.mark.asyncio
+async def test_pickle_serializer_shared_context_next_run_keeps_json_string() -> None:
+    workflow = RememberWorkflow(serializer=PickleSerializer())
+    context = Context(workflow)
+    await workflow.run(ctx=context, text="SwEu")
+
+    assert await workflow.run(ctx=context, text="x") == "SwEu"
 
 
 def test_standalone_default_resolves_import_paths() -> None:

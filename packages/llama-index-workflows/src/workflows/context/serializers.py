@@ -291,7 +291,8 @@ class PickleSerializer(JsonSerializer):
 
     This serializer attempts JSON first for readability and portability, and
     transparently falls back to Pickle for objects that cannot be represented in
-    JSON. Deserialization prioritizes Pickle and falls back to JSON.
+    JSON. Deserialization mirrors this: JSON first, Pickle only for payloads
+    that are not valid JSON.
 
     Warning:
         Pickle can execute arbitrary code during deserialization. Only
@@ -326,7 +327,7 @@ class PickleSerializer(JsonSerializer):
             return base64.b64encode(pickle.dumps(value)).decode("utf-8")
 
     def deserialize(self, value: str) -> Any:
-        """Deserialize with Pickle preference and JSON fallback.
+        """Deserialize with JSON preference and Pickle fallback.
 
         Args:
             value (str): Encoded string.
@@ -337,10 +338,14 @@ class PickleSerializer(JsonSerializer):
         Notes:
             Use only with trusted payloads due to Pickle security implications.
         """
+        # Pickle payloads are base64 of bytes starting with 0x80, so they never
+        # parse as JSON. The reverse is not true: b64decode drops non-alphabet
+        # characters, so JSON text can decode into a valid pickle.
         try:
+            data = json.loads(value)
+        except json.JSONDecodeError:
             return pickle.loads(base64.b64decode(value))
-        except Exception:
-            return super().deserialize(value)
+        return self.deserialize_value(data)
 
 
 JsonPickleSerializer = PickleSerializer
