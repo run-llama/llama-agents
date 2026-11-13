@@ -99,7 +99,6 @@ class _Resource(Generic[T]):
 
     def __init__(self, factory: Callable[..., T | Awaitable[T]], cache: bool) -> None:
         self._factory = factory
-        self._is_async = inspect.iscoroutinefunction(factory)
         self.name = getattr(factory, "__qualname__", type(factory).__name__)
         self.cache = cache
         self._localns: dict[str, Any] | None = None
@@ -120,11 +119,10 @@ class _Resource(Generic[T]):
     async def call(self, resource_manager: ResourceManager) -> T:
         """Invoke the underlying factory, awaiting if necessary."""
         args = await self._resolve_dependencies(resource_manager)
-        if self._is_async:
-            result = await cast(Callable[..., Awaitable[T]], self._factory)(**args)
-        else:
-            result = cast(Callable[..., T], self._factory)(**args)
-        return result
+        result = self._factory(**args)
+        if inspect.isawaitable(result):
+            result = await result
+        return cast(T, result)
 
     async def resolve(self, manager: ResourceManager) -> T:
         """Resolve the resource via the manager.
@@ -359,7 +357,8 @@ def Resource(
     """Declare a resource to inject into step functions.
 
     Args:
-        factory (Callable[..., T] | None): Function returning the resource instance. May be async.
+        factory (Callable[..., T] | None): Function returning the resource instance.
+            If the result is awaitable, it is awaited before injection and caching.
         cache (bool): If True, reuse the produced resource across steps. Defaults to True.
 
     Returns:
