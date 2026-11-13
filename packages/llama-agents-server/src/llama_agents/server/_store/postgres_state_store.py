@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Generic, Literal
 
 import asyncpg
+from llama_agents.server._store.postgres.migrate import _quote_identifier
 from pydantic import BaseModel
 from typing_extensions import TypeVar
 from workflows.context.serializers import BaseSerializer
@@ -59,8 +60,8 @@ class _PostgresStateStorage:
     @property
     def _table_ref(self) -> str:
         if self._schema:
-            return f"{self._schema}.workflow_state"
-        return "workflow_state"
+            return f'{_quote_identifier(self._schema)}."workflow_state"'
+        return '"workflow_state"'
 
     @asynccontextmanager
     async def _acquire(
