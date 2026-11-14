@@ -263,6 +263,11 @@ operator:
   # -- Rollout timeout in seconds for managed deployments
   # @section -- Operator
   rolloutTimeoutSeconds: 1800
+  # -- Old ReplicaSets kept per managed deployment (minimum 1). Deployment
+  # history, rollback and build artifact GC read them, so this is also how many
+  # previous versions a deployment can roll back to.
+  # @section -- Operator
+  revisionHistoryLimit: 10
 
   llamaDeploymentTemplate:
     # -- Create a default LlamaDeploymentTemplate in the namespace

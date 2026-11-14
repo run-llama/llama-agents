@@ -73,9 +73,15 @@ const (
 	// Default rollout timeout in seconds (30 minutes)
 	DefaultRolloutTimeoutSeconds int32 = 1800
 
-	// Build artifact GC walks ReplicaSets up to this limit to discover
-	// referenced buildIds, so pin it rather than relying on the apps/v1 default.
-	DeploymentRevisionHistoryLimit int32 = 10
+	// Old ReplicaSets kept per Deployment. Deployment history, rollback and
+	// build artifact GC (which keeps any buildId an RS still references) all
+	// read them, so this is also how far back a rollback can go. Pinned rather
+	// than left to the apps/v1 default; LLAMA_DEPLOY_REVISION_HISTORY_LIMIT
+	// overrides it (minimum 1, so a rollback target always remains).
+	DefaultRevisionHistoryLimit int32 = 10
+
+	// Environment variable for revision history limit configuration
+	EnvRevisionHistoryLimit = "LLAMA_DEPLOY_REVISION_HISTORY_LIMIT"
 
 	// Environment variable for rollout timeout configuration
 	EnvRolloutTimeoutSeconds = "LLAMA_DEPLOY_ROLLOUT_TIMEOUT_SECONDS"
@@ -331,6 +337,19 @@ func getRolloutTimeoutSecondsValue() int32 {
 		}
 	}
 	return DefaultRolloutTimeoutSeconds
+}
+
+// getRevisionHistoryLimit reads LLAMA_DEPLOY_REVISION_HISTORY_LIMIT, falling
+// back to DefaultRevisionHistoryLimit when unset, unparsable or below 1.
+func getRevisionHistoryLimit() *int32 {
+	if raw := os.Getenv(EnvRevisionHistoryLimit); raw != "" {
+		if v, err := strconv.ParseInt(raw, 10, 32); err == nil && v >= 1 {
+			limit := int32(v)
+			return &limit
+		}
+	}
+	limit := DefaultRevisionHistoryLimit
+	return &limit
 }
 
 // isValidDNS1035Label validates that a name is a valid DNS-1035 label.
@@ -1113,7 +1132,7 @@ func (r *LlamaDeploymentReconciler) createDeploymentForLlama(llamaDeploy *llamad
 		Spec: appsv1.DeploymentSpec{
 			Replicas:                &replicas,
 			ProgressDeadlineSeconds: getRolloutTimeoutSeconds(),
-			RevisionHistoryLimit:    ptr(DeploymentRevisionHistoryLimit),
+			RevisionHistoryLimit:    getRevisionHistoryLimit(),
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{"app": llamaDeploy.Name},
 			},

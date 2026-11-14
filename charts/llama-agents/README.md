@@ -234,6 +234,7 @@ Partial inline (one of `accessKey`/`secretKey` set) is a template error.
 | operator.maxDeployments | int | `0` | Max active LlamaDeployments per namespace (0 = unlimited) |
 | operator.env | list | `[]` | Extra environment variables for the operator container |
 | operator.rolloutTimeoutSeconds | int | `1800` | Rollout timeout in seconds for managed deployments |
+| operator.revisionHistoryLimit | int | `10` | Old ReplicaSets kept per managed deployment (minimum 1). Deployment history, rollback and build artifact GC read them, so this is also how many previous versions a deployment can roll back to. |
 | operator.llamaDeploymentTemplate.enabled | bool | `false` | Create a default LlamaDeploymentTemplate in the namespace |
 | operator.llamaDeploymentTemplate.name | string | `"default"` | Template resource name |
 | operator.llamaDeploymentTemplate.metadata | object | `{}` | Metadata for the template (labels, annotations) |
