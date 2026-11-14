@@ -505,3 +505,32 @@ def test_absolute_ui_directory_outside_source_root_is_rejected(tmp_path: Path) -
     # Act & Assert: expected to raise
     with pytest.raises((ValueError, AssertionError, RuntimeError)):
         _ = read_deployment_config(tmp_path, Path("."))
+
+
+def test_merge_config_preserves_env_files_order() -> None:
+    # Arrange: env files are loaded in list order with later files overriding
+    # earlier ones, so a merge must keep the declared order (no set()).
+    from llama_agents.core.deployment_config import DeploymentConfig
+
+    base = DeploymentConfig(env_files=[".env", ".env.local"])
+    extra = DeploymentConfig(env_files=[".env.local", ".env.staging"])
+
+    # Act
+    merged = base.merge_config(extra)
+
+    # Assert: order preserved, duplicates removed
+    assert merged.env_files == [".env", ".env.local", ".env.staging"]
+
+
+def test_merge_config_preserves_required_env_vars_order() -> None:
+    # Arrange: error messages list the missing variables in declared order
+    from llama_agents.core.deployment_config import DeploymentConfig
+
+    base = DeploymentConfig(required_env_vars=["DB_URL", "API_KEY", "SECRET"])
+    extra = DeploymentConfig(required_env_vars=["API_KEY", "EXTRA_KEY"])
+
+    # Act
+    merged = base.merge_config(extra)
+
+    # Assert
+    assert merged.required_env_vars == ["DB_URL", "API_KEY", "SECRET", "EXTRA_KEY"]
