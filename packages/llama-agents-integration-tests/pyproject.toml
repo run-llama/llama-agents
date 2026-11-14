@@ -21,7 +21,7 @@ name = "llama-agents-integration-tests"
 version = "0.1.0"
 description = "Integration tests for llama-index-core workflow abstractions against the workflows package"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
   "llama-index-core>=0.14.13",
   "llama-index-workflows",

@@ -20,7 +20,7 @@ version = "0.1.0"
 description = "Monorepo workspace for the LlamaIndex Workflows packages."
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
   "types-pyyaml>=6.0.12.20250822",
   "click>=8.1.7",
