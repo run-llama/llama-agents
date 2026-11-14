@@ -166,6 +166,39 @@ def test_add_collected_rerun_mints_a_new_invocation(state: BrokerState) -> None:
     assert execution.invocation_id == "invocation_3"
 
 
+@pytest.mark.parametrize(
+    "buffers", [("left", "right"), ("right", "left"), ("left", "middle", "right")]
+)
+def test_collect_rerun_defers_other_buffer_additions(
+    state: BrokerState, buffers: tuple[str, ...]
+) -> None:
+    state, [first] = _reduce(state, TickAddEvent(event=Job(n=1)))
+    state, [second] = _reduce(state, TickAddEvent(event=Job(n=2)))
+    state, _ = _reduce(
+        state,
+        _result(
+            first,
+            *(AddCollectedEvent(event_id=name, event=first.event) for name in buffers),
+        ),
+    )
+
+    state, [rerun] = _reduce(
+        state,
+        _result(
+            second,
+            *(AddCollectedEvent(event_id=name, event=second.event) for name in buffers),
+            StepWorkerResult(result=None),
+        ),
+    )
+
+    worker = state.workers[WORK]
+    [execution] = worker.in_progress
+    assert execution.invocation_id == rerun.invocation_id
+    for name in buffers:
+        assert worker.collected_events[name] == [first.event]
+        assert execution.shared_state.collected_events[name] == [first.event]
+
+
 def test_invocation_seq_survives_serialization(state: BrokerState) -> None:
     state, _ = _reduce(state, TickAddEvent(event=Job(n=1)))
     serializer = JsonSerializer()
