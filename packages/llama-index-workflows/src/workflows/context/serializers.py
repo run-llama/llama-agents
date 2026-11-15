@@ -338,7 +338,7 @@ class PickleSerializer(JsonSerializer):
             Use only with trusted payloads due to Pickle security implications.
         """
         try:
-            return pickle.loads(base64.b64decode(value))
+            return pickle.loads(base64.b64decode(value, validate=True))
         except Exception:
             return super().deserialize(value)
 
