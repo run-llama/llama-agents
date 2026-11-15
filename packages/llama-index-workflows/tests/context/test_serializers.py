@@ -27,3 +27,14 @@ def test_deserialization_invalid(ctx: Context, workflow: Workflow) -> None:
     }
     with pytest.raises(ContextSerdeError):
         Context.from_dict(workflow, old_payload)
+
+
+def test_pickle_serializer_json_string_roundtrip() -> None:
+    from workflows.context.serializers import PickleSerializer
+
+    serializer = PickleSerializer()
+    # A JSON string like "SwEu" is serialized with surrounding quotes '"SwEu"'.
+    # Without base64 validation, b64decode drops the quotes and decodes b'K\x01.',
+    # which incorrectly unpickles to integer 1 instead of the string "SwEu".
+    serialized = serializer.serialize("SwEu")
+    assert serializer.deserialize(serialized) == "SwEu"
