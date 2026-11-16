@@ -201,7 +201,7 @@ jobs:
       - uses: ./.github/actions/setup-publish
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
         with:
-          version: '3.18.1'
+          version: 'v4.3.2'
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: docker.io
