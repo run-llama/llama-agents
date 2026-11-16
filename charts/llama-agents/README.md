@@ -16,7 +16,7 @@ For managed CRD upgrades, use the companion [`llama-agents-crds`](../llama-agent
 ## Prerequisites
 
 - Kubernetes 1.26+
-- Helm 3.x
+- Helm 3.14+ or 4.x
 - S3-compatible object storage (for build artifacts and backups)
 
 ## Installation
