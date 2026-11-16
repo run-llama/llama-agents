@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 import pytest
 from pydantic import BaseModel, Field
+from typing_extensions import TypedDict
 from workflows.context import Context
 from workflows.context.serializers import JsonSerializer
 from workflows.context.state_store import (
@@ -125,6 +127,163 @@ def assert_patch_round_trips(
     expected = json.loads(json.dumps(current.to_dict()))
     assert apply_state_patch(json.loads(json.dumps(base.to_dict())), patch) == expected
     return patch
+
+
+class DeclaredItem(BaseModel):
+    model_config = {"extra": "forbid"}
+    text: str = "before"
+
+
+class ExtendedItem(DeclaredItem):
+    note: str = "internal"
+
+
+class DeclaredItemState(BaseModel):
+    item: DeclaredItem = Field(default_factory=ExtendedItem)
+
+
+class ItemContainers(BaseModel):
+    item: DeclaredItem | None = None
+    items: list[DeclaredItem] = Field(default_factory=list)
+    by_name: dict[str, DeclaredItem] = Field(default_factory=dict)
+    pair: tuple[DeclaredItem, ...] = ()
+
+
+class ConcreteItemState(BaseModel):
+    item: ExtendedItem
+
+
+class ItemRecord(TypedDict):
+    item: DeclaredItem
+
+
+@dataclass
+class ItemDataclass:
+    item: DeclaredItem
+
+
+class EncodedItemState(BaseModel):
+    record: ItemRecord | None = None
+    dataclass_item: ItemDataclass | None = None
+
+
+@pytest.mark.parametrize("kind", ["record", "dataclass"])
+async def test_subclass_fields_follow_enclosing_annotation(kind: str) -> None:
+    before, after = ExtendedItem(), ExtendedItem(text="after", note="changed")
+    if kind == "record":
+        initial: BaseModel = EncodedItemState(record={"item": before})
+        field, value = "record", {"item": after}
+    else:
+        initial = EncodedItemState(dataclass_item=ItemDataclass(before))
+        field, value = "dataclass_item", ItemDataclass(after)
+    store = InMemoryStateStore(initial)
+    baseline = store.checkpoint()
+    await store.set(field, value)
+    current = store.checkpoint()
+    # The full snapshot must be valid independently of patch generation.
+    InMemoryStateStore.from_dict(current.to_dict(), JsonSerializer())
+    patch = assert_patch_round_trips(baseline, current)
+    restored = InMemoryStateStore.from_dict(
+        apply_state_patch(baseline.to_dict(), patch), JsonSerializer()
+    )
+    assert (await restored.get_state()).model_dump() == (
+        await store.get_state()
+    ).model_dump()
+
+
+@pytest.mark.parametrize("writer", ["set", "edit_state"])
+async def test_declared_subclass_only_edits_preserve_checkpoint_schema(
+    writer: str,
+) -> None:
+    store = InMemoryStateStore(DeclaredItemState(item=ExtendedItem()))
+    baseline = store.checkpoint()
+    if writer == "set":
+        await store.set("item.note", "changed")
+    else:
+        async with store.edit_state() as state:
+            assert isinstance(state.item, ExtendedItem)
+            state.item.note = "changed"
+    current = store.checkpoint()
+    patch = assert_patch_round_trips(baseline, current)
+    assert patch == []
+    restored = InMemoryStateStore.from_dict(
+        apply_state_patch(baseline.to_dict(), patch), JsonSerializer()
+    )
+    assert await restored.get("item.text") == "before"
+
+
+def wrap_declared_item(field: str, item: ExtendedItem) -> Any:
+    if field == "items":
+        return [item]
+    if field == "by_name":
+        return {"job": item}
+    if field == "pair":
+        return (item,)
+    return item
+
+
+@pytest.mark.parametrize("field", ["item", "items", "by_name", "pair"])
+@pytest.mark.parametrize("existing", [False, True])
+async def test_declared_subclass_container_changes_round_trip(
+    field: str, existing: bool
+) -> None:
+    data = {field: wrap_declared_item(field, ExtendedItem())} if existing else {}
+    store = InMemoryStateStore(ItemContainers.model_validate(data))
+    baseline = store.checkpoint()
+    await store.set(field, wrap_declared_item(field, ExtendedItem(text="after")))
+    current = store.checkpoint()
+    patch = assert_patch_round_trips(baseline, current)
+    restored = InMemoryStateStore.from_dict(
+        apply_state_patch(baseline.to_dict(), patch), JsonSerializer()
+    )
+    assert (await restored.get_state()).model_dump() == (
+        await store.get_state()
+    ).model_dump()
+
+
+async def test_concrete_subclass_keeps_incremental_leaf_patches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = InMemoryStateStore(ConcreteItemState(item=ExtendedItem()))
+    baseline = store.checkpoint()
+    await store.set("item.note", "changed")
+    current = store.checkpoint()
+    before, expected = baseline.to_dict(), current.to_dict()
+
+    def unexpected_snapshot(self: StateCheckpoint) -> dict[str, Any]:
+        pytest.fail("Concrete model leaf changes must not serialize snapshots")
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(StateCheckpoint, "to_dict", unexpected_snapshot)
+        patch = current.diff(baseline)
+    assert patch == [
+        {"op": "replace", "path": "/state_data/value/item/note", "value": "changed"}
+    ]
+    assert apply_state_patch(before, patch) == expected
+
+
+class DeclaredStateWorkflow(Workflow):
+    @step
+    async def update(
+        self, ctx: Context[DeclaredItemState], ev: StartEvent
+    ) -> StopEvent:
+        if await ctx.store.get("item.text") == "before":
+            await ctx.store.set("item.note", "changed")
+            await ctx.store.set("item.text", "after")
+        return StopEvent(result=await ctx.store.get("item.text"))
+
+
+async def test_context_resumes_with_declared_schema_checkpoint_patch() -> None:
+    wf = DeclaredStateWorkflow()
+    handler = wf.run()
+    baseline = basic_runtime.state_checkpoint(handler.run_id)
+    assert await handler == "after"
+    current = basic_runtime.state_checkpoint(handler.run_id)
+    assert handler.ctx is not None
+    snapshot = handler.ctx.to_dict()
+    snapshot["state"] = apply_state_patch(baseline.to_dict(), current.diff(baseline))
+    restored = Context.from_dict(wf, json.loads(json.dumps(snapshot)))
+    assert await wf.run(ctx=restored) == "after"
 
 
 @pytest.mark.parametrize("kind", ["dict", "typed"])
