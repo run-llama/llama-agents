@@ -28,7 +28,7 @@ readme = "README.md"
 authors = [
   {name = "Adrian Lyjak", email = "adrianlyjak@gmail.com"}
 ]
-requires-python = ">=3.10, <4"
+requires-python = ">=3.11, <4"
 dependencies = [
   "fastapi[standard]>=0.137.0,<1",
   "llama-agents-core[server]>=0.5.0",
