@@ -2,12 +2,11 @@
 # Copyright (c) 2026 LlamaIndex Inc.
 from __future__ import annotations
 
-import asyncio
 import logging
 from contextlib import asynccontextmanager
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any, AsyncGenerator, cast
+from typing import Any, AsyncGenerator
 
 from llama_agents.client.protocol import (
     CancelHandlerResponse,
@@ -39,6 +38,7 @@ from workflows.events import Event, InternalDispatchEvent, StartEvent
 from workflows.representation import get_workflow_representation
 from workflows.utils import _nanoid as nanoid
 
+from ._event_stream import EventStreamingResponse
 from ._service import (
     EventSendError,
     HandlerAlreadyRunningError,
@@ -692,17 +692,25 @@ class _WorkflowAPI:
         async def event_gen() -> AsyncGenerator[
             tuple[int, EventEnvelopeWithMetadata], None
         ]:
-            async for stored_event in store.subscribe_events(
+            subscription = store.subscribe_events(
                 run_id,
                 after_sequence=after_sequence,  # type: ignore[arg-type]
-            ):
-                envelope = stored_event.event
-                types = (envelope.types or []) + [envelope.type]
-                if not include_internal and _INTERNAL_EVENT_TYPE in types:
-                    continue
-                if not include_qualified_name:
-                    envelope = envelope.model_copy(update={"qualified_name": None})
-                yield stored_event.sequence, envelope
+            )
+            try:
+                async for stored_event in subscription:
+                    envelope = stored_event.event
+                    types = (envelope.types or []) + [envelope.type]
+                    if not include_internal and _INTERNAL_EVENT_TYPE in types:
+                        continue
+                    if not include_qualified_name:
+                        envelope = envelope.model_copy(update={"qualified_name": None})
+                    yield stored_event.sequence, envelope
+            finally:
+                # A response may stop while this generator is suspended at yield.
+                # Custom stores may return an iterator without an aclose method.
+                close = getattr(subscription, "aclose", None)
+                if close is not None:
+                    await close()
 
         return event_gen()
 
@@ -949,49 +957,9 @@ class _WorkflowAPI:
         if gen is None:
             raise HTTPException(detail="Handler is completed", status_code=204)
 
-        media_type = "text/event-stream" if sse else "application/x-ndjson"
-        heartbeat_interval = self._sse_heartbeat_interval if sse else None
-
-        async def format_stream() -> AsyncGenerator[str, None]:
-            # We use a queue + feeder task so we can apply wait_for on
-            # queue.get() without corrupting async-generator state (which
-            # happens when asyncio.wait_for cancels __anext__).
-            _SENTINEL = object()
-            queue: asyncio.Queue[tuple[int, EventEnvelopeWithMetadata] | object] = (
-                asyncio.Queue()
-            )
-
-            async def _feed() -> None:
-                async for item in gen:
-                    await queue.put(item)
-                await queue.put(_SENTINEL)
-
-            feeder = asyncio.ensure_future(_feed())
-            try:
-                while True:
-                    try:
-                        item = await asyncio.wait_for(
-                            queue.get(), timeout=heartbeat_interval
-                        )
-                    except asyncio.TimeoutError:
-                        yield ": heartbeat\n\n"
-                        await asyncio.sleep(0)
-                        continue
-                    if item is _SENTINEL:
-                        break
-                    sequence, envelope = cast(
-                        tuple[int, EventEnvelopeWithMetadata], item
-                    )
-                    payload = envelope.model_dump_json()
-                    if sse:
-                        yield f"id: {sequence}\ndata: {payload}\n\n"
-                    else:
-                        yield f"{payload}\n"
-                    await asyncio.sleep(0)
-            finally:
-                feeder.cancel()
-
-        return StreamingResponse(format_stream(), media_type=media_type)
+        return EventStreamingResponse(
+            gen, sse=sse, heartbeat_interval=self._sse_heartbeat_interval
+        )
 
     async def _get_handlers(self, request: Request) -> JSONResponse:
         """
