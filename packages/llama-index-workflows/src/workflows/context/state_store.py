@@ -1528,12 +1528,31 @@ class _StateDiff:
             return True
         if type(a) is not type(b):
             return False
-        if not isinstance(a, (BaseModel, dict, list)):
+        if not isinstance(a, (BaseModel, dict, list, tuple)):
             return _safe_eq(a, b)
         key = (id(a), id(b))
         hit = self._eq_memo.get(key)
         if hit is None:
-            hit = self._eq_memo[key] = _safe_eq(a, b)
+            # Nonserialized model caches may contain cycles. A recursive revisit
+            # must conservatively trigger a diff, not assume equality or recurse.
+            self._eq_memo[key] = False
+            # Python container equality conflates True, 1 and 1.0. Compare
+            # children through this type-aware path instead of skipping them.
+            if isinstance(a, dict):
+                hit = a.keys() == b.keys() and all(
+                    self.same(value, b[name]) for name, value in a.items()
+                )
+            elif isinstance(a, (list, tuple)):
+                hit = len(a) == len(b) and all(
+                    self.same(left, right) for left, right in zip(a, b)
+                )
+            else:
+                hit = (
+                    self.same(a.__dict__, b.__dict__)
+                    and self.same(a.__pydantic_extra__, b.__pydantic_extra__)
+                    and self.same(a.__pydantic_private__, b.__pydantic_private__)
+                )
+            self._eq_memo[key] = hit
         return hit
 
     def node(self, a: Any, b: Any, loc: _PatchLocation) -> None:
