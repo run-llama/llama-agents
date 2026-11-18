@@ -285,6 +285,20 @@ class JsonSerializer(BaseSerializer):
         return self.deserialize_value(data)
 
 
+def _json_round_trips(value: Any) -> bool:
+    """Whether decoding this value from JSON would preserve its Python types."""
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return True
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str) and _json_round_trips(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return all(_json_round_trips(item) for item in value)
+    return False
+
+
 class PickleSerializer(JsonSerializer):
     """
     Hybrid serializer: JSON when possible, Pickle as a safe fallback.
@@ -314,6 +328,9 @@ class PickleSerializer(JsonSerializer):
     def serialize(self, value: Any) -> str:
         """Serialize with JSON preference and Pickle fallback.
 
+        JSON is only used when it round-trips without changing types, so tuples,
+        non-string dict keys and other JSON-lossy values are always pickled.
+
         Args:
             value (Any): The value to encode.
 
@@ -321,9 +338,16 @@ class PickleSerializer(JsonSerializer):
             str: Encoded string (JSON or base64-encoded Pickle bytes).
         """
         try:
-            return super().serialize(value)
+            serialized_value = self.serialize_value(value)
         except Exception:
-            return base64.b64encode(pickle.dumps(value)).decode("utf-8")
+            pass
+        else:
+            if _json_round_trips(serialized_value):
+                try:
+                    return json.dumps(serialized_value)
+                except Exception:
+                    pass
+        return base64.b64encode(pickle.dumps(value)).decode("utf-8")
 
     def deserialize(self, value: str) -> Any:
         """Deserialize with Pickle preference and JSON fallback.
