@@ -230,6 +230,9 @@ Partial inline (one of `accessKey`/`secretKey` set) is a template error.
 | operator.defaultAppLimits.cpu | string | `""` | Default CPU limit for managed app containers (empty = no limit) |
 | operator.defaultAppLimits.memory | string | `"4096Mi"` | Default memory limit for managed app containers |
 | operator.resources | object | `{limits: {cpu: 500m, memory: 128Mi}, requests: {cpu: 10m, memory: 64Mi}}` | Resource requests/limits for the operator container |
+| operator.startupProbe | object | `{httpGet: {path: /healthz, port: 8081}, periodSeconds: 5, timeoutSeconds: 5, failureThreshold: 60}` | Startup probe for the operator container. The kubelet holds the liveness and readiness probes until it passes, so a replica that starts slowly on a node under CPU, memory or disk pressure gets up to 5 minutes to bind its health server instead of being restarted after about a minute and crash-looping. |
+| operator.livenessProbe | object | `{httpGet: {path: /healthz, port: 8081}, periodSeconds: 20, timeoutSeconds: 5, failureThreshold: 3}` | Liveness probe for the operator container. Runs once the startup probe passes. |
+| operator.readinessProbe | object | `{httpGet: {path: /readyz, port: 8081}, periodSeconds: 10, timeoutSeconds: 5, failureThreshold: 3}` | Readiness probe for the operator container. Runs once the startup probe passes. |
 | operator.maxConcurrentRollouts | int | `10` | Max simultaneous LlamaDeployment rollouts (0 = unlimited) |
 | operator.maxDeployments | int | `0` | Max active LlamaDeployments per namespace (0 = unlimited) |
 | operator.env | list | `[]` | Extra environment variables for the operator container |

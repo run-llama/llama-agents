@@ -1,0 +1,64 @@
+suite: Operator probes
+templates:
+  - templates/operator-deployment.yaml
+tests:
+  # A replacement replica that starts slowly (busy node) must not be liveness-killed
+  # before its health server is up. The startup probe gives it 60 x 5s = 300s.
+  - it: gates liveness and readiness behind a 5 minute startup probe by default
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe
+          value:
+            httpGet:
+              path: /healthz
+              port: 8081
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe
+          value:
+            httpGet:
+              path: /healthz
+              port: 8081
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe
+          value:
+            httpGet:
+              path: /readyz
+              port: 8081
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      - notExists:
+          path: spec.template.spec.containers[0].livenessProbe.initialDelaySeconds
+
+  - it: takes probe overrides from values
+    set:
+      operator:
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          periodSeconds: 10
+          failureThreshold: 90
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.failureThreshold
+          value: 90
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.periodSeconds
+          value: 10
+
+  - it: drops the startup probe when it is set to null
+    set:
+      operator:
+        startupProbe: null
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].startupProbe
+      - exists:
+          path: spec.template.spec.containers[0].livenessProbe
