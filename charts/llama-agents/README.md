@@ -160,8 +160,8 @@ Partial inline (one of `accessKey`/`secretKey` set) is a template error.
 | images.appserver.repository | string | `"llamaindex/llama-agents-appserver"` | Appserver image repository (used by operator for managed pods) |
 | images.appserver.tag | string | `"0.12.3"` | Appserver image tag |
 | images.appserver.pullPolicy | string | `"IfNotPresent"` | Appserver image pull policy |
-| images.nginx.repository | string | `"nginxinc/nginx-unprivileged"` | Nginx sidecar image repository |
-| images.nginx.tag | string | `"1.27-alpine"` | Nginx sidecar image tag |
+| images.nginx.repository | string | `"nginx"` | Nginx sidecar image repository |
+| images.nginx.tag | string | `"1.30.7-alpine-slim@sha256:8c950211a641ec5b23f265450517001f6bcca533666120ebe36cb4cff3d00a55"` | Nginx sidecar image tag |
 | images.nginx.pullPolicy | string | `"IfNotPresent"` | Nginx sidecar image pull policy |
 
 ### Control Plane
