@@ -251,6 +251,39 @@ operator:
     requests:
       cpu: 10m
       memory: 64Mi
+  # -- Startup probe for the operator container. The kubelet holds the liveness and
+  # readiness probes until it passes, so a replica that starts slowly on a node under
+  # CPU, memory or disk pressure gets up to 5 minutes to bind its health server instead
+  # of being restarted after about a minute and crash-looping.
+  # @default -- `{httpGet: {path: /healthz, port: 8081}, periodSeconds: 5, timeoutSeconds: 5, failureThreshold: 60}`
+  # @section -- Operator
+  startupProbe:
+    httpGet:
+      path: /healthz
+      port: 8081
+    periodSeconds: 5
+    timeoutSeconds: 5
+    failureThreshold: 60
+  # -- Liveness probe for the operator container. Runs once the startup probe passes.
+  # @default -- `{httpGet: {path: /healthz, port: 8081}, periodSeconds: 20, timeoutSeconds: 5, failureThreshold: 3}`
+  # @section -- Operator
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: 8081
+    periodSeconds: 20
+    timeoutSeconds: 5
+    failureThreshold: 3
+  # -- Readiness probe for the operator container. Runs once the startup probe passes.
+  # @default -- `{httpGet: {path: /readyz, port: 8081}, periodSeconds: 10, timeoutSeconds: 5, failureThreshold: 3}`
+  # @section -- Operator
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: 8081
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
   # -- Max simultaneous LlamaDeployment rollouts (0 = unlimited)
   # @section -- Operator
   maxConcurrentRollouts: 10

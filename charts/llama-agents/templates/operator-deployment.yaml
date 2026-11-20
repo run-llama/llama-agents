@@ -95,18 +95,18 @@ spec:
         # Additional custom environment variables
           {{- toYaml .Values.operator.env | nindent 8 }}
         {{- end }}
+        {{- with .Values.operator.startupProbe }}
+        startupProbe:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.operator.livenessProbe }}
         livenessProbe:
-          httpGet:
-            path: /healthz
-            port: 8081
-          initialDelaySeconds: 15
-          periodSeconds: 20
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.operator.readinessProbe }}
         readinessProbe:
-          httpGet:
-            path: /readyz
-            port: 8081
-          initialDelaySeconds: 5
-          periodSeconds: 10
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
         ports:
         - name: metrics
           containerPort: 8080
