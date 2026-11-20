@@ -46,10 +46,10 @@ images:
   nginx:
     # -- Nginx sidecar image repository
     # @section -- Images
-    repository: nginxinc/nginx-unprivileged
+    repository: nginx
     # -- Nginx sidecar image tag
     # @section -- Images
-    tag: "1.27-alpine"
+    tag: "1.30.7-alpine-slim@sha256:8c950211a641ec5b23f265450517001f6bcca533666120ebe36cb4cff3d00a55"
     # -- Nginx sidecar image pull policy
     # @section -- Images
     pullPolicy: IfNotPresent

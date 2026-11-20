@@ -38,8 +38,13 @@ const (
 	EnvImagePullPolicy = "LLAMA_DEPLOY_IMAGE_PULL_POLICY"
 
 	// Nginx sidecar image configuration (configurable via Helm → operator env)
-	DefaultNginxImage       = "nginxinc/nginx-unprivileged"
-	DefaultNginxImageTag    = "1.27-alpine"
+	// Official nginx, not nginx-unprivileged: unprivileged never published 1.30.7
+	// (the F5 K000163926 fix). generateNginxConfig keeps pid and temp paths in /tmp
+	// and the sidecar runs as NginxUID/NginxGID (101, the image's nginx user), so it
+	// works unchanged. alpine-slim drops brotli-libs (KEV CVE-2026-111497). The digest
+	// rides on the tag because the image is built as <repository>:<tag>.
+	DefaultNginxImage       = "nginx"
+	DefaultNginxImageTag    = "1.30.7-alpine-slim@sha256:8c950211a641ec5b23f265450517001f6bcca533666120ebe36cb4cff3d00a55"
 	EnvNginxImageName       = "LLAMA_DEPLOY_NGINX_IMAGE"
 	EnvNginxImageTag        = "LLAMA_DEPLOY_NGINX_IMAGE_TAG"
 	EnvNginxImagePullPolicy = "LLAMA_DEPLOY_NGINX_IMAGE_PULL_POLICY"
