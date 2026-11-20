@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Annotated, Any, Callable, cast
 
 import pytest
-from workflows import Context, Workflow, step
+from workflows import Context, Workflow, catch_error, step
 from workflows.collect import All, Cardinality, Collect, Take
 from workflows.decorators import StepConfig, StepFunction
 from workflows.decorators import step as free_step
@@ -22,7 +22,13 @@ from workflows.errors import (
     WorkflowRuntimeError,
     WorkflowValidationError,
 )
-from workflows.events import Event, StartEvent, StopEvent, WorkflowIdleEvent
+from workflows.events import (
+    Event,
+    StartEvent,
+    StepFailedEvent,
+    StopEvent,
+    WorkflowIdleEvent,
+)
 
 
 class Task(Event):
@@ -602,6 +608,107 @@ async def test_refanning_collect_fires_join_once_per_refan_stream() -> None:
 # --------------------------------------------------------------------------- #
 # Multi-slot joins must fill at one stream level.
 # --------------------------------------------------------------------------- #
+
+
+def test_catch_error_handler_feeds_top_level_for_multi_slot_join() -> None:
+    """StepFailedEvent is delivered to @catch_error handlers from outside the
+    graph, so a multi-slot join downstream of such a handler must validate
+    (issue #23971)."""
+
+    from workflows import catch_error
+
+    class Fork(Event):
+        pass
+
+    class Left(Event):
+        pass
+
+    class Right(Event):
+        pass
+
+    class LeftDone(Event):
+        value: int
+
+    class RightDone(Event):
+        value: int
+
+    class WF(Workflow):
+        @step
+        async def begin(self, ev: StartEvent) -> StopEvent:
+            raise RuntimeError("fails")  # only the handler below produces Fork
+
+        @catch_error(for_steps=["begin"])
+        async def recover(self, ev: StepFailedEvent) -> Fork:
+            return Fork()
+
+        @step
+        async def fan(self, ev: Fork, ctx: Context) -> Left | Right | None:
+            ctx.send_event(Left())
+            ctx.send_event(Right())
+            return None
+
+        @step
+        async def left(self, ev: Left) -> LeftDone:
+            return LeftDone(value=1)
+
+        @step
+        async def right(self, ev: Right) -> RightDone:
+            return RightDone(value=2)
+
+        @step
+        async def join(self, first: LeftDone, second: RightDone) -> StopEvent:
+            return StopEvent(result=first.value + second.value)
+
+    WF()._validate()  # must not raise
+
+
+async def test_catch_error_handler_feeds_top_level_for_multi_slot_join_run() -> None:
+    """And the validated workflow actually runs end to end."""
+
+    class Fork(Event):
+        pass
+
+    class Left(Event):
+        pass
+
+    class Right(Event):
+        pass
+
+    class LeftDone(Event):
+        value: int
+
+    class RightDone(Event):
+        value: int
+
+    class WF(Workflow):
+        @step
+        async def begin(self, ev: StartEvent) -> StopEvent:
+            raise RuntimeError("fails")
+
+        @catch_error(for_steps=["begin"])
+        async def recover(self, ev: StepFailedEvent) -> Fork:
+            return Fork()
+
+        @step
+        async def fan(self, ev: Fork, ctx: Context) -> Left | Right | None:
+            ctx.send_event(Left())
+            ctx.send_event(Right())
+            return None
+
+        @step
+        async def left(self, ev: Left) -> LeftDone:
+            return LeftDone(value=1)
+
+        @step
+        async def right(self, ev: Right) -> RightDone:
+            return RightDone(value=2)
+
+        @step
+        async def join(self, first: LeftDone, second: RightDone) -> StopEvent:
+            return StopEvent(result=first.value + second.value)
+
+    result = await WF(timeout=10).run()
+    assert result == 3
 
 
 def test_mixed_level_multi_slot_join_rejected_at_init() -> None:

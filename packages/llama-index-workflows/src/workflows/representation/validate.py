@@ -592,7 +592,11 @@ def _validate_multi_slot_levels(
         event_type
         for cfg in steps.values()
         for event_type in cfg.accepted_events
-        if isinstance(event_type, type) and issubclass(event_type, HumanResponseEvent)
+        if isinstance(event_type, type)
+        and (
+            issubclass(event_type, HumanResponseEvent)
+            or issubclass(event_type, StepFailedEvent)
+        )
     ]
     levels: dict[str, set[type[Event]]] = {
         "the top level": same_level_types(
