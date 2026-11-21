@@ -1546,7 +1546,13 @@ class _StateDiff:
         if isinstance(b, BaseModel) and _diffable_model(b, loc.in_model):
             self.diff_model(a, b, loc)
         elif isinstance(b, dict):
-            if not self.same(a, b):
+            # Persistence encodes non-string keys differently from Python paths.
+            # A restored string key can also alias a newly supplied Python key.
+            if any(not isinstance(key, str) for key in a) or any(
+                not isinstance(key, str) for key in b
+            ):
+                self.emit("replace", loc, b)
+            elif not self.same(a, b):
                 self.diff_dict(a, b, loc)
         elif isinstance(b, list):
             if not self.same(a, b):
