@@ -588,11 +588,18 @@ def _validate_multi_slot_levels(
     if not multi_slot:
         return
 
+    # Events that enter a run at the top level without being produced by any
+    # step: StartEvent, HumanResponseEvent subclasses (delivered after a
+    # human-in-the-loop pause), and StepFailedEvent (routed by the runtime to
+    # @catch_error handlers). Without StepFailedEvent here, everything a handler
+    # produces, and everything downstream of it, is "produced at no level", so a
+    # multi-slot join reachable only through a handler is wrongly rejected.
     external_seeds = [
         event_type
         for cfg in steps.values()
         for event_type in cfg.accepted_events
-        if isinstance(event_type, type) and issubclass(event_type, HumanResponseEvent)
+        if isinstance(event_type, type)
+        and issubclass(event_type, (HumanResponseEvent, StepFailedEvent))
     ]
     levels: dict[str, set[type[Event]]] = {
         "the top level": same_level_types(
