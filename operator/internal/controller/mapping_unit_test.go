@@ -687,3 +687,39 @@ func TestIsValidDNS1035Label(t *testing.T) {
 		})
 	}
 }
+
+func TestGetRevisionHistoryLimit(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want int32
+	}{
+		{"", DefaultRevisionHistoryLimit},
+		{"3", 3},
+		{"1", 1},
+		{"0", DefaultRevisionHistoryLimit},
+		{"-2", DefaultRevisionHistoryLimit},
+		{"lots", DefaultRevisionHistoryLimit},
+	} {
+		t.Setenv(EnvRevisionHistoryLimit, tc.raw)
+		if got := getRevisionHistoryLimit(); got == nil || *got != tc.want {
+			t.Fatalf("%s=%q: expected %d, got %v", EnvRevisionHistoryLimit, tc.raw, tc.want, got)
+		}
+	}
+}
+
+func TestCreateDeploymentForLlama_RevisionHistoryLimit(t *testing.T) {
+	reconciler := &LlamaDeploymentReconciler{}
+	ld := &llamadeployv1.LlamaDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default"},
+		Spec:       llamadeployv1.LlamaDeploymentSpec{ProjectId: "p", RepoUrl: "r", GitRef: "main"},
+		Status:     llamadeployv1.LlamaDeploymentStatus{AuthToken: "tok"},
+	}
+	t.Setenv(EnvRevisionHistoryLimit, "")
+	if dep := reconciler.createDeploymentForLlama(ld, ""); dep.Spec.RevisionHistoryLimit == nil || *dep.Spec.RevisionHistoryLimit != DefaultRevisionHistoryLimit {
+		t.Fatalf("expected default %d, got %v", DefaultRevisionHistoryLimit, dep.Spec.RevisionHistoryLimit)
+	}
+	t.Setenv(EnvRevisionHistoryLimit, "3")
+	if dep := reconciler.createDeploymentForLlama(ld, ""); dep.Spec.RevisionHistoryLimit == nil || *dep.Spec.RevisionHistoryLimit != 3 {
+		t.Fatalf("expected 3, got %v", dep.Spec.RevisionHistoryLimit)
+	}
+}
