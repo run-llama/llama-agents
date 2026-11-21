@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import math
 import random
 import re
 import warnings
@@ -823,10 +824,12 @@ class _ComposableRetryPolicy:
         retry: RetryCondition | None = None,
         wait: WaitStrategy = wait_fixed(5),
         stop: StopCondition = stop_after_attempt(3),
+        retry_after: Callable[[Exception], float | None] | None = None,
     ) -> None:
         self.retry = retry
         self.wait = wait
         self.stop = stop
+        self.retry_after = retry_after
 
     def next(
         self,
@@ -845,6 +848,14 @@ class _ComposableRetryPolicy:
         # a direct caller passing 0 on the first delay instead of index -1,
         # which wait_chain would map to its last strategy.
         delay = self.wait(max(attempts - 1, 0), seed=seed)
+        if self.retry_after is not None:
+            minimum = self.retry_after(error)
+            if minimum is not None:
+                if not math.isfinite(minimum) or minimum < 0:
+                    raise ValueError(
+                        "retry_after must return finite non-negative seconds or None"
+                    )
+                delay = max(delay, minimum)
         if self.stop(attempts, elapsed_time, upcoming_sleep=delay):
             return None
         return delay
@@ -854,6 +865,8 @@ def retry_policy(
     retry: RetryCondition | None = None,
     wait: WaitStrategy = wait_fixed(5),
     stop: StopCondition = stop_after_attempt(3),
+    *,
+    retry_after: Callable[[Exception], float | None] | None = None,
 ) -> RetryPolicy:
     """
     Construct a composable retry policy from retry, wait, and stop components.
@@ -888,11 +901,17 @@ def retry_policy(
             Defaults to ``wait_fixed(5)`` (5 seconds).
         stop: Predicate that decides when to give up.
             Defaults to ``stop_after_attempt(3)``.
+        retry_after: Optional callback extracting a minimum delay in seconds from
+            the step exception, for example a provider's retry-after hint. Return
+            ``None`` to use the wait strategy alone. The stop condition sees the
+            longer of the two delays.
 
     Returns:
         A `RetryPolicy` implementation.
     """
-    return _ComposableRetryPolicy(retry=retry, wait=wait, stop=stop)
+    return _ComposableRetryPolicy(
+        retry=retry, wait=wait, stop=stop, retry_after=retry_after
+    )
 
 
 def ConstantDelayRetryPolicy(

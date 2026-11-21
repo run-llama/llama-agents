@@ -726,6 +726,47 @@ async def test_retry_e2e_exponential() -> None:
 
 
 @pytest.mark.asyncio
+async def test_retry_after_respects_step_budget() -> None:
+    class Busy(Exception):
+        retry_after = 60
+
+    class LimitedWorkflow(Workflow):
+        attempts = 0
+
+        @step(
+            retry_policy=retry_policy(
+                retry=retry_if_exception_type(Busy),
+                wait=wait_none(),
+                stop=stop_before_delay(10),
+                retry_after=lambda exc: exc.retry_after
+                if isinstance(exc, Busy)
+                else None,
+            )
+        )
+        async def request(self, ev: StartEvent) -> StopEvent:
+            self.attempts += 1
+            raise Busy("try later")
+
+    workflow = LimitedWorkflow()
+    with pytest.raises(Busy, match="try later"):
+        await workflow.run()
+    assert workflow.attempts == 1
+
+
+@pytest.mark.parametrize("minimum, expected", [(None, 3), (1, 3), (10, 10)])
+def test_retry_after_is_a_floor(minimum: float | None, expected: float) -> None:
+    policy = retry_policy(wait=wait_fixed(3), retry_after=lambda exc: minimum)
+    assert policy.next(0, 1, ValueError()) == expected
+
+
+@pytest.mark.parametrize("invalid", [-1.0, float("inf"), float("nan")])
+def test_retry_after_rejects_invalid_delay(invalid: float) -> None:
+    policy = retry_policy(retry_after=lambda exc: invalid)
+    with pytest.raises(ValueError, match="retry_after"):
+        policy.next(0, 1, ValueError())
+
+
+@pytest.mark.asyncio
 async def test_retry_e2e_retry_policy() -> None:
     class CountEvent(Event):
         pass
