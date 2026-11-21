@@ -33,6 +33,7 @@ from workflows.runtime.types.results import (
 from workflows.runtime.types.step_id import StepId
 from workflows.runtime.types.ticks import (
     _WORKFLOW_TICK_TYPES,
+    ResolvedWaiter,
     TickAddEvent,
     TickCancelRun,
     TickPublishEvent,
@@ -400,3 +401,63 @@ def test_workflow_tick_discriminated_union_roundtrip() -> None:
         roundtripped = json.loads(json.dumps(dumped))
         restored = adapter.validate_python(roundtripped)
         assert type(restored) is type(tick)
+
+
+def test_add_waiter_preserves_has_requirements_across_roundtrip() -> None:
+    waiter = AddWaiter(
+        waiter_id="w-1",
+        waiter_event=MyEvent(value="waiting"),
+        requirements={"value": "target"},
+        event_type=MyEvent,
+    )
+    assert waiter.has_requirements is True
+
+    tick = TickStepResult(
+        step_id=StepId.root("ask"),
+        worker_id=0,
+        invocation_id="worker-0",
+        event=StartEvent(),
+        result=[waiter],
+    )
+    first_dump = tick.model_dump(mode="json")
+    assert first_dump["result"][0]["has_requirements"] is True
+    assert first_dump["result"][0]["requirements"] == {}
+
+    restored = TickStepResult.model_validate(json.loads(json.dumps(first_dump)))
+    restored_waiter = restored.result[0]
+    assert isinstance(restored_waiter, AddWaiter)
+    assert restored_waiter.has_requirements is True
+    assert restored_waiter.requirements == {}
+
+    second_dump = restored.model_dump(mode="json")
+    assert second_dump["result"][0]["has_requirements"] is True
+    assert second_dump["result"][0]["requirements"] == {}
+
+    json_restored = TickStepResult.model_validate_json(tick.model_dump_json())
+    json_waiter = json_restored.result[0]
+    assert isinstance(json_waiter, AddWaiter)
+    assert json_waiter.has_requirements is True
+
+
+def test_tick_add_event_resolved_waiters_roundtrip() -> None:
+    resolved = [ResolvedWaiter(step_id=StepId.root("ask_a"), waiter_id="w-1")]
+    user_tick = TickAddEvent(event=MyEvent(value="allowed"), resolved_waiters=resolved)
+    dumped = WorkflowTickAdapter.dump_json(user_tick)
+    assert WorkflowTickAdapter.validate_json(dumped) == user_tick
+
+    serializer = JsonSerializer(allowed_types=[MyEvent])
+    assert serializer.deserialize(serializer.serialize(user_tick)) == user_tick
+
+    framework_tick = TickAddEvent(event=StartEvent(), resolved_waiters=resolved)
+    framework_serializer = JsonSerializer(allowed_types=[])
+    assert (
+        framework_serializer.deserialize(framework_serializer.serialize(framework_tick))
+        == framework_tick
+    )
+
+    legacy_payload = WorkflowTickAdapter.dump_python(
+        TickAddEvent(event=StartEvent()), mode="json"
+    )
+    legacy_payload.pop("resolved_waiters", None)
+    legacy_tick = TickAddEvent.model_validate(legacy_payload)
+    assert legacy_tick.resolved_waiters is None
