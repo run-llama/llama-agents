@@ -1224,3 +1224,38 @@ async def test_validation_cache_invalidated_on_add_step() -> None:
     # Next run() must re-validate (cache is stale due to version bump)
     await WorkflowTestRunner(wf).run()
     assert wf._validated_version == AddStepCacheWorkflow._step_functions_version
+
+
+class Ask(InputRequiredEvent):
+    prompt: str
+
+
+class Answer(HumanResponseEvent):
+    reply: str
+
+
+class SequentialWaiterWorkflow(Workflow):
+    @step
+    async def interview(self, ctx: Context, ev: StartEvent) -> StopEvent:
+        first = await ctx.wait_for_event(
+            Answer, waiter_event=Ask(prompt="first?"), waiter_id="first"
+        )
+        second = await ctx.wait_for_event(
+            Answer, waiter_event=Ask(prompt="second?"), waiter_id="second"
+        )
+        return StopEvent(result=(first.reply, second.reply))
+
+
+@pytest.mark.asyncio
+async def test_sequential_wait_for_event_preserves_first_answer() -> None:
+    """Regression: a second wait_for_event of the same type must not overwrite
+    the first waiter's resolved_event (run-llama/llama_index#23861)."""
+    workflow = SequentialWaiterWorkflow(timeout=10)
+    ctx = Context(workflow)
+    handler = workflow.run(ctx=ctx)
+    answers = iter(["A", "B"])
+    async for event in ctx.stream_events():
+        if isinstance(event, Ask):
+            ctx.send_event(Answer(reply=next(answers)))
+    result = await handler
+    assert result == ("A", "B")
