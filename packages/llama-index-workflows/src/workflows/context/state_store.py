@@ -9,10 +9,14 @@ import json
 import uuid
 import warnings
 from collections import deque
+from collections.abc import Mapping, Sequence
 from contextlib import asynccontextmanager
 from copy import copy, deepcopy
+from dataclasses import is_dataclass
+from types import UnionType
 from typing import (
     TYPE_CHECKING,
+    Annotated,
     Any,
     AsyncContextManager,
     AsyncGenerator,
@@ -21,13 +25,16 @@ from typing import (
     Literal,
     NamedTuple,
     Protocol,
+    Union,
     cast,
+    get_args,
+    get_origin,
     runtime_checkable,
 )
 
 from pydantic import BaseModel, RootModel, ValidationError, model_validator
 from pydantic_core import to_jsonable_python
-from typing_extensions import TypeVar
+from typing_extensions import TypeVar, is_typeddict
 
 from workflows.decorators import StepConfig
 from workflows.events import DictLikeModel
@@ -1496,6 +1503,48 @@ def _diffable_model(model: BaseModel, in_model: bool) -> bool:
     )
 
 
+def _needs_schema_snapshot(value: Any, annotation: Any) -> bool:
+    """Find field values that need their enclosing model's serialization schema."""
+    pending = [(value, annotation)]
+    while pending:
+        value, annotation = pending.pop()
+        if annotation is Any:
+            continue
+        origin, args = get_origin(annotation), get_args(annotation)
+        if origin is Annotated:
+            pending.append((value, args[0]))
+        elif origin in (Union, UnionType):
+            pending.extend((value, arg) for arg in args)
+        elif is_typeddict(annotation):
+            return True
+        elif isinstance(annotation, type):
+            if is_dataclass(annotation):
+                return True
+            if (
+                issubclass(annotation, BaseModel)
+                and isinstance(value, annotation)
+                and type(value) is not annotation
+            ):
+                return True
+        elif origin in (dict, Mapping) and isinstance(value, Mapping):
+            if len(args) == 2:
+                pending.extend((item, args[1]) for item in value.values())
+        elif origin in (list, set, frozenset, Sequence, deque) and isinstance(
+            value, (Sequence, set, frozenset, deque)
+        ):
+            if args:
+                pending.extend((item, args[0]) for item in value)
+        elif origin is tuple and isinstance(value, tuple):
+            if len(args) == 2 and args[1] is Ellipsis:
+                pending.extend((item, args[0]) for item in value)
+            else:
+                pending.extend(zip(value, args))
+        elif origin is not Literal:
+            # Opaque annotations may carry their own declared serialization schema.
+            return True
+    return False
+
+
 def _safe_eq(a: Any, b: Any) -> bool:
     try:
         return bool(a == b)
@@ -1513,10 +1562,13 @@ class _StateDiff:
     def __init__(self, serializer: JsonSerializer) -> None:
         self.serializer = serializer
         self.ops: list[dict[str, Any]] = []
+        self.needs_snapshot = False
         # Cache equality results so list trimming and recursion share comparisons.
         self._eq_memo: dict[tuple[int, int], bool] = {}
 
     def emit(self, op: str, loc: _PatchLocation, value: Any = None) -> None:
+        if self.needs_snapshot:
+            return
         if op == "remove":
             self.ops.append({"op": op, "path": loc.path})
         else:
@@ -1537,7 +1589,7 @@ class _StateDiff:
         return hit
 
     def node(self, a: Any, b: Any, loc: _PatchLocation) -> None:
-        if a is b:
+        if self.needs_snapshot or a is b:
             return
         if type(a) is not type(b):
             self.emit("replace", loc, b)
@@ -1558,7 +1610,7 @@ class _StateDiff:
 
     def collapse(self, start: int, loc: _PatchLocation, b: Any) -> None:
         """Replace the ops under ``loc`` with one replace when that is smaller."""
-        if len(self.ops) - start <= _COLLAPSE_MIN_OPS:
+        if self.needs_snapshot or len(self.ops) - start <= _COLLAPSE_MIN_OPS:
             return
         replace = {"op": "replace", "path": loc.path}
         replace["value"] = loc.encode(self.serializer, b)
@@ -1572,7 +1624,14 @@ class _StateDiff:
         old, new = a.__dict__, b.__dict__
         for name, info in type(b).model_fields.items():
             if not info.exclude:
-                self.node(old.get(name), new.get(name), loc.field(name))
+                old_value, new_value = old.get(name), new.get(name)
+                if old_value is new_value:
+                    continue
+                if _needs_schema_snapshot(new_value, info.annotation):
+                    # Standalone encoding loses the enclosing field's schema.
+                    self.needs_snapshot = True
+                    return
+                self.node(old_value, new_value, loc.field(name))
 
     def diff_dict(
         self, a: dict[Any, Any], b: dict[Any, Any], loc: _PatchLocation
@@ -1645,6 +1704,8 @@ class StateCheckpoint:
         Skip values shared by reference to avoid traversing unchanged subtrees.
         A changed container below the root becomes one ``replace`` when its
         ops would encode to more bytes than that ``replace``.
+        Fields that require an enclosing serialization schema use an atomic
+        snapshot replacement instead of standalone field patches.
         """
         old, new = since._state, self._state
         walk = _StateDiff(self._serializer)
@@ -1662,6 +1723,11 @@ class StateCheckpoint:
             walk.diff_model(old, new, root)
         elif not walk.same(old, new):
             walk.ops.append({"op": "replace", "path": "", "value": self.to_dict()})
+        if walk.needs_snapshot:
+            current = self.to_dict()
+            if json.dumps(since.to_dict()) == json.dumps(current):
+                return []
+            return [{"op": "replace", "path": "", "value": current}]
         return walk.ops
 
     def _encodable(self, data: dict[str, Any]) -> dict[str, Any]:
