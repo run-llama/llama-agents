@@ -1516,6 +1516,12 @@ def _resolve_waiters(
     for step_id, step_config in state.config.steps.items():
         wait_conditions = state.workers[step_id].collected_waiters
         for wait_condition in wait_conditions:
+            if wait_condition.resolved_event is not None:
+                # Already resolved by an earlier event. Do not let a later
+                # matching event overwrite the event that originally resolved
+                # this waiter (run-llama/llama_index#23861); unresolved waiters
+                # still grab their own event below.
+                continue
             is_match = event_matches(
                 tick.event,
                 wait_condition.waiting_for_event,
