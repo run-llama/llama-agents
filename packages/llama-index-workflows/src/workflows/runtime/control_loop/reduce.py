@@ -705,6 +705,7 @@ class _StepResultAcc:
     stop_in_batch: bool = False
     # Record the rerun ID to prevent a second rerun in the same batch.
     rerun_invocation_id: str | None = None
+    rerun_buffer_id: str | None = None
     output_event_name: str | None = None
     # Cleared when a worker is re-run mid-flight (stale collect buffer): the
     # execution stays in_progress and must not emit a NOT_RUNNING transition.
@@ -896,6 +897,13 @@ def _apply_step_result(
             run_id=run_id,
         )
     elif isinstance(result, AddCollectedEvent):
+        if (
+            acc.rerun_invocation_id is not None
+            and result.event_id != acc.rerun_buffer_id
+        ):
+            # The rerun will collect this event into the other buffers again.
+            # Keep their live contents consistent with the refreshed snapshot.
+            return
         # The current state of collected events.
         collected_events = state.workers[step_id].collected_events.setdefault(
             result.event_id, []
@@ -904,7 +912,7 @@ def _apply_step_result(
         snapshot_events = this_execution.shared_state.collected_events.get(
             result.event_id, []
         )
-        # Schedule one rerun per batch. Later writes append to the buffer.
+        # Schedule one rerun per batch. Later writes to this buffer still append.
         if acc.rerun_invocation_id is None and len(collected_events) > len(
             snapshot_events
         ):
@@ -914,6 +922,7 @@ def _apply_step_result(
             _refresh_collect_snapshot(state.workers[step_id], this_execution)
             invocation_id = _start_rerun(state, path, this_execution)
             acc.rerun_invocation_id = invocation_id
+            acc.rerun_buffer_id = result.event_id
             acc.commands.append(
                 CommandRunWorker(
                     step_id=step_id,
