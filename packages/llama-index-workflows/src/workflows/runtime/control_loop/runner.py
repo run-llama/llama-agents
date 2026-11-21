@@ -388,13 +388,19 @@ class _ControlLoopRunner:
             return None
         elif isinstance(command, CommandScheduleWaiterTimeout):
             now = await self.adapter.get_now()
+            timeout = command.timeout
+            if command.deadline_at is not None:
+                # Commands execute after adapter.on_tick(), so a slow
+                # persistence append can move now past the deadline. Anchor to
+                # the absolute deadline instead of old_now + delay.
+                timeout = max(0.0, command.deadline_at - now)
             self.schedule_tick(
                 TickWaiterTimeout(
                     step_id=command.step_id,
                     waiter_id=command.waiter_id,
                     invocation_namespace=command.invocation_namespace,
                 ),
-                at_time=now + command.timeout,
+                at_time=now + timeout,
             )
             return None
         elif isinstance(command, CommandScheduleTimeout):

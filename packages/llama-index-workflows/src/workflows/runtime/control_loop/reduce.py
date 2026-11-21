@@ -582,6 +582,24 @@ def _rewind_broker(
         for attempt in step_state.queue:
             if attempt.not_before is not None:
                 commands.append(CommandScheduleWakeup(at_time=attempt.not_before))
+        # Waiter timeouts live in the runner's wakeup heap, which does not
+        # survive a restart: re-arm them from the persisted deadline so a
+        # restored wait still times out instead of waiting forever.
+        for waiter in step_state.collected_waiters:
+            if (
+                waiter.resolved_event is None
+                and not waiter.timed_out
+                and waiter.timeout_at is not None
+            ):
+                commands.append(
+                    CommandScheduleWaiterTimeout(
+                        step_id=step_id,
+                        waiter_id=waiter.waiter_id,
+                        timeout=max(0.0, waiter.timeout_at - now_seconds),
+                        invocation_namespace=path,
+                        deadline_at=waiter.timeout_at,
+                    )
+                )
     for key, child in sorted(state.children.items()):
         _rewind_broker(child, (*path, key), commands, now_seconds)
 
@@ -836,6 +854,7 @@ def _apply_step_result(
     acc: _StepResultAcc,
     did_complete_step: bool,
     run_id: str | None,
+    now_seconds: float,
 ) -> None:
     """Apply a single result item from a step execution to the state."""
     step_id = tick.step_id
@@ -937,6 +956,10 @@ def _apply_step_result(
                 state.workers[step_id].bump_collect_generation(result.event_id)
     elif isinstance(result, AddWaiter):
         # indicates that a run has added a waiter to the collected waiters state
+        if result.waiter_epoch < worker_state.waiter_epochs.get(result.waiter_id, 0):
+            # This dispatch snapshotted the waiter before a timeout consumed
+            # it; re-registering now would resurrect it and re-arm a timeout.
+            return
         existing = next(
             (
                 (i)
@@ -945,6 +968,24 @@ def _apply_step_result(
             ),
             None,
         )
+        prior = (
+            worker_state.collected_waiters[existing] if existing is not None else None
+        )
+        # The deadline is state, not just a scheduled tick: a waiter that
+        # survives a snapshot/resume re-arms its timeout from this value. Derive
+        # it from the journaled tick stamp so replay rebuilds the same deadline;
+        # a re-registration keeps the original deadline instead of restarting.
+        timeout_at: float | None = None
+        schedule_timeout = False
+        if result.timeout is not None:
+            stamp = _tick_stamp(tick)
+            deadline_base = stamp if stamp is not None else now_seconds
+            timeout_at = (
+                prior.timeout_at
+                if prior is not None
+                else deadline_base + result.timeout
+            )
+            schedule_timeout = prior is None
         new_waiter = StepWorkerWaiter(
             waiter_id=result.waiter_id,
             event=this_execution.event,
@@ -953,6 +994,11 @@ def _apply_step_result(
             requirements=result.requirements,
             has_requirements=bool(len(result.requirements)),
             resolved_event=None,
+            # A worker dispatched before the waiter timed out re-registers it
+            # from its stale dispatch snapshot. Keep the live timed-out flag,
+            # or the queued retry sees a live waiter and waits forever.
+            timed_out=prior.timed_out if prior is not None else False,
+            timeout_at=timeout_at,
             # Store the suspended work item's record so resume re-delivers
             # it whole: same stream scope, same collect batch.
             scope_path=this_execution.scope_path,
@@ -965,15 +1011,16 @@ def _apply_step_result(
             worker_state.collected_waiters.append(new_waiter)
             if result.waiter_event:
                 acc.commands.append(CommandPublishEvent(event=result.waiter_event))
-            if result.timeout is not None:
-                acc.commands.append(
-                    CommandScheduleWaiterTimeout(
-                        step_id=step_id,
-                        waiter_id=result.waiter_id,
-                        timeout=result.timeout,
-                        invocation_namespace=path,
-                    )
+        if schedule_timeout:
+            acc.commands.append(
+                CommandScheduleWaiterTimeout(
+                    step_id=step_id,
+                    waiter_id=result.waiter_id,
+                    timeout=result.timeout or 0.0,
+                    invocation_namespace=path,
+                    deadline_at=timeout_at,
                 )
+            )
     elif isinstance(result, DeleteWaiter):
         if did_complete_step:  # allow retries to grab the waiter events
             # indicates that a run has obtained the waiting event, and it can be deleted from the collected waiters state
@@ -982,6 +1029,13 @@ def _apply_step_result(
             item = next(filter(lambda w: w.waiter_id == to_remove, waiters), None)
             if item is not None:
                 waiters.remove(item)
+                # A waiter deleted after its event was consumed must not be
+                # resurrected by a registration from a worker snapshot taken
+                # before the answer; bump the epoch so such ticks are ignored.
+                worker_state = state.workers[step_id]
+                worker_state.waiter_epochs[to_remove] = (
+                    worker_state.waiter_epochs.get(to_remove, 0) + 1
+                )
     else:
         raise ValueError(f"Unknown result type: {type(result)}")
 
@@ -1263,6 +1317,7 @@ def _process_step_result_tick(
             acc=acc,
             did_complete_step=did_complete_step,
             run_id=run_id,
+            now_seconds=now_seconds,
         )
 
     acc.commands.extend(
@@ -1390,6 +1445,7 @@ def _add_or_enqueue_event(
             scope_path=event.scope_path,
             work_item_id=event.work_item_id,
             invocation_id=invocation_id,
+            waiter_epochs=dict(state.waiter_epochs),
         )
         state.in_progress.append(
             InProgressState(
@@ -1932,10 +1988,16 @@ def _process_waiter_timeout_tick(
         (w for w in worker_state.collected_waiters if w.waiter_id == tick.waiter_id),
         None,
     )
-    # Only act if the waiter is still pending (not yet resolved by an event)
-    if waiter is None or waiter.resolved_event is not None:
+    # Only act if the waiter is still pending: an already resolved or timed-out
+    # waiter must not be resumed again by a duplicate timeout tick.
+    if waiter is None or waiter.resolved_event is not None or waiter.timed_out:
         return state, commands
     waiter.timed_out = True
+    # Bump the registration generation so any invocation dispatched before
+    # this timeout cannot re-register the consumed waiter later.
+    worker_state.waiter_epochs[waiter.waiter_id] = (
+        worker_state.waiter_epochs.get(waiter.waiter_id, 0) + 1
+    )
     # Timeout resumes the suspended work item whole, like waiter resolution.
     subcommands = _add_or_enqueue_event(
         EventAttempt(

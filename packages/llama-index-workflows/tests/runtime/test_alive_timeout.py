@@ -14,7 +14,11 @@ from workflows.events import StartEvent, StopEvent
 from workflows.runtime.control_loop.reduce import _reduce_tick
 from workflows.runtime.control_loop.runner import _ControlLoopRunner
 from workflows.runtime.types.commands import CommandHalt, CommandScheduleTimeout
-from workflows.runtime.types.internal_state import BrokerState
+from workflows.runtime.types.internal_state import (
+    BrokerState,
+    InProgressState,
+    StepWorkerState,
+)
 from workflows.runtime.types.results import StepWorkerWaiter
 from workflows.runtime.types.step_function import as_step_worker_functions
 from workflows.runtime.types.step_id import StepId
@@ -24,6 +28,7 @@ from workflows.runtime.types.ticks import (
     TickTimeout,
     TickWaiterTimeout,
     TickWakeup,
+    WorkflowTick,
 )
 
 from .conftest import MockRunAdapter
@@ -223,3 +228,102 @@ def test_wakeup_and_waiter_timeout_ticks_accrue_alive_budget() -> None:
 
     assert state.elapsed_alive == 2.0
     assert state.last_alive_stamp == 12.0
+
+
+@pytest.mark.asyncio
+async def test_rewound_waiter_timeout_schedules_at_persisted_deadline() -> None:
+    """A restored waiter must be re-armed at its persisted absolute deadline.
+
+    Commands are executed only after adapter.on_tick(), and a persistence
+    adapter appends to the database there. Scheduling at fresh_now + remaining
+    adds that latency to the saved deadline; a waiter due at 105, rewound at
+    100 and scheduled after persistence finishes at 110 must fire immediately
+    rather than at 115.
+    """
+
+    class PersistenceLatencyAdapter(MockRunAdapter):
+        async def on_tick(self, tick: WorkflowTick) -> None:
+            await super().on_tick(tick)
+            if isinstance(tick, TickSessionStart):
+                # Persisting the session-start tick moves the clock past the
+                # restored waiter's deadline.
+                self.advance_time(10.0)
+
+    workflow = _AliveBudgetWorkflow(timeout=30.0)
+    state = BrokerState.from_workflow(workflow)
+    state.is_running = True
+    state.workers[StepId.root("start")].collected_waiters.append(
+        StepWorkerWaiter(
+            waiter_id="restored-waiter",
+            event=StartEvent(),
+            waiting_for_event=StopEvent,
+            requirements={},
+            has_requirements=False,
+            resolved_event=None,
+            timeout_at=105.0,
+        )
+    )
+    adapter = PersistenceLatencyAdapter(run_id="restored-waiter-deadline")
+    adapter._current_time = 100.0
+    runner = _ControlLoopRunner(
+        workflow,
+        adapter,
+        cast(Context, object()),
+        as_step_worker_functions(workflow),
+        state,
+    )
+
+    await runner._process_tick(TickSessionStart(stamped_at=100.0))
+
+    waiter_timeouts = [
+        (wakeup_at, tick)
+        for wakeup_at, _, tick in runner.scheduled_wakeups
+        if isinstance(tick, TickWaiterTimeout)
+    ]
+    assert waiter_timeouts == [
+        (
+            110.0,
+            TickWaiterTimeout(
+                step_id=StepId.root("start"),
+                waiter_id="restored-waiter",
+            ),
+        )
+    ]
+
+
+def test_waiter_epochs_survive_state_round_trip() -> None:
+    """Waiter registration generations must survive serialize/resume.
+
+    A restored invocation keeps the generation it snapshotted at dispatch, so
+    the reducer can still recognize its late AddWaiter as stale after the
+    broker is resumed from a snapshot.
+    """
+    workflow = _AliveBudgetWorkflow()
+    state = BrokerState.from_workflow(workflow)
+    step_id = StepId.root("start")
+    state.workers[step_id].waiter_epochs["restored-waiter"] = 2
+    state.workers[step_id].in_progress.append(
+        InProgressState(
+            event=StartEvent(),
+            worker_id=0,
+            shared_state=StepWorkerState(
+                step_name="start",
+                collected_events={},
+                collected_waiters=[],
+                waiter_epochs={"restored-waiter": 1},
+            ),
+            attempts=0,
+            first_attempt_at=10.0,
+            invocation_id="invocation_1",
+        )
+    )
+
+    serializer = JsonSerializer()
+    restored = BrokerState.from_serialized(
+        state.to_serialized(serializer), workflow, serializer
+    )
+
+    assert restored.workers[step_id].waiter_epochs == {"restored-waiter": 2}
+    assert restored.workers[step_id].in_progress[0].shared_state.waiter_epochs == {
+        "restored-waiter": 1
+    }
