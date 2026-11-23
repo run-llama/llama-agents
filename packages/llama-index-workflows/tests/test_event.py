@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LlamaIndex Inc.
 
+from __future__ import annotations
+
 import json
 from http.client import HTTPException
 from typing import Any, cast
 
 import pytest
 from pydantic import PrivateAttr
-from workflows.context import JsonSerializer
+from workflows.context import JsonSerializer, PickleSerializer
 from workflows.context.utils import import_module_from_qualified_name
 from workflows.events import (
     Event,
@@ -161,6 +163,34 @@ def test_custom_stop_event_serialization() -> None:
     )
     assert ev.foo == deserialized_ev.foo
     assert ev.bar == deserialized_ev.bar
+
+
+@pytest.mark.parametrize("serializer_type", [JsonSerializer, PickleSerializer])
+@pytest.mark.parametrize("event_type", [StopEvent, CustomStopEvent])
+@pytest.mark.parametrize("result", [None, 0, "done"])
+def test_stop_event_dynamic_fields_serialization(
+    serializer_type: type[JsonSerializer],
+    event_type: type[StopEvent],
+    result: Any,
+) -> None:
+    ev = event_type(
+        result=result,
+        foo="foo",
+        bar=42,
+        document_id="doc-1",
+        metadata={"items": [1, 2]},
+    )
+    assert ev.model_dump()["_data"]["document_id"] == "doc-1"
+    assert event_type.model_validate_json(ev.model_dump_json()).document_id == "doc-1"
+    serializer = serializer_type()
+    restored = serializer.deserialize(serializer.serialize(ev))
+
+    assert type(restored) is event_type
+    assert restored.result == result
+    assert restored.document_id == "doc-1"
+    assert restored["metadata"] == {"items": [1, 2]}
+    assert restored.foo == "foo"
+    assert restored.bar == 42
 
 
 def test_stop_event_repr() -> None:
