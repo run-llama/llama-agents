@@ -42,6 +42,9 @@ def _get_factory_type_hints(
     Filters localns to exclude names that exist in factory's __globals__,
     so types resolve from the factory's module while allowing closure variables.
     """
+    while isinstance(factory, functools.partial):
+        factory = factory.func
+
     filtered_localns = localns
     if filtered_localns:
         globalns = getattr(factory, "__globals__", {})
@@ -146,8 +149,15 @@ class _Resource(Generic[T]):
         deps: list[tuple[str, ResourceDescriptor, type | None]] = []
         params = inspect.signature(self._factory).parameters
         type_hints = _get_factory_type_hints(self._factory, self._localns)
+        bound_keywords: set[str] = set()
+        factory = self._factory
+        while isinstance(factory, functools.partial):
+            bound_keywords.update(factory.keywords)
+            factory = factory.func
 
         for param in params.values():
+            if param.name in bound_keywords:
+                continue
             annotation = type_hints.get(param.name, param.annotation)
             if get_origin(annotation) is Annotated:
                 args = get_args(annotation)

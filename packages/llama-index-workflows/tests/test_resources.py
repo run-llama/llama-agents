@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+from functools import partial
 from pathlib import Path
 from typing import Annotated
 from unittest import mock
@@ -115,6 +116,57 @@ async def test_function_resource_init() -> None:
     resource_manager = ResourceManager()
     result = await retval.call(resource_manager)
     assert result == "string"
+
+
+@pytest.mark.asyncio
+async def test_partial_factory_resource() -> None:
+    def get_string(prefix: str) -> str:
+        return f"{prefix} resource"
+
+    factory = partial(get_string, "configured")
+
+    class PartialWorkflow(Workflow):
+        @step
+        async def start_step(
+            self, ev: StartEvent, value: Annotated[str, Resource(factory)]
+        ) -> StopEvent:
+            return StopEvent(result=value)
+
+    assert await PartialWorkflow(timeout=2).run() == "configured resource"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.parametrize(
+    ("bind_suffix", "expected"),
+    [(False, "configured dependency"), (True, "configured explicit")],
+)
+async def test_partial_factory_resource_dependencies(
+    bind_suffix: bool, expected: str, is_async: bool
+) -> None:
+    def get_suffix() -> str:
+        return "dependency"
+
+    def get_string(prefix: str, suffix: Annotated[str, Resource(get_suffix)]) -> str:
+        return f"{prefix} {suffix}"
+
+    async def get_string_async(
+        prefix: str, suffix: Annotated[str, Resource(get_suffix)]
+    ) -> str:
+        return f"{prefix} {suffix}"
+
+    factory = partial(get_string_async if is_async else get_string, "configured")
+    if bind_suffix:
+        factory = partial(factory, suffix="explicit")
+
+    class PartialWorkflow(Workflow):
+        @step
+        async def start_step(
+            self, ev: StartEvent, value: Annotated[str, Resource(factory)]
+        ) -> StopEvent:
+            return StopEvent(result=value)
+
+    assert await PartialWorkflow(timeout=2).run() == expected
 
 
 def test_resource_config_init(
