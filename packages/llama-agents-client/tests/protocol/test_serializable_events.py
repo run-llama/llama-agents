@@ -218,6 +218,15 @@ def test_parse_value_only_with_explicit_event() -> None:
     assert ev.foo == "bar"
 
 
+def test_parse_bare_payload_with_value_field_and_explicit_event() -> None:
+    class MyStart(Event):
+        value: int
+
+    ev = EventEnvelope.parse(client_data={"value": 21}, explicit_event=MyStart)
+    assert isinstance(ev, MyStart)
+    assert ev.value == 21
+
+
 def test_parse_invalid_inputs_raise() -> None:
     with pytest.raises(EventValidationError) as e:
         EventEnvelope.parse(client_data=123)  # type: ignore[arg-type]
