@@ -169,6 +169,101 @@ Everything on an in-flight event and in the state store has to be serializable. 
 serializer, Pydantic models included. If it hits a value it can't encode, `to_dict()` raises and the
 whole snapshot fails, not just that field. So don't put raw bytes or open connections on events.
 
+## Resume a runbook review
+
+An incident workflow can search a shared runbook collection in
+[Loom](https://github.com/ClickHouse/loom), then wait for an operator to confirm the
+result. Keep connection settings in a `Resource` and put only the source URI in
+the workflow's state. The approval step reads that URI after a restart.
+
+Install `httpx` and `llama-index-workflows`. Set `LOOM_BASE_URL`, `LOOM_ORG`,
+`LOOM_NAMESPACE`, and `LOOM_TOKEN` in the worker's environment. Use a viewer token
+for the runbook namespace, and use HTTPS for a remote deployment.
+
+Add a runbook with a known source URI to the namespace before starting the
+example. Include the word `rollback` in its text to match the query below. The
+approval prompt shows the source URI of the first matching runbook.
+
+```python
+import os
+from dataclasses import dataclass, field
+from typing import Annotated
+
+import httpx
+from workflows import Context, Workflow, step
+from workflows.events import (
+    HumanResponseEvent,
+    InputRequiredEvent,
+    StartEvent,
+    StopEvent,
+)
+from workflows.resource import Resource
+
+
+@dataclass(frozen=True)
+class LoomConfig:
+    base_url: str
+    org: str
+    namespace: str
+    token: str = field(repr=False)
+
+
+def loom_config() -> LoomConfig:
+    return LoomConfig(
+        base_url=os.environ["LOOM_BASE_URL"].rstrip("/"),
+        org=os.environ["LOOM_ORG"],
+        namespace=os.environ["LOOM_NAMESPACE"],
+        token=os.environ["LOOM_TOKEN"],
+    )
+
+
+class SearchRequest(StartEvent):
+    query: str
+
+
+class RunbookReview(Workflow):
+    @step
+    async def find(
+        self,
+        ctx: Context,
+        ev: SearchRequest,
+        config: Annotated[LoomConfig, Resource(loom_config)],
+    ) -> InputRequiredEvent | StopEvent:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.post(
+                f"{config.base_url}/v1/knowledge.search",
+                headers={"Authorization": f"Bearer {config.token}"},
+                json={
+                    "org": config.org,
+                    "namespace": config.namespace,
+                    "namespace_scope": "this",
+                    "query": ev.query,
+                    "top_k": 1,
+                    "search_mode": "lexical",
+                    "rerank": "none",
+                },
+            )
+            response.raise_for_status()
+
+        hits = response.json()["results"]
+        if not hits:
+            return StopEvent(result=None)
+        source_uri = hits[0]["source_uri"]
+        await ctx.store.set("source_uri", source_uri)
+        return InputRequiredEvent(prefix=f"Use this runbook? {source_uri}")
+
+    @step
+    async def review(self, ctx: Context, ev: HumanResponseEvent) -> StopEvent:
+        source_uri = await ctx.store.get("source_uri")
+        return StopEvent(result=source_uri if ev.response == "approve" else None)
+```
+
+Start the workflow with `RunbookReview().run(start_event=SearchRequest(query="rollback"))`.
+Snapshot and cancel the run when it emits the `InputRequiredEvent`, then resume it
+and send `HumanResponseEvent(response="approve")` using the
+[human-in-the-loop handoff](/python/llamaagents/workflows/human_in_the_loop).
+Protect snapshots as run data: they can contain the query and source URI.
+
 ## Runtime plugins for durability
 
 The checkpoint loop is durability you control. You decide when to snapshot, and resume is a couple of
