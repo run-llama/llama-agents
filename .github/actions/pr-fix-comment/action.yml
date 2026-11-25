@@ -95,11 +95,15 @@ runs:
     - name: Generate GitHub App token
       id: app-token
       if: steps.context.outputs.is_pr == 'true' && steps.auth-check.outputs.has_auth == 'true'
-      uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1.12.0
+      uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
       with:
         app-id: ${{ inputs.app-id }}
         private-key: ${{ inputs.private-key }}
         owner: ${{ github.repository_owner }}
+        repositories: ${{ github.event.repository.name }}
+        permission-contents: write
+        permission-pull-requests: write
+        permission-issues: write
 
     - name: Compute defaults
       id: defaults
@@ -186,7 +190,7 @@ runs:
     - name: Create PR with changes
       id: create-pr
       if: steps.context.outputs.is_pr == 'true' && steps.auth-check.outputs.has_auth == 'true'
-      uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6.1.0
+      uses: peter-evans/create-pull-request@3ffccacd46053766916f087ce41d627c0b8cf2d1 # v8.1.3
       with:
         token: ${{ steps.app-token.outputs.token }}
         commit-message: ${{ steps.defaults.outputs.commit-message }}
