@@ -33,6 +33,8 @@ class BackupManifest:
     namespace: str
     deployment_count: int
     encrypted: bool
+    # True when Secret data was left out because there was no encryption password.
+    secrets_omitted: bool = False
 
 
 @dataclass
@@ -99,8 +101,13 @@ def create_backup_archive(
     timestamp: str,
     encryption_password: str | None = None,
     generations: dict[str, int] | None = None,
+    allow_plaintext_secrets: bool = False,
 ) -> bytes:
     """Create a .tar.gz backup archive in memory.
+
+    Secret data (deployment API keys and app env secrets) is written only encrypted.
+    Without a password it is left out and the manifest says so, unless
+    ``allow_plaintext_secrets`` opts in to the old plaintext ``.secret.yaml`` files.
 
     Args:
         deployments: List of cleaned CRD dicts.
@@ -108,11 +115,13 @@ def create_backup_archive(
         namespace: K8s namespace the backup was taken from.
         timestamp: ISO-8601 timestamp string.
         encryption_password: If set, encrypt secret data with this password.
+        allow_plaintext_secrets: Write secrets unencrypted when there is no password.
 
     Returns:
         Bytes of the .tar.gz archive.
     """
     buf = io.BytesIO()
+    omit_secrets = not encryption_password and not allow_plaintext_secrets
 
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         # Write manifest
@@ -122,6 +131,7 @@ def create_backup_archive(
             "namespace": namespace,
             "deployment_count": len(deployments),
             "encrypted": encryption_password is not None,
+            "secrets_omitted": omit_secrets and bool(secrets),
         }
         _add_bytes_to_tar(tar, "manifest.json", json.dumps(manifest, indent=2).encode())
 
@@ -134,7 +144,7 @@ def create_backup_archive(
 
             # Write secret data if available
             secret_data = secrets.get(name)
-            if secret_data is not None:
+            if secret_data is not None and not omit_secrets:
                 secret_yaml = yaml.dump(secret_data, default_flow_style=False).encode()
                 if encryption_password:
                     encrypted = encrypt(secret_yaml, encryption_password)
@@ -216,6 +226,7 @@ def read_backup_archive(
         namespace=manifest_data["namespace"],
         deployment_count=manifest_data["deployment_count"],
         encrypted=manifest_data["encrypted"],
+        secrets_omitted=manifest_data.get("secrets_omitted", False),
     )
 
     entries = []

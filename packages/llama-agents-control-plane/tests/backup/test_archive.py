@@ -29,6 +29,7 @@ def test_round_trip() -> None:
         secrets=secrets,
         namespace="default",
         timestamp="2025-01-01T00:00:00Z",
+        allow_plaintext_secrets=True,
     )
     contents = read_backup_archive(archive)
     assert contents.manifest.version == 1
@@ -67,10 +68,33 @@ def test_unencrypted_archive_round_trip() -> None:
         namespace="ns",
         timestamp="2025-01-01T00:00:00Z",
         encryption_password=None,
+        allow_plaintext_secrets=True,
     )
     contents = read_backup_archive(archive)
     assert contents.manifest.encrypted is False
     assert contents.entries[0].secret == {"KEY": "val"}
+
+
+def test_unencrypted_archive_omits_secrets_by_default() -> None:
+    deployments = [make_deployment("plain")]
+    archive = create_backup_archive(
+        deployments=deployments,
+        secrets={"plain": {"LLAMA_CLOUD_API_KEY": "llx-secret"}},
+        namespace="ns",
+        timestamp="2025-01-01T00:00:00Z",
+    )
+    blob = b""
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        names = tar.getnames()
+        for member in tar.getmembers():
+            extracted = tar.extractfile(member)
+            if extracted is not None:
+                blob += extracted.read()
+    assert "plain.secret.yaml" not in names
+    assert b"llx-secret" not in blob
+    contents = read_backup_archive(archive)
+    assert contents.manifest.secrets_omitted is True
+    assert contents.entries[0].secret is None
 
 
 def test_empty_deployments() -> None:
@@ -93,6 +117,7 @@ def test_archive_extractable_with_tarfile() -> None:
         secrets=secrets,
         namespace="ns",
         timestamp="2025-01-01T00:00:00Z",
+        allow_plaintext_secrets=True,
     )
     with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
         names = tar.getnames()

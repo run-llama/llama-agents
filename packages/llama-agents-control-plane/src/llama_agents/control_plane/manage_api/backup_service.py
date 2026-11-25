@@ -73,7 +73,19 @@ class BackupService:
                 timestamp=timestamp,
                 encryption_password=settings.backup_encryption_password,
                 generations=generations,
+                allow_plaintext_secrets=settings.backup_allow_plaintext_secrets,
             )
+            if (
+                secrets
+                and not settings.backup_encryption_password
+                and not settings.backup_allow_plaintext_secrets
+            ):
+                logger.warning(
+                    "Backup %s omits secrets for %d deployments: set BACKUP_ENCRYPTION_PASSWORD "
+                    "to back them up encrypted",
+                    backup_id,
+                    len(secrets),
+                )
 
             # Upload to S3
             await self._storage.upload(backup_id, archive_data)
