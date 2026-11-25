@@ -24,17 +24,22 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          enable-cache: false
 
       - name: Resolve target tag
         id: target
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ github.event.inputs.tag }}"
+            TAG="${GITHUB_EVENT_INPUTS_TAG}"
           else
-            TAG="${{ github.event.client_payload.tag }}"
+            TAG="${GITHUB_EVENT_CLIENT_PAYLOAD_TAG}"
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "TARGET_TAG=${TAG}" >> "$GITHUB_ENV"
+        env:
+          GITHUB_EVENT_INPUTS_TAG: ${{ github.event.inputs.tag }}
+          GITHUB_EVENT_CLIENT_PAYLOAD_TAG: ${{ github.event.client_payload.tag }}
 
       - name: Compute release metadata
         id: metadata

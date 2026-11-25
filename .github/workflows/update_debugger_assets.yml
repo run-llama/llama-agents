@@ -33,13 +33,18 @@ jobs:
         id: payload
         run: |
           # Handle both repository_dispatch and workflow_dispatch
-          if [ -n "${{ github.event.inputs.js_url }}" ]; then
-            echo "js_url=${{ github.event.inputs.js_url }}" >> $GITHUB_OUTPUT
-            echo "css_url=${{ github.event.inputs.css_url }}" >> $GITHUB_OUTPUT
+          if [ -n "${GITHUB_EVENT_INPUTS_JS_URL}" ]; then
+            echo "js_url=${GITHUB_EVENT_INPUTS_JS_URL}" >> $GITHUB_OUTPUT
+            echo "css_url=${GITHUB_EVENT_INPUTS_CSS_URL}" >> $GITHUB_OUTPUT
           else
-            echo "js_url=${{ github.event.client_payload.js_url }}" >> $GITHUB_OUTPUT
-            echo "css_url=${{ github.event.client_payload.css_url }}" >> $GITHUB_OUTPUT
+            echo "js_url=${GITHUB_EVENT_CLIENT_PAYLOAD_JS_URL}" >> $GITHUB_OUTPUT
+            echo "css_url=${GITHUB_EVENT_CLIENT_PAYLOAD_CSS_URL}" >> $GITHUB_OUTPUT
           fi
+        env:
+          GITHUB_EVENT_INPUTS_JS_URL: ${{ github.event.inputs.js_url }}
+          GITHUB_EVENT_INPUTS_CSS_URL: ${{ github.event.inputs.css_url }}
+          GITHUB_EVENT_CLIENT_PAYLOAD_JS_URL: ${{ github.event.client_payload.js_url }}
+          GITHUB_EVENT_CLIENT_PAYLOAD_CSS_URL: ${{ github.event.client_payload.css_url }}
 
       - name: Update index.html
         run: >
