@@ -66,6 +66,8 @@ jobs:
         with:
           app-id: ${{ secrets.CI_BOT_APP_ID }}
           private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
 
       - name: Install helm-docs
         run: |
@@ -232,6 +234,7 @@ jobs:
         with:
           app-id: ${{ secrets.CI_BOT_APP_ID }}
           private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
+          permission-contents: write
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -310,6 +313,7 @@ jobs:
           private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
           owner: ${{ steps.dispatch-repo.outputs.owner }}
           repositories: ${{ steps.dispatch-repo.outputs.repo }}
+          permission-contents: write
 
       - name: Trigger downstream version bump
         if: github.ref == 'refs/heads/main' && vars.DOWNSTREAM_DISPATCH_REPO != ''

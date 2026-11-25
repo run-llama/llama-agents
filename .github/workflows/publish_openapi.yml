@@ -69,6 +69,8 @@ jobs:
           app-id: ${{ secrets.CI_BOT_APP_ID }}
           private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
           owner: run-llama
+          repositories: llama-ui
+          permission-contents: write
 
       - name: Trigger SDK update
         if: >
