@@ -192,6 +192,7 @@ def _make_archive_bytes(
         namespace="default",
         timestamp="2025-01-01T00:00:00Z",
         generations=generations,
+        allow_plaintext_secrets=True,
     )
 
 

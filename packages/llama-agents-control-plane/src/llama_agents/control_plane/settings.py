@@ -150,8 +150,16 @@ class ControlPlaneSettings(BaseSettings):
     )
     backup_encryption_password: str | None = Field(
         default=None,
-        description="Password for encrypting secrets in backups",
+        description="Password for encrypting secrets in backups. Without it, backups "
+        "leave deployment secrets out (unless BACKUP_ALLOW_PLAINTEXT_SECRETS is set).",
         alias="BACKUP_ENCRYPTION_PASSWORD",
+    )
+    backup_allow_plaintext_secrets: bool = Field(
+        default=False,
+        description="Write deployment secrets (agent API keys, app env secrets) into "
+        "backups unencrypted when no BACKUP_ENCRYPTION_PASSWORD is set. Local use only: "
+        "anyone who can read the backup bucket gets every deployment's credentials.",
+        alias="BACKUP_ALLOW_PLAINTEXT_SECRETS",
     )
 
     # Build artifact settings
