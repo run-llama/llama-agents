@@ -30,7 +30,12 @@ async def debounced_sorted_prefix(
     This async variant uses an asyncio.Queue and a background task to pump `inner`.
     """
 
-    buffer: list[T] = []
+    try:
+        first = await anext(inner)
+    except StopAsyncIteration:
+        return
+
+    buffer: list[T] = [first]
     debouncer = Debouncer(debounce_seconds, max_window_seconds)
     merged = merge_generators(inner, debouncer.aiter())
 
