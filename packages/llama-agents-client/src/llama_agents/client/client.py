@@ -426,19 +426,20 @@ class WorkflowClient:
                                 # Reset attempts on successful connection
                                 attempts = 0
 
-                                # Parse SSE stream: "id: N\ndata: {...}\n\n"
                                 current_id: str | None = None
+                                data_lines: list[str] = []
                                 async for line in response.aiter_lines():
-                                    stripped = line.strip()
-                                    if not stripped:
-                                        # Empty line = end of SSE event
+                                    if line:
+                                        field, _, value = line.partition(":")
+                                        value = value.removeprefix(" ")
+                                        if field == "id":
+                                            current_id = value
+                                        elif field == "data":
+                                            data_lines.append(value)
                                         continue
-                                    if stripped.startswith("id:"):
-                                        current_id = stripped[3:].strip()
-                                    elif stripped.startswith("data:"):
-                                        data = stripped[5:].strip()
+                                    if data_lines:
                                         event = EventEnvelopeWithMetadata.model_validate_json(
-                                            data
+                                            "\n".join(data_lines)
                                         )
                                         if current_id is not None:
                                             try:
@@ -446,12 +447,10 @@ class WorkflowClient:
                                             except ValueError:
                                                 pass
                                         await queue.put(
-                                            _QueuedEvent(
-                                                sequence=last_sequence,
-                                                event=event,
-                                            )
+                                            _QueuedEvent(last_sequence, event)
                                         )
-                                        current_id = None
+                                        data_lines.clear()
+                                    current_id = None
 
                             # Stream ended normally (server closed connection)
                             await queue.put(_QueuedDone())

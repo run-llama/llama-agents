@@ -647,6 +647,23 @@ class _ExplodingContext(Context):  # type: ignore[misc]
 
 
 @pytest.mark.asyncio
+async def test_multiline_sse_frame_keeps_its_trailing_id() -> None:
+    frame = (
+        'data: {"value": {"msg": "first"},\n'
+        ": heartbeat\n"
+        'data: "type": "TestEvent", "types": null, "qualified_name": null}\n'
+        "id: 17\n\n"
+        'data: {"value": {}'
+    )
+    async with _mock_client(lambda _: httpx.Response(200, text=frame)) as transport:
+        stream = WorkflowClient(httpx_client=transport).get_workflow_events("h")
+        events = [event async for event in stream]
+
+    assert [event.value["msg"] for event in events] == ["first"]
+    assert stream.last_sequence == 17
+
+
+@pytest.mark.asyncio
 async def test_reconnect_resumes_from_last_sequence() -> None:
     e1, e2, e3 = _envelope("first"), _envelope("second"), _envelope("third")
     fake = FakeStreamClient(
