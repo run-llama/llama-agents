@@ -18,6 +18,8 @@ from client_test_workflows import (
     OutputEvent,
     TypedInputEvent,
     TypedInputWorkflow,
+    ValueInputEvent,
+    ValueInputWorkflow,
 )
 from httpx import ASGITransport, AsyncClient
 from llama_agents.client import WorkflowClient
@@ -124,6 +126,24 @@ async def test_run_workflow_with_json_encoded_start_event(
     assert handler.status == "completed"
     assert handler.result is not None
     assert handler.result.value["result"] == event.model_dump(mode="json")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nowait", [False, True])
+async def test_run_workflow_with_start_event_field_named_value(
+    server: WorkflowServer, client: WorkflowClient, nowait: bool
+) -> None:
+    server.add_workflow(name="value-input", workflow=ValueInputWorkflow())
+    event = ValueInputEvent(value=21)
+    if nowait:
+        handler = await client.run_workflow_nowait("value-input", start_event=event)
+        handler = await client.wait_for_handler(handler.handler_id, poll_interval=0)
+    else:
+        handler = await client.run_workflow("value-input", start_event=event)
+
+    assert handler.status == "completed"
+    assert handler.result is not None
+    assert handler.result.value["result"] == 42
 
 
 @pytest.mark.asyncio

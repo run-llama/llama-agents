@@ -52,3 +52,13 @@ class TypedInputWorkflow(Workflow):
     @step
     async def echo(self, ev: TypedInputEvent) -> StopEvent:
         return StopEvent(result=ev.model_dump(mode="json"))
+
+
+class ValueInputEvent(StartEvent):
+    value: int
+
+
+class ValueInputWorkflow(Workflow):
+    @step
+    async def double(self, ev: ValueInputEvent) -> StopEvent:
+        return StopEvent(result=ev.value * 2)

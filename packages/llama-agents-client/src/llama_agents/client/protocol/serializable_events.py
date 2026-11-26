@@ -158,9 +158,13 @@ class EventEnvelope(BaseModel):
             raise EventValidationError(
                 "Failed to deserialize event. Must be a json object, or stringified json object"
             )
-        missing_qualifiers = (
-            "qualified_name" not in as_dict or "type" not in as_dict
-        ) and "value" not in as_dict
+        has_type = "type" in as_dict
+        has_qualified_name = "qualified_name" in as_dict
+        # Without a type or a qualified name the dict cannot be an envelope, so
+        # it holds the explicit event's fields, even one called "value".
+        missing_qualifiers = (not has_type and not has_qualified_name) or (
+            (not has_type or not has_qualified_name) and "value" not in as_dict
+        )
         if missing_qualifiers and explicit_event:
             if explicit_event.__name__ not in registry:
                 registry = {**registry, explicit_event.__name__: explicit_event}
