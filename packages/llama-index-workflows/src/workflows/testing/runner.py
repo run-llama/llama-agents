@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 LlamaIndex Inc.
+
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -39,7 +42,7 @@ class WorkflowTestRunner:
 
     async def run(
         self,
-        start_event: StartEvent = StartEvent(),
+        start_event: StartEvent | None = None,
         ctx: Optional["Context"] = None,
         expose_internal: bool = True,
         exclude_events: list[EventType] | None = None,
@@ -48,7 +51,8 @@ class WorkflowTestRunner:
         Run a workflow end-to-end and collect the events that are streamed during its execution.
 
         Args:
-            start_event (StartEvent): The input event for the workflow
+            start_event (StartEvent | None): The input event for the workflow.
+                If omitted, the workflow creates a fresh event of its declared start type.
             expose_internal (bool): Whether or not to expose internal events. Defaults to True if not set.
             exclude_events. (list[EventType]): A list of event types to exclude from the collected events. Defaults to None if not set.
 
