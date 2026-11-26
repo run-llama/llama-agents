@@ -9,9 +9,10 @@ from typing import cast
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from llama_agents.core.git.git_util import GitAccessError
 from prometheus_fastapi_instrumentator import Instrumentator
 
-from ..k8s_client import k8s_health_check
+from ..k8s_client import DeploymentIdUnavailableError, k8s_health_check
 from ..lifecycle import shutdown_event
 from .backup_v1beta1 import router as backup_v1beta1
 from .deployments_v1beta1 import router as deployments_v1beta1
@@ -80,6 +81,27 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
             "correlation_id": correlation_id,
         },
     )
+
+
+@app.exception_handler(GitAccessError)
+async def git_access_error_handler(
+    request: Request, exc: GitAccessError
+) -> JSONResponse:
+    """A repository URL or ref the user supplied was rejected or unreachable."""
+    logger.warning(
+        "Rejected git request on %s %s: %s",
+        request.method,
+        request.url.path,
+        exc.message,
+    )
+    return JSONResponse(status_code=400, content={"detail": exc.message})
+
+
+@app.exception_handler(DeploymentIdUnavailableError)
+async def deployment_id_unavailable_handler(
+    request: Request, exc: DeploymentIdUnavailableError
+) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 
 # Include API routers

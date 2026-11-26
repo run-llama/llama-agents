@@ -380,6 +380,10 @@ async def find_deployment_id(name: str, force_suffix: bool = False) -> str:
     )
 
 
+class DeploymentIdUnavailableError(ValueError):
+    """An explicitly requested deployment ID is reserved or already taken."""
+
+
 # in order to not conflict in URI routes
 reserved_deployment_ids = [
     "validate-repository",
@@ -411,12 +415,14 @@ async def create_deployment(
     if explicit_id is not None:
         # Already validated by DeploymentCreate schema; check reserved + uniqueness
         if explicit_id.lower() in reserved_deployment_ids:
-            raise ValueError(
+            raise DeploymentIdUnavailableError(
                 f"Deployment ID {explicit_id!r} is reserved. "
                 f"Reserved IDs: {reserved_deployment_ids}"
             )
         if not await validate_deployment_id(explicit_id):
-            raise ValueError(f"Deployment ID {explicit_id!r} is already in use.")
+            raise DeploymentIdUnavailableError(
+                f"Deployment ID {explicit_id!r} is already in use."
+            )
         deployment_id = explicit_id
     else:
         is_reserved = display_name.lower() in reserved_deployment_ids
