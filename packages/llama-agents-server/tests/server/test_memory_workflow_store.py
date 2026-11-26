@@ -557,3 +557,18 @@ async def test_max_completed_ignores_stale_terminal_queue_entries() -> None:
     by_id = {handler.handler_id: handler for handler in handlers}
     assert set(by_id) == {"shared", "done-2"}
     assert by_id["shared"].status == "running"
+
+
+@pytest.mark.asyncio
+async def test_tick_replay_isolated_from_mutable_payloads() -> None:
+    store = MemoryWorkflowStore()
+    steps = ["start"]
+    await store.append_tick("r", {"steps": steps})
+    steps.append("finish")
+
+    (tick,) = await store.get_ticks("r")
+    assert tick.tick_data == {"steps": ["start"]}
+    tick.tick_data["steps"].clear()
+
+    replay = [tick.tick_data async for tick in store.stream_ticks("r")]
+    assert replay == [{"steps": ["start"]}]

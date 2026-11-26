@@ -4,6 +4,7 @@ import asyncio
 import weakref
 from collections import deque
 from collections.abc import AsyncIterator
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 
@@ -183,12 +184,12 @@ class MemoryWorkflowStore(AbstractWorkflowStore):
             run_id=run_id,
             sequence=next_seq,
             timestamp=datetime.now(timezone.utc),
-            tick_data=tick_data,
+            tick_data=deepcopy(tick_data),
         )
         existing.append(stored)
 
     async def get_ticks(self, run_id: str) -> list[StoredTick]:
-        return list(self.ticks.get(run_id, []))
+        return [tick.model_copy(deep=True) for tick in self.ticks.get(run_id, [])]
 
     async def subscribe_events(
         self, run_id: str, after_sequence: int = -1
