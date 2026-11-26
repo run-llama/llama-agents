@@ -13,6 +13,7 @@ from typing import (
     Literal,
     overload,
 )
+from urllib.parse import quote
 
 import httpx
 from workflows import Context
@@ -240,7 +241,9 @@ class WorkflowClient:
     async def get_workflow_schema(self, workflow_name: str) -> WorkflowSchemaResponse:
         """Get the start and stop event schemas for a workflow."""
         async with self._get_client() as client:
-            response = await client.get(f"/workflows/{workflow_name}/schema")
+            response = await client.get(
+                f"/workflows/{quote(workflow_name, safe='')}/schema"
+            )
             _raise_for_status_with_body(response)
             return WorkflowSchemaResponse.model_validate(response.json())
 
@@ -249,14 +252,18 @@ class WorkflowClient:
     ) -> WorkflowEventsListResponse:
         """Get the schemas of events registered for a workflow."""
         async with self._get_client() as client:
-            response = await client.get(f"/workflows/{workflow_name}/events")
+            response = await client.get(
+                f"/workflows/{quote(workflow_name, safe='')}/events"
+            )
             _raise_for_status_with_body(response)
             return WorkflowEventsListResponse.model_validate(response.json())
 
     async def get_workflow_graph(self, workflow_name: str) -> WorkflowGraphResponse:
         """Get the directed graph representation of a workflow."""
         async with self._get_client() as client:
-            response = await client.get(f"/workflows/{workflow_name}/representation")
+            response = await client.get(
+                f"/workflows/{quote(workflow_name, safe='')}/representation"
+            )
             _raise_for_status_with_body(response)
             return WorkflowGraphResponse.model_validate(response.json())
 
@@ -302,7 +309,7 @@ class WorkflowClient:
             request_body["handler_id"] = handler_id
         async with self._get_client() as client:
             response = await client.post(
-                f"/workflows/{workflow_name}/run", json=request_body
+                f"/workflows/{quote(workflow_name, safe='')}/run", json=request_body
             )
 
             _raise_for_status_with_body(response)
@@ -354,7 +361,8 @@ class WorkflowClient:
             request_body["handler_id"] = handler_id
         async with self._get_client() as client:
             response = await client.post(
-                f"/workflows/{workflow_name}/run-nowait", json=request_body
+                f"/workflows/{quote(workflow_name, safe='')}/run-nowait",
+                json=request_body,
             )
 
             _raise_for_status_with_body(response)
@@ -397,7 +405,7 @@ class WorkflowClient:
 
         async def reader() -> None:
             incl_inter = "true" if include_internal_events else "false"
-            url = f"/events/{handler_id}"
+            url = f"/events/{quote(handler_id, safe='')}"
             last_sequence: int | Literal["now"] = after_sequence
             attempts = 0
             try:
@@ -500,7 +508,9 @@ class WorkflowClient:
         if step:
             request_body["step"] = step
         async with self._get_client() as client:
-            response = await client.post(f"/events/{handler_id}", json=request_body)
+            response = await client.post(
+                f"/events/{quote(handler_id, safe='')}", json=request_body
+            )
             _raise_for_status_with_body(response)
 
             return SendEventResponse.model_validate(response.json())
@@ -545,7 +555,7 @@ class WorkflowClient:
             handler_id: ID of the handler.
         """
         async with self._get_client() as client:
-            response = await client.get(f"/handlers/{handler_id}")
+            response = await client.get(f"/handlers/{quote(handler_id, safe='')}")
             _raise_for_status_with_body(response)
 
             return HandlerData.model_validate(response.json())
@@ -624,7 +634,7 @@ class WorkflowClient:
         """
         async with self._get_client() as client:
             response = await client.post(
-                f"/handlers/{handler_id}/cancel",
+                f"/handlers/{quote(handler_id, safe='')}/cancel",
                 params={"purge": "true" if purge else "false"},
             )
             _raise_for_status_with_body(response)
