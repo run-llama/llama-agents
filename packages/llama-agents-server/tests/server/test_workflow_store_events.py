@@ -245,6 +245,19 @@ async def test_subscribe_events_multiple_concurrent_subscribers(
 
 
 @pytest.mark.asyncio
+async def test_memory_subscription_waits_for_saved_cursor() -> None:
+    store = MemoryWorkflowStore()
+    await store.append_event("r", make_envelope())
+    events, consumer = await _subscribe_and_collect(store, "r", after_sequence=2)
+    for i in (1, 2):
+        await store.append_event("r", make_envelope(seq_label=i))
+    await store.append_event("r", make_envelope(_stop()))
+    await asyncio.wait_for(consumer, timeout=2)
+
+    assert [event.sequence for event in events] == [3]
+
+
+@pytest.mark.asyncio
 async def test_subscribe_events_with_after_sequence(
     store: AbstractWorkflowStore,
 ) -> None:

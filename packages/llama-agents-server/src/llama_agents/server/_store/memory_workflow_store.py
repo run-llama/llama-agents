@@ -220,7 +220,8 @@ class MemoryWorkflowStore(AbstractWorkflowStore):
                     continue
 
             for event in batch:
-                yield event
                 cursor += 1
+                if event.sequence > after_sequence:
+                    yield event
                 if self._is_terminal_event(event):
                     return
