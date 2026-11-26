@@ -163,6 +163,29 @@ async def test_set_state_parent_type_merge(db_path: str) -> None:
     assert state.extra == "mine"  # child field preserved
 
 
+@pytest.mark.asyncio
+async def test_first_parent_state_write_preserves_child_after_reopen(
+    db_path: str,
+) -> None:
+    store: SqliteStateStore[ExtendedCounterState] = SqliteStateStore(
+        db_path=db_path,
+        run_id="run-first-parent",
+        state_type=ExtendedCounterState,
+    )
+    await store.set_state(CounterState(count=7, label="parent"))  # type: ignore[arg-type]
+
+    reopened: SqliteStateStore[ExtendedCounterState] = SqliteStateStore(
+        db_path=db_path,
+        run_id="run-first-parent",
+        state_type=ExtendedCounterState,
+    )
+    state = await reopened.get_state()
+    assert isinstance(state, ExtendedCounterState)
+    assert state.count == 7
+    assert state.label == "parent"
+    assert state.extra == "extra_default"
+
+
 # -- edit_state --
 
 

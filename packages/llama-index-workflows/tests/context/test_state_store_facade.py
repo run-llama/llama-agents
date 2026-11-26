@@ -27,6 +27,14 @@ class SeedState(BaseModel):
     x: int = 0
 
 
+class ExtendedSeedState(SeedState):
+    label: str = "child default"
+
+
+class RequiredState(BaseModel):
+    value: int
+
+
 class FakeDurableStorage:
     """Minimal durable StateStorage fake: counts saves, records copies."""
 
@@ -72,6 +80,40 @@ def make_facade(
 
 def in_memory_seed_payload(serializer: BaseSerializer, **items: Any) -> dict[str, Any]:
     return InMemoryStateStore(DictState(**items)).to_dict(serializer)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("read_first", [False, True])
+async def test_first_parent_state_write_preserves_configured_child_type(
+    read_first: bool,
+) -> None:
+    storage = FakeDurableStorage()
+    store = make_facade(storage, ExtendedSeedState)
+    if read_first:
+        assert isinstance(await store.get_state(), ExtendedSeedState)
+    await store.set_state(SeedState(x=7))
+    result = await store.get_state()
+    assert isinstance(result, ExtendedSeedState)
+    assert result.x == 7
+    assert result.label == "child default"
+    assert storage.save_count == 1
+
+
+@pytest.mark.asyncio
+async def test_first_state_write_rejects_unrelated_type() -> None:
+    storage = FakeDurableStorage()
+    store = make_facade(storage, SeedState)
+    with pytest.raises(ValueError, match="must be of type"):
+        await store.set_state(TwoFieldState(a=7))
+    assert storage.save_count == 0
+    assert storage.record is None
+
+
+@pytest.mark.asyncio
+async def test_first_state_write_accepts_required_fields() -> None:
+    store = make_facade(FakeDurableStorage(), RequiredState)
+    await store.set_state(RequiredState(value=7))
+    assert (await store.get_state()).value == 7
 
 
 # ============================================================================
