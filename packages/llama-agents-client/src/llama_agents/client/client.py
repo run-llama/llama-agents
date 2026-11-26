@@ -151,7 +151,10 @@ class EventStream:
         task.cancel()
         try:
             await task
-        except (asyncio.CancelledError, Exception):
+        except asyncio.CancelledError:
+            # The reader may be cancelled before it enters its coroutine.
+            self._queue.put_nowait(_QueuedDone())
+        except Exception:
             pass
 
 
