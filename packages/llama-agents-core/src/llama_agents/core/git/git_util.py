@@ -85,6 +85,15 @@ class GitAccessError(Exception):
         super().__init__(message)
 
 
+class GitHostNotAllowedError(GitAccessError):
+    """The URL's host did not resolve, or resolved to a private or internal address.
+
+    The message names the host and the reason. API responses should not echo it,
+    since the difference between the two reasons tells a caller which internal
+    names exist.
+    """
+
+
 _ALLOWED_SCHEMES = {"https", "http"}
 
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -134,16 +143,16 @@ def validate_git_url_no_ssrf(url: str) -> None:
 
 
 def _check_hostname_not_private(hostname: str) -> None:
-    """Resolve hostname and raise GitAccessError if it points to a private/internal IP."""
+    """Resolve hostname and raise GitHostNotAllowedError if it points to a private/internal IP."""
     try:
         addr_infos = socket.getaddrinfo(hostname, None)
     except socket.gaierror as e:
-        raise GitAccessError(f"DNS resolution failed for {hostname}") from e
+        raise GitHostNotAllowedError(f"DNS resolution failed for {hostname}") from e
 
     for addr_info in addr_infos:
         ip = ipaddress.ip_address(addr_info[4][0])
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
-            raise GitAccessError(
+            raise GitHostNotAllowedError(
                 f"Git URL resolves to a private network address: {hostname}"
             )
 

@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import signal
 import uuid
 from collections.abc import AsyncGenerator
@@ -9,7 +10,7 @@ from typing import cast
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from llama_agents.core.git.git_util import GitAccessError
+from llama_agents.core.git.git_util import GitAccessError, GitHostNotAllowedError
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from ..k8s_client import DeploymentIdUnavailableError, k8s_health_check
@@ -83,25 +84,43 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     )
 
 
+_HOST_NOT_ALLOWED_DETAIL = (
+    "Could not reach the repository host, or the host is not allowed."
+)
+# The `user:password@` part of a URL, e.g. a token in `https://bot:token@host/r`.
+_URL_USERINFO_RE = re.compile(r"(?<=://)[^/@\s]+@")
+
+
+def _redact_url_userinfo(text: str) -> str:
+    return _URL_USERINFO_RE.sub("***@", text)
+
+
 @app.exception_handler(GitAccessError)
 async def git_access_error_handler(
     request: Request, exc: GitAccessError
 ) -> JSONResponse:
-    """A repository URL or ref the user supplied was rejected or unreachable."""
+    """A repository URL or ref the user supplied was rejected or unreachable.
+
+    Host rejections share one generic detail; the log keeps the host and reason.
+    """
+    message = _redact_url_userinfo(exc.message)
     logger.warning(
         "Rejected git request on %s %s: %s",
         request.method,
         request.url.path,
-        exc.message,
+        message,
     )
-    return JSONResponse(status_code=400, content={"detail": exc.message})
+    detail = (
+        _HOST_NOT_ALLOWED_DETAIL if isinstance(exc, GitHostNotAllowedError) else message
+    )
+    return JSONResponse(status_code=400, content={"detail": detail})
 
 
 @app.exception_handler(DeploymentIdUnavailableError)
 async def deployment_id_unavailable_handler(
     request: Request, exc: DeploymentIdUnavailableError
 ) -> JSONResponse:
-    return JSONResponse(status_code=409, content={"detail": str(exc)})
+    return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
 
 
 # Include API routers

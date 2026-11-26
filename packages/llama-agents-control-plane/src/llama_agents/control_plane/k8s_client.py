@@ -299,7 +299,11 @@ async def k8s_health_check() -> tuple[int, dict[str, str]]:
 
 
 async def validate_deployment_id(deployment_id: str) -> bool:
-    """Check if a deployment ID is available (returns True if available)"""
+    """Check if a deployment ID is available (returns True if available).
+
+    Re-raises any apiserver error other than 404, so a failed lookup is not
+    reported as a taken ID.
+    """
     try:
         await get_deployment_crd(deployment_id)
         # If we get here, the deployment exists, so ID is not available
@@ -308,10 +312,8 @@ async def validate_deployment_id(deployment_id: str) -> bool:
         if e.status == 404:
             # Deployment doesn't exist, so ID is available
             return True
-        else:
-            # Some other error occurred
-            logger.error(f"Error checking deployment ID {deployment_id}: {e}")
-            return False
+        logger.error(f"Error checking deployment ID {deployment_id}: {e}")
+        raise
 
 
 async def validate_deployment_token(
@@ -381,7 +383,11 @@ async def find_deployment_id(name: str, force_suffix: bool = False) -> str:
 
 
 class DeploymentIdUnavailableError(ValueError):
-    """An explicitly requested deployment ID is reserved or already taken."""
+    """An explicitly requested deployment ID is reserved (400) or already taken (409)."""
+
+    def __init__(self, message: str, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 # in order to not conflict in URI routes
@@ -417,11 +423,13 @@ async def create_deployment(
         if explicit_id.lower() in reserved_deployment_ids:
             raise DeploymentIdUnavailableError(
                 f"Deployment ID {explicit_id!r} is reserved. "
-                f"Reserved IDs: {reserved_deployment_ids}"
+                f"Reserved IDs: {reserved_deployment_ids}",
+                status_code=400,
             )
         if not await validate_deployment_id(explicit_id):
             raise DeploymentIdUnavailableError(
-                f"Deployment ID {explicit_id!r} is already in use."
+                f"Deployment ID {explicit_id!r} is already in use.",
+                status_code=409,
             )
         deployment_id = explicit_id
     else:

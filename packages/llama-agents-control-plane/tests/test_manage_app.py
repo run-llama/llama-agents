@@ -1,57 +1,107 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+import logging
+from collections.abc import AsyncGenerator, Iterator
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+import pytest_asyncio
+from kubernetes.client.exceptions import ApiException
 from llama_agents.control_plane.manage_api.manage_app import app
 from llama_agents.core.schema.deployments import DeploymentResponse
 from llama_agents.core.schema.git_validation import GitApplicationValidationResponse
 
+PROJECT = {"project_id": "proj"}
+
+
+@pytest_asyncio.fixture
+async def client() -> AsyncGenerator[httpx.AsyncClient, None]:
+    # raise_app_exceptions=False so unhandled errors come back as the app's 500
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+@pytest.fixture
+def valid_git_application() -> Iterator[None]:
+    with patch(
+        "llama_agents.control_plane.manage_api.deployments_service.git_service.validate_git_application",
+        AsyncMock(
+            return_value=GitApplicationValidationResponse(
+                is_valid=True,
+                git_sha="12345678",
+                git_ref="main",
+                valid_deployment_file_path="llama_deploy.yaml",
+            )
+        ),
+    ):
+        yield
+
+
+async def _create(client: httpx.AsyncClient, deployment_id: str) -> httpx.Response:
+    return await client.post(
+        "/api/v1beta1/deployments",
+        params=PROJECT,
+        json={
+            "display_name": "My App",
+            "id": deployment_id,
+            "repo_url": "https://github.com/user/repo.git",
+        },
+    )
+
+
+async def _validate_repository(
+    client: httpx.AsyncClient, repository_url: str
+) -> httpx.Response:
+    return await client.post(
+        "/api/v1beta1/deployments/validate-repository",
+        params=PROJECT,
+        json={"repository_url": repository_url},
+    )
+
 
 @pytest.mark.asyncio
-async def test_health_does_not_touch_k8s() -> None:
+async def test_health_does_not_touch_k8s(client: httpx.AsyncClient) -> None:
     """`/health` stays a cheap process check, unrelated to k8s; backs startup and
     liveness so an apiserver outage can't restart every replica at once."""
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as client:
-        response = await client.get("/health")
+    response = await client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
 
 @pytest.mark.asyncio
-async def test_readyz_returns_200_when_k8s_is_healthy() -> None:
+async def test_readyz_returns_200_when_k8s_is_healthy(
+    client: httpx.AsyncClient,
+) -> None:
     with patch(
         "llama_agents.control_plane.k8s_client.check_k8s_connectivity",
         AsyncMock(return_value=None),
     ):
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://test"
-        ) as client:
-            response = await client.get("/readyz")
+        response = await client.get("/readyz")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
 
 
 @pytest.mark.asyncio
-async def test_readyz_returns_503_when_k8s_check_fails() -> None:
+async def test_readyz_returns_503_when_k8s_check_fails(
+    client: httpx.AsyncClient,
+) -> None:
     """A wedged kube-apiserver connection must fail /readyz, not report 200."""
     with patch(
         "llama_agents.control_plane.k8s_client.check_k8s_connectivity",
         AsyncMock(side_effect=TimeoutError("simulated wedge")),
     ):
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://test"
-        ) as client:
-            response = await client.get("/readyz")
+        response = await client.get("/readyz")
     assert response.status_code == 503
     assert response.json()["status"] == "unhealthy"
 
 
-def _existing_deployment() -> DeploymentResponse:
-    return DeploymentResponse(
+@pytest.mark.asyncio
+async def test_patch_with_rejected_repo_url_returns_400_and_does_not_update(
+    client: httpx.AsyncClient,
+) -> None:
+    existing = DeploymentResponse(
         id="my-app",
         display_name="my-app",
         project_id="proj",
@@ -63,14 +113,10 @@ def _existing_deployment() -> DeploymentResponse:
         secret_names=[],
         apiserver_url=None,
     )
-
-
-@pytest.mark.asyncio
-async def test_patch_with_rejected_repo_url_returns_400_and_does_not_update() -> None:
     with (
         patch(
             "llama_agents.control_plane.k8s_client.get_deployment",
-            AsyncMock(return_value=_existing_deployment()),
+            AsyncMock(return_value=existing),
         ),
         patch(
             "llama_agents.control_plane.k8s_client.get_deployment_pat",
@@ -80,49 +126,71 @@ async def test_patch_with_rejected_repo_url_returns_400_and_does_not_update() ->
             "llama_agents.control_plane.k8s_client.update_deployment", AsyncMock()
         ) as update_deployment,
     ):
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://test"
-        ) as client:
-            response = await client.patch(
-                "/api/v1beta1/deployments/my-app",
-                params={"project_id": "proj"},
-                json={"repo_url": "file:///tmp/repo"},
-            )
+        response = await client.patch(
+            "/api/v1beta1/deployments/my-app",
+            params=PROJECT,
+            json={"repo_url": "file:///tmp/repo"},
+        )
     assert response.status_code == 400
     assert "Disallowed git URL scheme 'file'" in response.json()["detail"]
     update_deployment.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_create_with_taken_deployment_id_returns_409() -> None:
-    with (
-        patch(
-            "llama_agents.control_plane.manage_api.deployments_service.git_service.validate_git_application",
-            AsyncMock(
-                return_value=GitApplicationValidationResponse(
-                    is_valid=True,
-                    git_sha="12345678",
-                    git_ref="main",
-                    valid_deployment_file_path="llama_deploy.yaml",
-                )
-            ),
-        ),
-        patch(
-            "llama_agents.control_plane.k8s_client.validate_deployment_id",
-            AsyncMock(return_value=False),
-        ),
+async def test_unresolvable_and_private_hosts_get_the_same_400_detail(
+    client: httpx.AsyncClient,
+) -> None:
+    private = await _validate_repository(client, "http://localhost/repo.git")
+    unresolvable = await _validate_repository(
+        client, "http://no-such-host.invalid/repo.git"
+    )
+    assert private.status_code == unresolvable.status_code == 400
+    assert private.json() == unresolvable.json()
+
+
+@pytest.mark.asyncio
+async def test_rejected_url_credentials_are_redacted_from_response_and_log(
+    client: httpx.AsyncClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        response = await _validate_repository(
+            client, "ssh://bot:s3cret@git.example.com/repo.git"
+        )
+    assert response.status_code == 400
+    assert "ssh://***@git.example.com/repo.git" in response.json()["detail"]
+    assert "s3cret" not in response.text
+    assert "s3cret" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_create_with_taken_deployment_id_returns_409(
+    client: httpx.AsyncClient, valid_git_application: None
+) -> None:
+    with patch(
+        "llama_agents.control_plane.k8s_client.get_deployment_crd",
+        AsyncMock(return_value=MagicMock()),
     ):
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://test"
-        ) as client:
-            response = await client.post(
-                "/api/v1beta1/deployments",
-                params={"project_id": "proj"},
-                json={
-                    "display_name": "My App",
-                    "id": "my-app",
-                    "repo_url": "https://github.com/user/repo.git",
-                },
-            )
+        response = await _create(client, "my-app")
     assert response.status_code == 409
     assert response.json()["detail"] == "Deployment ID 'my-app' is already in use."
+
+
+@pytest.mark.asyncio
+async def test_create_with_reserved_deployment_id_returns_400(
+    client: httpx.AsyncClient, valid_git_application: None
+) -> None:
+    response = await _create(client, "version")
+    assert response.status_code == 400
+    assert "is reserved" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_create_when_id_lookup_fails_returns_500_not_409(
+    client: httpx.AsyncClient, valid_git_application: None
+) -> None:
+    with patch(
+        "llama_agents.control_plane.k8s_client.get_deployment_crd",
+        AsyncMock(side_effect=ApiException(status=503)),
+    ):
+        response = await _create(client, "my-app")
+    assert response.status_code == 500
