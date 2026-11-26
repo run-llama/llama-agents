@@ -279,3 +279,19 @@ async def test_create_state_store_concurrent_writers_share_lock(
     await asyncio.gather(increment(first), increment(second))
 
     assert await first.get("count") == 20
+
+
+@pytest.mark.asyncio
+async def test_in_memory_database_survives_across_operations() -> None:
+    store = SqliteWorkflowStore(":memory:")
+    await store.update(
+        PersistentHandler(handler_id="h", workflow_name="wf", status="running")
+    )
+    state = store.create_state_store("r")
+    await state.set("page", 2)
+
+    assert [handler.handler_id for handler in await store.query(HandlerQuery())] == [
+        "h"
+    ]
+    assert await state.get("page") == 2
+    assert await SqliteWorkflowStore(":memory:").query(HandlerQuery()) == []

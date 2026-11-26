@@ -44,12 +44,13 @@ class SqliteWorkflowStore(AbstractWorkflowStore):
         super().__init__()
         self.db_path = db_path
         self.poll_interval = poll_interval
-        self._single_connection = single_connection
         self._persistent_conn: sqlite3.Connection | None = None
         self._conditions: weakref.WeakValueDictionary[str, asyncio.Condition] = (
             weakref.WeakValueDictionary()
         )
-        if single_connection:
+        if db_path == ":memory:":
+            self._persistent_conn = sqlite3.connect(db_path)
+        elif single_connection:
             self._persistent_conn = self._open_nolock(db_path)
         if auto_migrate:
             self._run_migrations()
@@ -81,8 +82,7 @@ class SqliteWorkflowStore(AbstractWorkflowStore):
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        if self._single_connection:
-            assert self._persistent_conn is not None
+        if self._persistent_conn is not None:
             yield self._persistent_conn
         else:
             conn = sqlite3.connect(self.db_path, timeout=30.0)
