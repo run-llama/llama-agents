@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import pathlib
 import sqlite3
 import weakref
 from collections.abc import AsyncIterator
@@ -64,7 +65,12 @@ class SqliteWorkflowStore(AbstractWorkflowStore):
         """
         conn: sqlite3.Connection | None = None
         try:
-            conn = sqlite3.connect(f"file:{db_path}?vfs=unix-none", uri=True)
+            uri = (
+                "file::memory:"
+                if db_path == ":memory:"
+                else pathlib.Path(db_path).absolute().as_uri()
+            )
+            conn = sqlite3.connect(f"{uri}?vfs=unix-none", uri=True)
             conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
             return conn
         except sqlite3.OperationalError as exc:
