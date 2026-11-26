@@ -20,7 +20,7 @@ from llama_index_instrumentation.dispatcher import (
     instrument_tags,
 )
 from pydantic import PrivateAttr
-from workflows.context import Context, PickleSerializer
+from workflows.context import Context, JsonSerializer, PickleSerializer
 from workflows.decorators import catch_error, step
 from workflows.errors import (
     WorkflowConfigurationError,
@@ -61,6 +61,35 @@ class MyStop(StopEvent):
 
 class ResumeStartEvent(StartEvent):
     topic: str
+
+
+@pytest.mark.parametrize("serializer_type", [JsonSerializer, PickleSerializer])
+async def test_custom_stop_event_dynamic_fields_survive_context_restore(
+    serializer_type: type[JsonSerializer],
+) -> None:
+    class FinishWorkflow(Workflow):
+        @step
+        async def finish(self, ctx: Context, ev: StartEvent) -> MyStop:
+            completion = MyStop(outcome="done")
+            completion["document_id"] = ev.document_id
+            await ctx.store.set("completion", completion)
+            return completion
+
+    workflow = FinishWorkflow()
+    handler = workflow.run(document_id="doc-1")
+    result = await handler
+    assert isinstance(result, MyStop)
+    assert result.outcome == "done"
+    assert result.document_id == "doc-1"
+
+    serializer = serializer_type()
+    restored_ctx = Context.from_dict(
+        workflow, handler.ctx.to_dict(serializer=serializer), serializer=serializer
+    )
+    restored = await restored_ctx.store.get("completion")
+    assert isinstance(restored, MyStop)
+    assert restored.outcome == "done"
+    assert restored.document_id == "doc-1"
 
 
 def test_fn() -> None:

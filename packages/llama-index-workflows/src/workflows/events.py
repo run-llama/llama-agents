@@ -362,14 +362,16 @@ class StopEvent(Event):
 
     @model_serializer(mode="wrap")
     def custom_model_dump(self, handler: Any) -> dict[str, Any]:
-        data = handler(self)
+        data = super().custom_model_dump(handler)
         # include _result in serialization for base StopEvent
         if self._result is not None:
             data["result"] = self._result
         return data
 
     def __repr__(self) -> str:
-        dict_items = {**self._data, **self.model_dump()}
+        data = self.model_dump()
+        data.pop("_data", None)
+        dict_items = {**self._data, **data}
         # Format as key=value pairs
         parts = [f"{k}={v!r}" for k, v in dict_items.items()]
         dict_str = ", ".join(parts)
