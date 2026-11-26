@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -600,3 +601,29 @@ async def test_copy_reproduces_every_namespace(db_path: str) -> None:
         db_path=db_path, run_id="run-dst", namespace=("child",)
     )
     assert await dst_child.get("k") == "child-val"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "run#2.db",
+        "run%20two.db",
+        pytest.param(
+            "run?draft.db",
+            marks=pytest.mark.skipif(
+                sys.platform == "win32",
+                reason="Windows filenames cannot contain a question mark",
+            ),
+        ),
+    ],
+)
+async def test_single_connection_reopens_literal_filename(
+    tmp_path: Path, filename: str
+) -> None:
+    path = str(tmp_path / filename)
+    regular = SqliteWorkflowStore(path)
+    await regular.create_state_store("r").set("checkpoint", 42)
+
+    reopened = SqliteWorkflowStore(path, single_connection=True)
+    assert await reopened.create_state_store("r").get("checkpoint") == 42
