@@ -277,6 +277,9 @@ class StepWorkerWaiter(Generic[EventType]):
     # Stable identity for the suspended work item. Used to rebuild implicit
     # waiter IDs across retries, serialization, and resume.
     work_item_id: str | None = None
+    # Dispatch that created this registration, retained during requirements
+    # refreshes so its timer cannot expire a later reuse of the same waiter ID.
+    registration_id: str | None = None
 
 
 @dataclass()

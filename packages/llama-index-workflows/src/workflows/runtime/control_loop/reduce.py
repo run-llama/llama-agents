@@ -958,6 +958,11 @@ def _apply_step_result(
             scope_path=this_execution.scope_path,
             collection_release_payload=this_execution.shared_state.collection_release_payload,
             work_item_id=this_execution.work_item_id,
+            registration_id=(
+                worker_state.collected_waiters[existing].registration_id
+                if existing is not None
+                else this_execution.invocation_id
+            ),
         )
         if existing is not None:
             worker_state.collected_waiters[existing] = new_waiter
@@ -972,6 +977,7 @@ def _apply_step_result(
                         waiter_id=result.waiter_id,
                         timeout=result.timeout,
                         invocation_namespace=path,
+                        registration_id=new_waiter.registration_id,
                     )
                 )
     elif isinstance(result, DeleteWaiter):
@@ -1932,8 +1938,14 @@ def _process_waiter_timeout_tick(
         (w for w in worker_state.collected_waiters if w.waiter_id == tick.waiter_id),
         None,
     )
-    # Only act if the waiter is still pending (not yet resolved by an event)
-    if waiter is None or waiter.resolved_event is not None:
+    # Only act if this registration is still pending. Older journals have no
+    # registration ID and keep their original waiter-ID-only semantics.
+    if waiter is None or waiter.resolved_event is not None or waiter.timed_out:
+        return state, commands
+    if (
+        tick.registration_id is not None
+        and tick.registration_id != waiter.registration_id
+    ):
         return state, commands
     waiter.timed_out = True
     # Timeout resumes the suspended work item whole, like waiter resolution.

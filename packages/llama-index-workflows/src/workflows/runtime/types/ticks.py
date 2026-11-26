@@ -132,6 +132,8 @@ class TickWaiterTimeout(BaseModel):
     waiter_id: str
     invocation_namespace: tuple[str, ...] = Field(default=(), exclude=True)
     stamped_at: float | None = None
+    # Missing in older journals, which retain the legacy waiter-ID behavior.
+    registration_id: str | None = None
 
 
 class TickSessionStart(BaseModel):

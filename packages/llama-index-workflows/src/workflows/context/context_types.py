@@ -156,6 +156,8 @@ class SerializedWaiter(BaseModel):
     collection_release_payload: SerializedCollectionReleasePayload | None = None
     # Stable identity for the suspended work item, if available.
     work_item_id: str | None = None
+    # Identity of the registration that owns the pending timeout.
+    registration_id: str | None = None
 
     @model_validator(mode="before")
     @classmethod
