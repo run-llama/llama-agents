@@ -10,7 +10,7 @@ import sqlite3
 import weakref
 from collections.abc import AsyncIterator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Iterator, Sequence
 
 from llama_agents.client.protocol.serializable_events import EventEnvelopeWithMetadata
@@ -31,6 +31,15 @@ from .sqlite_state_store import SqliteStateStore
 logger = logging.getLogger(__name__)
 
 _TICK_PAGE_SIZE = 100
+
+
+def _journal_timestamp(value: str) -> datetime:
+    timestamp = datetime.fromisoformat(value)
+    return (
+        timestamp
+        if timestamp.tzinfo is not None
+        else timestamp.replace(tzinfo=timezone.utc)
+    )
 
 
 class SqliteWorkflowStore(AbstractWorkflowStore):
@@ -244,7 +253,7 @@ class SqliteWorkflowStore(AbstractWorkflowStore):
             StoredEvent(
                 run_id=row[0],
                 sequence=row[1],
-                timestamp=datetime.fromisoformat(row[2]),
+                timestamp=_journal_timestamp(row[2]),
                 event=EventEnvelopeWithMetadata.model_validate_json(row[3]),
             )
             for row in rows
@@ -297,7 +306,7 @@ class SqliteWorkflowStore(AbstractWorkflowStore):
             StoredTick(
                 run_id=row[0],
                 sequence=row[1],
-                timestamp=datetime.fromisoformat(row[2]),
+                timestamp=_journal_timestamp(row[2]),
                 tick_data=json.loads(row[3]),
             )
             for row in rows
@@ -326,7 +335,7 @@ class SqliteWorkflowStore(AbstractWorkflowStore):
                 tick = StoredTick(
                     run_id=row[0],
                     sequence=row[1],
-                    timestamp=datetime.fromisoformat(row[2]),
+                    timestamp=_journal_timestamp(row[2]),
                     tick_data=json.loads(row[3]),
                 )
                 yield tick
