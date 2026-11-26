@@ -564,7 +564,8 @@ class WorkflowClient:
         Args:
             handler_id: ID of the handler to poll.
             timeout: Maximum number of seconds to wait. ``None`` waits
-                indefinitely.
+                indefinitely. Positive timeouts include status requests.
+                ``0`` performs one status request without waiting for completion.
             poll_interval: Initial number of seconds between status requests.
             max_poll_interval: Maximum number of seconds between requests.
             backoff: Strategy for increasing the polling interval after each
@@ -591,9 +592,23 @@ class WorkflowClient:
         loop = asyncio.get_running_loop()
         deadline = None if timeout is None else loop.time() + timeout
         current_interval = poll_interval
+        timeout_message = (
+            f"Handler {handler_id!r} did not complete within {timeout} seconds"
+        )
 
         while True:
-            handler = await self.get_handler(handler_id)
+            if deadline is None or timeout == 0:
+                handler = await self.get_handler(handler_id)
+            else:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise TimeoutError(timeout_message)
+                try:
+                    handler = await asyncio.wait_for(
+                        self.get_handler(handler_id), timeout=remaining
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise TimeoutError(timeout_message) from exc
             if is_status_completed(handler.status):
                 return handler
 
@@ -602,9 +617,7 @@ class WorkflowClient:
             else:
                 remaining = deadline - loop.time()
                 if remaining <= 0:
-                    raise TimeoutError(
-                        f"Handler {handler_id!r} did not complete within {timeout} seconds"
-                    )
+                    raise TimeoutError(timeout_message)
                 sleep_interval = min(current_interval, remaining)
 
             await asyncio.sleep(sleep_interval)
