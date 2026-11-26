@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -102,6 +103,19 @@ def store(
         return SqliteWorkflowStore(str(tmp_path / "test.sqlite"), poll_interval=0.05)
     else:
         return create_agent_data_store(FakeAgentDataBackend(), monkeypatch)
+
+
+@pytest.mark.asyncio
+async def test_sqlite_journal_timestamps_are_aware(tmp_path: Path) -> None:
+    store = SqliteWorkflowStore(str(tmp_path / "journal.db"))
+    await store.append_event("r", make_envelope())
+    await store.append_tick("r", {"step": "start"})
+
+    (event,) = await store.query_events("r")
+    (tick,) = await store.get_ticks("r")
+    replay = [entry async for entry in store.stream_ticks("r")]
+    for timestamp in (event.timestamp, tick.timestamp, replay[0].timestamp):
+        assert timestamp.utcoffset() == timedelta(0)
 
 
 @pytest.mark.asyncio
