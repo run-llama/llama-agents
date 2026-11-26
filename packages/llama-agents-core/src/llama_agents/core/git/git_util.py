@@ -77,12 +77,27 @@ def parse_github_repo_url(repo_url: str) -> tuple[str, str]:
     raise ValueError(f"Could not parse GitHub repository URL: {repo_url}")
 
 
+# Credentials in a URL: the longest run of non-space, non-slash characters
+# ending in `@`. Covers `https://user:pass@host`, scheme-less `user:pass@host`,
+# token-only `https://token@host`, and a raw `@` inside the password.
+_URL_USERINFO_RE = re.compile(r"[^\s/'\"]+@")
+
+
+def redact_url_userinfo(text: str) -> str:
+    """Replace credentials in any URL inside ``text`` with ``***``."""
+    return _URL_USERINFO_RE.sub("***@", text)
+
+
 class GitAccessError(Exception):
-    """Error raised when a user reportable git error occurs, e.g connection fails, cannot access repository, timeout, ref not found, etc."""
+    """Error raised when a user reportable git error occurs, e.g connection fails, cannot access repository, timeout, ref not found, etc.
+
+    Messages often quote the repository URL and get logged and returned to API
+    callers, so any credentials in them are redacted on construction.
+    """
 
     def __init__(self, message: str):
-        self.message = message
-        super().__init__(message)
+        self.message = redact_url_userinfo(message)
+        super().__init__(self.message)
 
 
 class GitHostNotAllowedError(GitAccessError):

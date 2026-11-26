@@ -247,6 +247,24 @@ async def test_clone_repo_network_error(mock_clone: MagicMock) -> None:
 
 @patch(f"{GIT_UTIL}.porcelain.clone")
 @pytest.mark.asyncio
+async def test_clone_error_message_redacts_url_credentials(
+    mock_clone: MagicMock,
+) -> None:
+    mock_clone.side_effect = HangupException()
+
+    with tempfile.TemporaryDirectory() as t:
+        with pytest.raises(GitAccessError) as exc_info:
+            await clone_repo(
+                "https://bot:s3cret@gitlab.example.com/r.git",
+                "main",
+                dest_dir=Path(t) / "sub",
+            )
+    assert "https://***@gitlab.example.com/r.git" in exc_info.value.message
+    assert "s3cret" not in str(exc_info.value)
+
+
+@patch(f"{GIT_UTIL}.porcelain.clone")
+@pytest.mark.asyncio
 async def test_clone_repo_with_basic_auth(mock_clone: MagicMock) -> None:
     """Basic auth gets parsed and forwarded to dulwich as username/password."""
     mock_clone.return_value = _make_fake_repo("e" * 40)

@@ -1,6 +1,5 @@
 import logging
 import os
-import re
 import signal
 import uuid
 from collections.abc import AsyncGenerator
@@ -87,12 +86,6 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 _HOST_NOT_ALLOWED_DETAIL = (
     "Could not reach the repository host, or the host is not allowed."
 )
-# The `user:password@` part of a URL, e.g. a token in `https://bot:token@host/r`.
-_URL_USERINFO_RE = re.compile(r"(?<=://)[^/@\s]+@")
-
-
-def _redact_url_userinfo(text: str) -> str:
-    return _URL_USERINFO_RE.sub("***@", text)
 
 
 @app.exception_handler(GitAccessError)
@@ -103,15 +96,16 @@ async def git_access_error_handler(
 
     Host rejections share one generic detail; the log keeps the host and reason.
     """
-    message = _redact_url_userinfo(exc.message)
     logger.warning(
         "Rejected git request on %s %s: %s",
         request.method,
         request.url.path,
-        message,
+        exc.message,
     )
     detail = (
-        _HOST_NOT_ALLOWED_DETAIL if isinstance(exc, GitHostNotAllowedError) else message
+        _HOST_NOT_ALLOWED_DETAIL
+        if isinstance(exc, GitHostNotAllowedError)
+        else exc.message
     )
     return JSONResponse(status_code=400, content={"detail": detail})
 

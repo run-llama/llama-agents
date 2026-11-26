@@ -148,18 +148,27 @@ async def test_unresolvable_and_private_hosts_get_the_same_400_detail(
     assert private.json() == unresolvable.json()
 
 
+@pytest.mark.parametrize(
+    ("repository_url", "redacted"),
+    [
+        ("ssh://bot:s3cret@git.example.com/repo.git", "ssh://***@git.example.com"),
+        ("bot:s3cret@git.example.com/repo.git", "***@git.example.com"),
+        ("ssh://bot:s3@cret@git.example.com/repo.git", "ssh://***@git.example.com"),
+    ],
+)
 @pytest.mark.asyncio
 async def test_rejected_url_credentials_are_redacted_from_response_and_log(
-    client: httpx.AsyncClient, caplog: pytest.LogCaptureFixture
+    client: httpx.AsyncClient,
+    caplog: pytest.LogCaptureFixture,
+    repository_url: str,
+    redacted: str,
 ) -> None:
     with caplog.at_level(logging.WARNING):
-        response = await _validate_repository(
-            client, "ssh://bot:s3cret@git.example.com/repo.git"
-        )
+        response = await _validate_repository(client, repository_url)
     assert response.status_code == 400
-    assert "ssh://***@git.example.com/repo.git" in response.json()["detail"]
-    assert "s3cret" not in response.text
-    assert "s3cret" not in caplog.text
+    assert redacted in response.json()["detail"]
+    assert "s3" not in response.text
+    assert "s3" not in caplog.text
 
 
 @pytest.mark.asyncio

@@ -312,7 +312,6 @@ async def validate_deployment_id(deployment_id: str) -> bool:
         if e.status == 404:
             # Deployment doesn't exist, so ID is available
             return True
-        logger.error(f"Error checking deployment ID {deployment_id}: {e}")
         raise
 
 
