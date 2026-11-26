@@ -6,7 +6,7 @@ from typing import Any, TypeVar
 
 import yaml
 from llama_agents.core._compat import load_toml_file
-from llama_agents.core.git.git_util import get_git_root, is_git_repo
+from llama_agents.core.git.git_util import GitAccessError, get_git_root
 from llama_agents.core.path_util import validate_path_traversal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -19,11 +19,12 @@ def read_deployment_config_from_git_root_or_cwd(
     """
     Read the deployment config from the git root or cwd.
     """
-    if is_git_repo():
-        git_root = get_git_root()
-        relative_cwd_path = cwd.relative_to(git_root)
-        return read_deployment_config(git_root, relative_cwd_path / config_path)
-    return read_deployment_config(cwd, config_path)
+    cwd = cwd.resolve()
+    try:
+        git_root = get_git_root(cwd)
+    except GitAccessError:
+        return read_deployment_config(cwd, config_path)
+    return read_deployment_config(git_root, cwd.relative_to(git_root) / config_path)
 
 
 def read_deployment_config(source_root: Path, config_path: Path) -> "DeploymentConfig":
