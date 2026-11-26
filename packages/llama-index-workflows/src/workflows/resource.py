@@ -151,11 +151,11 @@ class _Resource(Generic[T]):
             annotation = type_hints.get(param.name, param.annotation)
             if get_origin(annotation) is Annotated:
                 args = get_args(annotation)
-                if len(args) >= 2:
-                    descriptor = args[1]
-                    if isinstance(descriptor, ResourceDescriptor):
-                        type_annotation = args[0]
-                        deps.append((param.name, descriptor, type_annotation))
+                descriptor = next(
+                    (a for a in args[1:] if isinstance(a, ResourceDescriptor)), None
+                )
+                if descriptor is not None:
+                    deps.append((param.name, descriptor, args[0]))
         return deps
 
 

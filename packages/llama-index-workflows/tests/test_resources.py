@@ -506,6 +506,64 @@ async def test_recursive_resource_injection() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("is_async", [False, True])
+async def test_recursive_resource_with_unrelated_metadata(is_async: bool) -> None:
+    def get_name() -> str:
+        return "configured"
+
+    def get_message(
+        name: Annotated[str, "resource name", Resource(get_name)],
+        prefix: Annotated[str, "ordinary default"] = "hello",
+    ) -> str:
+        return f"{prefix} {name}"
+
+    async def get_message_async(
+        name: Annotated[str, "resource name", Resource(get_name)],
+        prefix: Annotated[str, "ordinary default"] = "hello",
+    ) -> str:
+        return f"{prefix} {name}"
+
+    factory = get_message_async if is_async else get_message
+
+    class MetadataWorkflow(Workflow):
+        @step
+        async def use_resource(
+            self,
+            ev: StartEvent,
+            message: Annotated[str, "message", Resource(factory)],
+        ) -> StopEvent:
+            return StopEvent(result=message)
+
+    assert await MetadataWorkflow(timeout=2).run() == "hello configured"
+
+
+@pytest.mark.asyncio
+async def test_recursive_resource_config_with_unrelated_metadata(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"name": "configured"}))
+
+    def get_name(
+        config: Annotated[
+            _FactoryConfig,
+            "factory configuration",
+            ResourceConfig(config_file=str(config_path)),
+        ],
+    ) -> str:
+        return config.name
+
+    class ConfigMetadataWorkflow(Workflow):
+        @step
+        async def use_resource(
+            self, ev: StartEvent, name: Annotated[str, Resource(get_name)]
+        ) -> StopEvent:
+            return StopEvent(result=name)
+
+    assert await ConfigMetadataWorkflow(timeout=2).run() == "configured"
+
+
+@pytest.mark.asyncio
 async def test_recursive_resource_caching() -> None:
     """Test that nested resources respect individual cache settings."""
     call_counts = {"db": 0, "repo": 0}
