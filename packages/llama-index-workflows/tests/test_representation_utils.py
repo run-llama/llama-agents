@@ -1,7 +1,7 @@
 import json
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import pytest
 from pydantic import BaseModel
@@ -273,6 +273,32 @@ def test_get_workflow_representation_with_resources() -> None:
         label="db_client",
     )
     assert len(edges) == 1
+
+
+@pytest.mark.asyncio
+async def test_resource_without_source_can_be_represented() -> None:
+    namespace: dict[str, Any] = {}
+    exec(
+        'def factory() -> str:\n    """Generated resource."""\n    return "value"\n',
+        namespace,
+    )
+    factory = namespace["factory"]
+
+    class GeneratedResourceWorkflow(Workflow):
+        @step
+        async def start_step(
+            self, ev: StartEvent, value: Annotated[str, Resource(factory)]
+        ) -> StopEvent:
+            return StopEvent(result=value)
+
+    workflow = GeneratedResourceWorkflow(timeout=2)
+    assert await workflow.run() == "value"
+    graph = get_workflow_representation(workflow)
+    (node,) = _resource_nodes(graph)
+    assert node.getter_name == "factory"
+    assert node.description == "Generated resource."
+    assert node.source_line is None
+    assert len(_find_edges(graph, source="start_step", target_prefix="resource_")) == 1
 
 
 def test_resource_nodes_are_deduplicated() -> None:
