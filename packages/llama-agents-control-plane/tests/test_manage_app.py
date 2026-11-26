@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 LlamaIndex Inc.
 from __future__ import annotations
 
 import logging
@@ -132,7 +134,7 @@ async def test_patch_with_rejected_repo_url_returns_400_and_does_not_update(
             json={"repo_url": "file:///tmp/repo"},
         )
     assert response.status_code == 400
-    assert "Disallowed git URL scheme 'file'" in response.json()["detail"]
+    assert "Disallowed git URL scheme: file:///tmp/repo" in response.json()["detail"]
     update_deployment.assert_not_called()
 
 
@@ -149,11 +151,12 @@ async def test_unresolvable_and_private_hosts_get_the_same_400_detail(
 
 
 @pytest.mark.parametrize(
-    ("repository_url", "redacted"),
+    "repository_url",
     [
-        ("ssh://bot:s3cret@git.example.com/repo.git", "ssh://***@git.example.com"),
-        ("bot:s3cret@git.example.com/repo.git", "***@git.example.com"),
-        ("ssh://bot:s3@cret@git.example.com/repo.git", "ssh://***@git.example.com"),
+        "ssh://bot:s3cret@git.example.com/repo.git",
+        "bot:s3cret@git.example.com/repo.git",
+        "s3cret-token:x-oauth-basic@git.example.com/repo.git",
+        "ssh://bot:s3'c/r@et@git.example.com/repo.git",
     ],
 )
 @pytest.mark.asyncio
@@ -161,12 +164,11 @@ async def test_rejected_url_credentials_are_redacted_from_response_and_log(
     client: httpx.AsyncClient,
     caplog: pytest.LogCaptureFixture,
     repository_url: str,
-    redacted: str,
 ) -> None:
     with caplog.at_level(logging.WARNING):
         response = await _validate_repository(client, repository_url)
     assert response.status_code == 400
-    assert redacted in response.json()["detail"]
+    assert "***@git.example.com/repo.git" in response.json()["detail"]
     assert "s3" not in response.text
     assert "s3" not in caplog.text
 

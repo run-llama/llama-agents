@@ -259,7 +259,7 @@ async def test_clone_error_message_redacts_url_credentials(
                 "main",
                 dest_dir=Path(t) / "sub",
             )
-    assert "https://***@gitlab.example.com/r.git" in exc_info.value.message
+    assert "***@gitlab.example.com/r.git" in exc_info.value.message
     assert "s3cret" not in str(exc_info.value)
 
 

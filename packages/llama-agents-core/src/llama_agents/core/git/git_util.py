@@ -77,27 +77,30 @@ def parse_github_repo_url(repo_url: str) -> tuple[str, str]:
     raise ValueError(f"Could not parse GitHub repository URL: {repo_url}")
 
 
-# Credentials in a URL: the longest run of non-space, non-slash characters
-# ending in `@`. Covers `https://user:pass@host`, scheme-less `user:pass@host`,
-# token-only `https://token@host`, and a raw `@` inside the password.
-_URL_USERINFO_RE = re.compile(r"[^\s/'\"]+@")
+# Everything in a token up to its last `@`: the scheme plus any `user:pass@`,
+# `token@` or scheme-less `user:pass@`, including passwords with `@`, `/` or `'`.
+_URL_USERINFO_RE = re.compile(r"\S+@")
 
 
 def redact_url_userinfo(text: str) -> str:
-    """Replace credentials in any URL inside ``text`` with ``***``."""
+    """Replace credentials in URLs inside ``text``, e.g. ``https://u:p@host/r`` -> ``***@host/r``.
+
+    Apply it to URLs and to library error text that may quote them; it also
+    rewrites any other ``word@`` in the text.
+    """
     return _URL_USERINFO_RE.sub("***@", text)
 
 
 class GitAccessError(Exception):
     """Error raised when a user reportable git error occurs, e.g connection fails, cannot access repository, timeout, ref not found, etc.
 
-    Messages often quote the repository URL and get logged and returned to API
-    callers, so any credentials in them are redacted on construction.
+    Messages are logged and returned to API callers, so any URL in them goes
+    through :func:`redact_url_userinfo` first.
     """
 
     def __init__(self, message: str):
-        self.message = redact_url_userinfo(message)
-        super().__init__(self.message)
+        self.message = message
+        super().__init__(message)
 
 
 class GitHostNotAllowedError(GitAccessError):
@@ -126,18 +129,20 @@ def validate_git_url(url: str) -> None:
     network address.  Callers that accept user-supplied URLs should also
     call :func:`validate_git_url_no_ssrf` to guard against SSRF.
     """
+    shown = redact_url_userinfo(url)
     if url.startswith("-"):
-        raise GitAccessError(f"Invalid git URL (starts with '-'): {url}")
+        raise GitAccessError(f"Invalid git URL (starts with '-'): {shown}")
 
     if url.startswith("ext::"):
-        raise GitAccessError(f"Disallowed git URL scheme 'ext': {url}")
+        raise GitAccessError(f"Disallowed git URL scheme 'ext': {shown}")
 
     parsed = urllib.parse.urlparse(url)
     scheme = parsed.scheme.lower()
 
+    # The message leaves out the parsed scheme: in `token:x@host` it is the token.
     if scheme not in _ALLOWED_SCHEMES:
         raise GitAccessError(
-            f"Disallowed git URL scheme '{scheme}': {url}. "
+            f"Disallowed git URL scheme: {shown}. "
             f"Allowed schemes: {', '.join(sorted(_ALLOWED_SCHEMES))}"
         )
 
@@ -152,7 +157,9 @@ def validate_git_url_no_ssrf(url: str) -> None:
     parsed = urllib.parse.urlparse(url)
     hostname = parsed.hostname
     if not hostname:
-        raise GitAccessError(f"Invalid git URL (no hostname): {url}")
+        raise GitAccessError(
+            f"Invalid git URL (no hostname): {redact_url_userinfo(url)}"
+        )
 
     _check_hostname_not_private(hostname)
 
@@ -365,7 +372,8 @@ def clone_repo_sync(
             # HangupException, NotGitRepository, OSError, and assorted
             # GitProtocolError subclasses — normalize them all here.
             raise GitAccessError(
-                f"Failed to clone repository {repository_url}: {e}"
+                f"Failed to clone repository {redact_url_userinfo(repository_url)}: "
+                f"{redact_url_userinfo(str(e))}"
             ) from e
 
         try:
@@ -381,7 +389,7 @@ def clone_repo_sync(
                     head_sha_bytes = repo.head()
                 except KeyError as e:
                     raise GitAccessError(
-                        f"Cloned repository {repository_url} has no HEAD"
+                        f"Cloned repository {redact_url_userinfo(repository_url)} has no HEAD"
                     ) from e
 
             if git_sha is None and git_ref and is_sha_ref:
