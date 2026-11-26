@@ -389,8 +389,9 @@ class WorkflowClient:
                 all events from the beginning. ``"now"`` skips existing events
                 and only delivers new ones. An integer ``N`` streams events
                 after sequence ``N``.
-            max_reconnect_attempts: Maximum reconnect attempts on connection
-                drop. Defaults to ``3``.
+            max_reconnect_attempts: Maximum consecutive reconnect attempts on
+                connection drop. Resets after receiving an event, rather than
+                response headers alone. Defaults to ``3``.
         """
         queue: asyncio.Queue[_QueueItem] = asyncio.Queue()
         stream = EventStream(queue, None, after_sequence)
@@ -423,9 +424,6 @@ class WorkflowClient:
 
                                 _raise_for_status_with_body(response)
 
-                                # Reset attempts on successful connection
-                                attempts = 0
-
                                 # Parse SSE stream: "id: N\ndata: {...}\n\n"
                                 current_id: str | None = None
                                 async for line in response.aiter_lines():
@@ -451,6 +449,8 @@ class WorkflowClient:
                                                 event=event,
                                             )
                                         )
+                                        # Headers alone do not prove the stream is usable.
+                                        attempts = 0
                                         current_id = None
 
                             # Stream ended normally (server closed connection)
