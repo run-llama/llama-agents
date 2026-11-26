@@ -148,3 +148,15 @@ async def test_debounced_sorted_prefix_sorts_then_passthrough() -> None:
 
     # First three should be sorted, rest in order
     assert output == [1, 2, 3, 4, 5]
+
+
+@pytest.mark.asyncio
+async def test_debounced_prefix_starts_with_first_log_entry() -> None:
+    logs = _gen_with_delays(["later", "earlier"], [0.1, 0])
+    result = [
+        entry
+        async for entry in debounced_sorted_prefix(
+            logs, key=str, debounce_seconds=0.02, max_window_seconds=0.04
+        )
+    ]
+    assert result == ["earlier", "later"]
