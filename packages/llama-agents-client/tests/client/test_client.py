@@ -61,6 +61,28 @@ async def test_list_workflows(client: WorkflowClient) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "handler_id"),
+    [("review#2", "ticket-1"), ("review", "ticket?revision=1%20")],
+)
+async def test_url_delimiters_in_workflow_and_handler_names(
+    client: WorkflowClient, server: WorkflowServer, name: str, handler_id: str
+) -> None:
+    server.add_workflow(name, GreetingWorkflow())
+    schema = await client.get_workflow_schema(name)
+    assert schema.start["title"] == "InputEvent"
+
+    handler = await client.run_workflow(
+        name, handler_id=handler_id, start_event=InputEvent(greeting="hi", name="Jo")
+    )
+    assert (
+        (await client.get_handler(handler_id)).handler_id
+        == handler.handler_id
+        == handler_id
+    )
+
+
+@pytest.mark.asyncio
 async def test_get_workflow_schema(client: WorkflowClient) -> None:
     schema = await client.get_workflow_schema("greeting")
 
