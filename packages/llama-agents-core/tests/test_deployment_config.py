@@ -1,8 +1,14 @@
+from __future__ import annotations
+
 import json
 from pathlib import Path
 
 import pytest
-from llama_agents.core.deployment_config import read_deployment_config
+from dulwich.repo import Repo
+from llama_agents.core.deployment_config import (
+    read_deployment_config,
+    read_deployment_config_from_git_root_or_cwd,
+)
 
 
 def write_file(path: Path, content: str) -> None:
@@ -505,3 +511,22 @@ def test_absolute_ui_directory_outside_source_root_is_rejected(tmp_path: Path) -
     # Act & Assert: expected to raise
     with pytest.raises((ValueError, AssertionError, RuntimeError)):
         _ = read_deployment_config(tmp_path, Path("."))
+
+
+@pytest.mark.parametrize("target_in_git", [False, True])
+def test_read_config_from_another_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target_in_git: bool
+) -> None:
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    Repo.init(caller).close()
+    monkeypatch.chdir(caller)
+    target = tmp_path / "target"
+    project = target / "service"
+    project.mkdir(parents=True)
+    if target_in_git:
+        Repo.init(target).close()
+    write_file(project / "llama_agents.toml", 'name = "worker"')
+
+    config = read_deployment_config_from_git_root_or_cwd(project, Path("."))
+    assert config.name == "worker"

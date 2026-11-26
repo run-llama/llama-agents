@@ -36,10 +36,10 @@ _DETACHED_BRANCH_REF = Ref(b"refs/heads/_llama_checkout")
 
 
 @contextlib.contextmanager
-def _discover_repo() -> Iterator[Repo]:
-    """Discover the repo at cwd, yield it, and guarantee close."""
+def _discover_repo(start: Path | None = None) -> Iterator[Repo]:
+    """Discover the repo from start (or cwd), yield it, and guarantee close."""
     try:
-        repo = Repo.discover(start=str(Path.cwd()))
+        repo = Repo.discover(start=str(start or Path.cwd()))
     except NotGitRepository as e:
         raise GitAccessError("Not a git repository") from e
     try:
@@ -532,8 +532,8 @@ def get_commit_sha_for_ref(ref: str) -> str | None:
         return None
 
 
-def get_git_root() -> Path:
-    with _discover_repo() as repo:
+def get_git_root(start: Path | None = None) -> Path:
+    with _discover_repo(start) as repo:
         return Path(repo.path)
 
 
