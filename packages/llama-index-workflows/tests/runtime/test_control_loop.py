@@ -1503,3 +1503,33 @@ async def test_external_event_not_double_routed_when_waiter_exists(
     assert step_run_count == 2, (
         f"handle_input should run exactly twice, but ran {step_run_count} times"
     )
+
+
+class _AnswerEvent(Event):
+    answer: str
+
+
+class _TwoWaitWorkflow(Workflow):
+    @step
+    async def ask(self, ctx: Context, ev: StartEvent) -> StopEvent:
+        a1 = await ctx.wait_for_event(_AnswerEvent, waiter_id="w1")
+        a2 = await ctx.wait_for_event(_AnswerEvent, waiter_id="w2")
+        return StopEvent(result=(a1.answer, a2.answer))
+
+
+@pytest.mark.asyncio
+async def test_wait_for_event_distinct_waiter_ids_keep_distinct_answers() -> None:
+    """Regression test for llama_index#23861.
+
+    A step that waits twice for the same event type with distinct waiter_ids
+    must keep each waiter's own resolved event. Waiters stay in
+    collected_waiters until the step finishes, so the second event used to
+    overwrite the first waiter's resolved_event, making both waits return the
+    second answer.
+    """
+    workflow = _TwoWaitWorkflow()
+    handler = workflow.run()
+    handler.ctx.send_event(_AnswerEvent(answer="A"))
+    handler.ctx.send_event(_AnswerEvent(answer="B"))
+    result = await handler
+    assert result == ("A", "B")
