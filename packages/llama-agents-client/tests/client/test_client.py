@@ -869,6 +869,17 @@ async def test_run_workflow_nowait_wraps_context_to_dict_failure(
 
 
 @pytest.mark.asyncio
+async def test_close_before_reader_starts(client: WorkflowClient) -> None:
+    stream = client.get_workflow_events("unused", after_sequence=7)
+    await stream.aclose()
+    await stream.aclose()
+
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(anext(aiter(stream)), timeout=1)
+    assert stream.last_sequence == 7
+
+
+@pytest.mark.asyncio
 async def test_event_stream_double_iteration_raises_runtime_error(
     client: WorkflowClient,
 ) -> None:
