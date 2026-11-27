@@ -1516,6 +1516,13 @@ def _resolve_waiters(
     for step_id, step_config in state.config.steps.items():
         wait_conditions = state.workers[step_id].collected_waiters
         for wait_condition in wait_conditions:
+            # A waiter that is already resolved keeps the event that resolved
+            # it: it stays in collected_waiters until its step finishes, and a
+            # later event of the same type must not overwrite it. Otherwise a
+            # step waiting twice for the same type sees the second answer in
+            # both waits, and the first answer is gone.
+            if wait_condition.resolved_event is not None:
+                continue
             is_match = event_matches(
                 tick.event,
                 wait_condition.waiting_for_event,

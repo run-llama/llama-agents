@@ -1503,3 +1503,57 @@ async def test_external_event_not_double_routed_when_waiter_exists(
     assert step_run_count == 2, (
         f"handle_input should run exactly twice, but ran {step_run_count} times"
     )
+
+
+@pytest.mark.asyncio
+async def test_waiter_keeps_the_event_that_resolved_it(
+    test_plugin: MockRunAdapter,
+) -> None:
+    """A step that waits twice for the same event type must get both answers.
+
+    The second answer also matched the first (already resolved) waiter, which
+    had not yet left collected_waiters. On the resume re-run the first wait
+    then returned the second answer and the first one was lost.
+    """
+
+    class Question(InputRequiredEvent):
+        label: str
+
+    class Answer(Event):
+        reply: str
+
+    class InterviewWorkflow(Workflow):
+        @step
+        async def interview(self, ctx: Context, ev: StartEvent) -> StopEvent:
+            first = await ctx.wait_for_event(
+                Answer, waiter_event=Question(label="first"), waiter_id="first"
+            )
+            second = await ctx.wait_for_event(
+                Answer, waiter_event=Question(label="second"), waiter_id="second"
+            )
+            return StopEvent(result=(first.reply, second.reply))
+
+    wf = InterviewWorkflow(timeout=2.0)
+    task = asyncio.create_task(
+        run_control_loop(
+            workflow=wf,
+            start_event=StartEvent(),
+            test_runtime=test_plugin,
+        )
+    )
+
+    answers = {"first": "A", "second": "B"}
+    async for event in test_plugin.stream_published_events():
+        if isinstance(event, Question):
+            await test_plugin.send_event(
+                TickAddEvent(
+                    event=Answer(reply=answers[event.label]),
+                    step_id=StepId.root("interview"),
+                )
+            )
+            if event.label == "second":
+                break
+
+    result = await asyncio.wait_for(task, timeout=2.0)
+    assert isinstance(result, StopEvent)
+    assert result.result == ("A", "B")
