@@ -22,7 +22,12 @@ from workflows.events import (
     StepFailedEvent,
     StopEvent,
 )
-from workflows.resource import ResourceDescriptor, ResourceManager, _ResourceConfig
+from workflows.resource import (
+    ResourceDescriptor,
+    ResourceManager,
+    _resource_key,
+    _ResourceConfig,
+)
 
 # Graph nodes: step names (str) for steps, event classes (type) for events.
 GraphNode = str | type
@@ -464,7 +469,7 @@ def _validate_resource_configs(steps: dict[str, StepConfig]) -> list[str]:
     cleanly. Callers decide whether to raise.
     """
     errors: list[str] = []
-    seen: set[str] = set()
+    seen: set[object] = set()
 
     stack: list[_ResourceValidationContext] = []
     for step_name, cfg in steps.items():
@@ -481,9 +486,10 @@ def _validate_resource_configs(steps: dict[str, StepConfig]) -> list[str]:
 
     while stack:
         ctx = stack.pop()
-        if ctx.resource.name in seen:
+        key = _resource_key(ctx.resource)
+        if key in seen:
             continue
-        seen.add(ctx.resource.name)
+        seen.add(key)
 
         for _dep_param, dep, type_ann in ctx.resource.get_dependencies():
             dep.set_type_annotation(type_ann)
