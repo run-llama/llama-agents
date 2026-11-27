@@ -230,13 +230,18 @@ class DeploymentConfig(BaseModel):
             llama_cloud=self.llama_cloud or config.llama_cloud,
             app=self.app or config.app,
             workflows={**self.workflows, **config.workflows},
-            env_files=list(set(self.env_files + config.env_files)),
+            # Preserve declaration order: env files are loaded in list order
+            # with later files overriding earlier ones, so a set() here would
+            # scramble the precedence (e.g. ".env.local" before ".env").
+            env_files=list(dict.fromkeys(self.env_files + config.env_files)),
             env={**self.env, **config.env},
             required_env_vars=list(
-                {
-                    *[v for v in self.required_env_vars],
-                    *[v for v in config.required_env_vars],
-                }
+                dict.fromkeys(
+                    [
+                        *self.required_env_vars,
+                        *config.required_env_vars,
+                    ]
+                )
             ),
             ui=self.ui.merge_config(config.ui)
             if config.ui is not None and self.ui is not None
