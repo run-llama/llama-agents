@@ -10,6 +10,8 @@ from enum import Enum
 from typing import Annotated, Any
 
 from pydantic import (
+    AliasChoices,
+    AliasPath,
     BaseModel,
     ConfigDict,
     Field,
@@ -40,21 +42,34 @@ class DictLikeModel(BaseModel):
         _data (dict[str, Any]): Underlying Python dict for dynamic fields.
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    # Serialized events use field names, including fields with validation aliases.
+    model_config = ConfigDict(arbitrary_types_allowed=True, validate_by_name=True)
     _data: dict[str, Any] = PrivateAttr(default_factory=dict)
 
-    def __init__(self, **params: Any):
+    def __init__(self, **params: Any) -> None:
         """
         __init__.
 
-        NOTE: fields and private_attrs are pulled from params by name.
+        NOTE: fields accept names and validation aliases; private_attrs use names.
         """
         # extract and set fields, private attrs and remaining shove in _data
         fields = {}
         private_attrs = {}
         data = {}
+        field_inputs = set(self.__class__.model_fields)
+        if self.model_config.get("validate_by_alias", True):
+            for field in self.__class__.model_fields.values():
+                aliases = (
+                    field.validation_alias.choices
+                    if isinstance(field.validation_alias, AliasChoices)
+                    else [field.validation_alias]
+                )
+                for alias in aliases:
+                    key = alias.path[0] if isinstance(alias, AliasPath) else alias
+                    if isinstance(key, str):
+                        field_inputs.add(key)
         for k, v in params.items():
-            if k in self.__class__.model_fields:
+            if k in field_inputs:
                 fields[k] = v
             elif k in self.__private_attributes__:
                 private_attrs[k] = v
