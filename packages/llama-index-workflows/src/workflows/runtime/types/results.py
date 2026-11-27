@@ -405,8 +405,10 @@ class AddWaiter(BaseModel, Generic[EventType]):
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any) -> dict[str, Any]:
         data = handler(self)
-        # Always serialize requirements as {} and record whether they existed
-        data["has_requirements"] = bool(self.requirements)
+        # Always serialize requirements as {} (may be non-JSON-serializable)
+        # and preserve whether they existed — including after a prior dump
+        # already cleared the dict but kept has_requirements=True.
+        data["has_requirements"] = bool(self.requirements) or self.has_requirements
         data["requirements"] = {}
         return data
 
@@ -414,9 +416,14 @@ class AddWaiter(BaseModel, Generic[EventType]):
     @classmethod
     def _validate(cls, data: Any, handler: Any) -> AddWaiter:
         if isinstance(data, dict):
-            # Strip has_requirements before validation (it's computed)
             data = dict(data)
-            data.pop("has_requirements", None)
+            # Requirements may be non-serializable, so the journal stores
+            # has_requirements with requirements={}. Keep the flag so restore
+            # can re-ping the step and rebuild the real requirements.
+            reqs = data.get("requirements") or {}
+            if reqs:
+                data["has_requirements"] = True
+            # else: leave serialized has_requirements as-is (True or absent)
         return handler(data)
 
 
