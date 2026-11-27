@@ -414,9 +414,18 @@ class AddWaiter(BaseModel, Generic[EventType]):
     @classmethod
     def _validate(cls, data: Any, handler: Any) -> AddWaiter:
         if isinstance(data, dict):
-            # Strip has_requirements before validation (it's computed)
             data = dict(data)
-            data.pop("has_requirements", None)
+            # The serializer drops `requirements` and records only
+            # `has_requirements`. Keep the flag on the way back in so a
+            # journaled waiter is re-registered with its step on resume
+            # instead of matching every event of its type.
+            has_requirements = data.pop("has_requirements", None)
+            validated = handler(data)
+            if has_requirements is None:
+                return validated
+            return validated.model_copy(
+                update={"has_requirements": bool(has_requirements)}
+            )
         return handler(data)
 
 
