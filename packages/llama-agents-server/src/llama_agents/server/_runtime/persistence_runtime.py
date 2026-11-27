@@ -113,13 +113,8 @@ class _PersistenceInternalRunAdapter(BaseInternalRunAdapterDecorator):
     async def on_tick(self, tick: WorkflowTick) -> None:
         await super().on_tick(tick)
         tick_data = {"serialized_tick": self._serializer.serialize(tick)}
-        try:
-            await self._store.append_tick(self.run_id, tick_data)
-        except Exception:
-            logger.exception(
-                "Failed to persist tick for run %s",
-                self.run_id,
-            )
+        await self._store.append_tick(self.run_id, tick_data)
+        await self._store.flush_pending_ticks(self.run_id)
 
     @override
     async def after_tick(self, tick: WorkflowTick) -> None:
@@ -127,13 +122,7 @@ class _PersistenceInternalRunAdapter(BaseInternalRunAdapterDecorator):
         if not isinstance(tick, TickStepResult):
             return
         tick_data = {"serialized_tick": self._serializer.serialize(tick)}
-        try:
-            await self._store.after_tick(self.run_id, tick_data)
-        except Exception:
-            logger.exception(
-                "Failed to gather pending writes for run %s",
-                self.run_id,
-            )
+        await self._store.after_tick(self.run_id, tick_data)
 
 
 class TickPersistenceDecorator(BaseRuntimeDecorator):

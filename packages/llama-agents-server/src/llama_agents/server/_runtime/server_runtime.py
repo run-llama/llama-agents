@@ -40,6 +40,7 @@ from workflows.runtime.types.plugin import (
     InternalRunAdapter,
     Runtime,
 )
+from workflows.runtime.types.ticks import WorkflowTick
 from workflows.workflow import Workflow
 
 from .._store.abstract_workflow_store import (
@@ -104,6 +105,31 @@ class _ServerInternalRunAdapter(BaseInternalRunAdapterDecorator):
             )
         self._state_stores[namespace] = store
         return store
+
+    async def _report_journal_failure(self, error: Exception) -> None:
+        """Make an incomplete journal terminal instead of reporting success."""
+        try:
+            await self.write_to_event_stream(
+                WorkflowFailedEvent(step_name="journal persistence", exception=error)
+            )
+        except Exception:
+            logger.exception("Failed to report journal failure for run %s", self.run_id)
+
+    @override
+    async def on_tick(self, tick: WorkflowTick) -> None:
+        try:
+            await super().on_tick(tick)
+        except Exception as exc:
+            await self._report_journal_failure(exc)
+            raise
+
+    @override
+    async def after_tick(self, tick: WorkflowTick) -> None:
+        try:
+            await super().after_tick(tick)
+        except Exception as exc:
+            await self._report_journal_failure(exc)
+            raise
 
     @override
     async def write_to_event_stream(self, event: Event) -> None:

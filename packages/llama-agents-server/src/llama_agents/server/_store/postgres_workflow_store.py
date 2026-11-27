@@ -27,6 +27,7 @@ from .abstract_workflow_store import (
     StoredTick,
     decode_persistent_handler,
 )
+from .postgres.migrate import _quote_identifier
 from .postgres.migrate import run_migrations as _run_migrations
 from .postgres_state_store import PostgresStateStore
 
@@ -65,6 +66,10 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
         the provided DSN and pool size settings.
         """
         super().__init__()
+        if schema:
+            _quote_identifier(schema)
+        _quote_identifier(handlers_table_name)
+        _quote_identifier(events_table_name)
         self._dsn = dsn
         self._schema = schema
         self.poll_interval = poll_interval
@@ -91,20 +96,20 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
     @property
     def _handlers_ref(self) -> str:
         if self._schema:
-            return f"{self._schema}.{self._handlers_table_name}"
-        return self._handlers_table_name
+            return f"{_quote_identifier(self._schema)}.{_quote_identifier(self._handlers_table_name)}"
+        return _quote_identifier(self._handlers_table_name)
 
     @property
     def _events_ref(self) -> str:
         if self._schema:
-            return f"{self._schema}.{self._events_table_name}"
-        return self._events_table_name
+            return f"{_quote_identifier(self._schema)}.{_quote_identifier(self._events_table_name)}"
+        return _quote_identifier(self._events_table_name)
 
     @property
     def _ticks_ref(self) -> str:
         if self._schema:
-            return f"{self._schema}.wf_ticks"
-        return "wf_ticks"
+            return f'{_quote_identifier(self._schema)}."wf_ticks"'
+        return '"wf_ticks"'
 
     @property
     def _notify_channel(self) -> str:
@@ -431,8 +436,6 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
 
     # ── Events ──────────────────────────────────────────────────────────
 
-    _MAX_SEQUENCE_RETRIES = 5
-
     async def append_event(self, run_id: str, event: EventEnvelopeWithMetadata) -> None:
         now = _utc_now()
         event_json = event.model_dump_json()
@@ -447,24 +450,16 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
                 $3
             )
         """
-        # Retry on unique constraint violation from concurrent sequence assignment
-        for attempt in range(self._MAX_SEQUENCE_RETRIES):
-            try:
-                async with pool.acquire() as conn:
-                    await conn.execute(insert_sql, run_id, now, event_json)
-                    await conn.execute(
-                        "SELECT pg_notify($1, $2)",
-                        self._notify_channel,
-                        run_id,
-                    )
-                    return
-            except asyncpg.UniqueViolationError:
-                if attempt == self._MAX_SEQUENCE_RETRIES - 1:
-                    raise
-                logger.debug(
-                    "Sequence conflict for run_id=%s, retrying (attempt %d)",
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1, $2::regclass::oid::bigint))",
                     run_id,
-                    attempt + 1,
+                    self._events_ref,
+                )
+                await conn.execute(insert_sql, run_id, now, event_json)
+                await conn.execute(
+                    "SELECT pg_notify($1, $2)", self._notify_channel, run_id
                 )
 
     async def query_events(
@@ -530,8 +525,6 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
 
     # ── Ticks ──────────────────────────────────────────────────────────
 
-    _MAX_TICK_SEQUENCE_RETRIES = 5
-
     async def append_tick(self, run_id: str, tick_data: dict[str, Any]) -> None:
         now = _utc_now()
         tick_json = json.dumps(tick_data)
@@ -546,19 +539,14 @@ class PostgresWorkflowStore(AbstractWorkflowStore):
                 $3::jsonb
             )
         """
-        for attempt in range(self._MAX_TICK_SEQUENCE_RETRIES):
-            try:
-                async with pool.acquire() as conn:
-                    await conn.execute(insert_sql, run_id, now, tick_json)
-                    return
-            except asyncpg.UniqueViolationError:
-                if attempt == self._MAX_TICK_SEQUENCE_RETRIES - 1:
-                    raise
-                logger.debug(
-                    "Tick sequence conflict for run_id=%s, retrying (attempt %d)",
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1, $2::regclass::oid::bigint))",
                     run_id,
-                    attempt + 1,
+                    self._ticks_ref,
                 )
+                await conn.execute(insert_sql, run_id, now, tick_json)
 
     async def get_ticks(self, run_id: str) -> list[StoredTick]:
         pool = await self._ensure_pool()

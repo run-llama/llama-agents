@@ -24,7 +24,7 @@ _VALID_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 def _quote_identifier(name: str) -> str:
     """Quote a SQL identifier, raising on invalid names."""
-    if not _VALID_IDENTIFIER.match(name):
+    if len(name.encode("utf-8")) > 63 or not _VALID_IDENTIFIER.fullmatch(name):
         msg = f"Invalid SQL identifier: {name!r}"
         raise ValueError(msg)
     return f'"{name}"'
@@ -52,7 +52,21 @@ async def run_migrations(
 
     await conn.execute("SELECT pg_advisory_lock($1)", _LOCK_ID)
     try:
-        await _run_migrations_locked(conn, schema, sources)
+        original_search_path = await conn.fetchval("SHOW search_path")
+        try:
+            if conn.is_in_transaction():
+                # Roll back any setup or version-query failure before restoring
+                # session state and releasing the session-level advisory lock.
+                async with conn.transaction():
+                    await _run_migrations_locked(conn, schema, sources)
+            else:
+                # Preserve the existing per-migration commits without a caller
+                # transaction; a wrapper transaction would make them atomic.
+                await _run_migrations_locked(conn, schema, sources)
+        finally:
+            await conn.execute(
+                "SELECT set_config('search_path', $1, false)", original_search_path
+            )
     finally:
         await conn.execute("SELECT pg_advisory_unlock($1)", _LOCK_ID)
 
@@ -81,19 +95,20 @@ async def _run_migrations_locked(
     has_package = await conn.fetchval("""
         SELECT EXISTS (
             SELECT 1 FROM information_schema.columns
-            WHERE table_name = 'schema_migrations' AND column_name = 'package'
+            WHERE table_schema = current_schema() AND table_name = 'schema_migrations' AND column_name = 'package'
         )
     """)
     if not has_package:
-        await conn.execute(
-            "ALTER TABLE schema_migrations ADD COLUMN package TEXT NOT NULL DEFAULT 'server'"
-        )
-        await conn.execute(
-            "ALTER TABLE schema_migrations DROP CONSTRAINT IF EXISTS schema_migrations_pkey"
-        )
-        await conn.execute(
-            "ALTER TABLE schema_migrations ADD PRIMARY KEY (package, version)"
-        )
+        async with conn.transaction():
+            await conn.execute(
+                "ALTER TABLE schema_migrations ADD COLUMN package TEXT NOT NULL DEFAULT 'server'"
+            )
+            await conn.execute(
+                "ALTER TABLE schema_migrations DROP CONSTRAINT IF EXISTS schema_migrations_pkey"
+            )
+            await conn.execute(
+                "ALTER TABLE schema_migrations ADD PRIMARY KEY (package, version)"
+            )
 
     for package_name, source_pkg in sources:
         row = await conn.fetchval(
