@@ -259,6 +259,7 @@ class InternalContext(Generic[MODEL_T]):
                     timeout=timeout,
                     event_type=event_type,
                     waiter_event=waiter_event,
+                    waiter_epoch=step_ctx.state.waiter_epochs.get(waiter_id, 0),
                 )
             )
         else:

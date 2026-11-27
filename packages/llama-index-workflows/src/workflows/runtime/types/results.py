@@ -6,7 +6,7 @@ from __future__ import annotations
 import dataclasses
 import weakref
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import (
     Annotated,
     Any,
@@ -153,6 +153,15 @@ class StepWorkerState:
     work_item_id: str | None = None
     # ctx.send_event uses this dispatch ID to identify each send.
     invocation_id: str | None = None
+    # Registration generation of each waiter as observed at dispatch time.
+    # A waiter timeout bumps its entry so a stale re-registration from an
+    # invocation dispatched before the timeout is recognized and ignored.
+    waiter_epochs: dict[str, int] = field(default_factory=dict)
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        # Older pickled states predate the waiter generation map.
+        self.__dict__.update(state)
+        self.__dict__.setdefault("waiter_epochs", {})
 
     def _deepcopy(self) -> StepWorkerState:
         return StepWorkerState(
@@ -165,6 +174,7 @@ class StepWorkerState:
             scope_path=self.scope_path,
             work_item_id=self.work_item_id,
             invocation_id=self.invocation_id,
+            waiter_epochs=dict(self.waiter_epochs),
         )
 
 
@@ -269,6 +279,10 @@ class StepWorkerWaiter(Generic[EventType]):
     bound_events: dict[str, Event] | None = None
     # set to true when the waiter has timed out, such that the step raises asyncio.TimeoutError
     timed_out: bool = False
+    # Absolute adapter-time deadline for the wait, persisted so a restored run
+    # can re-arm the pending timeout. None for waits without a timeout (and for
+    # snapshots written before the deadline was recorded).
+    timeout_at: float | None = None
     # Originating work record: stream scope of the suspended work item, restored
     # whole on resume so the resumed attempt still closes its stream.
     scope_path: tuple[str, ...] = ()
@@ -401,6 +415,9 @@ class AddWaiter(BaseModel, Generic[EventType]):
     timeout: float | None = None
     event_type: SerializableEventType
     has_requirements: bool = False
+    # Generation of the waiter map the registering dispatch observed. The
+    # reducer drops registrations older than the live generation.
+    waiter_epoch: int = 0
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any) -> dict[str, Any]:

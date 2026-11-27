@@ -70,10 +70,20 @@ class CommandPublishEvent:
 
 @dataclass(frozen=True)
 class CommandScheduleWaiterTimeout:
+    """Schedule a TickWaiterTimeout for a wait_for_event() waiter.
+
+    timeout is the relative delay for callers that compute it at command
+    emission. deadline_at is the waiter's absolute adapter-time deadline; when
+    set, the runner schedules at that deadline instead of now + timeout, so
+    persistence latency between reduction and command execution cannot push a
+    restored wait later.
+    """
+
     step_id: StepId
     waiter_id: str
     timeout: float
     invocation_namespace: tuple[str, ...] = ()
+    deadline_at: float | None = None
 
 
 @dataclass(frozen=True)
