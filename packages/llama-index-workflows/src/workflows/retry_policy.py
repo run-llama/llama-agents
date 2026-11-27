@@ -348,7 +348,9 @@ class retry_if_exception_cause_type(_RetryConditionBase):
 
     def __call__(self, error: BaseException) -> bool:
         current: BaseException | None = error
-        while current is not None:
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
             cause = current.__cause__
             if isinstance(cause, self.exception_types):
                 return True

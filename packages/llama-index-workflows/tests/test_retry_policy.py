@@ -121,6 +121,59 @@ def test_retry_if_exception_cause_type() -> None:
     assert cond(RuntimeError("no cause")) is False
 
 
+@pytest.mark.parametrize(
+    ("links", "match", "expected"),
+    [
+        ([0], TimeoutError, False),
+        ([0], ValueError, True),
+        ([1, 0], TimeoutError, False),
+        ([1, 0], ValueError, True),
+        ([1, 2, 1], TimeoutError, False),
+        ([1, 2, 1], KeyError, True),
+    ],
+)
+def test_retry_cause_cycles(
+    links: list[int], match: type[BaseException], expected: bool
+) -> None:
+    errors = [ValueError("root"), RuntimeError("middle"), KeyError("leaf")]
+    for index, target in enumerate(links):
+        errors[index].__cause__ = errors[target]
+    assert retry_if_exception_cause_type(match)(errors[0]) is expected
+
+
+def test_retry_cause_does_not_match_root_or_implicit_context() -> None:
+    error = ValueError("root")
+    error.__context__ = TimeoutError("implicit")
+    assert retry_if_exception_cause_type((ValueError, TimeoutError))(error) is False
+
+
+def test_retry_cause_cycles_use_identity() -> None:
+    class UnhashableError(Exception):
+        __hash__ = None  # type: ignore[assignment]
+
+    error = UnhashableError("provider failed")
+    error.__cause__ = error
+    assert retry_if_exception_cause_type(TimeoutError)(error) is False
+
+
+async def test_workflow_rejects_nonretryable_cyclic_cause() -> None:
+    class CyclicCauseWorkflow(Workflow):
+        @step(
+            retry_policy=retry_policy(
+                retry=retry_if_exception_cause_type(TimeoutError),
+                wait=wait_none(),
+            )
+        )
+        async def request(self, ev: StartEvent) -> StopEvent:
+            try:
+                raise ValueError("provider rejected request")
+            except ValueError as exc:
+                raise exc from exc
+
+    with pytest.raises(ValueError, match="provider rejected request"):
+        await CyclicCauseWorkflow(timeout=5).run()
+
+
 def test_retry_unless_exception_type() -> None:
     cond = retry_unless_exception_type(exception_types=(ValueError, KeyError))
     assert cond(RuntimeError("retry")) is True
