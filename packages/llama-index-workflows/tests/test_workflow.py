@@ -20,7 +20,7 @@ from llama_index_instrumentation.dispatcher import (
     instrument_tags,
 )
 from pydantic import PrivateAttr
-from workflows.context import Context, PickleSerializer
+from workflows.context import Context, JsonSerializer, PickleSerializer
 from workflows.decorators import catch_error, step
 from workflows.errors import (
     WorkflowConfigurationError,
@@ -554,6 +554,59 @@ async def test_human_in_the_loop_waiter_with_nonserializable_requirements_pickle
     )
     final_result = await new_handler
     assert final_result == "Done"
+
+
+class AskPrompt(InputRequiredEvent):
+    prompt: str
+
+
+class AskAnswer(HumanResponseEvent):
+    reply: str
+
+
+class SequentialWaitWorkflow(Workflow):
+    @step
+    async def interview(self, ctx: Context, ev: StartEvent) -> StopEvent:
+        first = await ctx.wait_for_event(
+            AskAnswer, waiter_event=AskPrompt(prompt="first?"), waiter_id="first"
+        )
+        second = await ctx.wait_for_event(
+            AskAnswer, waiter_event=AskPrompt(prompt="second?"), waiter_id="second"
+        )
+        return StopEvent(result=(first.reply, second.reply))
+
+
+@pytest.mark.asyncio
+async def test_sequential_waits_for_same_event_type_keep_their_own_answer() -> None:
+    """Two waits for the same event type must each resolve to its own answer."""
+    workflow = SequentialWaitWorkflow(timeout=30)
+    ctx = Context(workflow)
+    handler = workflow.run(ctx=ctx)
+    answers = iter(["A", "B"])
+    async for event in ctx.stream_events():
+        if isinstance(event, AskPrompt):
+            ctx.send_event(AskAnswer(reply=next(answers)))
+    result = await handler
+    assert result == ("A", "B")
+
+
+@pytest.mark.asyncio
+async def test_sequential_waits_keep_the_first_answer_after_resume() -> None:
+    workflow = SequentialWaitWorkflow(
+        serializer=JsonSerializer(allowed_types=[AskAnswer])
+    )
+    handler = workflow.run()
+    events = handler.stream_events()
+    assert await anext(events) == AskPrompt(prompt="first?")
+    handler.ctx.send_event(AskAnswer(reply="A"))
+    assert await anext(events) == AskPrompt(prompt="second?")
+    snapshot = json.dumps(handler.ctx.to_dict())
+    await events.aclose()
+    await handler.cancel_run()
+
+    resumed = workflow.run(ctx=Context.from_dict(workflow, json.loads(snapshot)))
+    resumed.ctx.send_event(AskAnswer(reply="B"))
+    assert await resumed == ("A", "B")
 
 
 def test__get_start_event_instance(caplog: Any) -> None:
