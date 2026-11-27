@@ -82,6 +82,9 @@ spec:
         # Rollout timeout for managed deployments
         - name: LLAMA_DEPLOY_ROLLOUT_TIMEOUT_SECONDS
           value: {{ .Values.operator.rolloutTimeoutSeconds | default "1800" | quote }}
+        # Old ReplicaSets kept per managed deployment (rollback depth)
+        - name: LLAMA_DEPLOY_REVISION_HISTORY_LIMIT
+          value: {{ .Values.operator.revisionHistoryLimit | default "10" | quote }}
         # Max concurrent rollouts (0 = unlimited, default: 10)
         - name: LLAMA_DEPLOY_MAX_CONCURRENT_ROLLOUTS
           value: {{ .Values.operator.maxConcurrentRollouts | default "10" | quote }}
