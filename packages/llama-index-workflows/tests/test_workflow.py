@@ -556,6 +556,87 @@ async def test_human_in_the_loop_waiter_with_nonserializable_requirements_pickle
     assert final_result == "Done"
 
 
+@pytest.mark.asyncio
+async def test_wait_for_event_resolved_waiter_keeps_its_event() -> None:
+    """Two waits for the same event type must keep their own answers.
+
+    The second answer used to also resolve the first (already-resolved)
+    waiter again, so the first wait returned the second answer.
+    """
+
+    class Ask(InputRequiredEvent):
+        prompt: str
+
+    class Answer(HumanResponseEvent):
+        reply: str
+
+    class Interview(Workflow):
+        @step
+        async def interview(self, ctx: Context, ev: StartEvent) -> StopEvent:
+            first = await ctx.wait_for_event(
+                Answer, waiter_event=Ask(prompt="first?"), waiter_id="first"
+            )
+            second = await ctx.wait_for_event(
+                Answer, waiter_event=Ask(prompt="second?"), waiter_id="second"
+            )
+            return StopEvent(result=(first.reply, second.reply))
+
+    workflow = Interview(timeout=30)
+    handler = workflow.run()
+    assert handler.ctx
+
+    answers = iter(["A", "B"])
+    async for event in handler.stream_events():
+        if isinstance(event, Ask):
+            handler.ctx.send_event(Answer(reply=next(answers)))
+
+    assert await handler == ("A", "B")
+
+
+@pytest.mark.asyncio
+async def test_wait_for_event_same_type_waiters_resume_step_once() -> None:
+    """A single matching event must resume the suspended work item once.
+
+    With one resolved and one pending waiter of the same type, re-resolving
+    the resolved waiter used to enqueue a duplicate resume of the same work
+    item. Count the step's executions to guard against that.
+    """
+
+    class Ask(InputRequiredEvent):
+        prompt: str
+
+    class Answer(HumanResponseEvent):
+        reply: str
+
+    runs = 0
+
+    class Interview(Workflow):
+        @step
+        async def interview(self, ctx: Context, ev: StartEvent) -> StopEvent:
+            nonlocal runs
+            runs += 1
+            first = await ctx.wait_for_event(
+                Answer, waiter_event=Ask(prompt="first?"), waiter_id="first"
+            )
+            second = await ctx.wait_for_event(
+                Answer, waiter_event=Ask(prompt="second?"), waiter_id="second"
+            )
+            return StopEvent(result=(first.reply, second.reply))
+
+    workflow = Interview(timeout=30)
+    handler = workflow.run()
+    assert handler.ctx
+
+    answers = iter(["A", "B"])
+    async for event in handler.stream_events():
+        if isinstance(event, Ask):
+            handler.ctx.send_event(Answer(reply=next(answers)))
+
+    assert await handler == ("A", "B")
+    # one run per suspension boundary, never an extra duplicate resume
+    assert runs == 3
+
+
 def test__get_start_event_instance(caplog: Any) -> None:
     class CustomEvent(StartEvent):
         field: str
