@@ -951,7 +951,8 @@ def _apply_step_result(
             bound_events=this_execution.bound_events,
             waiting_for_event=result.event_type,
             requirements=result.requirements,
-            has_requirements=bool(len(result.requirements)),
+            # A replayed AddWaiter carries requirements as {} and only the flag.
+            has_requirements=bool(result.requirements) or result.has_requirements,
             resolved_event=None,
             # Store the suspended work item's record so resume re-delivers
             # it whole: same stream scope, same collect batch.
