@@ -217,7 +217,8 @@ class WorkflowHandler(Awaitable[RunResultT]):
         except Exception:
             pass
         try:
-            await asyncio.wait_for(self._result_task, timeout=timeout)
+            # Only bound this wait, not the runtime's graceful cancellation.
+            await asyncio.wait_for(asyncio.shield(self._result_task), timeout=timeout)
         except asyncio.TimeoutError:
             pass
         except asyncio.CancelledError:
