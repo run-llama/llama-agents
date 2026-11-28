@@ -1065,6 +1065,14 @@ class StateStoreFacade(Generic[MODEL_T]):
         async with self._lock.acquire_write():
             async with self._storage.session() as storage:
                 current = await self._load_state_or_none(storage)
+                if current is None and not isinstance(state, self.state_type):
+                    if not issubclass(self.state_type, type(state)):
+                        raise ValueError(
+                            f"State must be of type {self.state_type.__name__} or a parent type, "
+                            f"got {type(state).__name__}"
+                        )
+                    # A first parent write still merges with the declared child defaults.
+                    current = self._create_default_state()
                 merged: BaseModel = (
                     state if current is None else merge_state(current, state)
                 )
