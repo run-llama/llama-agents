@@ -141,9 +141,12 @@ def _create_resource_node(resource_def: ResourceDefinition) -> WorkflowResourceN
 
     if isinstance(resource, _Resource):
         factory = resource._factory
-        source_file = inspect.getfile(factory)  # type: ignore[arg-type]
-        _, source_line = inspect.getsourcelines(factory)  # type: ignore[arg-type]
         resource_description = inspect.getdoc(factory)
+        try:
+            source_file = inspect.getfile(factory)  # type: ignore[arg-type]
+            _, source_line = inspect.getsourcelines(factory)  # type: ignore[arg-type]
+        except (OSError, TypeError):
+            pass
 
     # Compute unique hash for deduplication
     hash_input = f"{resource.name}:{source_file or 'unknown'}"
