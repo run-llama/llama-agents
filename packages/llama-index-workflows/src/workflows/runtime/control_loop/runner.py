@@ -72,10 +72,23 @@ if TYPE_CHECKING:
 
 from workflows.runtime.control_loop.reduce import (
     _decide_retry_delay,
-    _reduce_tick,
+    _reduce_live_tick,
 )
 
 logger = logging.getLogger("workflows.runtime.control_loop")
+
+
+def _has_unrehydrated_requirements_waiters(state: BrokerState) -> bool:
+    """True while an active step holds a restored waiter without live requirements."""
+    for worker in state.workers.values():
+        if worker.in_progress and any(
+            w.has_requirements and not w.requirements for w in worker.collected_waiters
+        ):
+            return True
+    return any(
+        _has_unrehydrated_requirements_waiters(child)
+        for child in state.children.values()
+    )
 
 
 def _stamp_tick(tick: WorkflowTick, now: float) -> WorkflowTick:
@@ -519,18 +532,25 @@ class _ControlLoopRunner:
                 # Calculate timeout for next scheduled wakeup
                 timeout = self.next_wakeup_timeout(now)
 
-                # Build pending list: new workers + pull if needed
+                # Build pending list: new workers + pull if needed.
+                # On resume after restore/snapshot, defer pulling external events
+                # until re-pinged workers holding stripped-requirement waiters
+                # repopulate their live requirements.
+                has_pending_workers = bool(self.worker_tasks or self._pending_workers)
                 pending: list[PendingStart] = list(self._pending_workers)
                 self._pending_workers.clear()
 
-                if pull_task is None:
+                defer_pull = (
+                    pull_task is None
+                    and has_pending_workers
+                    and _has_unrehydrated_requirements_waiters(self.state)
+                )
+                if pull_task is None and not defer_pull:
                     pull_sequence = self._pull_sequence
                     self._pull_sequence += 1
                     pending.append(
                         PendingPull(pull_sequence, _single_pull(self.adapter))
                     )
-                else:
-                    pull_sequence = self._pull_sequence - 1
 
                 # Build running list from existing tasks
                 running: list[WorkerTask | PullTask] = [
@@ -545,7 +565,7 @@ class _ControlLoopRunner:
                     if key is not None
                 ]
                 if pull_task is not None:
-                    running.append(PullTask(pull_sequence, pull_task))
+                    running.append(PullTask(self._pull_sequence - 1, pull_task))
 
                 result = await self.adapter.wait_for_next_task(
                     running, pending, timeout
@@ -634,7 +654,7 @@ class _ControlLoopRunner:
             # Stamp the live-run time before journaling so replay reads the same
             # clock the live run used.
             tick = _stamp_tick(tick, start)
-            self.state, commands = _reduce_tick(
+            tick, self.state, commands = _reduce_live_tick(
                 tick, self.state, start, run_id=self.adapter.run_id
             )
         except Exception:
