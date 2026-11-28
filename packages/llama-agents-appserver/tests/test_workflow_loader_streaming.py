@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -67,6 +68,31 @@ def test_spawn_process_streams_in_background(
     time.sleep(0.05)
     out = capsys.readouterr().out
     assert "[p] a" in out and "[p] b" in out
+
+
+def test_run_process_keeps_streaming_with_legacy_console(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    script = tmp_path / "child.py"
+    script.write_text(
+        "import sys\n"
+        "sys.stdout.buffer.write(b'invalid \\xa9\\nplain\\n')\n"
+        "sys.stderr.buffer.write(b'unicode \\xe2\\x9e\\x9c\\nfinished\\n')\n",
+        encoding="utf-8",
+    )
+
+    stdout_bytes, stderr_bytes = io.BytesIO(), io.BytesIO()
+    with (
+        io.TextIOWrapper(stdout_bytes, encoding="cp1252", newline="\n") as stdout,
+        io.TextIOWrapper(stderr_bytes, encoding="cp1252", newline="\n") as stderr,
+        monkeypatch.context() as patch,
+    ):
+        patch.setattr(sys, "stdout", stdout)
+        patch.setattr(sys, "stderr", stderr)
+        run_process([sys.executable, str(script)], use_tty=False)
+
+        assert b"invalid \\ufffd\nplain\n" in stdout_bytes.getvalue()
+        assert b"unicode \\u279c\nfinished\n" in stderr_bytes.getvalue()
 
 
 def test_install_python_dependencies_calls_when_target_found(

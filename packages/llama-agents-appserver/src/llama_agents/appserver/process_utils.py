@@ -163,6 +163,7 @@ def _spawn_process(
         stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
+        errors="replace",
         shell=use_shell,
     )
 
@@ -199,16 +200,26 @@ def _stream_source(
             # PTY EOF may raise EIO; ignore
             pass
     else:
-        for line in iter(source.readline, ""):
-            out = transform(line) if transform else line
-            if out is None:
-                continue
-            writer.write(out)
-            writer.flush()
         try:
-            source.close()
-        except Exception:
-            pass
+            for line in iter(source.readline, ""):
+                out = transform(line) if transform else line
+                if out is None:
+                    continue
+                try:
+                    writer.write(out)
+                except UnicodeEncodeError:
+                    encoding = writer.encoding
+                    if encoding is None:
+                        raise
+                    writer.write(
+                        out.encode(encoding, errors="backslashreplace").decode(encoding)
+                    )
+                writer.flush()
+        finally:
+            try:
+                source.close()
+            except Exception:
+                pass
 
 
 def _log_command(cmd: list[str], transform: Callable[[str], str | None] | None) -> None:
